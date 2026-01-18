@@ -1,0 +1,11 @@
+[package]
+name = "kernel_api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types.workspace = true
+ipc.workspace = true
+thiserror.workspace = true

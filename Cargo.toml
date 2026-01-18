@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "core_types",
+    "ipc",
+    "kernel_api",
+    "sim_kernel",
+    "hal",
+    "hal_x86_64",
+    "services_registry",
+    "services_process_manager",
+    "services_logger",
+    "services_storage",
+    "intent_router",
+    "cli_console",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["PandaGen Contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Core crates
+core_types = { path = "core_types" }
+ipc = { path = "ipc" }
+kernel_api = { path = "kernel_api" }
+sim_kernel = { path = "sim_kernel" }
+hal = { path = "hal" }
+hal_x86_64 = { path = "hal_x86_64" }
+
+# Service crates
+services_registry = { path = "services_registry" }
+services_process_manager = { path = "services_process_manager" }
+services_logger = { path = "services_logger" }
+services_storage = { path = "services_storage" }
+intent_router = { path = "intent_router" }
+
+# Demo crates
+cli_console = { path = "cli_console" }
+
+# External dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+thiserror = "1.0"
