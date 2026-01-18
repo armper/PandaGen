@@ -21,7 +21,11 @@
 //! This is not a "toy" or "mock" - it's a full implementation of the
 //! kernel API that happens to run in-process for testing.
 
+pub mod fault_injection;
+pub mod test_utils;
+
 use core_types::{Cap, ServiceId, TaskId};
+use fault_injection::FaultInjector;
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use std::collections::{HashMap, VecDeque};
@@ -39,6 +43,10 @@ pub struct SimulatedKernel {
     channels: HashMap<ChannelId, Channel>,
     /// Service registry
     services: HashMap<ServiceId, ChannelId>,
+    /// Fault injector (optional, for testing)
+    fault_injector: Option<FaultInjector>,
+    /// Pending delayed messages
+    delayed_messages: Vec<DelayedMessage>,
 }
 
 #[derive(Debug)]
@@ -52,6 +60,13 @@ struct Channel {
     messages: VecDeque<MessageEnvelope>,
 }
 
+#[derive(Debug)]
+struct DelayedMessage {
+    channel: ChannelId,
+    message: MessageEnvelope,
+    deliver_at: Instant,
+}
+
 impl SimulatedKernel {
     /// Creates a new simulated kernel
     pub fn new() -> Self {
@@ -60,12 +75,75 @@ impl SimulatedKernel {
             tasks: HashMap::new(),
             channels: HashMap::new(),
             services: HashMap::new(),
+            fault_injector: None,
+            delayed_messages: Vec::new(),
         }
+    }
+
+    /// Sets the fault injector for this kernel
+    ///
+    /// This enables fault injection for testing. The fault injector
+    /// will be applied to all message operations.
+    pub fn with_fault_injector(mut self, injector: FaultInjector) -> Self {
+        self.fault_injector = Some(injector);
+        self
+    }
+
+    /// Sets the fault plan for this kernel
+    ///
+    /// Convenience method that creates a fault injector from a plan.
+    pub fn with_fault_plan(self, plan: fault_injection::FaultPlan) -> Self {
+        self.with_fault_injector(FaultInjector::new(plan))
     }
 
     /// Advances simulated time
     pub fn advance_time(&mut self, duration: Duration) {
         self.current_time = self.current_time + duration;
+        self.process_delayed_messages();
+    }
+
+    /// Processes delayed messages that are ready to be delivered
+    fn process_delayed_messages(&mut self) {
+        let current_time = self.current_time;
+        let mut ready_messages = Vec::new();
+
+        // Find messages ready to be delivered
+        self.delayed_messages.retain(|delayed| {
+            if delayed.deliver_at <= current_time {
+                ready_messages.push((delayed.channel, delayed.message.clone()));
+                false
+            } else {
+                true
+            }
+        });
+
+        // Deliver ready messages
+        for (channel, message) in ready_messages {
+            if let Some(ch) = self.channels.get_mut(&channel) {
+                ch.messages.push_back(message);
+            }
+        }
+    }
+
+    /// Runs until no more messages are pending
+    ///
+    /// This advances time in small increments until all channels are empty
+    /// and no delayed messages remain. Useful for test scenarios.
+    pub fn run_until_idle(&mut self) {
+        const MAX_ITERATIONS: usize = 1000;
+        const TIME_STEP: Duration = Duration::from_millis(10);
+
+        for _ in 0..MAX_ITERATIONS {
+            if self.is_idle() {
+                break;
+            }
+            self.advance_time(TIME_STEP);
+        }
+    }
+
+    /// Checks if the kernel is idle (no messages pending)
+    pub fn is_idle(&self) -> bool {
+        self.channels.values().all(|ch| ch.messages.is_empty()) && self.delayed_messages.is_empty()
     }
 
     /// Returns the number of spawned tasks
@@ -81,6 +159,15 @@ impl SimulatedKernel {
     /// Returns the number of registered services
     pub fn service_count(&self) -> usize {
         self.services.len()
+    }
+
+    /// Returns the number of pending messages across all channels
+    pub fn pending_message_count(&self) -> usize {
+        self.channels
+            .values()
+            .map(|ch| ch.messages.len())
+            .sum::<usize>()
+            + self.delayed_messages.len()
     }
 }
 
@@ -112,11 +199,41 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
-        let channel = self
+        // Check for crash-on-send fault
+        if let Some(ref mut injector) = self.fault_injector {
+            if injector.should_crash_on_send() {
+                return Err(KernelError::SendFailed("Task crashed on send".to_string()));
+            }
+
+            // Check if message should be dropped
+            if injector.should_drop_message(channel, &message) {
+                // Message dropped by fault injector
+                return Ok(());
+            }
+
+            // Check for delay
+            if let Some(delay) = injector.get_message_delay() {
+                let deliver_at = self.current_time + delay;
+                self.delayed_messages.push(DelayedMessage {
+                    channel,
+                    message,
+                    deliver_at,
+                });
+                return Ok(());
+            }
+        }
+
+        let channel_obj = self
             .channels
             .get_mut(&channel)
             .ok_or_else(|| KernelError::ChannelError("Channel not found".to_string()))?;
-        channel.messages.push_back(message);
+        channel_obj.messages.push_back(message);
+
+        // Apply reordering faults if present
+        if let Some(ref injector) = self.fault_injector {
+            injector.apply_reordering(&mut channel_obj.messages);
+        }
+
         Ok(())
     }
 
@@ -125,12 +242,31 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         _timeout: Option<Duration>,
     ) -> Result<MessageEnvelope, KernelError> {
-        let channel = self
+        // Check for crash-on-recv fault
+        if let Some(ref mut injector) = self.fault_injector {
+            if injector.should_crash_on_recv() {
+                return Err(KernelError::ReceiveFailed(
+                    "Task crashed on recv".to_string(),
+                ));
+            }
+        }
+
+        let channel_obj = self
             .channels
             .get_mut(&channel)
             .ok_or_else(|| KernelError::ChannelError("Channel not found".to_string()))?;
 
-        channel.messages.pop_front().ok_or(KernelError::Timeout)
+        let message = channel_obj
+            .messages
+            .pop_front()
+            .ok_or(KernelError::Timeout)?;
+
+        // Record message processed for fault injection tracking
+        if let Some(ref mut injector) = self.fault_injector {
+            injector.record_message_processed();
+        }
+
+        Ok(message)
     }
 
     fn now(&self) -> Instant {

@@ -77,11 +77,37 @@ kernel.send_message(channel_id, message)?;
 let message = kernel.receive_message(channel_id, Some(timeout))?;
 ```
 
-**Contract**:
-- Messages are ordered per channel
-- Send never blocks (may fail if full)
+**Baseline Semantics**:
+- Messages are ordered per channel (FIFO)
+- Send never blocks in SimulatedKernel (may fail if channel doesn't exist)
 - Receive blocks until message or timeout
 - Messages are typed and versioned
+
+**Delivery Guarantees**:
+- **At-most-once delivery**: A message is delivered zero or one time, never duplicated
+- **No guaranteed delivery**: Messages may be lost (especially under faults)
+- **Ordering preserved per channel**: Messages sent on the same channel are received in order (unless reordered by fault injection)
+
+**Fault Injection Semantics**:
+
+When fault injection is enabled via `FaultPlan`, the following behaviors apply:
+
+1. **Drop**: Message is silently discarded. Sender receives `Ok(())` but receiver never sees the message.
+2. **Delay**: Message is held and delivered after simulated time advances. Maintains at-most-once semantics.
+3. **Reorder**: Messages in queue are swapped deterministically. No duplication occurs.
+4. **Crash on Send**: `send_message` returns `Err(KernelError::SendFailed)`. Message is not enqueued.
+5. **Crash on Recv**: `receive_message` returns `Err(KernelError::ReceiveFailed)`. Message may or may not be consumed.
+
+**Safety Properties Under Faults**:
+- No message duplication (at-most-once is preserved)
+- No undefined behavior or panics
+- State remains consistent (no partial operations)
+- Faults are deterministic and reproducible (given same FaultPlan)
+
+**Testing Guidance**:
+- Systems should be designed to tolerate message loss (at-most-once semantics)
+- If at-least-once delivery is needed, implement explicit acknowledgment and retry at application level
+- Use fault injection to validate resilience to dropped, delayed, and reordered messages
 
 ### Time Management
 

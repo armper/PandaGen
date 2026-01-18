@@ -1,0 +1,19 @@
+[package]
+name = "tests_resilience"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+sim_kernel.workspace = true
+kernel_api.workspace = true
+core_types.workspace = true
+ipc.workspace = true
+services_registry.workspace = true
+services_process_manager.workspace = true
+services_storage.workspace = true
+cli_console.workspace = true
+
+[dev-dependencies]
+# No additional dev dependencies needed

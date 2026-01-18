@@ -321,6 +321,50 @@ This document explains PandaGen's architecture, design decisions, and the reason
 
 ## Future Directions
 
+### Resilience and Fault Injection
+
+**Phase 2 (Current)**: Deterministic fault injection framework integrated into SimulatedKernel.
+
+The system now includes:
+- **Fault Plans**: Composable, deterministic fault injection for testing
+- **Message Faults**: Drop, delay, and reorder messages predictably
+- **Lifecycle Faults**: Simulate service crashes at specific points
+- **Test Utilities**: Helpers for writing resilience tests (`run_until_idle`, `with_fault_plan`)
+
+**Philosophy**:
+- Testability is a first-class design constraint
+- Failures must be tested, not just success paths
+- Deterministic testing (no flaky tests from randomness)
+- Safety properties must hold even under faults
+
+**Resilience Testing Approach**:
+
+Tests validate that the system maintains invariants under failure:
+1. **Capability Non-Leak**: Capabilities cannot be used after crash/revocation
+2. **Storage Consistency**: No partial commits or corruption after crash
+3. **Registry Consistency**: Service registry remains coherent through restarts
+4. **Restart Correctness**: Services restart according to policy
+
+The fault injection framework enables:
+- Testing message loss scenarios (at-most-once semantics)
+- Validating crash recovery procedures
+- Ensuring no undefined behavior under faults
+- Proving safety properties hold under adversarial conditions
+
+**Usage Example**:
+```rust
+use sim_kernel::fault_injection::{FaultPlan, MessageFault};
+use sim_kernel::test_utils::with_fault_plan;
+
+let plan = FaultPlan::new()
+    .with_message_fault(MessageFault::DropNext { count: 2 })
+    .with_lifecycle_fault(LifecycleFault::CrashAfterMessages { count: 5 });
+
+with_fault_plan(plan, |kernel| {
+    // Test system behavior under faults
+});
+```
+
 ### Performance
 
 Currently optimized for clarity, not performance. Future work:
