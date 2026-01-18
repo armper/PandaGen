@@ -1,0 +1,11 @@
+[package]
+name = "services_logger"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types.workspace = true
+kernel_api.workspace = true
+ipc.workspace = true

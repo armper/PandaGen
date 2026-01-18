@@ -1,0 +1,13 @@
+[package]
+name = "cli_console"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types.workspace = true
+kernel_api.workspace = true
+ipc.workspace = true
+sim_kernel.workspace = true
+services_registry.workspace = true

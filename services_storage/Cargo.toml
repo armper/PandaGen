@@ -1,0 +1,14 @@
+[package]
+name = "services_storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types.workspace = true
+kernel_api.workspace = true
+ipc.workspace = true
+uuid.workspace = true
+serde.workspace = true
+thiserror.workspace = true
