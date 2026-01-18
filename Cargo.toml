@@ -13,6 +13,7 @@ members = [
     "services_storage",
     "intent_router",
     "cli_console",
+    "tests_resilience",
 ]
 
 [workspace.package]

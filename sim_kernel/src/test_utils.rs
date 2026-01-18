@@ -3,8 +3,8 @@
 //! This module provides helper functions and utilities for writing
 //! resilience and integration tests.
 
-use crate::SimulatedKernel;
 use crate::fault_injection::FaultPlan;
+use crate::SimulatedKernel;
 use kernel_api::{Duration, KernelApi};
 
 /// Runs a test with a fault plan applied
@@ -41,7 +41,7 @@ where
 pub fn advance_until_idle(kernel: &mut SimulatedKernel, max_duration: Duration) {
     let start_time = kernel.now();
     const TIME_STEP: Duration = Duration::from_millis(1);
-    
+
     while !kernel.is_idle() {
         let elapsed = kernel.now().duration_since(start_time);
         if elapsed >= max_duration {
@@ -58,7 +58,7 @@ pub fn advance_until_idle(kernel: &mut SimulatedKernel, max_duration: Duration) 
 pub fn run_for_duration(kernel: &mut SimulatedKernel, duration: Duration) {
     let target_time = kernel.now() + duration;
     const TIME_STEP: Duration = Duration::from_millis(1);
-    
+
     while kernel.now() < target_time {
         kernel.advance_time(TIME_STEP);
     }
@@ -68,32 +68,31 @@ pub fn run_for_duration(kernel: &mut SimulatedKernel, duration: Duration) {
 mod tests {
     use super::*;
     use crate::fault_injection::{FaultPlan, MessageFault};
-    
+
     #[test]
     fn test_with_fault_plan() {
-        let plan = FaultPlan::new()
-            .with_message_fault(MessageFault::DropNext { count: 1 });
-        
+        let plan = FaultPlan::new().with_message_fault(MessageFault::DropNext { count: 1 });
+
         with_fault_plan(plan, |kernel| {
             assert_eq!(kernel.task_count(), 0);
         });
     }
-    
+
     #[test]
     fn test_advance_until_idle() {
         let mut kernel = SimulatedKernel::new();
         advance_until_idle(&mut kernel, Duration::from_secs(1));
         assert!(kernel.is_idle());
     }
-    
+
     #[test]
     fn test_run_for_duration() {
         let mut kernel = SimulatedKernel::new();
         let start = kernel.now();
         let duration = Duration::from_millis(100);
-        
+
         run_for_duration(&mut kernel, duration);
-        
+
         let elapsed = kernel.now().duration_since(start);
         assert!(elapsed >= duration);
     }
