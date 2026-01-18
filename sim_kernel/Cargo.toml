@@ -9,3 +9,4 @@ license.workspace = true
 kernel_api.workspace = true
 core_types.workspace = true
 ipc.workspace = true
+serde.workspace = true

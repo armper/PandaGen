@@ -18,5 +18,8 @@
 pub mod capability;
 pub mod ids;
 
-pub use capability::{Cap, CapabilityError, CapabilityGrant, CapabilityTransfer};
+pub use capability::{
+    Cap, CapabilityError, CapabilityEvent, CapabilityGrant, CapabilityInvalidReason,
+    CapabilityMetadata, CapabilityStatus, CapabilityTransfer,
+};
 pub use ids::{ServiceId, TaskId};

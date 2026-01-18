@@ -26,6 +26,7 @@
 //! // These are different types and cannot be confused
 //! ```
 
+use crate::TaskId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -170,6 +171,96 @@ impl<T> CapabilityTransfer<T> {
     }
 }
 
+/// Capability lifecycle event types
+///
+/// These events track the lifecycle of capabilities for audit purposes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityEvent {
+    /// Capability was granted to a task
+    Granted {
+        cap_id: u64,
+        grantor: Option<TaskId>,
+        grantee: TaskId,
+        cap_type: String,
+    },
+    /// Capability was delegated from one task to another
+    Delegated {
+        cap_id: u64,
+        from_task: TaskId,
+        to_task: TaskId,
+        cap_type: String,
+    },
+    /// Capability was cloned (duplication allowed)
+    Cloned {
+        cap_id: u64,
+        original_owner: TaskId,
+        new_owner: TaskId,
+        cap_type: String,
+    },
+    /// Capability was dropped by its owner
+    Dropped {
+        cap_id: u64,
+        owner: TaskId,
+        cap_type: String,
+    },
+    /// Attempted to use an invalid capability
+    InvalidUseAttempt {
+        cap_id: u64,
+        task: TaskId,
+        reason: CapabilityInvalidReason,
+    },
+    /// Capability invalidated due to owner termination
+    Invalidated {
+        cap_id: u64,
+        owner: TaskId,
+        cap_type: String,
+    },
+}
+
+/// Reasons why a capability use attempt failed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityInvalidReason {
+    /// Owner task has terminated
+    OwnerDead,
+    /// Capability was never granted to this task
+    NeverGranted,
+    /// Capability was transferred away (move semantics)
+    TransferredAway,
+    /// Capability type mismatch
+    TypeMismatch,
+    /// Capability has been explicitly revoked
+    Revoked,
+}
+
+/// Capability status in the lifecycle
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityStatus {
+    /// Capability is valid and can be used
+    Valid,
+    /// Capability has been transferred to another task
+    Transferred,
+    /// Capability has been invalidated (owner dead, revoked, etc.)
+    Invalid,
+}
+
+/// Metadata about a capability's lifecycle
+///
+/// This tracks the ownership and status of capabilities in the system.
+/// Used by the kernel to enforce capability semantics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityMetadata {
+    /// The capability ID
+    pub cap_id: u64,
+    /// Current owner of the capability
+    pub owner: TaskId,
+    /// Type name of the capability (for audit/debug)
+    pub cap_type: String,
+    /// Current status
+    pub status: CapabilityStatus,
+    /// Original grantor (None for kernel-created caps)
+    pub grantor: Option<TaskId>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +337,98 @@ mod tests {
         let display = format!("{}", cap);
         assert!(display.contains("Cap"));
         assert!(display.contains("42"));
+    }
+
+    #[test]
+    fn test_capability_event_granted() {
+        use crate::TaskId;
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+        let event = CapabilityEvent::Granted {
+            cap_id: 42,
+            grantor: Some(task1),
+            grantee: task2,
+            cap_type: "FileRead".to_string(),
+        };
+
+        match event {
+            CapabilityEvent::Granted { cap_id, .. } => assert_eq!(cap_id, 42),
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_capability_event_delegated() {
+        use crate::TaskId;
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+        let event = CapabilityEvent::Delegated {
+            cap_id: 42,
+            from_task: task1,
+            to_task: task2,
+            cap_type: "FileRead".to_string(),
+        };
+
+        match event {
+            CapabilityEvent::Delegated { from_task, to_task, .. } => {
+                assert_eq!(from_task, task1);
+                assert_eq!(to_task, task2);
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_capability_event_invalidated() {
+        use crate::TaskId;
+        let task = TaskId::new();
+        let event = CapabilityEvent::Invalidated {
+            cap_id: 42,
+            owner: task,
+            cap_type: "FileRead".to_string(),
+        };
+
+        match event {
+            CapabilityEvent::Invalidated { cap_id, owner, .. } => {
+                assert_eq!(cap_id, 42);
+                assert_eq!(owner, task);
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_capability_invalid_reason() {
+        let reason = CapabilityInvalidReason::OwnerDead;
+        assert_eq!(reason, CapabilityInvalidReason::OwnerDead);
+
+        let reason2 = CapabilityInvalidReason::TransferredAway;
+        assert_ne!(reason, reason2);
+    }
+
+    #[test]
+    fn test_capability_status() {
+        let status = CapabilityStatus::Valid;
+        assert_eq!(status, CapabilityStatus::Valid);
+
+        let status2 = CapabilityStatus::Invalid;
+        assert_ne!(status, status2);
+    }
+
+    #[test]
+    fn test_capability_metadata() {
+        use crate::TaskId;
+        let task = TaskId::new();
+        let metadata = CapabilityMetadata {
+            cap_id: 42,
+            owner: task,
+            cap_type: "FileRead".to_string(),
+            status: CapabilityStatus::Valid,
+            grantor: None,
+        };
+
+        assert_eq!(metadata.cap_id, 42);
+        assert_eq!(metadata.owner, task);
+        assert_eq!(metadata.status, CapabilityStatus::Valid);
     }
 }
