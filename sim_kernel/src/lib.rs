@@ -673,10 +673,13 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
-        // Phase 11: Check budget before sending
-        // Note: We need to get task_id from the message source if available
-        // For now, we'll check if sender context is available via current task tracking
-        // In a real implementation, send_message would take TaskId as parameter
+        // TODO(Phase 11 - Future Work): Budget enforcement for message send
+        // To fully implement:
+        // 1. Add TaskId parameter to send_message in KernelApi trait
+        // 2. Check MessageCount budget for sender task
+        // 3. Consume one message unit on success
+        // 4. Return ResourceExhausted error if budget exceeded
+        // For now, message sending is unlimited (backwards compatible)
 
         // Check for crash-on-send fault
         if let Some(ref mut injector) = self.fault_injector {

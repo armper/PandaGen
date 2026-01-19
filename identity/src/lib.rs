@@ -161,6 +161,9 @@ pub struct IdentityMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResourceBudget>,
     /// Current resource usage (Phase 11)
+    /// Note: Defaults to zero on deserialization. This is intentional because
+    /// usage is runtime state that should not be persisted. If identity is
+    /// serialized and deserialized, usage should reset to zero.
     #[serde(default)]
     pub usage: ResourceUsage,
 }
