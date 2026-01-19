@@ -10,7 +10,6 @@ global_asm!(
 .section .text.entry, "ax"
 .global _start
 .extern rust_main
-.intel_syntax noprefix
 _start:
     lea rsp, [rip + stack_top]
     and rsp, -16
@@ -24,7 +23,6 @@ _start:
 stack_bottom:
     .skip 65536
 stack_top:
-    .att_syntax prefix
 "#
 );
 
