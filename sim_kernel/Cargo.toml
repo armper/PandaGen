@@ -12,3 +12,4 @@ ipc.workspace = true
 serde.workspace = true
 identity.workspace = true
 policy.workspace = true
+resources.workspace = true

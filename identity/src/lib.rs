@@ -25,6 +25,7 @@
 //! - Global policy engine
 
 use core_types::TaskId;
+use resources::{ResourceBudget, ResourceUsage};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -136,6 +137,8 @@ impl fmt::Display for TrustDomain {
 ///
 /// Identity metadata is immutable after creation. It provides lineage
 /// information for supervision and audit.
+///
+/// **Phase 11 Addition**: Optional resource budget attachment for quota enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityMetadata {
     /// Unique execution identifier
@@ -154,6 +157,15 @@ pub struct IdentityMetadata {
     pub trust_domain: TrustDomain,
     /// Human-readable name (for debugging/logging)
     pub name: String,
+    /// Optional resource budget (Phase 11)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ResourceBudget>,
+    /// Current resource usage (Phase 11)
+    /// Note: Defaults to zero on deserialization. This is intentional because
+    /// usage is runtime state that should not be persisted. If identity is
+    /// serialized and deserialized, usage should reset to zero.
+    #[serde(default)]
+    pub usage: ResourceUsage,
 }
 
 impl IdentityMetadata {
@@ -173,6 +185,8 @@ impl IdentityMetadata {
             created_at_nanos,
             trust_domain,
             name: name.into(),
+            budget: None,
+            usage: ResourceUsage::zero(),
         }
     }
 
@@ -202,6 +216,33 @@ impl IdentityMetadata {
     /// Checks if this identity is a child of the given parent
     pub fn is_child_of(&self, parent_id: ExecutionId) -> bool {
         self.parent_id == Some(parent_id)
+    }
+
+    /// Sets the resource budget (builder pattern)
+    ///
+    /// Phase 11: Attaches a resource budget to this identity.
+    /// Budget inheritance rules:
+    /// - Child budget must be ≤ parent budget (validated at spawn time)
+    /// - Budget is scoped to identity lifetime
+    pub fn with_budget(mut self, budget: ResourceBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Checks if identity has a budget attached
+    pub fn has_budget(&self) -> bool {
+        self.budget.is_some()
+    }
+
+    /// Validates budget inheritance (child ≤ parent)
+    ///
+    /// Returns true if this identity's budget is a subset of the parent's budget,
+    /// or if either has no budget (no constraint).
+    pub fn budget_inherits_from(&self, parent: &IdentityMetadata) -> bool {
+        match (&self.budget, &parent.budget) {
+            (Some(child_budget), Some(parent_budget)) => child_budget.is_subset_of(parent_budget),
+            _ => true, // No constraint if either has no budget
+        }
     }
 }
 
@@ -446,5 +487,140 @@ mod tests {
         assert_eq!(notification.task_id, Some(task_id));
         assert_eq!(notification.reason, ExitReason::Normal);
         assert_eq!(notification.terminated_at_nanos, now);
+    }
+
+    // ============================================================================
+    // Phase 11: Resource Budget Tests
+    // ============================================================================
+
+    #[test]
+    fn test_identity_with_budget() {
+        use resources::{CpuTicks, MessageCount, ResourceBudget};
+
+        let now = 1000u64;
+        let budget = ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(1000))
+            .with_message_count(MessageCount::new(50));
+
+        let identity = IdentityMetadata::new(
+            IdentityKind::Component,
+            TrustDomain::user(),
+            "test-component",
+            now,
+        )
+        .with_budget(budget);
+
+        assert!(identity.has_budget());
+        assert_eq!(identity.budget, Some(budget));
+        assert!(identity.usage.cpu_ticks.is_zero());
+    }
+
+    #[test]
+    fn test_identity_without_budget() {
+        let now = 1000u64;
+        let identity =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::user(), "test", now);
+
+        assert!(!identity.has_budget());
+        assert_eq!(identity.budget, None);
+    }
+
+    #[test]
+    fn test_budget_inheritance_valid() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let now = 1000u64;
+        let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
+
+        // Child with smaller budget - valid
+        let child_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id)
+                .with_budget(child_budget);
+
+        assert!(child.budget_inherits_from(&parent));
+    }
+
+    #[test]
+    fn test_budget_inheritance_equal() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let now = 1000u64;
+        let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(budget);
+
+        // Child with equal budget - valid
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id)
+                .with_budget(budget);
+
+        assert!(child.budget_inherits_from(&parent));
+    }
+
+    #[test]
+    fn test_budget_inheritance_violates() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let now = 1000u64;
+        let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
+
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
+
+        // Child with larger budget - invalid
+        let child_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id)
+                .with_budget(child_budget);
+
+        assert!(!child.budget_inherits_from(&parent));
+    }
+
+    #[test]
+    fn test_budget_inheritance_no_parent_budget() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let now = 1000u64;
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now);
+
+        // Child has budget, parent doesn't - valid (no constraint)
+        let child_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id)
+                .with_budget(child_budget);
+
+        assert!(child.budget_inherits_from(&parent));
+    }
+
+    #[test]
+    fn test_budget_inheritance_no_child_budget() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let now = 1000u64;
+        let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
+
+        // Child has no budget - valid (no constraint)
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id);
+
+        assert!(child.budget_inherits_from(&parent));
     }
 }

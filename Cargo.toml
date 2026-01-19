@@ -17,6 +17,7 @@ members = [
     "lifecycle",
     "identity",
     "policy",
+    "resources",
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
@@ -49,6 +50,7 @@ pipeline = { path = "pipeline" }
 lifecycle = { path = "lifecycle" }
 identity = { path = "identity" }
 policy = { path = "policy" }
+resources = { path = "resources" }
 
 # Demo crates
 cli_console = { path = "cli_console" }

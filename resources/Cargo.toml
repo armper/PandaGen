@@ -1,13 +1,12 @@
 [package]
-name = "identity"
+name = "resources"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-core_types = { workspace = true }
-resources = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]

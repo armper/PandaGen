@@ -538,6 +538,13 @@ impl SimulatedKernel {
         self.exit_notifications.clear();
     }
 
+    /// Updates identity metadata (mutable borrow)
+    ///
+    /// Used by enforcement points to update usage.
+    pub fn get_identity_mut(&mut self, exec_id: ExecutionId) -> Option<&mut IdentityMetadata> {
+        self.identity_table.get_mut(&exec_id)
+    }
+
     /// Spawns a task with explicit identity metadata
     ///
     /// This is for supervisors who need full control over child identity
@@ -561,6 +568,15 @@ impl SimulatedKernel {
 
         if let Some(parent) = parent_id {
             metadata = metadata.with_parent(parent);
+
+            // Phase 11: Validate budget inheritance
+            if let Some(parent_identity) = self.identity_table.get(&parent) {
+                if !metadata.budget_inherits_from(parent_identity) {
+                    return Err(KernelError::InsufficientAuthority(
+                        "Budget inheritance violation: child budget exceeds parent".to_string(),
+                    ));
+                }
+            }
         }
         if let Some(creator) = creator_id {
             metadata = metadata.with_creator(creator);
@@ -657,6 +673,14 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
+        // TODO(Phase 11 - Future Work): Budget enforcement for message send
+        // To fully implement:
+        // 1. Add TaskId parameter to send_message in KernelApi trait
+        // 2. Check MessageCount budget for sender task
+        // 3. Consume one message unit on success
+        // 4. Return ResourceExhausted error if budget exceeded
+        // For now, message sending is unlimited (backwards compatible)
+
         // Check for crash-on-send fault
         if let Some(ref mut injector) = self.fault_injector {
             if injector.should_crash_on_send() {
