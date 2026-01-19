@@ -49,7 +49,11 @@ impl TextRenderer {
     }
 
     /// Checks if a redraw is needed based on revision changes
-    pub fn needs_redraw(&self, main_frame: Option<&ViewFrame>, status_frame: Option<&ViewFrame>) -> bool {
+    pub fn needs_redraw(
+        &self,
+        main_frame: Option<&ViewFrame>,
+        status_frame: Option<&ViewFrame>,
+    ) -> bool {
         let main_changed = main_frame.map(|f| f.revision) != self.last_main_revision;
         let status_changed = status_frame.map(|f| f.revision) != self.last_status_revision;
         main_changed || status_changed
@@ -77,9 +81,9 @@ impl TextRenderer {
         }
 
         // Separator line
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&"─".repeat(80));
-        output.push_str("\n");
+        output.push('\n');
 
         // Render status view (if present)
         if let Some(frame) = status_view {
@@ -96,7 +100,9 @@ impl TextRenderer {
     /// Renders a single view frame
     fn render_view_frame(&self, frame: &ViewFrame) -> String {
         match &frame.content {
-            ViewContent::TextBuffer { lines } => self.render_text_buffer(lines, frame.cursor.as_ref()),
+            ViewContent::TextBuffer { lines } => {
+                self.render_text_buffer(lines, frame.cursor.as_ref())
+            }
             ViewContent::StatusLine { text } => format!("{}\n", text),
             ViewContent::Panel { metadata } => format!("[Panel: {}]\n", metadata),
         }
@@ -165,7 +171,11 @@ mod tests {
     use super::*;
     use view_types::{ViewId, ViewKind};
 
-    fn create_text_buffer_frame(lines: Vec<String>, cursor: Option<CursorPosition>, revision: u64) -> ViewFrame {
+    fn create_text_buffer_frame(
+        lines: Vec<String>,
+        cursor: Option<CursorPosition>,
+        revision: u64,
+    ) -> ViewFrame {
         let mut frame = ViewFrame::new(
             ViewId::new(),
             ViewKind::TextBuffer,
@@ -284,13 +294,13 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let lines = vec!["Test".to_string()];
         let frame1 = create_text_buffer_frame(lines.clone(), None, 1);
-        
+
         // First render
         renderer.render_snapshot(Some(&frame1), None);
-        
+
         // Same revision - no redraw needed
         assert!(!renderer.needs_redraw(Some(&frame1), None));
-        
+
         // New revision - redraw needed
         let frame2 = create_text_buffer_frame(lines, None, 2);
         assert!(renderer.needs_redraw(Some(&frame2), None));
@@ -300,13 +310,13 @@ mod tests {
     fn test_needs_redraw_on_status_change() {
         let mut renderer = TextRenderer::new();
         let status1 = create_status_frame("Status 1".to_string(), 1);
-        
+
         // First render
         renderer.render_snapshot(None, Some(&status1));
-        
+
         // Same revision - no redraw needed
         assert!(!renderer.needs_redraw(None, Some(&status1)));
-        
+
         // New revision - redraw needed
         let status2 = create_status_frame("Status 2".to_string(), 2);
         assert!(renderer.needs_redraw(None, Some(&status2)));

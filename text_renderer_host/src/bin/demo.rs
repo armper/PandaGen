@@ -47,13 +47,15 @@ fn main() {
     println!("Launched editor component: {}\n", component_id);
 
     // Get view handles from the component
-    let component = workspace.get_component(component_id).expect("Component not found");
-    let main_view_handle = component.main_view.clone().expect("No main view");
-    let status_view_handle = component.status_view.clone().expect("No status view");
+    let component = workspace
+        .get_component(component_id)
+        .expect("Component not found");
+    let main_view_handle = component.main_view.expect("No main view");
+    let status_view_handle = component.status_view.expect("No status view");
 
     // Create an editor instance (simulated)
     let mut editor = Editor::new();
-    editor.set_view_handles(main_view_handle.clone(), status_view_handle.clone());
+    editor.set_view_handles(main_view_handle, status_view_handle);
 
     // Simulate some input events - entering insert mode and typing
     let test_inputs = vec![
@@ -86,7 +88,9 @@ fn main() {
     let timestamp = 1000; // Simulated timestamp
     for (i, event) in test_inputs.iter().enumerate() {
         // Process input in editor
-        editor.process_input(event.clone()).expect("Failed to process input");
+        editor
+            .process_input(event.clone())
+            .expect("Failed to process input");
 
         // Publish views from editor
         editor
@@ -97,8 +101,9 @@ fn main() {
         let snapshot = workspace.render_snapshot();
 
         if renderer.needs_redraw(snapshot.main_view.as_ref(), snapshot.status_view.as_ref()) {
-            let output = renderer.render_snapshot(snapshot.main_view.as_ref(), snapshot.status_view.as_ref());
-            
+            let output = renderer
+                .render_snapshot(snapshot.main_view.as_ref(), snapshot.status_view.as_ref());
+
             // This is a host, so it is allowed to print
             println!("\n{}", "=".repeat(80));
             println!("After input #{}: {:?}", i + 1, event);
