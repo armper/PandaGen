@@ -235,13 +235,13 @@ fn test_punctuation_with_shift() {
     
     editor.process_input(press_key(KeyCode::I)).unwrap();
     
-    // Type "Hello!" with shift for exclamation
+    // Type "hello!" - testing shift for punctuation
     editor.process_input(press_key(KeyCode::H)).unwrap();
     editor.process_input(press_key(KeyCode::E)).unwrap();
     editor.process_input(press_key(KeyCode::L)).unwrap();
     editor.process_input(press_key(KeyCode::L)).unwrap();
     editor.process_input(press_key(KeyCode::O)).unwrap();
-    editor.process_input(press_key_shift(KeyCode::Num1)).unwrap(); // !
+    editor.process_input(press_key_shift(KeyCode::Num1)).unwrap(); // Shift+1 = !
     
     assert_eq!(editor.get_content(), "hello!");
 }
