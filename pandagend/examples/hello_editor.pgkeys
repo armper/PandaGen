@@ -1,0 +1,22 @@
+# Hello Editor Example
+# Demonstrates opening an editor, typing text, and saving
+
+# Enter insert mode
+i
+
+# Type "Hello Panda"
+"Hello Panda"
+
+# Exit insert mode
+Escape
+
+# Type save command
+":w"
+Enter
+
+# Wait a moment
+wait 100ms
+
+# Exit editor
+":q"
+Enter

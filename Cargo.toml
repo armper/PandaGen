@@ -32,7 +32,7 @@ members = [
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
-    "contract_tests",
+    "contract_tests", "pandagend",
 ]
 
 [workspace.package]
