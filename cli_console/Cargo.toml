@@ -18,3 +18,6 @@ services_registry.workspace = true
 services_storage.workspace = true
 services_fs_view.workspace = true
 fs_view.workspace = true
+input_types.workspace = true
+services_input.workspace = true
+services_focus_manager.workspace = true

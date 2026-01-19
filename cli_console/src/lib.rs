@@ -4,6 +4,7 @@
 //! It is NOT a shell and NOT intended for POSIX compatibility.
 
 pub mod commands;
+pub mod interactive;
 
 use kernel_api::{KernelApi, TaskDescriptor};
 use services_registry::ServiceRegistry;

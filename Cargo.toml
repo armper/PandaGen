@@ -13,6 +13,8 @@ members = [
     "services_storage",
     "services_pipeline_executor",
     "services_fs_view",
+    "services_input",
+    "services_focus_manager",
     "fs_view",
     "intent_router",
     "pipeline",
@@ -20,6 +22,7 @@ members = [
     "identity",
     "policy",
     "resources",
+    "input_types",
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
@@ -55,6 +58,11 @@ lifecycle = { path = "lifecycle" }
 identity = { path = "identity" }
 policy = { path = "policy" }
 resources = { path = "resources" }
+
+# Input system crates
+input_types = { path = "input_types" }
+services_input = { path = "services_input" }
+services_focus_manager = { path = "services_focus_manager" }
 
 # Demo crates
 cli_console = { path = "cli_console" }

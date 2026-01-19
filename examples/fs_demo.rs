@@ -14,7 +14,9 @@ fn main() {
 
     println!("1. Creating directory structure...");
     handler.mkdir("docs").expect("Failed to create docs");
-    handler.mkdir("projects").expect("Failed to create projects");
+    handler
+        .mkdir("projects")
+        .expect("Failed to create projects");
     println!("   ✓ Created: /docs");
     println!("   ✓ Created: /projects\n");
 

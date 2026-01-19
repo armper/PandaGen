@@ -66,12 +66,23 @@ PandaGen/
 ├── sim_kernel/              # Simulated kernel (for testing)
 ├── hal/                     # Hardware abstraction traits
 ├── hal_x86_64/              # x86_64 HAL implementation (skeleton)
+├── identity/                # Execution identities & trust domains
+├── policy/                  # Policy engine framework
+├── resources/               # Resource budgets & enforcement
+├── lifecycle/               # Task lifecycle management
+├── pipeline/                # Pipeline execution primitives
 ├── services_registry/       # Service discovery
 ├── services_process_manager/# Service lifecycle management
 ├── services_logger/         # Structured logging
 ├── services_storage/        # Versioned object storage
+├── services_fs_view/        # Filesystem view illusion
+├── services_pipeline_executor/ # Pipeline execution service
+├── services_input/          # Input subscription management (Phase 14)
+├── services_focus_manager/  # Focus control & routing (Phase 14)
+├── input_types/             # Input event types (Phase 14)
+├── fs_view/                 # Filesystem view client library
 ├── intent_router/           # Typed command routing
-└── cli_console/             # Demo bootstrap (not a shell)
+└── cli_console/             # Demo bootstrap & interactive console
 ```
 
 ### Key Design Decisions
@@ -95,6 +106,13 @@ PandaGen/
 - All IPC is via structured messages
 - Messages have schema versions for compatibility
 - Correlation IDs for request/response matching
+
+**Input System (Phase 14)**
+- Explicit input subscriptions via capabilities
+- Keyboard events are structured (KeyEvent), not byte streams
+- Stack-based focus management
+- No TTY/stdin/stdout emulation
+- Fully testable via event injection
 
 **Simulated Kernel**
 - Full kernel API implementation that runs in-process
@@ -132,7 +150,35 @@ cargo clippy -- -D warnings
 - [Architecture Overview](docs/architecture.md) - System design and principles
 - [Interfaces](docs/interfaces.md) - API reference and contracts
 
-### Quick Example
+### Quick Example: Interactive Input
+
+```rust
+use input_types::{InputEvent, KeyEvent, KeyCode, Modifiers};
+use services_input::InputService;
+use services_focus_manager::FocusManager;
+
+// Create services
+let mut input_service = InputService::new();
+let mut focus_manager = FocusManager::new();
+
+// Subscribe to keyboard input
+let cap = input_service.subscribe_keyboard(task_id, channel)?;
+
+// Request focus
+focus_manager.request_focus(cap)?;
+
+// Process keyboard events
+let event = InputEvent::key(
+    KeyEvent::pressed(KeyCode::A, Modifiers::CTRL)
+);
+
+if let Some(focused_cap) = focus_manager.route_event(&event)? {
+    // Deliver event to focused component
+    println!("Ctrl+A pressed!");
+}
+```
+
+### Quick Example: Capability-Based Task Spawning
 
 ```rust
 use sim_kernel::SimulatedKernel;
@@ -169,7 +215,7 @@ cargo test --all
 
 ## 🛣️ Roadmap
 
-### Phase 1: Foundation (Current)
+### ✅ Phase 1: Foundation (Complete)
 - [x] Workspace structure
 - [x] Core types (Cap, IDs, errors)
 - [x] IPC primitives
@@ -180,23 +226,34 @@ cargo test --all
 - [x] Documentation
 - [x] CI/CD
 
-### Phase 2: Services (Next)
-- [ ] Storage service implementation
-- [ ] Logger service implementation
-- [ ] Process manager implementation
-- [ ] Intent router implementation
-- [ ] Service registry implementation
+### ✅ Phase 2-13: Core Services (Complete)
+- [x] Storage service (versioned objects)
+- [x] Logger service (structured logging)
+- [x] Process manager (lifecycle)
+- [x] Service registry (discovery)
+- [x] Identity system (trust domains)
+- [x] Policy engine framework
+- [x] Resource budgets & enforcement
+- [x] Filesystem view illusion
+- [x] Pipeline execution
+- [x] Fault injection & resilience testing
 
-### Phase 3: Advanced Features
+### ✅ Phase 14: Input System (Complete)
+- [x] Input types (KeyEvent, KeyCode, Modifiers)
+- [x] Input service (subscription management)
+- [x] Focus manager (stack-based focus control)
+- [x] SimKernel event injection utilities
+- [x] Interactive console demo
+- [x] Full documentation & examples
+
+### Phase 15+: Future Work
 - [ ] Real kernel implementation (baremetal)
-- [ ] Hardware drivers
+- [ ] Hardware drivers (keyboard, display, etc.)
+- [ ] Pointer/touch input support
 - [ ] Multi-core support
+- [ ] Graphics/UI framework
+- [ ] Network stack
 - [ ] Bootloader integration
-
-### Phase 4: Ecosystem
-- [ ] Development tools
-- [ ] Application framework
-- [ ] Examples and tutorials
 
 ## 🤝 Contributing
 

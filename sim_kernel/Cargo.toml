@@ -13,3 +13,7 @@ serde.workspace = true
 identity.workspace = true
 policy.workspace = true
 resources.workspace = true
+
+[dev-dependencies]
+input_types.workspace = true
+services_input.workspace = true

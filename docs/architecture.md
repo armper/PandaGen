@@ -2712,3 +2712,136 @@ Phase 12 provides:
 - **Test-driven**: All enforcement testable in SimKernel
 
 This completes resource enforcement: budgets that **bite**.
+
+---
+
+## Phase 14: Input System Abstraction
+
+### Philosophy: Input as Explicit Events
+
+**Problem**: Traditional input models (stdin, TTY, global keyboard state) are:
+- Ambient authority (anyone can read)
+- Byte streams (unstructured, hard to test)
+- Timing-dependent (race conditions)
+- Hardware-coupled (can't test without devices)
+
+**Solution**: Treat input as explicit, capability-gated events:
+- **Events, not streams**: `InputEvent` structures (typed, serializable)
+- **Explicit subscription**: Must request input via capability
+- **Focus control**: Only focused component receives events
+- **Test-first**: Inject events deterministically in SimKernel
+
+### Input Model
+
+```
+┌─────────────────────────────────────────┐
+│         Interactive Component           │
+│     (CLI, Editor, UI Shell)             │
+├─────────────────────────────────────────┤
+│         Focus Manager Service           │
+│     (maintains focus stack)             │
+├─────────────────────────────────────────┤
+│         Input Service                   │
+│     (subscriptions + delivery)          │
+├─────────────────────────────────────────┤
+│         Input Types                     │
+│     (KeyEvent, Modifiers, KeyCode)      │
+└─────────────────────────────────────────┘
+```
+
+### Core Components
+
+**1. Input Types (`input_types`)**
+- `InputEvent`: Enum of input event types
+  - `Key(KeyEvent)`: Keyboard events
+  - (Pointer/Touch reserved for future)
+- `KeyEvent`: Structured keyboard event
+  - `code: KeyCode`: Logical key (A-Z, F1-F12, etc.)
+  - `modifiers: Modifiers`: Ctrl, Alt, Shift, Meta
+  - `state: KeyState`: Pressed, Released, Repeat
+  - `text: Option<String>`: For IME support (future)
+- No raw scan codes or hardware details
+
+**2. Input Service (`services_input`)**
+- Manages input subscriptions
+- API:
+  - `subscribe_keyboard(task_id, channel) -> InputSubscriptionCap`
+  - `revoke_subscription(cap)`
+  - `deliver_event(cap, event) -> bool`
+- One subscription per task
+- Delivery consumes MessageCount budget
+
+**3. Focus Manager (`services_focus_manager`)**
+- Maintains focus stack (LIFO)
+- API:
+  - `request_focus(cap)` - Push onto focus stack
+  - `release_focus()` - Pop from focus stack
+  - `route_event(event) -> Option<InputSubscriptionCap>`
+- Only top of stack receives events
+- Audit trail for all focus changes
+
+**4. SimKernel Integration**
+- Test utilities for event injection
+- `InputEventQueue` for simulation
+- Deterministic event ordering
+- Budget consumption enforcement
+
+### Why No TTY / stdin / stdout?
+
+Traditional terminal model problems:
+1. **Ambient authority**: Any process can read stdin
+2. **Implicit focus**: "Whoever reads first" race condition
+3. **Byte streams**: Raw bytes, not structured events
+4. **Hardware coupling**: Assumes VT100-style terminal
+
+PandaGen approach:
+1. **Explicit capability**: Must request input subscription
+2. **Explicit focus**: Focus manager controls routing
+3. **Structured events**: Typed, serializable, testable
+4. **Hardware abstraction**: Works in simulation, extensible to real hardware
+
+### Interactive Component Pattern
+
+```rust
+// 1. Create component
+let console = InteractiveConsole::new(task_id);
+
+// 2. Subscribe to input
+console.subscribe(&mut input_service, channel)?;
+
+// 3. Request focus
+console.request_focus(&mut focus_manager)?;
+
+// 4. Process events
+let event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
+if let Some(command) = console.process_event(event)? {
+    // Execute command
+}
+```
+
+### Future Evolution
+
+When real hardware drivers are added:
+1. HAL provides keyboard/pointer/touch drivers
+2. Drivers inject events into input service
+3. Everything else stays the same
+4. Tests continue to work via injection
+
+### Testing Strategy
+
+All input behavior is testable:
+- Unit tests: Each component in isolation
+- Integration tests: Full input flow (subscribe → focus → event → delivery)
+- Simulation tests: Multiple components competing for focus
+- Budget tests: Message delivery consumes resources
+
+### Summary
+
+Phase 14 provides:
+- **Explicit input ownership**: No ambient keyboard access
+- **Event-driven**: Structured events, not byte streams
+- **Focus control**: Explicit, policy-driven focus management
+- **Testability**: Full input simulation without hardware
+- **Extensibility**: Ready for pointer, touch, gamepad when needed
+
+This is **not** a TTY. This is a modern input abstraction.
