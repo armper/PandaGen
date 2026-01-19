@@ -25,6 +25,7 @@ pub mod capability_audit;
 pub mod fault_injection;
 pub mod policy_audit;
 pub mod resource_audit;
+pub mod scheduler;
 pub mod test_utils;
 pub mod timer;
 
