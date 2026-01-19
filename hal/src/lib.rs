@@ -21,9 +21,11 @@ pub mod interrupts;
 pub mod keyboard;
 pub mod keyboard_translation;
 pub mod memory;
+pub mod timer;
 
 pub use cpu::CpuHal;
 pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
 pub use keyboard_translation::{scancode_to_keycode, KeyboardTranslator};
 pub use memory::MemoryHal;
+pub use timer::TimerDevice;

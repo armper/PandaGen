@@ -13,6 +13,7 @@ serde.workspace = true
 identity.workspace = true
 policy.workspace = true
 resources.workspace = true
+hal.workspace = true
 
 [dev-dependencies]
 input_types.workspace = true

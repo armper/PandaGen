@@ -26,6 +26,7 @@ pub mod fault_injection;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod test_utils;
+pub mod timer;
 
 use core_types::{
     Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata, CapabilityStatus, ServiceId,
