@@ -21,10 +21,14 @@
 //! This is not a "toy" or "mock" - it's a full implementation of the
 //! kernel API that happens to run in-process for testing.
 
+pub mod capability_audit;
 pub mod fault_injection;
 pub mod test_utils;
 
-use core_types::{Cap, ServiceId, TaskId};
+use core_types::{
+    Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata, CapabilityStatus, ServiceId,
+    TaskId,
+};
 use fault_injection::FaultInjector;
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
@@ -47,6 +51,10 @@ pub struct SimulatedKernel {
     fault_injector: Option<FaultInjector>,
     /// Pending delayed messages
     delayed_messages: Vec<DelayedMessage>,
+    /// Capability authority table: tracks which tasks own which capabilities
+    capability_table: HashMap<u64, CapabilityMetadata>,
+    /// Audit log for capability operations (test-only)
+    capability_audit: capability_audit::CapabilityAuditLog,
 }
 
 #[derive(Debug)]
@@ -77,6 +85,8 @@ impl SimulatedKernel {
             services: HashMap::new(),
             fault_injector: None,
             delayed_messages: Vec::new(),
+            capability_table: HashMap::new(),
+            capability_audit: capability_audit::CapabilityAuditLog::new(),
         }
     }
 
@@ -168,6 +178,175 @@ impl SimulatedKernel {
             .map(|ch| ch.messages.len())
             .sum::<usize>()
             + self.delayed_messages.len()
+    }
+
+    /// Returns a reference to the capability audit log
+    pub fn audit_log(&self) -> &capability_audit::CapabilityAuditLog {
+        &self.capability_audit
+    }
+
+    /// Terminates a task and invalidates its capabilities
+    ///
+    /// This is called when a task exits or crashes. It invalidates all
+    /// capabilities owned by the task to prevent use-after-free.
+    pub fn terminate_task(&mut self, task_id: TaskId) {
+        // Remove task
+        self.tasks.remove(&task_id);
+
+        // Invalidate all capabilities owned by this task
+        let cap_ids: Vec<u64> = self
+            .capability_table
+            .iter()
+            .filter(|(_, meta)| meta.owner == task_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for cap_id in cap_ids {
+            if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+                meta.status = CapabilityStatus::Invalid;
+
+                // Record invalidation event
+                self.capability_audit.record_event(
+                    self.current_time,
+                    CapabilityEvent::Invalidated {
+                        cap_id,
+                        owner: task_id,
+                        cap_type: meta.cap_type.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Checks if a capability is valid for use by the specified task
+    fn validate_capability(
+        &self,
+        cap_id: u64,
+        task_id: TaskId,
+    ) -> Result<(), CapabilityInvalidReason> {
+        match self.capability_table.get(&cap_id) {
+            None => Err(CapabilityInvalidReason::NeverGranted),
+            Some(meta) => {
+                // Check if capability is invalid
+                if meta.status != CapabilityStatus::Valid {
+                    return Err(CapabilityInvalidReason::TransferredAway);
+                }
+
+                // Check if owner is still alive
+                if !self.tasks.contains_key(&meta.owner) {
+                    return Err(CapabilityInvalidReason::OwnerDead);
+                }
+
+                // Check if the task trying to use it is the owner
+                if meta.owner != task_id {
+                    return Err(CapabilityInvalidReason::NeverGranted);
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Records a capability grant in the authority table
+    fn record_capability_grant(
+        &mut self,
+        cap_id: u64,
+        grantee: TaskId,
+        cap_type: String,
+        grantor: Option<TaskId>,
+    ) {
+        let metadata = CapabilityMetadata {
+            cap_id,
+            owner: grantee,
+            cap_type: cap_type.clone(),
+            status: CapabilityStatus::Valid,
+            grantor,
+        };
+
+        self.capability_table.insert(cap_id, metadata);
+
+        self.capability_audit.record_event(
+            self.current_time,
+            CapabilityEvent::Granted {
+                cap_id,
+                grantor,
+                grantee,
+                cap_type,
+            },
+        );
+    }
+
+    /// Delegates a capability from one task to another (move semantics)
+    ///
+    /// This transfers ownership of the capability. After delegation,
+    /// the original owner can no longer use the capability.
+    pub fn delegate_capability(
+        &mut self,
+        cap_id: u64,
+        from_task: TaskId,
+        to_task: TaskId,
+    ) -> Result<(), KernelError> {
+        // Validate that the source task owns the capability
+        self.validate_capability(cap_id, from_task)
+            .map_err(|reason| {
+                KernelError::InvalidCapability(format!("Cannot delegate: {:?}", reason))
+            })?;
+
+        // Verify target task exists
+        if !self.tasks.contains_key(&to_task) {
+            return Err(KernelError::SendFailed("Target task not found".to_string()));
+        }
+
+        // Transfer ownership
+        if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+            let cap_type = meta.cap_type.clone();
+            meta.owner = to_task;
+            // Keep status as Valid since it's being transferred to a valid owner
+
+            // Record delegation event
+            self.capability_audit.record_event(
+                self.current_time,
+                CapabilityEvent::Delegated {
+                    cap_id,
+                    from_task,
+                    to_task,
+                    cap_type,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Drops a capability (explicitly releases it)
+    pub fn drop_capability(&mut self, cap_id: u64, owner: TaskId) -> Result<(), KernelError> {
+        // Validate ownership
+        self.validate_capability(cap_id, owner).map_err(|reason| {
+            KernelError::InvalidCapability(format!("Cannot drop: {:?}", reason))
+        })?;
+
+        // Mark as invalid
+        if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+            let cap_type = meta.cap_type.clone();
+            meta.status = CapabilityStatus::Invalid;
+
+            // Record drop event
+            self.capability_audit.record_event(
+                self.current_time,
+                CapabilityEvent::Dropped {
+                    cap_id,
+                    owner,
+                    cap_type,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Checks if a capability is valid for a given task (test helper)
+    pub fn is_capability_valid(&self, cap_id: u64, task_id: TaskId) -> bool {
+        self.validate_capability(cap_id, task_id).is_ok()
     }
 }
 
@@ -278,13 +457,16 @@ impl KernelApi for SimulatedKernel {
         Ok(())
     }
 
-    fn grant_capability(&mut self, task: TaskId, _capability: Cap<()>) -> Result<(), KernelError> {
+    fn grant_capability(&mut self, task: TaskId, capability: Cap<()>) -> Result<(), KernelError> {
         // Verify task exists
         if !self.tasks.contains_key(&task) {
             return Err(KernelError::SendFailed("Task not found".to_string()));
         }
-        // In simulation, we just verify the task exists
-        // Real implementation would track capabilities
+
+        // Record the capability grant in the authority table
+        // For now, we use a generic type name since Cap<()> is type-erased
+        self.record_capability_grant(capability.id(), task, "Generic".to_string(), None);
+
         Ok(())
     }
 
@@ -409,5 +591,150 @@ mod tests {
         let service_id = ServiceId::new();
         let result = kernel.lookup_service(service_id);
         assert!(matches!(result, Err(KernelError::ServiceNotFound(_))));
+    }
+
+    #[test]
+    fn test_capability_grant_and_tracking() {
+        let mut kernel = SimulatedKernel::new();
+        let descriptor = TaskDescriptor::new("test_task".to_string());
+        let handle = kernel.spawn_task(descriptor).unwrap();
+        let task_id = handle.task_id;
+
+        let cap: Cap<()> = Cap::new(42);
+        kernel.grant_capability(task_id, cap).unwrap();
+
+        // Check audit log
+        let audit = kernel.audit_log();
+        assert_eq!(audit.len(), 1);
+        assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Granted { .. })));
+    }
+
+    #[test]
+    fn test_capability_delegation() {
+        let mut kernel = SimulatedKernel::new();
+
+        // Create two tasks
+        let task1 = kernel
+            .spawn_task(TaskDescriptor::new("task1".to_string()))
+            .unwrap()
+            .task_id;
+        let task2 = kernel
+            .spawn_task(TaskDescriptor::new("task2".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Grant capability to task1
+        let cap: Cap<()> = Cap::new(42);
+        kernel.grant_capability(task1, cap).unwrap();
+
+        // Verify task1 can use it
+        assert!(kernel.is_capability_valid(42, task1));
+
+        // Delegate to task2
+        kernel.delegate_capability(42, task1, task2).unwrap();
+
+        // Now task2 owns it
+        assert!(kernel.is_capability_valid(42, task2));
+        // And task1 no longer owns it
+        assert!(!kernel.is_capability_valid(42, task1));
+
+        // Check audit log
+        let audit = kernel.audit_log();
+        assert_eq!(audit.len(), 2); // Grant + Delegate
+        assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Delegated { .. })));
+    }
+
+    #[test]
+    fn test_capability_invalidation_on_task_death() {
+        let mut kernel = SimulatedKernel::new();
+
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("task".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Grant capability
+        let cap: Cap<()> = Cap::new(42);
+        kernel.grant_capability(task, cap).unwrap();
+
+        // Capability is valid
+        assert!(kernel.is_capability_valid(42, task));
+
+        // Terminate task
+        kernel.terminate_task(task);
+
+        // Capability is no longer valid
+        assert!(!kernel.is_capability_valid(42, task));
+
+        // Check audit log
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Invalidated { .. })));
+    }
+
+    #[test]
+    fn test_capability_drop() {
+        let mut kernel = SimulatedKernel::new();
+
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("task".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Grant capability
+        let cap: Cap<()> = Cap::new(42);
+        kernel.grant_capability(task, cap).unwrap();
+
+        // Drop capability
+        kernel.drop_capability(42, task).unwrap();
+
+        // Capability is no longer valid
+        assert!(!kernel.is_capability_valid(42, task));
+
+        // Check audit log
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Dropped { .. })));
+    }
+
+    #[test]
+    fn test_cannot_delegate_without_ownership() {
+        let mut kernel = SimulatedKernel::new();
+
+        let task1 = kernel
+            .spawn_task(TaskDescriptor::new("task1".to_string()))
+            .unwrap()
+            .task_id;
+        let task2 = kernel
+            .spawn_task(TaskDescriptor::new("task2".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Try to delegate a capability task1 doesn't own
+        let result = kernel.delegate_capability(999, task1, task2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cannot_use_capability_after_delegation() {
+        let mut kernel = SimulatedKernel::new();
+
+        let task1 = kernel
+            .spawn_task(TaskDescriptor::new("task1".to_string()))
+            .unwrap()
+            .task_id;
+        let task2 = kernel
+            .spawn_task(TaskDescriptor::new("task2".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Grant to task1
+        let cap: Cap<()> = Cap::new(42);
+        kernel.grant_capability(task1, cap).unwrap();
+
+        // Delegate to task2
+        kernel.delegate_capability(42, task1, task2).unwrap();
+
+        // Task1 cannot delegate again (no longer owns it)
+        let result = kernel.delegate_capability(42, task1, task2);
+        assert!(result.is_err());
     }
 }

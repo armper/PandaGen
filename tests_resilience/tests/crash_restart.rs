@@ -102,7 +102,8 @@ fn test_service_crash_and_restart() {
 fn test_service_no_restart_on_success() {
     let (mut kernel, _registry) = test_bootstrap();
 
-    let _service_desc = ServiceDescriptor::new("test_service".to_string(), RestartPolicy::OnFailure);
+    let _service_desc =
+        ServiceDescriptor::new("test_service".to_string(), RestartPolicy::OnFailure);
     let task_id = spawn_test_service(&mut kernel, "test_service").expect("Failed to spawn service");
 
     let mut handle = ServiceHandle::new(task_id, LifecycleState::Running);

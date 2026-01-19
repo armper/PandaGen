@@ -35,13 +35,36 @@ This document explains PandaGen's architecture, design decisions, and the reason
 **Solution**:
 - `Cap<T>` - strongly typed, unforgeable capabilities
 - No ambient authority
-- Explicit grant/transfer semantics
-- Type system enforces correctness
+- Explicit grant/transfer semantics with move-only default
+- Automatic invalidation on owner termination
+- Type system + runtime enforcement
 
 **Impact**:
 - Least privilege by default
 - Can't accidentally inherit dangerous capabilities
 - Fine-grained security without complexity
+- Clear ownership model prevents confused deputy attacks
+
+**Phase 3 Enhancements**:
+- **Capability Lifecycle**: Explicit grant, delegate, drop, and invalidate operations
+- **Move Semantics**: Capabilities transfer ownership (no implicit cloning)
+- **Authority Table**: Kernel tracks capability ownership and validity
+- **Audit Trail**: All capability operations logged for test verification
+- **Automatic Cleanup**: Capabilities invalidated when owner task dies
+
+**Example**:
+```rust
+// Grant capability to task
+kernel.grant_capability(task_id, cap)?;
+
+// Delegate with move semantics
+kernel.delegate_capability(cap_id, from_task, to_task)?;
+// from_task can NO LONGER use cap_id
+
+// Automatic invalidation on crash
+kernel.terminate_task(task_id);
+// All capabilities owned by task_id are now invalid
+```
 
 ### 3. Message Passing, Not Shared Memory
 
@@ -364,6 +387,132 @@ with_fault_plan(plan, |kernel| {
     // Test system behavior under faults
 });
 ```
+
+### Phase 3: Capability Lifecycle and Delegation Semantics
+
+**Phase 3 (Current)**: Hardened capability security contract with lifecycle tracking and audit.
+
+The system now includes:
+- **Capability Lifecycle Model**: Explicit grant, delegate, drop, and invalidate operations
+- **Move Semantics**: Capabilities use move-only transfer (no implicit cloning)
+- **Authority Table**: Kernel maintains ownership and validity state for all capabilities
+- **Audit Trail**: Comprehensive logging of capability operations (test/simulation mode)
+- **Automatic Invalidation**: Capabilities invalidated when owner task terminates
+
+**Philosophy**:
+- Explicit over implicit (no ambient authority, no automatic inheritance)
+- Capabilities over permissions (unforgeable tokens, not UIDs)
+- Testability first (audit log for verification)
+- Mechanism not policy (kernel provides primitives, services decide policy)
+- No confusion (clear ownership, move semantics prevent aliasing)
+
+**Capability Lifecycle Operations**:
+
+1. **Grant**: Kernel issues capability to a task
+   ```rust
+   kernel.grant_capability(task_id, cap)?;
+   // Creates authority table entry: cap_id -> task_id (Valid)
+   ```
+
+2. **Delegate**: Transfer ownership between tasks (move semantics)
+   ```rust
+   kernel.delegate_capability(cap_id, from_task, to_task)?;
+   // from_task loses access, to_task gains access
+   // Authority table updated: cap_id -> to_task
+   ```
+
+3. **Drop**: Explicit release
+   ```rust
+   kernel.drop_capability(cap_id, task_id)?;
+   // Capability marked Invalid
+   ```
+
+4. **Invalidate**: Automatic on task death
+   ```rust
+   kernel.terminate_task(task_id);
+   // All capabilities owned by task_id marked Invalid
+   ```
+
+**Enforcement Model**:
+
+SimulatedKernel enforces:
+- **Ownership validation**: Every operation checks authority table
+- **Liveness checking**: Validates owner task is still alive
+- **Move semantics**: After delegation, original owner cannot use capability
+- **Type safety**: Compile-time type checking + runtime ownership checks
+
+Tests validate:
+- No capability use after transfer (move semantics work)
+- No capability use after owner death (automatic invalidation)
+- No capability leaks through message faults (resilience)
+- Delegation chains work correctly (A→B→C)
+- Audit trail accurately reflects operations
+
+**Example Test**:
+```rust
+#[test]
+fn test_capability_move_semantics() {
+    let mut kernel = SimulatedKernel::new();
+    let task1 = kernel.spawn_task(...).task_id;
+    let task2 = kernel.spawn_task(...).task_id;
+    
+    // Grant to task1
+    kernel.grant_capability(task1, Cap::new(42))?;
+    assert!(kernel.is_capability_valid(42, task1));
+    
+    // Delegate to task2
+    kernel.delegate_capability(42, task1, task2)?;
+    
+    // Move semantics: task1 can no longer use it
+    assert!(!kernel.is_capability_valid(42, task1));
+    assert!(kernel.is_capability_valid(42, task2));
+}
+```
+
+**Audit Trail**:
+
+The capability audit log (test-only) records:
+- Timestamp (simulated time)
+- Event type (Granted, Delegated, Dropped, Invalidated, InvalidUseAttempt)
+- Actor identities (grantor, grantee, from/to tasks)
+- Capability ID and type
+
+Tests query the audit log to verify security properties:
+```rust
+let audit = kernel.audit_log();
+
+// No unexpected delegations
+assert!(!audit.has_event(|e| matches!(e, CapabilityEvent::Delegated { to_task: untrusted, .. })));
+
+// All capabilities properly invalidated
+let invalid_count = audit.count_events(|e| matches!(e, CapabilityEvent::Invalidated { .. }));
+assert_eq!(invalid_count, expected_count);
+```
+
+**Design Rationale**:
+
+**Why move-only semantics?**
+- Prevents confused deputy attacks (only one task can act with a capability)
+- Clear ownership model (no ambiguity about who has authority)
+- Easier to reason about (no aliasing)
+- Matches Rust's ownership semantics (feels natural to developers)
+
+**Why automatic invalidation?**
+- Prevents use-after-free of authority
+- No manual cleanup needed in most cases
+- Natural fit for crash recovery (no dangling capabilities)
+- Testable invariant (all dead tasks have invalid capabilities)
+
+**Why no revocation (yet)?**
+- Revocation requires policy decisions (who can revoke? under what conditions?)
+- Current model focuses on mechanism (grant, delegate, drop)
+- Future: explicit revocation API if needed, with clear policy hooks
+
+**Future Real Kernel**:
+- Authority table in kernel space (user cannot forge entries)
+- Capability IDs cryptographically unforgeable (not just u64)
+- Hardware memory protection prevents capability inspection/modification
+- Same semantics as SimulatedKernel, proven by tests
 
 ### Performance
 
