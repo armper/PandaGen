@@ -25,5 +25,5 @@ pub mod memory;
 pub use cpu::CpuHal;
 pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, KeyboardDevice};
-pub use keyboard_translation::{KeyboardTranslator, scancode_to_keycode};
+pub use keyboard_translation::{scancode_to_keycode, KeyboardTranslator};
 pub use memory::MemoryHal;

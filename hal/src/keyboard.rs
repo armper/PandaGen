@@ -28,10 +28,10 @@
 pub struct HalKeyEvent {
     /// Raw scan code from keyboard controller
     pub scancode: u8,
-    
+
     /// Whether the key was pressed (true) or released (false)
     pub pressed: bool,
-    
+
     /// Optional timestamp in nanoseconds (if hardware provides it)
     pub timestamp_ns: Option<u64>,
 }
@@ -45,7 +45,7 @@ impl HalKeyEvent {
             timestamp_ns: None,
         }
     }
-    
+
     /// Creates a keyboard event with timestamp
     pub fn with_timestamp(scancode: u8, pressed: bool, timestamp_ns: u64) -> Self {
         Self {
@@ -54,12 +54,12 @@ impl HalKeyEvent {
             timestamp_ns: Some(timestamp_ns),
         }
     }
-    
+
     /// Returns true if this is a key press event
     pub fn is_pressed(&self) -> bool {
         self.pressed
     }
-    
+
     /// Returns true if this is a key release event
     pub fn is_released(&self) -> bool {
         !self.pressed
@@ -102,7 +102,7 @@ pub trait KeyboardDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_hal_key_event_creation() {
         let event = HalKeyEvent::new(0x1E, true);
@@ -111,7 +111,7 @@ mod tests {
         assert!(!event.is_released());
         assert_eq!(event.timestamp_ns, None);
     }
-    
+
     #[test]
     fn test_hal_key_event_with_timestamp() {
         let event = HalKeyEvent::with_timestamp(0x1E, false, 123456789);
@@ -120,30 +120,30 @@ mod tests {
         assert!(event.is_released());
         assert_eq!(event.timestamp_ns, Some(123456789));
     }
-    
+
     #[test]
     fn test_hal_key_event_pressed_released() {
         let press = HalKeyEvent::new(0x10, true);
         let release = HalKeyEvent::new(0x10, false);
-        
+
         assert!(press.is_pressed());
         assert!(!press.is_released());
         assert!(!release.is_pressed());
         assert!(release.is_released());
     }
-    
+
     /// Fake keyboard device for testing
     struct FakeKeyboard {
         events: Vec<HalKeyEvent>,
         index: usize,
     }
-    
+
     impl FakeKeyboard {
         fn new(events: Vec<HalKeyEvent>) -> Self {
             Self { events, index: 0 }
         }
     }
-    
+
     impl KeyboardDevice for FakeKeyboard {
         fn poll_event(&mut self) -> Option<HalKeyEvent> {
             if self.index < self.events.len() {
@@ -155,17 +155,17 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_fake_keyboard_device() {
         let events = vec![
-            HalKeyEvent::new(0x1E, true),   // A pressed
-            HalKeyEvent::new(0x1E, false),  // A released
-            HalKeyEvent::new(0x30, true),   // B pressed
+            HalKeyEvent::new(0x1E, true),  // A pressed
+            HalKeyEvent::new(0x1E, false), // A released
+            HalKeyEvent::new(0x30, true),  // B pressed
         ];
-        
+
         let mut keyboard = FakeKeyboard::new(events.clone());
-        
+
         // Poll all events
         assert_eq!(keyboard.poll_event(), Some(events[0]));
         assert_eq!(keyboard.poll_event(), Some(events[1]));
@@ -173,13 +173,12 @@ mod tests {
         assert_eq!(keyboard.poll_event(), None);
         assert_eq!(keyboard.poll_event(), None);
     }
-    
+
     #[test]
     fn test_keyboard_device_trait() {
-        let mut keyboard: Box<dyn KeyboardDevice> = Box::new(
-            FakeKeyboard::new(vec![HalKeyEvent::new(0x1C, true)])
-        );
-        
+        let mut keyboard: Box<dyn KeyboardDevice> =
+            Box::new(FakeKeyboard::new(vec![HalKeyEvent::new(0x1C, true)]));
+
         assert!(keyboard.poll_event().is_some());
         assert!(keyboard.poll_event().is_none());
     }

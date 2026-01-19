@@ -16,8 +16,8 @@
 //! - Released keys have bit 7 set (scancode | 0x80)
 //! - Extended keys are prefixed with 0xE0 (not fully handled yet)
 
-use input_types::{KeyCode, KeyEvent, KeyState, Modifiers};
 use crate::keyboard::HalKeyEvent;
+use input_types::{KeyCode, KeyEvent, KeyState, Modifiers};
 
 /// Modifier key tracking state
 ///
@@ -41,7 +41,7 @@ impl ModifierState {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Updates modifier state based on key event
     pub fn update(&mut self, code: KeyCode, pressed: bool) {
         match code {
@@ -56,11 +56,11 @@ impl ModifierState {
             _ => {}
         }
     }
-    
+
     /// Returns the current Modifiers flags
     pub fn to_modifiers(&self) -> Modifiers {
         let mut mods = Modifiers::none();
-        
+
         if self.left_shift || self.right_shift {
             mods = mods.with(Modifiers::SHIFT);
         }
@@ -73,7 +73,7 @@ impl ModifierState {
         if self.left_meta || self.right_meta {
             mods = mods.with(Modifiers::META);
         }
-        
+
         mods
     }
 }
@@ -101,7 +101,7 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         0x44 => KeyCode::F10,
         0x57 => KeyCode::F11,
         0x58 => KeyCode::F12,
-        
+
         // Row 2: Numbers
         0x29 => KeyCode::Grave,
         0x02 => KeyCode::Num1,
@@ -117,7 +117,7 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         0x0C => KeyCode::Minus,
         0x0D => KeyCode::Equal,
         0x0E => KeyCode::Backspace,
-        
+
         // Row 3: QWERTY row
         0x0F => KeyCode::Tab,
         0x10 => KeyCode::Q,
@@ -133,7 +133,7 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         0x1A => KeyCode::LeftBracket,
         0x1B => KeyCode::RightBracket,
         0x2B => KeyCode::Backslash,
-        
+
         // Row 4: ASDF row
         0x3A => KeyCode::CapsLock,
         0x1E => KeyCode::A,
@@ -148,7 +148,7 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         0x27 => KeyCode::Semicolon,
         0x28 => KeyCode::Quote,
         0x1C => KeyCode::Enter,
-        
+
         // Row 5: ZXCV row
         0x2A => KeyCode::LeftShift,
         0x2C => KeyCode::Z,
@@ -162,36 +162,36 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         0x34 => KeyCode::Period,
         0x35 => KeyCode::Slash,
         0x36 => KeyCode::RightShift,
-        
+
         // Bottom row
         0x1D => KeyCode::LeftCtrl,
         0x38 => KeyCode::LeftAlt,
         0x39 => KeyCode::Space,
-        
+
         // Lock keys
         0x45 => KeyCode::NumLock,
         0x46 => KeyCode::ScrollLock,
-        
+
         // Numpad operators
         0x4A => KeyCode::NumpadMinus,
         0x4E => KeyCode::NumpadPlus,
         0x37 => KeyCode::NumpadMultiply,
         // 0x35 => NumpadDivide (extended), conflicts with Slash
-        
+
         // Navigation cluster (prioritized over numpad when ambiguous)
         // Note: With 0xE0 prefix these would be distinct, but we handle base codes
-        0x47 => KeyCode::Home,         // Also Numpad7
-        0x48 => KeyCode::Up,           // Also Numpad8
-        0x49 => KeyCode::PageUp,       // Also Numpad9
-        0x4B => KeyCode::Left,         // Also Numpad4
-        0x4C => KeyCode::Numpad5,      // Center key (no nav equivalent)
-        0x4D => KeyCode::Right,        // Also Numpad6
-        0x4F => KeyCode::End,          // Also Numpad1
-        0x50 => KeyCode::Down,         // Also Numpad2
-        0x51 => KeyCode::PageDown,     // Also Numpad3
-        0x52 => KeyCode::Insert,       // Also Numpad0
-        0x53 => KeyCode::Delete,       // Also NumpadPeriod
-        
+        0x47 => KeyCode::Home,     // Also Numpad7
+        0x48 => KeyCode::Up,       // Also Numpad8
+        0x49 => KeyCode::PageUp,   // Also Numpad9
+        0x4B => KeyCode::Left,     // Also Numpad4
+        0x4C => KeyCode::Numpad5,  // Center key (no nav equivalent)
+        0x4D => KeyCode::Right,    // Also Numpad6
+        0x4F => KeyCode::End,      // Also Numpad1
+        0x50 => KeyCode::Down,     // Also Numpad2
+        0x51 => KeyCode::PageDown, // Also Numpad3
+        0x52 => KeyCode::Insert,   // Also Numpad0
+        0x53 => KeyCode::Delete,   // Also NumpadPeriod
+
         // Unmapped
         _ => KeyCode::Unknown,
     }
@@ -211,33 +211,37 @@ impl KeyboardTranslator {
             modifiers: ModifierState::new(),
         }
     }
-    
+
     /// Translates a HAL keyboard event to a KeyEvent
     ///
     /// Returns None if the event should be ignored (e.g., extended scan code prefix).
     pub fn translate(&mut self, hal_event: HalKeyEvent) -> Option<KeyEvent> {
         // Determine if pressed or released
         let pressed = hal_event.is_pressed();
-        let state = if pressed { KeyState::Pressed } else { KeyState::Released };
-        
+        let state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+
         // Translate scan code
         let code = scancode_to_keycode(hal_event.scancode);
-        
+
         // Skip unknown keys
         if code == KeyCode::Unknown {
             return None;
         }
-        
+
         // Update modifier state
         self.modifiers.update(code, pressed);
-        
+
         // Get current modifiers
         let mods = self.modifiers.to_modifiers();
-        
+
         // Create KeyEvent
         Some(KeyEvent::new(code, mods, state))
     }
-    
+
     /// Resets the translator state (all modifiers released)
     pub fn reset(&mut self) {
         self.modifiers = ModifierState::new();
@@ -253,7 +257,7 @@ impl Default for KeyboardTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_scancode_to_keycode_letters() {
         assert_eq!(scancode_to_keycode(0x1E), KeyCode::A);
@@ -261,13 +265,13 @@ mod tests {
         assert_eq!(scancode_to_keycode(0x2E), KeyCode::C);
         assert_eq!(scancode_to_keycode(0x2C), KeyCode::Z);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_numbers() {
         assert_eq!(scancode_to_keycode(0x02), KeyCode::Num1);
         assert_eq!(scancode_to_keycode(0x0B), KeyCode::Num0);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_special() {
         assert_eq!(scancode_to_keycode(0x01), KeyCode::Escape);
@@ -275,7 +279,7 @@ mod tests {
         assert_eq!(scancode_to_keycode(0x0E), KeyCode::Backspace);
         assert_eq!(scancode_to_keycode(0x39), KeyCode::Space);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_arrows() {
         assert_eq!(scancode_to_keycode(0x48), KeyCode::Up);
@@ -283,7 +287,7 @@ mod tests {
         assert_eq!(scancode_to_keycode(0x4B), KeyCode::Left);
         assert_eq!(scancode_to_keycode(0x4D), KeyCode::Right);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_function_keys() {
         assert_eq!(scancode_to_keycode(0x3B), KeyCode::F1);
@@ -291,7 +295,7 @@ mod tests {
         assert_eq!(scancode_to_keycode(0x57), KeyCode::F11);
         assert_eq!(scancode_to_keycode(0x58), KeyCode::F12);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_modifiers() {
         assert_eq!(scancode_to_keycode(0x2A), KeyCode::LeftShift);
@@ -299,124 +303,124 @@ mod tests {
         assert_eq!(scancode_to_keycode(0x1D), KeyCode::LeftCtrl);
         assert_eq!(scancode_to_keycode(0x38), KeyCode::LeftAlt);
     }
-    
+
     #[test]
     fn test_scancode_to_keycode_unknown() {
         assert_eq!(scancode_to_keycode(0xFF), KeyCode::Unknown);
         assert_eq!(scancode_to_keycode(0x00), KeyCode::Unknown);
     }
-    
+
     #[test]
     fn test_modifier_state_shift() {
         let mut state = ModifierState::new();
         assert!(state.to_modifiers().is_empty());
-        
+
         state.update(KeyCode::LeftShift, true);
         assert!(state.to_modifiers().is_shift());
-        
+
         state.update(KeyCode::LeftShift, false);
         assert!(state.to_modifiers().is_empty());
     }
-    
+
     #[test]
     fn test_modifier_state_ctrl() {
         let mut state = ModifierState::new();
         state.update(KeyCode::LeftCtrl, true);
         assert!(state.to_modifiers().is_ctrl());
     }
-    
+
     #[test]
     fn test_modifier_state_multiple() {
         let mut state = ModifierState::new();
         state.update(KeyCode::LeftCtrl, true);
         state.update(KeyCode::LeftShift, true);
-        
+
         let mods = state.to_modifiers();
         assert!(mods.is_ctrl());
         assert!(mods.is_shift());
         assert!(!mods.is_alt());
     }
-    
+
     #[test]
     fn test_translator_basic() {
         let mut translator = KeyboardTranslator::new();
-        
+
         let hal_event = HalKeyEvent::new(0x1E, true); // A pressed
         let key_event = translator.translate(hal_event).unwrap();
-        
+
         assert_eq!(key_event.code, KeyCode::A);
         assert!(key_event.is_pressed());
         assert!(key_event.modifiers.is_empty());
     }
-    
+
     #[test]
     fn test_translator_with_shift() {
         let mut translator = KeyboardTranslator::new();
-        
+
         // Press shift
         let shift_down = HalKeyEvent::new(0x2A, true);
         translator.translate(shift_down).unwrap();
-        
+
         // Press A (with shift held)
         let a_down = HalKeyEvent::new(0x1E, true);
         let key_event = translator.translate(a_down).unwrap();
-        
+
         assert_eq!(key_event.code, KeyCode::A);
         assert!(key_event.modifiers.is_shift());
     }
-    
+
     #[test]
     fn test_translator_modifier_release() {
         let mut translator = KeyboardTranslator::new();
-        
+
         // Press Ctrl
         translator.translate(HalKeyEvent::new(0x1D, true)).unwrap();
-        
+
         // Press C (Ctrl+C)
         let c_event = translator.translate(HalKeyEvent::new(0x2E, true)).unwrap();
         assert!(c_event.modifiers.is_ctrl());
-        
+
         // Release Ctrl
         translator.translate(HalKeyEvent::new(0x1D, false)).unwrap();
-        
+
         // Press C again (no Ctrl)
         let c_event2 = translator.translate(HalKeyEvent::new(0x2E, true)).unwrap();
         assert!(!c_event2.modifiers.is_ctrl());
     }
-    
+
     #[test]
     fn test_translator_unknown_keys() {
         let mut translator = KeyboardTranslator::new();
-        
+
         let unknown = HalKeyEvent::new(0xFF, true);
         assert_eq!(translator.translate(unknown), None);
     }
-    
+
     #[test]
     fn test_translator_press_release_sequence() {
         let mut translator = KeyboardTranslator::new();
-        
+
         // Press A
         let press = translator.translate(HalKeyEvent::new(0x1E, true)).unwrap();
         assert!(press.is_pressed());
         assert_eq!(press.code, KeyCode::A);
-        
+
         // Release A
         let release = translator.translate(HalKeyEvent::new(0x1E, false)).unwrap();
         assert!(release.is_released());
         assert_eq!(release.code, KeyCode::A);
     }
-    
+
     #[test]
     fn test_translator_reset() {
         let mut translator = KeyboardTranslator::new();
-        
+
         // Press Ctrl
         translator.translate(HalKeyEvent::new(0x1D, true)).unwrap();
-        
+
         // Reset
         translator.reset();
-        
+
         // Press A (should have no modifiers)
         let event = translator.translate(HalKeyEvent::new(0x1E, true)).unwrap();
         assert!(event.modifiers.is_empty());

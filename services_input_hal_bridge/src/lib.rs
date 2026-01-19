@@ -46,7 +46,7 @@
 //! ```
 
 use core_types::TaskId;
-use hal::{HalKeyEvent, KeyboardDevice, KeyboardTranslator};
+use hal::{KeyboardDevice, KeyboardTranslator};
 use identity::ExecutionId;
 use input_types::InputEvent;
 use services_input::InputSubscriptionCap;
@@ -89,20 +89,20 @@ pub enum PollResult {
 pub struct InputHalBridge {
     /// Execution identity of this bridge component
     execution_id: ExecutionId,
-    
+
     /// Task ID for message delivery (used in real kernel integration)
     #[allow(dead_code)]
     task_id: TaskId,
-    
+
     /// Input subscription capability (for event delivery)
     subscription: InputSubscriptionCap,
-    
+
     /// Hardware keyboard device
     keyboard: Box<dyn KeyboardDevice>,
-    
+
     /// Scancode translator
     translator: KeyboardTranslator,
-    
+
     /// Number of events delivered (for diagnostics)
     events_delivered: u64,
 }
@@ -131,7 +131,7 @@ impl InputHalBridge {
             events_delivered: 0,
         }
     }
-    
+
     /// Polls for a keyboard event and delivers it if available
     ///
     /// Returns:
@@ -147,16 +147,16 @@ impl InputHalBridge {
             Some(event) => event,
             None => return Ok(PollResult::NoEvent),
         };
-        
+
         // Translate to KeyEvent
         let key_event = match self.translator.translate(hal_event) {
             Some(event) => event,
             None => return Ok(PollResult::NoEvent), // Unknown key, skip
         };
-        
+
         // Create InputEvent
         let input_event = InputEvent::key(key_event);
-        
+
         // Deliver event
         // NOTE: In real implementation, this would:
         // 1. Check budget via kernel.try_consume_message(execution_id)
@@ -165,44 +165,44 @@ impl InputHalBridge {
         //
         // For now, we just increment counter to show the flow
         self.deliver_event(input_event)?;
-        
+
         Ok(PollResult::EventDelivered)
     }
-    
+
     /// Delivers an input event (internal helper)
     fn deliver_event(&mut self, _event: InputEvent) -> Result<(), BridgeError> {
         // Placeholder for message delivery
         // Real implementation would send via kernel API
-        
+
         // Check budget (simulated)
         // if kernel.try_consume_message(self.execution_id).is_err() {
         //     return Err(BridgeError::BudgetExhausted {
         //         resource: "MessageCount".to_string(),
         //     });
         // }
-        
+
         // Send message (simulated)
         // kernel.send_message(self.subscription.channel, message)?;
-        
+
         self.events_delivered += 1;
         Ok(())
     }
-    
+
     /// Returns the execution ID of this bridge
     pub fn execution_id(&self) -> ExecutionId {
         self.execution_id
     }
-    
+
     /// Returns the subscription capability
     pub fn subscription(&self) -> &InputSubscriptionCap {
         &self.subscription
     }
-    
+
     /// Returns the number of events delivered
     pub fn events_delivered(&self) -> u64 {
         self.events_delivered
     }
-    
+
     /// Resets the translator state (all modifiers released)
     pub fn reset_translator(&mut self) {
         self.translator.reset();
@@ -213,20 +213,21 @@ impl InputHalBridge {
 mod tests {
     use super::*;
     use core_types::TaskId;
+    use hal::HalKeyEvent;
     use ipc::ChannelId;
-    
+
     /// Fake keyboard for testing
     struct FakeKeyboard {
         events: Vec<HalKeyEvent>,
         index: usize,
     }
-    
+
     impl FakeKeyboard {
         fn new(events: Vec<HalKeyEvent>) -> Self {
             Self { events, index: 0 }
         }
     }
-    
+
     impl KeyboardDevice for FakeKeyboard {
         fn poll_event(&mut self) -> Option<HalKeyEvent> {
             if self.index < self.events.len() {
@@ -238,56 +239,56 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_bridge_creation() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
         let keyboard = Box::new(FakeKeyboard::new(vec![]));
-        
+
         let bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
         assert_eq!(bridge.execution_id(), exec_id);
         assert_eq!(bridge.events_delivered(), 0);
     }
-    
+
     #[test]
     fn test_bridge_poll_no_event() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
         let keyboard = Box::new(FakeKeyboard::new(vec![]));
-        
+
         let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
         let result = bridge.poll().unwrap();
-        
+
         assert_eq!(result, PollResult::NoEvent);
         assert_eq!(bridge.events_delivered(), 0);
     }
-    
+
     #[test]
     fn test_bridge_poll_with_event() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
-        
+
         // Create fake keyboard with A key press
         let events = vec![HalKeyEvent::new(0x1E, true)]; // A pressed
         let keyboard = Box::new(FakeKeyboard::new(events));
-        
+
         let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
         let result = bridge.poll().unwrap();
-        
+
         assert_eq!(result, PollResult::EventDelivered);
         assert_eq!(bridge.events_delivered(), 1);
     }
-    
+
     #[test]
     fn test_bridge_poll_multiple_events() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
-        
+
         // A pressed, A released, B pressed
         let events = vec![
             HalKeyEvent::new(0x1E, true),
@@ -295,51 +296,51 @@ mod tests {
             HalKeyEvent::new(0x30, true),
         ];
         let keyboard = Box::new(FakeKeyboard::new(events));
-        
+
         let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
-        
+
         assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
         assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
         assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
         assert_eq!(bridge.poll().unwrap(), PollResult::NoEvent);
-        
+
         assert_eq!(bridge.events_delivered(), 3);
     }
-    
+
     #[test]
     fn test_bridge_poll_unknown_key() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
-        
+
         // Unknown scancode
         let events = vec![HalKeyEvent::new(0xFF, true)];
         let keyboard = Box::new(FakeKeyboard::new(events));
-        
+
         let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
         let result = bridge.poll().unwrap();
-        
+
         // Unknown keys are skipped
         assert_eq!(result, PollResult::NoEvent);
         assert_eq!(bridge.events_delivered(), 0);
     }
-    
+
     #[test]
     fn test_bridge_reset_translator() {
         let exec_id = ExecutionId::new();
         let task_id = TaskId::new();
         let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
-        
+
         // Ctrl pressed
         let events = vec![HalKeyEvent::new(0x1D, true)];
         let keyboard = Box::new(FakeKeyboard::new(events));
-        
+
         let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
         bridge.poll().unwrap();
-        
+
         // Reset translator (clears modifier state)
         bridge.reset_translator();
-        
+
         // After reset, translator should have no modifiers
         // (can't directly test internal state, but this exercises the code)
     }

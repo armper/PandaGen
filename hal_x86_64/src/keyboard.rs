@@ -67,7 +67,7 @@ impl KeyboardDevice for X86Ps2Keyboard {
         // 3. Parse scan code (handle 0xE0 extended codes)
         // 4. Determine press/release (bit 7 in scan code set 1)
         // 5. Return HalKeyEvent with scancode and pressed/released state
-        
+
         // For now, return None (no events)
         // This allows the interface to be integrated without requiring
         // real hardware or a bootloader environment
@@ -78,33 +78,33 @@ impl KeyboardDevice for X86Ps2Keyboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_x86_keyboard_creation() {
         let keyboard = X86Ps2Keyboard::new();
         // Should create without panicking
         drop(keyboard);
     }
-    
+
     #[test]
     fn test_x86_keyboard_default() {
         let keyboard = X86Ps2Keyboard::default();
         drop(keyboard);
     }
-    
+
     #[test]
     fn test_x86_keyboard_poll() {
         let mut keyboard = X86Ps2Keyboard::new();
-        
+
         // Skeleton returns None (no hardware)
         assert_eq!(keyboard.poll_event(), None);
         assert_eq!(keyboard.poll_event(), None);
     }
-    
+
     #[test]
     fn test_x86_keyboard_trait() {
         let mut keyboard: Box<dyn KeyboardDevice> = Box::new(X86Ps2Keyboard::new());
-        
+
         // Should implement trait correctly
         assert!(keyboard.poll_event().is_none());
     }
@@ -134,17 +134,17 @@ mod tests {
 //             if (status & 0x01) != 0 {
 //                 // Data available
 //                 let scancode = read_ps2_data();
-//                 
+//
 //                 // Handle extended scan codes
 //                 if scancode == 0xE0 {
 //                     self.state.extended = true;
 //                     return None; // Wait for next byte
 //                 }
-//                 
+//
 //                 // Bit 7 indicates key release in scan code set 1
 //                 let pressed = (scancode & 0x80) == 0;
 //                 let code = scancode & 0x7F;
-//                 
+//
 //                 Some(HalKeyEvent::new(code, pressed))
 //             } else {
 //                 None
