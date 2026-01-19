@@ -3178,3 +3178,363 @@ The input system provides:
 - **Audit trail**: All operations logged
 
 This is the foundation for interactive components: CLI, editors, UI shells, debuggers.
+
+## Editor Service (Phase 15)
+
+### Interface: `services_editor_vi::Editor`
+
+The editor service provides a modal text editor component with capability-based document access.
+
+#### Creating an Editor
+
+```rust
+use services_editor_vi::Editor;
+
+// Create with default viewport (20 lines)
+let editor = Editor::new();
+
+// Create with custom viewport
+let editor = Editor::with_viewport(30);
+```
+
+#### Editor State
+
+```rust
+// Get current state
+let state = editor.state();
+
+// Check mode
+match state.mode() {
+    EditorMode::Normal => { /* navigation mode */ }
+    EditorMode::Insert => { /* text entry mode */ }
+    EditorMode::Command => { /* ex command mode */ }
+}
+
+// Check dirty flag
+if state.is_dirty() {
+    println!("Unsaved changes");
+}
+
+// Get cursor position
+let pos = state.cursor().position();
+println!("Row: {}, Col: {}", pos.row, pos.col);
+
+// Get status message
+println!("{}", state.status_message());
+```
+
+#### Processing Input
+
+```rust
+use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+let event = InputEvent::key(KeyEvent::pressed(KeyCode::I, Modifiers::none()));
+
+match editor.process_input(event)? {
+    EditorAction::Continue => {
+        // Keep editing
+    }
+    EditorAction::Saved(version_id) => {
+        // Document saved, new version created
+        println!("Saved version: {}", version_id);
+    }
+    EditorAction::Quit => {
+        // Editor wants to quit
+        break;
+    }
+}
+```
+
+#### Document Operations
+
+```rust
+use services_editor_vi::{DocumentHandle, OpenOptions};
+use services_storage::{ObjectId, VersionId};
+
+// Open new empty document
+editor.new_document();
+
+// Load document with capability
+let handle = DocumentHandle::new(
+    object_id,           // Object capability
+    version_id,          // Current version
+    Some("readme.txt"),  // Display label (optional)
+    true                 // Can update directory link
+);
+editor.load_document(content, handle);
+
+// Get current document
+if let Some(handle) = editor.document() {
+    println!("Editing: {:?}", handle.path_label);
+}
+
+// Get content
+let content = editor.get_content();
+```
+
+#### Rendering
+
+```rust
+// Render full editor view (viewport + status)
+let output = editor.render();
+println!("{}", output);
+
+// Example output:
+// [h]ello world
+// second line
+// ~
+// ~
+// NORMAL readme.txt [+] | Saved v2
+```
+
+### Modal Input Processing
+
+#### Normal Mode Commands
+
+| Key | Action |
+|-----|--------|
+| `h` / Left | Move cursor left |
+| `j` / Down | Move cursor down |
+| `k` / Up | Move cursor up |
+| `l` / Right | Move cursor right |
+| `i` | Enter insert mode |
+| `x` | Delete character under cursor |
+| `:` | Enter command mode |
+
+#### Insert Mode Commands
+
+| Key | Action |
+|-----|--------|
+| Printable chars | Insert at cursor |
+| Enter | Insert newline |
+| Backspace | Delete previous character |
+| Escape | Return to normal mode |
+
+#### Command Mode Commands
+
+| Command | Action |
+|---------|--------|
+| `:w` or `:write` | Save document (create new version) |
+| `:q` or `:quit` | Quit (blocked if dirty) |
+| `:q!` or `:quit!` | Force quit (discard changes) |
+| `:wq` or `:x` | Save and quit |
+
+### Document Handle
+
+```rust
+pub struct DocumentHandle {
+    /// Object ID (capability)
+    pub object_id: ObjectId,
+    
+    /// Current version ID
+    pub version_id: VersionId,
+    
+    /// Optional path label (display only, NOT authority)
+    pub path_label: Option<String>,
+    
+    /// Whether we can update directory link
+    pub can_update_link: bool,
+}
+```
+
+**Important**: `path_label` is for display only. Authority comes from `object_id` capability.
+
+### Save Semantics
+
+When saving:
+1. New immutable version created in storage
+2. New VersionId returned
+3. Directory link updated **only if** `can_update_link == true`
+
+```rust
+// Save always creates new version
+let result = save_document(&editor)?;
+
+// Check if link was updated
+if result.link_updated {
+    println!("Saved and updated link");
+} else {
+    println!("Saved but link not updated (no permission)");
+    // New version exists, but directory still points to old version
+}
+```
+
+This separates content saves from directory updates:
+- Content save: requires object write capability
+- Link update: requires directory write capability
+- These are independent authorities
+
+### Open Options
+
+```rust
+use services_editor_vi::OpenOptions;
+
+// Open by direct capability (preferred)
+let opts = OpenOptions::new()
+    .with_object(object_id);
+
+// Open by path via fs_view (convenience)
+let opts = OpenOptions::new()
+    .with_path("/docs/readme.txt");
+// Requires root capability for path resolution
+// Path provides NO authority on its own
+```
+
+### Error Handling
+
+```rust
+use services_editor_vi::EditorError;
+
+match editor.process_input(event) {
+    Ok(action) => { /* handle action */ }
+    Err(EditorError::Command(cmd_err)) => {
+        // Command parse error (:w typo, etc.)
+        println!("Command error: {}", cmd_err);
+    }
+    Err(EditorError::Io(io_err)) => {
+        // I/O operation failed
+        println!("I/O error: {}", io_err);
+    }
+    Err(e) => {
+        println!("Error: {}", e);
+    }
+}
+```
+
+### Testing with SimKernel
+
+```rust
+#[test]
+fn test_editor_workflow() {
+    let mut editor = Editor::new();
+    
+    // Enter insert mode
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    
+    // Type "hello"
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::E)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    
+    // Exit insert mode
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    
+    // Verify content
+    assert_eq!(editor.get_content(), "hello");
+    assert!(editor.state().is_dirty());
+    
+    // Save
+    editor.process_input(press_key_shift(KeyCode::Semicolon)).unwrap(); // :
+    editor.state_mut().append_to_command('w');
+    let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+    
+    assert!(matches!(result, EditorAction::Saved(_)));
+    assert!(!editor.state().is_dirty());
+}
+
+fn press_key(code: KeyCode) -> InputEvent {
+    InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
+}
+
+fn press_key_shift(code: KeyCode) -> InputEvent {
+    InputEvent::key(KeyEvent::pressed(code, Modifiers::SHIFT))
+}
+```
+
+### Integration Example
+
+```rust
+use services_editor_vi::Editor;
+use services_input::InputService;
+use services_focus_manager::FocusManager;
+
+// Create editor
+let mut editor = Editor::new();
+
+// Subscribe to keyboard input
+let subscription = input_service.subscribe_keyboard(task_id, channel)?;
+
+// Request focus
+focus_manager.request_focus(subscription)?;
+
+// Event loop
+loop {
+    // Receive keyboard event
+    let event = receive_input_event()?;
+    
+    // Process in editor
+    match editor.process_input(event)? {
+        EditorAction::Continue => {
+            // Render and continue
+            println!("{}", editor.render());
+        }
+        EditorAction::Saved(version_id) => {
+            // Handle save
+            println!("Saved version: {}", version_id);
+            println!("{}", editor.render());
+        }
+        EditorAction::Quit => {
+            // Clean up and exit
+            focus_manager.release_focus()?;
+            break;
+        }
+    }
+}
+```
+
+### Comparison with Traditional vi
+
+| Feature | Traditional vi | PandaGen Editor |
+|---------|----------------|----------------|
+| Input | stdin (TTY) | InputEvent |
+| Output | stdout (TTY) | String render |
+| Files | Path strings | Capabilities |
+| Save | Overwrite file | Create version |
+| Open | `vi file.txt` | `editor.load_document(content, handle)` |
+| Authority | Ambient (file paths) | Explicit (capabilities) |
+| Testing | Requires PTY | cargo test |
+| Embedding | Hard (process) | Easy (library) |
+
+### Design Rationale
+
+**Why modal?**
+- Proven UI pattern (vi/vim)
+- Keyboard-only workflow
+- Clear state separation
+- Easy to test
+
+**Why capabilities?**
+- No ambient file access
+- Explicit authority
+- Auditable operations
+- Least privilege
+
+**Why versioned?**
+- Immutability preserved
+- No data loss
+- Easy rollback
+- Natural fit for storage model
+
+**Why component?**
+- Easy to embed
+- Easy to test
+- Clean interfaces
+- No process overhead
+
+### Summary
+
+The editor service provides:
+- **Modal editing**: vi-like interface without TTY
+- **Capability-based I/O**: Explicit document access
+- **Versioned saves**: Immutable version creation
+- **Testability**: Full coverage without hardware
+- **Component model**: Library, not process
+
+Usage pattern:
+1. Create editor
+2. Load document (via capability or path convenience)
+3. Process input events
+4. Handle actions (continue/saved/quit)
+5. Render output

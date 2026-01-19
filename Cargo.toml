@@ -15,6 +15,7 @@ members = [
     "services_fs_view",
     "services_input",
     "services_focus_manager",
+    "services_editor_vi",
     "fs_view",
     "intent_router",
     "pipeline",
@@ -63,6 +64,7 @@ resources = { path = "resources" }
 input_types = { path = "input_types" }
 services_input = { path = "services_input" }
 services_focus_manager = { path = "services_focus_manager" }
+services_editor_vi = { path = "services_editor_vi" }
 
 # Demo crates
 cli_console = { path = "cli_console" }

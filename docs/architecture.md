@@ -2845,3 +2845,235 @@ Phase 14 provides:
 - **Extensibility**: Ready for pointer, touch, gamepad when needed
 
 This is **not** a TTY. This is a modern input abstraction.
+
+## Phase 15: Editor Component (Modal, Versioned, Capability-Safe)
+
+### Philosophy: Components, Not Processes
+
+Traditional Unix editors (vi, emacs, nano) are **processes** that:
+- Run in a terminal (TTY)
+- Read stdin, write stdout
+- Access files via paths (ambient authority)
+- Overwrite files on save
+
+PandaGen's editor is a **component** that:
+- Receives keyboard events (no TTY)
+- Renders to a text surface (no stdout)
+- Accesses documents via capabilities (no ambient paths)
+- Creates new versions on save (immutability)
+
+This is a fundamental shift: **editors as library components**, not standalone programs.
+
+### Editor Model
+
+**Modal Editing**:
+```
+Normal Mode ──i──> Insert Mode
+     │              │
+     │              └──Esc──> Normal Mode
+     │
+     └──:──> Command Mode
+              │
+              └──Enter/Esc──> Normal Mode
+```
+
+**Document Model**:
+```
+┌─────────────────┐
+│  DocumentHandle │
+├─────────────────┤
+│ ObjectId        │ ← Capability to object
+│ VersionId       │ ← Current version
+│ path_label      │ ← Display only (not authority!)
+│ can_update_link │ ← Write permission flag
+└─────────────────┘
+```
+
+**Save Semantics**:
+1. Save creates **new version** (immutable)
+2. Return new VersionId capability
+3. **Separately** update directory link (if permission exists)
+
+This separates content versioning from directory management.
+
+### Core Design
+
+**State Machine**:
+```rust
+pub struct EditorState {
+    mode: EditorMode,              // Normal | Insert | Command
+    buffer: TextBuffer,            // Vec<String> (simple, testable)
+    cursor: Cursor,                // Position with boundary checking
+    dirty: bool,                   // Unsaved changes flag
+    command_buffer: String,        // Command being typed
+    status_message: String,        // Feedback to user
+    document_label: Option<String>,// Display name (not authority)
+}
+```
+
+**Operations**:
+- Text insertion at cursor
+- Character deletion (backspace, delete)
+- Newline insertion with line splitting
+- Line joining on backspace
+- Cursor navigation with clamping
+
+**Commands**:
+- `:w` - Save (create new version)
+- `:q` - Quit (blocked if dirty)
+- `:q!` - Force quit (discard changes)
+- `:wq` - Save and quit
+
+### Capability-Based Document Access
+
+**Opening a Document**:
+```rust
+// Option 1: Direct capability (preferred)
+let handle = DocumentHandle::new(
+    object_id,    // Capability to object
+    version_id,   // Current version
+    None,         // No path label
+    false         // No link update permission
+);
+
+// Option 2: Via fs_view (convenience)
+let options = OpenOptions::new()
+    .with_path("/docs/readme.txt");
+// fs_view resolves path → object capability
+// Authority comes from root capability, not path
+```
+
+**Saving a Document**:
+```rust
+let save_result = editor.save()?;
+// Returns:
+// - new_version_id: VersionId   (always)
+// - link_updated: bool           (only if can_update_link)
+// - message: String              (status for user)
+
+// If link_updated == false:
+//   - New version created in storage
+//   - Directory link still points to old version
+//   - User notified: "Saved but no directory write permission"
+```
+
+This is crucial: **saving content and updating links are distinct operations**.
+
+### Key Differences from Traditional Editors
+
+| Traditional vi | PandaGen Editor |
+|----------------|----------------|
+| TTY-based | Event-based |
+| stdin/stdout | InputEvent/Render |
+| Path = authority | Path = label |
+| File overwrite | Version creation |
+| Global environment | Explicit capabilities |
+| Hard to test | Fully testable |
+
+### Implementation Highlights
+
+**Modal Input Processing**:
+```rust
+match editor.state().mode() {
+    EditorMode::Normal => {
+        // h/j/k/l navigation
+        // i enters insert
+        // x deletes char
+        // : enters command
+    }
+    EditorMode::Insert => {
+        // printable chars insert
+        // Enter inserts newline
+        // Backspace deletes
+        // Escape exits to normal
+    }
+    EditorMode::Command => {
+        // build command string
+        // Enter executes
+        // Escape cancels
+    }
+}
+```
+
+**Character Translation**:
+- Full A-Z (lowercase/uppercase with Shift)
+- Numbers 0-9 (symbols with Shift)
+- Punctuation (period, comma, space, etc.)
+- No hardcoded ASCII assumptions
+- Uses KeyCode enum, not scan codes
+
+**Rendering**:
+```
+[h]ello world    ← Cursor on 'h'
+second line
+~                ← Empty line marker
+~
+NORMAL readme.txt | Saved v2
+```
+
+Status line shows: mode, dirty flag, label, messages
+
+### Testing Strategy
+
+**Unit Tests**: 51 tests
+- State machine transitions
+- Buffer operations
+- Command parsing
+- Cursor movement
+- Rendering
+
+**Integration Tests**: 11 tests
+- Full edit sessions (insert → save → quit)
+- Safety checks (quit blocked when dirty)
+- Multi-line editing
+- Mode switching
+- Error handling
+
+**All tests run under cargo test**:
+- No terminal required
+- Simulated KeyEvent injection
+- Deterministic behavior
+- Fast (< 1 second)
+
+### Future Extensions
+
+Ready for:
+1. **Storage integration**: Real save/load via `services_storage`
+2. **Path support**: Via `fs_view` for convenience
+3. **Focus integration**: Via `services_focus_manager`
+4. **Input subscription**: Via `services_input`
+5. **Advanced features**:
+   - Visual mode (selection)
+   - Copy/paste
+   - Undo/redo
+   - Search/replace
+   - Syntax highlighting
+
+### Why This Matters
+
+**Problem**: Traditional editors are hard to embed, hard to test, and tightly coupled to terminals.
+
+**Solution**: Editor as a library component with:
+- Explicit interfaces (not stdin/stdout)
+- Capability-based I/O (not path-based)
+- Versioned storage (not overwrite)
+- Event-driven input (not byte streams)
+- Full testability (no hardware)
+
+**Impact**:
+- Can embed editor in any application
+- Can test editor without terminal
+- Can version every document change
+- Can enforce least-privilege access
+- Can integrate with modern UIs
+
+### Summary
+
+Phase 15 provides:
+- **Modal text editor**: vi-like interface without TTY coupling
+- **Capability-based I/O**: Documents via capabilities, not paths
+- **Versioned saves**: Immutable versions instead of overwrites
+- **Component architecture**: Library, not standalone process
+- **Full testability**: 62 tests without hardware
+
+This demonstrates how classic Unix tools can be reimagined as modern, testable, capability-safe components.
