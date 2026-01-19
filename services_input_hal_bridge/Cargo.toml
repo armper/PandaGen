@@ -1,0 +1,17 @@
+[package]
+name = "services_input_hal_bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types = { workspace = true }
+input_types = { workspace = true }
+services_input = { workspace = true }
+hal = { workspace = true }
+identity = { workspace = true }
+resources = { workspace = true }
+policy = { workspace = true }
+ipc = { workspace = true }
+thiserror = { workspace = true }

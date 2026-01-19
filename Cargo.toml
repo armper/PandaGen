@@ -14,6 +14,7 @@ members = [
     "services_pipeline_executor",
     "services_fs_view",
     "services_input",
+    "services_input_hal_bridge",
     "services_focus_manager",
     "services_editor_vi",
     "services_workspace_manager",

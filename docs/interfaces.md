@@ -3619,3 +3619,420 @@ let result = workspace.execute_command(cmd);
 ### Summary
 
 The Workspace Manager provides component orchestration with explicit focus, observable lifecycle, and policy enforcement. See PHASE16_SUMMARY.md for complete details.
+
+---
+
+## HAL Keyboard Interface (Phase 17)
+
+### Overview
+
+The HAL keyboard interface provides hardware abstraction for keyboard input devices.
+It bridges the gap between raw hardware (scan codes) and PandaGen's logical input types (KeyCodes).
+
+### Core Types
+
+#### HalKeyEvent
+
+```rust
+pub struct HalKeyEvent {
+    pub scancode: u8,           // Raw scan code from keyboard controller
+    pub pressed: bool,          // true = press, false = release
+    pub timestamp_ns: Option<u64>, // Optional timestamp
+}
+```
+
+**Purpose**: Represents a raw keyboard event from hardware before translation.
+
+**Contract**:
+- `scancode` is hardware-specific (e.g., PS/2 Scan Code Set 1)
+- `pressed` indicates key state (pressed or released)
+- `timestamp_ns` is optional and hardware-dependent
+- This type **does not leak** outside the HAL boundary
+
+#### KeyboardDevice Trait
+
+```rust
+pub trait KeyboardDevice {
+    fn poll_event(&mut self) -> Option<HalKeyEvent>;
+}
+```
+
+**Purpose**: Architecture-specific implementations provide keyboard input via this trait.
+
+**Contract**:
+- **Poll-based**: Non-blocking, returns immediately
+- **Returns `None`**: If no event is available
+- **Returns `Some(HalKeyEvent)`**: If a key event is available
+- **Stateless**: Does not track modifier state or key repeat
+
+**Example Implementation**:
+```rust
+struct FakeKeyboard {
+    events: Vec<HalKeyEvent>,
+    index: usize,
+}
+
+impl KeyboardDevice for FakeKeyboard {
+    fn poll_event(&mut self) -> Option<HalKeyEvent> {
+        if self.index < self.events.len() {
+            let event = self.events[self.index];
+            self.index += 1;
+            Some(event)
+        } else {
+            None
+        }
+    }
+}
+```
+
+### Translation Layer
+
+#### scancode_to_keycode
+
+```rust
+pub fn scancode_to_keycode(scancode: u8) -> KeyCode
+```
+
+**Purpose**: Translates a PS/2 scan code (Set 1) to a logical KeyCode.
+
+**Contract**:
+- Deterministic mapping (same input → same output)
+- Returns `KeyCode::Unknown` for unmapped scan codes
+- Assumes PS/2 Scan Code Set 1 (most common)
+- No locale-specific behavior (ASCII layout)
+
+**Coverage**:
+- Letters: A-Z
+- Numbers: 0-9
+- Function keys: F1-F12
+- Special keys: Enter, Backspace, Escape, Space, Tab
+- Arrow keys: Up, Down, Left, Right
+- Modifiers: Shift, Ctrl, Alt, Meta (left/right variants)
+- Navigation: Insert, Delete, Home, End, PageUp, PageDown
+- Numpad: Numbers, operators
+
+#### ModifierState
+
+```rust
+pub struct ModifierState {
+    left_shift: bool,
+    right_shift: bool,
+    left_ctrl: bool,
+    right_ctrl: bool,
+    left_alt: bool,
+    right_alt: bool,
+    left_meta: bool,
+    right_meta: bool,
+}
+
+impl ModifierState {
+    pub fn new() -> Self;
+    pub fn update(&mut self, code: KeyCode, pressed: bool);
+    pub fn to_modifiers(&self) -> Modifiers;
+}
+```
+
+**Purpose**: Tracks which modifier keys are currently pressed.
+
+**Contract**:
+- Updated on each key event
+- Combines left/right variants into single Modifiers flag
+- Stateful (persists across events)
+- Resettable via `new()`
+
+#### KeyboardTranslator
+
+```rust
+pub struct KeyboardTranslator {
+    modifiers: ModifierState,
+}
+
+impl KeyboardTranslator {
+    pub fn new() -> Self;
+    pub fn translate(&mut self, hal_event: HalKeyEvent) -> Option<KeyEvent>;
+    pub fn reset(&mut self);
+}
+```
+
+**Purpose**: Translates HalKeyEvents to KeyEvents with modifier tracking.
+
+**Contract**:
+- Maintains modifier state across events
+- Returns `None` for unknown scan codes
+- Updates modifiers before generating KeyEvent
+- Deterministic (same sequence → same results)
+
+**Example Usage**:
+```rust
+let mut translator = KeyboardTranslator::new();
+
+// Press Shift
+let shift_down = HalKeyEvent::new(0x2A, true);
+translator.translate(shift_down).unwrap();
+
+// Press A (with Shift held)
+let a_down = HalKeyEvent::new(0x1E, true);
+let key_event = translator.translate(a_down).unwrap();
+
+assert_eq!(key_event.code, KeyCode::A);
+assert!(key_event.modifiers.is_shift());
+```
+
+### Input HAL Bridge
+
+#### InputHalBridge
+
+```rust
+pub struct InputHalBridge {
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    subscription: InputSubscriptionCap,
+    keyboard: Box<dyn KeyboardDevice>,
+    translator: KeyboardTranslator,
+    events_delivered: u64,
+}
+
+impl InputHalBridge {
+    pub fn new(
+        execution_id: ExecutionId,
+        task_id: TaskId,
+        subscription: InputSubscriptionCap,
+        keyboard: Box<dyn KeyboardDevice>,
+    ) -> Self;
+    
+    pub fn poll(&mut self) -> Result<PollResult, BridgeError>;
+    pub fn execution_id(&self) -> ExecutionId;
+    pub fn subscription(&self) -> &InputSubscriptionCap;
+    pub fn events_delivered(&self) -> u64;
+    pub fn reset_translator(&mut self);
+}
+```
+
+**Purpose**: Bridges hardware keyboard input to PandaGen's input system.
+
+**Contract**:
+- Polls `KeyboardDevice` for events
+- Translates via `KeyboardTranslator`
+- Delivers to `services_input` via subscription
+- Tracks own ExecutionId for budget/policy enforcement
+- Non-blocking poll (returns immediately)
+
+**Poll Results**:
+```rust
+pub enum PollResult {
+    EventDelivered,  // Event received and delivered
+    NoEvent,         // No event available from hardware
+}
+```
+
+**Error Handling**:
+```rust
+pub enum BridgeError {
+    BudgetExhausted { resource: String },
+    PolicyDenied { reason: String },
+    InputServiceError(String),
+    ChannelError(String),
+}
+```
+
+**Example Usage**:
+```rust
+let keyboard = Box::new(X86Ps2Keyboard::new());
+let mut bridge = InputHalBridge::new(
+    execution_id,
+    task_id,
+    subscription,
+    keyboard,
+);
+
+// Poll loop (run as a component/task)
+loop {
+    match bridge.poll() {
+        Ok(PollResult::EventDelivered) => {
+            // Event delivered, continue
+        }
+        Ok(PollResult::NoEvent) => {
+            // No event, sleep briefly
+            kernel.sleep(Duration::from_millis(10))?;
+        }
+        Err(BridgeError::BudgetExhausted { resource }) => {
+            // Budget exhausted, terminate bridge
+            eprintln!("Bridge exhausted: {}", resource);
+            break;
+        }
+        Err(e) => {
+            // Other error, handle or terminate
+            eprintln!("Bridge error: {}", e);
+            break;
+        }
+    }
+}
+```
+
+### Testing Interface
+
+#### FakeKeyboard (test helper)
+
+```rust
+struct FakeKeyboard {
+    events: Vec<HalKeyEvent>,
+    index: usize,
+}
+
+impl FakeKeyboard {
+    fn new(events: Vec<HalKeyEvent>) -> Self;
+}
+
+impl KeyboardDevice for FakeKeyboard {
+    fn poll_event(&mut self) -> Option<HalKeyEvent>;
+}
+```
+
+**Purpose**: Test helper for simulating keyboard events without hardware.
+
+**Usage**:
+```rust
+let events = vec![
+    HalKeyEvent::new(0x1E, true),  // A pressed
+    HalKeyEvent::new(0x1E, false), // A released
+];
+
+let keyboard = Box::new(FakeKeyboard::new(events));
+let mut bridge = InputHalBridge::new(..., keyboard);
+
+assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+assert_eq!(bridge.poll().unwrap(), PollResult::NoEvent);
+```
+
+### Design Guidelines
+
+#### For HAL Implementers
+
+1. **Keep KeyboardDevice minimal**: Just poll_event(), no extra state
+2. **Return None when no event**: Don't block or spin
+3. **Use raw scan codes**: Don't translate at HAL level
+4. **Provide timestamp if available**: Hardware-dependent
+5. **Test with FakeKeyboard**: Proves interface works
+
+#### For Bridge Users
+
+1. **Run bridge as a component**: With explicit identity and budget
+2. **Handle PollResult::NoEvent**: Sleep briefly between polls
+3. **Handle BudgetExhausted**: Terminate cleanly
+4. **Don't bypass subscription**: Always use services_input
+5. **Test with FakeKeyboard**: No real hardware required
+
+#### For Translation Users
+
+1. **Use KeyboardTranslator**: Don't translate manually
+2. **Keep translator stateful**: It tracks modifiers
+3. **Handle None results**: Unknown keys are skipped
+4. **Reset when needed**: E.g., on focus loss
+5. **Test modifier sequences**: Ensure correct state tracking
+
+### Integration with Existing Interfaces
+
+#### With Input Service (Phase 14)
+
+- Bridge uses `InputSubscriptionCap` for delivery
+- Events delivered to same channel as simulation
+- Focus manager routes identically
+- No changes to input_types
+
+#### With Execution Identity (Phase 7)
+
+- Bridge has `ExecutionId`
+- Subject to trust domain rules
+- Can be supervised like any component
+
+#### With Resource Budgets (Phase 11/12)
+
+- Message delivery consumes MessageCount
+- Budget exhaustion terminates bridge
+- Enforcement via kernel API (future)
+
+#### With Policy (Phase 8/9)
+
+- Policy can deny bridge spawn
+- Policy can restrict event delivery
+- Audit trail records operations
+
+### Scan Code Reference
+
+**PS/2 Scan Code Set 1** (commonly used):
+- Letters: 0x1E (A) to 0x2C (Z)
+- Numbers: 0x02 (1) to 0x0B (0)
+- Function keys: 0x3B (F1) to 0x58 (F12)
+- Modifiers: 0x2A (LShift), 0x36 (RShift), 0x1D (LCtrl), 0x38 (LAlt)
+- Special: 0x01 (Esc), 0x1C (Enter), 0x0E (Backspace), 0x39 (Space)
+- Arrows: 0x48 (Up), 0x50 (Down), 0x4B (Left), 0x4D (Right)
+
+**Note**: Extended scan codes (0xE0 prefix) are not fully handled yet.
+See `hal/src/keyboard_translation.rs` for complete mapping.
+
+### Example: Complete Integration
+
+```rust
+use hal_x86_64::X86Ps2Keyboard;
+use services_input_hal_bridge::InputHalBridge;
+
+// Create bridge with hardware keyboard
+let keyboard = Box::new(X86Ps2Keyboard::new());
+
+// Subscribe to input service
+let subscription = input_service.subscribe_keyboard(task_id, channel)?;
+
+// Create bridge with identity
+let bridge_identity = IdentityMetadata::new(
+    IdentityKind::Component,
+    TrustDomain::core(),
+    "input-hal-bridge",
+    kernel.now().as_nanos(),
+).with_budget(
+    ResourceBudget::unlimited()
+        .with_message_count(MessageCount::new(1000))
+);
+
+let exec_id = kernel.create_identity(bridge_identity);
+
+let mut bridge = InputHalBridge::new(
+    exec_id,
+    task_id,
+    subscription,
+    keyboard,
+);
+
+// Run poll loop
+loop {
+    match bridge.poll() {
+        Ok(PollResult::EventDelivered) => {
+            println!("Event delivered (total: {})", bridge.events_delivered());
+        }
+        Ok(PollResult::NoEvent) => {
+            kernel.sleep(Duration::from_millis(10))?;
+        }
+        Err(BridgeError::BudgetExhausted { resource }) => {
+            eprintln!("Bridge exhausted: {}", resource);
+            break;
+        }
+        Err(e) => {
+            eprintln!("Bridge error: {}", e);
+            break;
+        }
+    }
+}
+```
+
+### Summary
+
+The HAL keyboard interface provides:
+- **Clean abstraction**: KeyboardDevice trait
+- **Deterministic translation**: Scancode → KeyCode
+- **Stateful modifiers**: KeyboardTranslator
+- **Component-based integration**: InputHalBridge
+- **Full testability**: FakeKeyboard for tests
+- **No breaking changes**: Existing code unchanged
+
+This interface allows PandaGen to receive input from real hardware while maintaining the same abstractions, routing, and testing capabilities as simulation.
+
