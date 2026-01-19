@@ -19,8 +19,10 @@
 //! - A terminal multiplexer
 //! - A monolithic "god shell"
 
+pub mod commands;
+
 use core_types::TaskId;
-use identity::{ExitReason, ExecutionId, IdentityKind, IdentityMetadata, TrustDomain};
+use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
@@ -378,7 +380,8 @@ impl WorkspaceManager {
 
         // Check policy if configured
         if let Some(policy) = &self.policy {
-            let context = PolicyContext::for_spawn(self.workspace_identity.clone(), identity.clone());
+            let context =
+                PolicyContext::for_spawn(self.workspace_identity.clone(), identity.clone());
             let decision = policy.evaluate(PolicyEvent::OnSpawn, &context);
 
             if let PolicyDecision::Deny { reason } = decision {
@@ -596,7 +599,7 @@ impl WorkspaceManager {
     /// Returns the currently focused component ID
     pub fn get_focused_component(&self) -> Option<ComponentId> {
         let focus_sub = self.focus_manager.current_focus()?;
-        
+
         // Find component with matching subscription
         self.components
             .values()
@@ -612,7 +615,7 @@ impl WorkspaceManager {
     /// Routes an input event to the focused component
     pub fn route_input(&self, event: &InputEvent) -> Option<ComponentId> {
         let focused_sub = self.focus_manager.route_event(event).ok()??;
-        
+
         // Find component with matching subscription
         self.components
             .values()
@@ -631,7 +634,10 @@ impl WorkspaceManager {
     }
 
     /// Handles budget exhaustion for a component
-    pub fn handle_budget_exhaustion(&mut self, component_id: ComponentId) -> Result<(), WorkspaceError> {
+    pub fn handle_budget_exhaustion(
+        &mut self,
+        component_id: ComponentId,
+    ) -> Result<(), WorkspaceError> {
         self.terminate_component(
             component_id,
             ExitReason::Failure {
@@ -901,7 +907,9 @@ mod tests {
         assert!(!trail.is_empty());
 
         match &trail[0] {
-            WorkspaceEvent::ComponentLaunched { component_id: id, .. } => {
+            WorkspaceEvent::ComponentLaunched {
+                component_id: id, ..
+            } => {
                 assert_eq!(*id, component_id);
             }
             _ => panic!("Expected ComponentLaunched event"),
@@ -924,7 +932,10 @@ mod tests {
         let component_id = workspace.launch_component(config).unwrap();
 
         let component = workspace.get_component(component_id).unwrap();
-        assert_eq!(component.metadata.get("file"), Some(&"test.txt".to_string()));
+        assert_eq!(
+            component.metadata.get("file"),
+            Some(&"test.txt".to_string())
+        );
         assert_eq!(component.metadata.get("mode"), Some(&"edit".to_string()));
     }
 }
