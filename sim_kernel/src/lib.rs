@@ -162,7 +162,7 @@ impl SimulatedKernel {
 
             decision
         } else {
-            PolicyDecision::Allow
+            PolicyDecision::Allow { derived: None }
         }
     }
 
@@ -419,7 +419,7 @@ impl SimulatedKernel {
             let decision = self.evaluate_policy(PolicyEvent::OnCapabilityDelegate, &context);
 
             match decision {
-                PolicyDecision::Allow => {
+                PolicyDecision::Allow { .. } => {
                     // Continue with delegation
                 }
                 PolicyDecision::Deny { reason } => {
@@ -574,7 +574,7 @@ impl SimulatedKernel {
                 let decision = self.evaluate_policy(PolicyEvent::OnSpawn, &context);
 
                 match decision {
-                    PolicyDecision::Allow => {
+                    PolicyDecision::Allow { .. } => {
                         // Continue with spawn
                     }
                     PolicyDecision::Deny { reason } => {

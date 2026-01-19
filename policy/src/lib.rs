@@ -30,15 +30,188 @@
 use identity::{IdentityKind, IdentityMetadata, TrustDomain};
 use pipeline::{PipelineId, StageId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
+
+// ============================================================================
+// Phase 10: Capability Set and Derived Authority Types
+// ============================================================================
+
+/// A set of capabilities
+///
+/// Represents a collection of capabilities available to an execution context.
+/// Used for capability derivation and subset validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySet {
+    /// Set of capability IDs
+    pub capabilities: HashSet<u64>,
+}
+
+impl CapabilitySet {
+    /// Creates a new empty capability set
+    pub fn new() -> Self {
+        Self {
+            capabilities: HashSet::new(),
+        }
+    }
+
+    /// Creates a capability set from a vector of capability IDs
+    pub fn from_capabilities(caps: Vec<u64>) -> Self {
+        Self {
+            capabilities: caps.into_iter().collect(),
+        }
+    }
+
+    /// Checks if this set is a subset of another set
+    ///
+    /// Returns true if all capabilities in this set are present in the other set.
+    pub fn is_subset_of(&self, other: &CapabilitySet) -> bool {
+        self.capabilities.is_subset(&other.capabilities)
+    }
+
+    /// Returns the intersection of this set with another
+    pub fn intersection(&self, other: &CapabilitySet) -> CapabilitySet {
+        CapabilitySet {
+            capabilities: self
+                .capabilities
+                .intersection(&other.capabilities)
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// Returns the difference of this set with another (elements in self but not in other)
+    pub fn difference(&self, other: &CapabilitySet) -> CapabilitySet {
+        CapabilitySet {
+            capabilities: self
+                .capabilities
+                .difference(&other.capabilities)
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// Returns true if the set is empty
+    pub fn is_empty(&self) -> bool {
+        self.capabilities.is_empty()
+    }
+
+    /// Returns the number of capabilities in the set
+    pub fn len(&self) -> usize {
+        self.capabilities.len()
+    }
+
+    /// Returns a vector of capability IDs
+    pub fn to_vec(&self) -> Vec<u64> {
+        let mut caps: Vec<u64> = self.capabilities.iter().copied().collect();
+        caps.sort_unstable();
+        caps
+    }
+}
+
+impl Default for CapabilitySet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Represents a derived (restricted) authority
+///
+/// Contains capabilities that have been restricted from the original authority.
+/// Must always be a subset of or equal to the original authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedAuthority {
+    /// The restricted set of capabilities
+    pub capabilities: CapabilitySet,
+    /// Optional constraints (for future use, currently unused)
+    #[serde(default)]
+    pub constraints: Vec<String>,
+}
+
+impl DerivedAuthority {
+    /// Creates a new derived authority with the given capabilities
+    pub fn new(capabilities: CapabilitySet) -> Self {
+        Self {
+            capabilities,
+            constraints: Vec::new(),
+        }
+    }
+
+    /// Creates a derived authority from a vector of capability IDs
+    pub fn from_capabilities(caps: Vec<u64>) -> Self {
+        Self::new(CapabilitySet::from_capabilities(caps))
+    }
+
+    /// Adds a constraint to this derived authority
+    pub fn with_constraint(mut self, constraint: impl Into<String>) -> Self {
+        self.constraints.push(constraint.into());
+        self
+    }
+}
+
+/// Describes changes made to capabilities
+///
+/// Used to explain what changed when deriving authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityDelta {
+    /// Capabilities that were removed
+    pub removed: Vec<u64>,
+    /// Capabilities that were restricted (for future use)
+    #[serde(default)]
+    pub restricted: Vec<String>,
+    /// Capabilities that were added (should be empty for now - no escalation)
+    #[serde(default)]
+    pub added: Vec<u64>,
+}
+
+impl CapabilityDelta {
+    /// Creates a new empty capability delta
+    pub fn new() -> Self {
+        Self {
+            removed: Vec::new(),
+            restricted: Vec::new(),
+            added: Vec::new(),
+        }
+    }
+
+    /// Computes the delta between before and after capability sets
+    ///
+    /// - `removed`: capabilities in `before` but not in `after`
+    /// - `added`: capabilities in `after` but not in `before`
+    pub fn from(before: &CapabilitySet, after: &CapabilitySet) -> Self {
+        let removed = before.difference(after).to_vec();
+        let added = after.difference(before).to_vec();
+
+        Self {
+            removed,
+            restricted: Vec::new(),
+            added,
+        }
+    }
+
+    /// Returns true if there are no changes
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.restricted.is_empty() && self.added.is_empty()
+    }
+}
+
+impl Default for CapabilityDelta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Policy decision returned by policy engines
 ///
 /// Decisions are explicit: allow, deny, or require additional action.
+/// The Allow variant can optionally include derived (restricted) authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyDecision {
-    /// Operation is allowed to proceed
-    Allow,
+    /// Operation is allowed to proceed, optionally with derived authority
+    Allow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        derived: Option<DerivedAuthority>,
+    },
     /// Operation is denied with a specific reason
     Deny { reason: String },
     /// Operation requires additional action before proceeding
@@ -46,9 +219,16 @@ pub enum PolicyDecision {
 }
 
 impl PolicyDecision {
-    /// Creates an Allow decision
+    /// Creates an Allow decision without derived authority
     pub fn allow() -> Self {
-        Self::Allow
+        Self::Allow { derived: None }
+    }
+
+    /// Creates an Allow decision with derived authority
+    pub fn allow_with_derived(derived: DerivedAuthority) -> Self {
+        Self::Allow {
+            derived: Some(derived),
+        }
     }
 
     /// Creates a Deny decision with a reason
@@ -65,9 +245,9 @@ impl PolicyDecision {
         }
     }
 
-    /// Checks if decision is Allow
+    /// Checks if decision is Allow (with or without derived authority)
     pub fn is_allow(&self) -> bool {
-        matches!(self, Self::Allow)
+        matches!(self, Self::Allow { .. })
     }
 
     /// Checks if decision is Deny
@@ -79,12 +259,26 @@ impl PolicyDecision {
     pub fn is_require(&self) -> bool {
         matches!(self, Self::Require { .. })
     }
+
+    /// Returns the derived authority if present
+    pub fn derived_authority(&self) -> Option<&DerivedAuthority> {
+        match self {
+            Self::Allow { derived } => derived.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for PolicyDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Allow => write!(f, "Allow"),
+            Self::Allow { derived } => {
+                if derived.is_some() {
+                    write!(f, "Allow (with derived authority)")
+                } else {
+                    write!(f, "Allow")
+                }
+            }
             Self::Deny { reason } => write!(f, "Deny: {}", reason),
             Self::Require { action } => write!(f, "Require: {}", action),
         }
@@ -228,7 +422,7 @@ pub struct NoOpPolicy;
 
 impl PolicyEngine for NoOpPolicy {
     fn evaluate(&self, _event: PolicyEvent, _context: &PolicyContext) -> PolicyDecision {
-        PolicyDecision::Allow
+        PolicyDecision::Allow { derived: None }
     }
 
     fn name(&self) -> &str {
@@ -270,7 +464,7 @@ impl PolicyEngine for TrustDomainPolicy {
                     );
                 }
 
-                PolicyDecision::Allow
+                PolicyDecision::Allow { derived: None }
             }
             PolicyEvent::OnCapabilityDelegate => {
                 // Cross-domain delegation requires explicit opt-in
@@ -279,9 +473,9 @@ impl PolicyEngine for TrustDomainPolicy {
                         "Cross-domain capability delegation requires explicit approval",
                     );
                 }
-                PolicyDecision::Allow
+                PolicyDecision::Allow { derived: None }
             }
-            _ => PolicyDecision::Allow,
+            _ => PolicyDecision::Allow { derived: None },
         }
     }
 
@@ -355,9 +549,9 @@ impl PolicyEngine for PipelineSafetyPolicy {
                     }
                 }
 
-                PolicyDecision::Allow
+                PolicyDecision::Allow { derived: None }
             }
-            _ => PolicyDecision::Allow,
+            _ => PolicyDecision::Allow { derived: None },
         }
     }
 
@@ -396,8 +590,10 @@ impl ComposedPolicy {
     /// - First Deny wins (short-circuit)
     /// - Collect all Require decisions
     /// - Return Allow if no Deny and no Require
+    /// - Phase 10: Derived authority from the most restrictive policy is used
     pub fn evaluate_all(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
         let mut requires = Vec::new();
+        let mut most_restrictive_derived: Option<DerivedAuthority> = None;
 
         for policy in &self.policies {
             match policy.evaluate(event.clone(), context) {
@@ -408,8 +604,20 @@ impl ComposedPolicy {
                 PolicyDecision::Require { action } => {
                     requires.push(action);
                 }
-                PolicyDecision::Allow => {
-                    // Continue evaluating
+                PolicyDecision::Allow { derived } => {
+                    // Track the most restrictive derived authority
+                    if let Some(new_derived) = derived {
+                        most_restrictive_derived = Some(match most_restrictive_derived {
+                            None => new_derived,
+                            Some(existing) => {
+                                // Take the intersection of both capability sets
+                                let intersection = existing
+                                    .capabilities
+                                    .intersection(&new_derived.capabilities);
+                                DerivedAuthority::new(intersection)
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -420,7 +628,9 @@ impl ComposedPolicy {
                 action: requires.join("; "),
             }
         } else {
-            PolicyDecision::Allow
+            PolicyDecision::Allow {
+                derived: most_restrictive_derived,
+            }
         }
     }
 }
@@ -445,6 +655,7 @@ impl PolicyEngine for ComposedPolicy {
 ///
 /// Provides detailed information about policy evaluation including
 /// which policies were checked and what decisions they made.
+/// Phase 10: Now includes capability derivation information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyDecisionReport {
     /// Final aggregated decision
@@ -455,6 +666,15 @@ pub struct PolicyDecisionReport {
     pub deny_reason: Option<String>,
     /// Required actions (if decision is Require)
     pub required_actions: Vec<String>,
+    /// Input capabilities (before policy evaluation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_capabilities: Option<CapabilitySet>,
+    /// Output capabilities (after policy evaluation, if derived)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_capabilities: Option<CapabilitySet>,
+    /// Capability delta (changes made by policy)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_delta: Option<CapabilityDelta>,
 }
 
 /// Single policy evaluation record
@@ -473,7 +693,7 @@ impl PolicyDecisionReport {
         let (deny_reason, required_actions) = match &decision {
             PolicyDecision::Deny { reason } => (Some(reason.clone()), Vec::new()),
             PolicyDecision::Require { action } => (None, vec![action.clone()]),
-            PolicyDecision::Allow => (None, Vec::new()),
+            PolicyDecision::Allow { .. } => (None, Vec::new()),
         };
 
         Self {
@@ -484,7 +704,24 @@ impl PolicyDecisionReport {
             }],
             deny_reason,
             required_actions,
+            input_capabilities: None,
+            output_capabilities: None,
+            capability_delta: None,
         }
+    }
+
+    /// Creates a report with capability information
+    pub fn with_capabilities(
+        mut self,
+        input: CapabilitySet,
+        output: Option<CapabilitySet>,
+    ) -> Self {
+        let delta = output.as_ref().map(|out| CapabilityDelta::from(&input, out));
+
+        self.input_capabilities = Some(input);
+        self.output_capabilities = output;
+        self.capability_delta = delta;
+        self
     }
 
     /// Creates a report from composed policy evaluation
@@ -505,7 +742,7 @@ impl PolicyDecisionReport {
                 PolicyDecision::Require { action } => {
                     required_actions.push(action.clone());
                 }
-                PolicyDecision::Allow => {}
+                PolicyDecision::Allow { .. } => {}
             }
         }
 
@@ -520,6 +757,9 @@ impl PolicyDecisionReport {
                 .collect(),
             deny_reason,
             required_actions,
+            input_capabilities: None,
+            output_capabilities: None,
+            capability_delta: None,
         }
     }
 
@@ -852,5 +1092,182 @@ mod tests {
         assert!(report.is_require());
         assert_eq!(report.evaluated_policies.len(), 2);
         assert!(!report.required_actions.is_empty());
+    }
+
+    // ============================================================================
+    // Phase 10: Capability Set and Derived Authority Tests
+    // ============================================================================
+
+    #[test]
+    fn test_capability_set_creation() {
+        let set = CapabilitySet::new();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+
+        let set2 = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        assert!(!set2.is_empty());
+        assert_eq!(set2.len(), 3);
+    }
+
+    #[test]
+    fn test_capability_set_subset() {
+        let full = CapabilitySet::from_capabilities(vec![1, 2, 3, 4]);
+        let subset = CapabilitySet::from_capabilities(vec![1, 2]);
+        let not_subset = CapabilitySet::from_capabilities(vec![1, 5]);
+
+        assert!(subset.is_subset_of(&full));
+        assert!(!not_subset.is_subset_of(&full));
+        assert!(full.is_subset_of(&full)); // Set is subset of itself
+    }
+
+    #[test]
+    fn test_capability_set_intersection() {
+        let set1 = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let set2 = CapabilitySet::from_capabilities(vec![2, 3, 4]);
+
+        let intersection = set1.intersection(&set2);
+        let caps = intersection.to_vec();
+        assert_eq!(caps, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_capability_set_difference() {
+        let set1 = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let set2 = CapabilitySet::from_capabilities(vec![2, 3, 4]);
+
+        let diff = set1.difference(&set2);
+        assert_eq!(diff.to_vec(), vec![1]);
+    }
+
+    #[test]
+    fn test_derived_authority_creation() {
+        let caps = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let derived = DerivedAuthority::new(caps.clone());
+
+        assert_eq!(derived.capabilities, caps);
+        assert!(derived.constraints.is_empty());
+    }
+
+    #[test]
+    fn test_derived_authority_with_constraints() {
+        let derived = DerivedAuthority::from_capabilities(vec![1, 2])
+            .with_constraint("read-only")
+            .with_constraint("no-network");
+
+        assert_eq!(derived.constraints.len(), 2);
+        assert_eq!(derived.constraints[0], "read-only");
+        assert_eq!(derived.constraints[1], "no-network");
+    }
+
+    #[test]
+    fn test_capability_delta_empty() {
+        let before = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let after = before.clone();
+
+        let delta = CapabilityDelta::from(&before, &after);
+        assert!(delta.is_empty());
+        assert!(delta.removed.is_empty());
+        assert!(delta.added.is_empty());
+    }
+
+    #[test]
+    fn test_capability_delta_removed() {
+        let before = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let after = CapabilitySet::from_capabilities(vec![1, 2]);
+
+        let delta = CapabilityDelta::from(&before, &after);
+        assert!(!delta.is_empty());
+        assert_eq!(delta.removed, vec![3]);
+        assert!(delta.added.is_empty());
+    }
+
+    #[test]
+    fn test_capability_delta_added() {
+        let before = CapabilitySet::from_capabilities(vec![1, 2]);
+        let after = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+
+        let delta = CapabilityDelta::from(&before, &after);
+        assert!(!delta.is_empty());
+        assert!(delta.removed.is_empty());
+        assert_eq!(delta.added, vec![3]);
+    }
+
+    #[test]
+    fn test_capability_delta_both() {
+        let before = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let after = CapabilitySet::from_capabilities(vec![2, 3, 4]);
+
+        let delta = CapabilityDelta::from(&before, &after);
+        assert!(!delta.is_empty());
+        assert_eq!(delta.removed, vec![1]);
+        assert_eq!(delta.added, vec![4]);
+    }
+
+    #[test]
+    fn test_policy_decision_allow_with_derived() {
+        let derived = DerivedAuthority::from_capabilities(vec![1, 2]);
+        let decision = PolicyDecision::allow_with_derived(derived.clone());
+
+        assert!(decision.is_allow());
+        assert_eq!(decision.derived_authority(), Some(&derived));
+    }
+
+    #[test]
+    fn test_policy_decision_allow_without_derived() {
+        let decision = PolicyDecision::allow();
+
+        assert!(decision.is_allow());
+        assert_eq!(decision.derived_authority(), None);
+    }
+
+    #[test]
+    fn test_policy_decision_report_with_capabilities() {
+        let input = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let output = CapabilitySet::from_capabilities(vec![1, 2]);
+
+        let report = PolicyDecisionReport::new("TestPolicy", PolicyDecision::allow())
+            .with_capabilities(input.clone(), Some(output.clone()));
+
+        assert_eq!(report.input_capabilities, Some(input));
+        assert_eq!(report.output_capabilities, Some(output));
+        assert!(report.capability_delta.is_some());
+
+        let delta = report.capability_delta.unwrap();
+        assert_eq!(delta.removed, vec![3]);
+        assert!(delta.added.is_empty());
+    }
+
+    #[test]
+    fn test_capability_set_serialization() {
+        let set = CapabilitySet::from_capabilities(vec![1, 2, 3]);
+        let json = serde_json::to_string(&set).unwrap();
+        let deserialized: CapabilitySet = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(set, deserialized);
+    }
+
+    #[test]
+    fn test_derived_authority_serialization() {
+        let derived =
+            DerivedAuthority::from_capabilities(vec![1, 2, 3]).with_constraint("read-only");
+
+        let json = serde_json::to_string(&derived).unwrap();
+        let deserialized: DerivedAuthority = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(derived, deserialized);
+    }
+
+    #[test]
+    fn test_capability_delta_serialization() {
+        let delta = CapabilityDelta {
+            removed: vec![1, 2],
+            restricted: vec!["read-only".to_string()],
+            added: vec![3],
+        };
+
+        let json = serde_json::to_string(&delta).unwrap();
+        let deserialized: CapabilityDelta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(delta, deserialized);
     }
 }
