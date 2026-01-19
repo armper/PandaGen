@@ -88,10 +88,12 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
 
     fs::create_dir_all(staging.join("boot"))?;
     fs::create_dir_all(staging.join("EFI/BOOT"))?;
+    fs::create_dir_all(staging.join("limine"))?;
 
     let limine_cfg = root.join("boot/limine.cfg");
     copy_file(limine_cfg.clone(), staging.join("boot/limine.cfg"))?;
     copy_file(limine_cfg, staging.join("limine.cfg"))?;
+    copy_file(root.join("boot/limine.cfg"), staging.join("limine/limine.cfg"))?;
 
     let kernel_path = root
         .join("target")
@@ -110,6 +112,7 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let bios_sys = vendor.join("limine-bios.sys");
     copy_file(bios_sys.clone(), staging.join("boot/limine-bios.sys"))?;
     copy_file(bios_sys, staging.join("limine-bios.sys"))?;
+    copy_file(vendor.join("limine-bios.sys"), staging.join("limine/limine-bios.sys"))?;
     copy_file(
         vendor.join("limine-bios-cd.bin"),
         staging.join("boot/limine-bios-cd.bin"),
@@ -135,6 +138,11 @@ fn build_iso(root: &Path, staging: &Path) -> Result<(), Box<dyn std::error::Erro
         .current_dir(root)
         .arg("-as")
         .arg("mkisofs")
+        .arg("-R")
+        .arg("-J")
+        .arg("-joliet-long")
+        .arg("-iso-level")
+        .arg("3")
         .arg("-b")
         .arg("boot/limine-bios-cd.bin")
         .arg("-no-emul-boot")
