@@ -201,13 +201,13 @@ impl Scheduler {
                 task_info.ticks_in_quantum = 0;
             }
             self.current_task = Some(task_id);
-            
+
             // Record audit event
             self.audit_log.push(ScheduleEvent::TaskSelected {
                 task_id,
                 timestamp_ticks: self.current_ticks,
             });
-            
+
             Some(task_id)
         } else {
             self.current_task = None;
@@ -251,14 +251,14 @@ impl Scheduler {
                     // Reset quantum and re-enqueue
                     task_info.ticks_in_quantum = 0;
                     self.run_queue.enqueue(task_id);
-                    
+
                     // Record audit event
                     self.audit_log.push(ScheduleEvent::TaskPreempted {
                         task_id,
                         reason: PreemptionReason::QuantumExpired,
                         timestamp_ticks: self.current_ticks,
                     });
-                    
+
                     return true;
                 }
             }
@@ -308,7 +308,7 @@ impl Scheduler {
         if self.current_task == Some(task_id) {
             self.current_task = None;
         }
-        
+
         // Record audit event
         self.audit_log.push(ScheduleEvent::TaskExited {
             task_id,
@@ -330,7 +330,7 @@ impl Scheduler {
         if self.current_task == Some(task_id) {
             self.current_task = None;
         }
-        
+
         // Record audit event
         self.audit_log.push(ScheduleEvent::TaskExited {
             task_id,

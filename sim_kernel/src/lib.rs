@@ -419,9 +419,13 @@ impl SimulatedKernel {
                 resource_type: reason,
             },
         );
-        
+
         // Phase 23: Find and cancel the task in scheduler
-        if let Some((&task_id, _)) = self.task_to_identity.iter().find(|(_, &exec_id)| exec_id == execution_id) {
+        if let Some((&task_id, _)) = self
+            .task_to_identity
+            .iter()
+            .find(|(_, &exec_id)| exec_id == execution_id)
+        {
             self.scheduler.cancel_task(task_id);
         }
     }
@@ -484,7 +488,7 @@ impl SimulatedKernel {
 
         // Process delayed messages
         self.process_delayed_messages();
-        
+
         // Phase 23: Notify scheduler of tick advancement
         self.scheduler.on_tick_advanced(ticks_to_advance);
     }
@@ -569,7 +573,10 @@ impl SimulatedKernel {
 
                     // Try to consume CPU ticks (if task has identity)
                     if let Some(execution_id) = self.get_task_identity(task_id) {
-                        if self.try_consume_cpu_ticks(execution_id, ticks_advanced).is_err() {
+                        if self
+                            .try_consume_cpu_ticks(execution_id, ticks_advanced)
+                            .is_err()
+                        {
                             // Task cancelled due to budget exhaustion
                             break;
                         }
@@ -629,7 +636,10 @@ impl SimulatedKernel {
 
                     // Try to consume CPU ticks
                     if let Some(execution_id) = self.get_task_identity(task_id) {
-                        if self.try_consume_cpu_ticks(execution_id, ticks_advanced).is_err() {
+                        if self
+                            .try_consume_cpu_ticks(execution_id, ticks_advanced)
+                            .is_err()
+                        {
                             // Task cancelled due to budget exhaustion
                             break;
                         }
@@ -718,7 +728,7 @@ impl SimulatedKernel {
 
         // Invalidate all capabilities owned by this task
         self.invalidate_task_capabilities(task_id);
-        
+
         // Phase 23: Notify scheduler that task has exited
         self.scheduler.exit_task(task_id);
     }
@@ -1146,10 +1156,10 @@ impl SimulatedKernel {
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
-        
+
         // Phase 23: Enqueue task in scheduler
         self.scheduler.enqueue(task_id);
-        
+
         Ok((TaskHandle::new(task_id), execution_id))
     }
 }
@@ -1186,10 +1196,10 @@ impl KernelApi for SimulatedKernel {
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
-        
+
         // Phase 23: Enqueue task in scheduler
         self.scheduler.enqueue(task_id);
-        
+
         Ok(TaskHandle::new(task_id))
     }
 
@@ -2192,7 +2202,11 @@ mod tests {
             .count();
 
         // With quantum of 3 and 10 ticks, we should see at least 2 preemptions
-        assert!(preemption_count >= 2, "Expected at least 2 preemptions, got {}", preemption_count);
+        assert!(
+            preemption_count >= 2,
+            "Expected at least 2 preemptions, got {}",
+            preemption_count
+        );
 
         // Clean up
         kernel.terminate_task(handle.task_id);
@@ -2254,7 +2268,10 @@ mod tests {
                 } if *task_id == task_handle.task_id
             )
         });
-        assert!(cancelled, "Task should have been cancelled due to budget exhaustion");
+        assert!(
+            cancelled,
+            "Task should have been cancelled due to budget exhaustion"
+        );
     }
 
     #[test]
@@ -2284,6 +2301,10 @@ mod tests {
         // Both should have same number of audit events
         let audit1 = kernel1.scheduler_audit();
         let audit2 = kernel2.scheduler_audit();
-        assert_eq!(audit1.len(), audit2.len(), "Should have same number of scheduling events");
+        assert_eq!(
+            audit1.len(),
+            audit2.len(),
+            "Should have same number of scheduling events"
+        );
     }
 }

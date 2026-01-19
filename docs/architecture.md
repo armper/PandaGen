@@ -133,6 +133,122 @@ let ticks = timer.poll_ticks(); // Reads from 8254 PIT
 - Non-blocking polling (no waits, no sleeps)
 - Determinism preserved for testing
 
+### 6. Preemptive Scheduling Foundation (Phase 23)
+
+**Problem**: Without preemptive scheduling, a misbehaving task can monopolize the CPU and starve other tasks. Cooperative scheduling requires trust, which violates our security principles.
+
+**Solution**:
+- Deterministic preemptive scheduler
+- Round-robin task selection (FIFO queue)
+- Time-sliced execution (configurable quantum)
+- Integrated with CPU tick accounting
+- Mechanism, not policy (no priorities, no fairness)
+
+**Impact**:
+- Tasks can be interrupted and switched
+- CPU budget enforcement can prevent runaway tasks
+- Deterministic behavior for testing
+- Foundation for future scheduling policies
+
+**Design**:
+```rust
+// Scheduler configuration
+let config = SchedulerConfig {
+    quantum_ticks: 10,  // Time slice per task
+    max_steps_per_tick: Some(1000),
+};
+
+let mut kernel = SimulatedKernel::new()
+    .with_scheduler_config(config);
+
+// Tasks are automatically enqueued when spawned
+kernel.spawn_task(descriptor)?;
+
+// Run scheduler with tick-based preemption
+kernel.run_for_ticks(100);
+
+// Or run for N scheduling rounds
+kernel.run_for_steps(5);
+
+// Inspect scheduling decisions (test-only)
+let audit = kernel.scheduler_audit();
+```
+
+**Philosophy**:
+- **Scheduling is mechanism, not policy**: The scheduler provides preemption infrastructure without imposing fairness or priority policies.
+- **Determinism first**: Same inputs + same ticks => same schedule. No randomness, no time-of-day, no hidden state.
+- **No hidden yields**: Preemption is explicit and testable. Tasks are cooperative by default, but preemption exists as a kernel mechanism.
+- **Correctness over performance**: We aim for correct behavior, not optimal throughput. "Correct" beats "nice".
+
+**What We DON'T Have (Intentionally)**:
+- ❌ Priorities or fairness policies
+- ❌ SMP / multi-core scheduling
+- ❌ Blocking syscalls or user/kernel mode
+- ❌ Real interrupt controller integration (yet)
+- ❌ Starvation prevention
+
+**Task States**:
+- `Runnable`: Task is ready to execute
+- `Blocked`: Task is waiting for I/O or resources
+- `Exited`: Task has terminated normally
+- `Cancelled`: Task was terminated due to resource exhaustion
+
+**Preemption Points**:
+- After executing for `quantum_ticks` ticks
+- When task budget is exhausted (automatic cancellation)
+- When task explicitly yields (future feature)
+
+**Integration with Resource Budgets**:
+```rust
+// Task with CPU budget
+let budget = ResourceBudget {
+    cpu_ticks: Some(CpuTicks::new(1000)),
+    ..Default::default()
+};
+
+// Task runs until budget exhausted
+// Scheduler automatically removes cancelled tasks
+kernel.run_for_ticks(1500);
+
+// Check scheduler state
+assert_eq!(
+    kernel.scheduler().task_state(task_id),
+    Some(TaskState::Cancelled)
+);
+```
+
+**Hardware Interrupt Seam** (Future):
+
+The scheduler is designed for simulation but provides hooks for hardware integration:
+
+1. **Interrupt-driven preemption**: Hardware timer interrupts can trigger `scheduler.on_tick_advanced()` to update quantum tracking.
+
+2. **Context switching**: When `scheduler.should_preempt()` returns true, an interrupt handler can save/restore task contexts.
+
+3. **Policy separation**: The scheduler state remains separate from interrupt handling, allowing the same scheduling logic to work in both simulated and hardware environments.
+
+4. **What doesn't change**: Identity model, capability model, and resource budgets remain unchanged. Only the trigger mechanism (simulation vs. interrupts) differs.
+
+**Example hardware integration** (not implemented):
+```rust
+// Timer interrupt handler (future)
+fn timer_interrupt() {
+    let ticks = timer.poll_ticks();
+    scheduler.on_tick_advanced(ticks);
+    
+    if let Some(current) = scheduler.current_task() {
+        if scheduler.should_preempt(current) {
+            save_context(current);
+            scheduler.preempt_current();
+            
+            if let Some(next) = scheduler.dequeue_next() {
+                restore_context(next);
+            }
+        }
+    }
+}
+```
+
 ## System Layers
 
 ```
@@ -186,10 +302,10 @@ let ticks = timer.poll_ticks(); // Reads from 8254 PIT
 - Capability management
 
 **Kernel Implementation**
-- Scheduling (not yet implemented)
+- Preemptive scheduling (Phase 23)
+- Resource accounting (Phase 12)
 - Memory management (not yet implemented)
 - Hardware interaction
-- Resource accounting
 
 **HAL**
 - CPU operations
