@@ -39,7 +39,7 @@ This establishes the B1 milestone: bootloader integration and a stub kernel entr
 - `.cargo/config.toml`
 - `xtask/Cargo.toml`
 - `xtask/src/main.rs`
-- `boot/limine.cfg`
+- `boot/limine.conf`
 - `third_party/limine/README.md`
 - `docs/qemu_boot.md`
 - `PHASE42_SUMMARY.md`
