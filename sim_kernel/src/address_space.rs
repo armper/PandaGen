@@ -224,11 +224,7 @@ impl AddressSpaceManager {
             timestamp_nanos,
         });
 
-        Ok(MemoryRegionCap::new(
-            space_cap.space_id,
-            region_id,
-            cap_id,
-        ))
+        Ok(MemoryRegionCap::new(space_cap.space_id, region_id, cap_id))
     }
 
     /// Checks if an access to a region is allowed
@@ -324,10 +320,7 @@ impl AddressSpaceManager {
     }
 
     /// Returns the address space for an execution
-    pub fn get_space_for_execution(
-        &self,
-        execution_id: ExecutionId,
-    ) -> Option<&AddressSpace> {
+    pub fn get_space_for_execution(&self, execution_id: ExecutionId) -> Option<&AddressSpace> {
         let space_id = self.execution_to_space.get(&execution_id)?;
         self.spaces.get(space_id)
     }
@@ -397,10 +390,9 @@ mod tests {
 
         assert!(manager.get_space_for_execution(exec_id).is_some());
         assert_eq!(manager.audit_log().events().len(), 1);
-        assert!(manager.audit_log().has_event(|e| matches!(
-            e,
-            AddressSpaceEvent::SpaceCreated { .. }
-        )));
+        assert!(manager
+            .audit_log()
+            .has_event(|e| matches!(e, AddressSpaceEvent::SpaceCreated { .. })));
     }
 
     #[test]
@@ -419,10 +411,9 @@ mod tests {
 
         assert_eq!(region_cap.region_id, region_id);
         assert_eq!(manager.audit_log().events().len(), 2);
-        assert!(manager.audit_log().has_event(|e| matches!(
-            e,
-            AddressSpaceEvent::RegionAllocated { .. }
-        )));
+        assert!(manager
+            .audit_log()
+            .has_event(|e| matches!(e, AddressSpaceEvent::RegionAllocated { .. })));
     }
 
     #[test]
@@ -480,10 +471,9 @@ mod tests {
 
         assert!(manager.activate_space(exec_id, 2000).is_ok());
         assert!(manager.current_space().is_some());
-        assert!(manager.audit_log().has_event(|e| matches!(
-            e,
-            AddressSpaceEvent::SpaceActivated { .. }
-        )));
+        assert!(manager
+            .audit_log()
+            .has_event(|e| matches!(e, AddressSpaceEvent::SpaceActivated { .. })));
     }
 
     #[test]
@@ -497,10 +487,9 @@ mod tests {
 
         assert!(manager.destroy_address_space(exec_id, 3000).is_ok());
         assert!(manager.get_space_for_execution(exec_id).is_none());
-        assert!(manager.audit_log().has_event(|e| matches!(
-            e,
-            AddressSpaceEvent::SpaceDestroyed { .. }
-        )));
+        assert!(manager
+            .audit_log()
+            .has_event(|e| matches!(e, AddressSpaceEvent::SpaceDestroyed { .. })));
     }
 
     #[test]

@@ -346,6 +346,12 @@ impl AddressSpace {
     }
 }
 
+impl Default for AddressSpace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Memory-related errors
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MemoryError {
@@ -525,12 +531,12 @@ mod tests {
     #[test]
     fn test_address_space_add_region() {
         let mut space = AddressSpace::new();
-        
+
         let region = MemoryRegion::new(4096, MemoryPerms::read_write(), MemoryBacking::Anonymous);
         let region_id = region.region_id;
-        
+
         space.add_region(region).unwrap();
-        
+
         assert_eq!(space.region_count(), 1);
         assert_eq!(space.total_size_bytes(), 4096);
         assert!(space.find_region(region_id).is_some());
@@ -539,13 +545,14 @@ mod tests {
     #[test]
     fn test_address_space_multiple_regions() {
         let mut space = AddressSpace::new();
-        
+
         let region1 = MemoryRegion::new(4096, MemoryPerms::read_write(), MemoryBacking::Anonymous);
-        let region2 = MemoryRegion::new(8192, MemoryPerms::read_execute(), MemoryBacking::Anonymous);
-        
+        let region2 =
+            MemoryRegion::new(8192, MemoryPerms::read_execute(), MemoryBacking::Anonymous);
+
         space.add_region(region1).unwrap();
         space.add_region(region2).unwrap();
-        
+
         assert_eq!(space.region_count(), 2);
         assert_eq!(space.total_size_bytes(), 12288);
     }
@@ -553,13 +560,13 @@ mod tests {
     #[test]
     fn test_address_space_remove_region() {
         let mut space = AddressSpace::new();
-        
+
         let region = MemoryRegion::new(4096, MemoryPerms::read_write(), MemoryBacking::Anonymous);
         let region_id = region.region_id;
-        
+
         space.add_region(region).unwrap();
         assert_eq!(space.region_count(), 1);
-        
+
         let removed = space.remove_region(region_id);
         assert!(removed.is_some());
         assert_eq!(space.region_count(), 0);
