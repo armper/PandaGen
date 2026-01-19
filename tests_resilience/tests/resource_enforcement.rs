@@ -3,6 +3,7 @@
 //! Phase 12: These tests validate resource budget enforcement:
 //! - Message budget exhaustion (send/receive)
 //! - CPU exhaustion
+//! - Pipeline stages exhaustion
 //! - Cancellation due to exhaustion
 //! - Fault injection interaction with enforcement
 //!
@@ -12,7 +13,7 @@ use core_types::ServiceId;
 use identity::{IdentityKind, TrustDomain};
 use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{KernelApi, KernelError, TaskDescriptor};
-use resources::{MessageCount, ResourceBudget};
+use resources::{CpuTicks, MessageCount, PipelineStages, ResourceBudget};
 use sim_kernel::{resource_audit, SimulatedKernel};
 
 // ============================================================================
@@ -571,4 +572,236 @@ fn test_unlimited_budget_never_exhausts() {
         0,
         "Should have 0 budget exhausted events"
     );
+}
+
+// ============================================================================
+// Test B: CPU Exhaustion
+// ============================================================================
+
+#[test]
+fn test_cpu_ticks_budget_exhaustion() {
+    let mut kernel = SimulatedKernel::new();
+
+    // Create task with limited CPU budget
+    let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(100));
+
+    let descriptor = TaskDescriptor::new("cpu_limited".to_string());
+    let (_, exec_id) = kernel
+        .spawn_task_with_identity(
+            descriptor,
+            IdentityKind::Component,
+            TrustDomain::user(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    if let Some(identity) = kernel.get_identity_mut(exec_id) {
+        *identity = identity.clone().with_budget(budget);
+    }
+
+    // Consume CPU ticks - should succeed within budget
+    for i in 0..5 {
+        let result = kernel.try_consume_cpu_ticks(exec_id, 20);
+        assert!(
+            result.is_ok(),
+            "Consumption {} should succeed (under budget)",
+            i
+        );
+    }
+
+    // Verify we've consumed exactly 100 ticks
+    let identity = kernel.get_identity(exec_id).unwrap();
+    assert_eq!(identity.usage.cpu_ticks.0, 100);
+
+    // Next consumption should fail (budget exhausted)
+    let result = kernel.try_consume_cpu_ticks(exec_id, 1);
+    assert!(result.is_err(), "Should fail - budget exhausted");
+
+    match result {
+        Err(KernelError::ResourceBudgetExhausted {
+            resource_type,
+            limit,
+            usage,
+            ..
+        }) => {
+            assert_eq!(resource_type, "CpuTicks");
+            assert_eq!(limit, 100);
+            assert_eq!(usage, 100);
+        }
+        _ => panic!("Expected ResourceBudgetExhausted error"),
+    }
+
+    // Verify audit log
+    let audit = kernel.resource_audit();
+    assert_eq!(
+        audit.count_events(|e| matches!(e, resource_audit::ResourceEvent::CpuConsumed { .. })),
+        5,
+        "Should have 5 CPU consumed events"
+    );
+    assert_eq!(
+        audit.count_events(|e| matches!(e, resource_audit::ResourceEvent::BudgetExhausted { .. })),
+        1,
+        "Should have 1 budget exhausted event"
+    );
+}
+
+#[test]
+fn test_cpu_ticks_no_double_consumption() {
+    let mut kernel = SimulatedKernel::new();
+
+    let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(50));
+
+    let descriptor = TaskDescriptor::new("test_task".to_string());
+    let (_, exec_id) = kernel
+        .spawn_task_with_identity(
+            descriptor,
+            IdentityKind::Component,
+            TrustDomain::user(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    if let Some(identity) = kernel.get_identity_mut(exec_id) {
+        *identity = identity.clone().with_budget(budget);
+    }
+
+    // Consume 30 ticks
+    kernel.try_consume_cpu_ticks(exec_id, 30).unwrap();
+
+    // Check identity usage
+    let identity = kernel.get_identity(exec_id).unwrap();
+    assert_eq!(identity.usage.cpu_ticks.0, 30);
+
+    // Verify audit: exactly 1 event
+    let audit = kernel.resource_audit();
+    assert_eq!(
+        audit.count_events(|e| matches!(e, resource_audit::ResourceEvent::CpuConsumed { .. })),
+        1,
+        "Should have exactly 1 CPU consumed event"
+    );
+}
+
+// ============================================================================
+// Test D: Pipeline Stage Exhaustion
+// ============================================================================
+
+#[test]
+fn test_pipeline_stage_budget_exhaustion() {
+    let mut kernel = SimulatedKernel::new();
+
+    // Create task with limited pipeline stage budget
+    let budget = ResourceBudget::unlimited().with_pipeline_stages(PipelineStages::new(3));
+
+    let descriptor = TaskDescriptor::new("pipeline_limited".to_string());
+    let (_, exec_id) = kernel
+        .spawn_task_with_identity(
+            descriptor,
+            IdentityKind::Component,
+            TrustDomain::user(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    if let Some(identity) = kernel.get_identity_mut(exec_id) {
+        *identity = identity.clone().with_budget(budget);
+    }
+
+    // Consume pipeline stages - should succeed within budget
+    for i in 0..3 {
+        let result = kernel.try_consume_pipeline_stage(exec_id, format!("stage_{}", i));
+        assert!(result.is_ok(), "Stage {} should succeed (under budget)", i);
+    }
+
+    // Verify we've consumed exactly 3 stages
+    let identity = kernel.get_identity(exec_id).unwrap();
+    assert_eq!(identity.usage.pipeline_stages.0, 3);
+
+    // Next stage should fail (budget exhausted)
+    let result = kernel.try_consume_pipeline_stage(exec_id, "stage_3".to_string());
+    assert!(result.is_err(), "Should fail - budget exhausted");
+
+    match result {
+        Err(KernelError::ResourceBudgetExhausted {
+            resource_type,
+            limit,
+            usage,
+            ..
+        }) => {
+            assert_eq!(resource_type, "PipelineStages");
+            assert_eq!(limit, 3);
+            assert_eq!(usage, 3);
+        }
+        _ => panic!("Expected ResourceBudgetExhausted error"),
+    }
+
+    // Verify audit log
+    let audit = kernel.resource_audit();
+    assert_eq!(
+        audit.count_events(|e| matches!(
+            e,
+            resource_audit::ResourceEvent::PipelineStageConsumed { .. }
+        )),
+        3,
+        "Should have 3 pipeline stage consumed events"
+    );
+    assert_eq!(
+        audit.count_events(|e| matches!(e, resource_audit::ResourceEvent::BudgetExhausted { .. })),
+        1,
+        "Should have 1 budget exhausted event"
+    );
+}
+
+#[test]
+fn test_pipeline_stage_cancellation_integration() {
+    let mut kernel = SimulatedKernel::new();
+
+    let budget = ResourceBudget::unlimited().with_pipeline_stages(PipelineStages::new(2));
+
+    let descriptor = TaskDescriptor::new("test_task".to_string());
+    let (_, exec_id) = kernel
+        .spawn_task_with_identity(
+            descriptor,
+            IdentityKind::Component,
+            TrustDomain::user(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    if let Some(identity) = kernel.get_identity_mut(exec_id) {
+        *identity = identity.clone().with_budget(budget);
+    }
+
+    // Consume entire budget
+    kernel
+        .try_consume_pipeline_stage(exec_id, "stage_0".to_string())
+        .unwrap();
+    kernel
+        .try_consume_pipeline_stage(exec_id, "stage_1".to_string())
+        .unwrap();
+
+    // Next stage exhausts budget and triggers cancellation
+    let result = kernel.try_consume_pipeline_stage(exec_id, "stage_2".to_string());
+    assert!(result.is_err(), "Should fail due to exhaustion");
+
+    // Try another stage - should fail immediately due to cancellation
+    let result2 = kernel.try_consume_pipeline_stage(exec_id, "stage_3".to_string());
+    assert!(
+        result2.is_err(),
+        "Should fail due to cancellation (before checking budget)"
+    );
+
+    // Verify it's a cancellation error
+    match result2 {
+        Err(KernelError::ResourceBudgetExhausted { resource_type, .. }) => {
+            assert!(
+                resource_type.contains("cancelled"),
+                "Error should indicate cancellation"
+            );
+        }
+        _ => panic!("Expected ResourceBudgetExhausted with cancellation"),
+    }
 }

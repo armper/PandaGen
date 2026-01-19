@@ -36,6 +36,7 @@ use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+use resources::CpuTicks;
 use std::collections::{HashMap, VecDeque};
 
 /// Simulated kernel state
@@ -167,6 +168,170 @@ impl SimulatedKernel {
     /// Phase 12: Call this after receive_message to clean up context.
     pub fn clear_receive_context(&mut self) {
         self.current_receive_task = None;
+    }
+
+    /// Attempts to consume CPU ticks for an execution identity
+    ///
+    /// Phase 12: External enforcement point for CPU consumption.
+    /// Returns Err if budget is exhausted or identity is cancelled.
+    pub fn try_consume_cpu_ticks(
+        &mut self,
+        execution_id: ExecutionId,
+        amount: u64,
+    ) -> Result<(), KernelError> {
+        // Check if identity is cancelled
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "CpuTicks (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: "cpu_consumption".to_string(),
+            });
+        }
+
+        // Get identity metadata
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()), // No identity - backward compat
+        };
+
+        // Check if identity has a budget
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()), // No budget - unlimited
+        };
+
+        // Check current usage
+        let current_usage = identity.usage.cpu_ticks.0;
+
+        // Check if we would exceed the limit
+        if let Some(limit) = budget.cpu_ticks {
+            if current_usage + amount > limit.0 {
+                // Budget exhausted - cancel identity and fail
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "CpuTicks".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + amount,
+                        operation: "cpu_consumption".to_string(),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "CpuTicks".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "CpuTicks".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: "cpu_consumption".to_string(),
+                });
+            }
+        }
+
+        // Consume the CPU ticks
+        let before = current_usage;
+        identity
+            .usage
+            .consume_cpu_ticks(CpuTicks::new(amount));
+        let after = identity.usage.cpu_ticks.0;
+
+        // Record audit event
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::CpuConsumed {
+                execution_id,
+                amount,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Attempts to consume a pipeline stage for an execution identity
+    ///
+    /// Phase 12: External enforcement point for pipeline stage consumption.
+    /// Returns Err if budget is exhausted or identity is cancelled.
+    pub fn try_consume_pipeline_stage(
+        &mut self,
+        execution_id: ExecutionId,
+        stage_name: String,
+    ) -> Result<(), KernelError> {
+        // Check if identity is cancelled
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "PipelineStages (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("pipeline_stage:{}", stage_name),
+            });
+        }
+
+        // Get identity metadata
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()), // No identity - backward compat
+        };
+
+        // Check if identity has a budget
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()), // No budget - unlimited
+        };
+
+        // Check current usage
+        let current_usage = identity.usage.pipeline_stages.0;
+
+        // Check if we would exceed the limit
+        if let Some(limit) = budget.pipeline_stages {
+            if current_usage >= limit.0 {
+                // Budget exhausted - cancel identity and fail
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "PipelineStages".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("pipeline_stage:{}", stage_name),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "PipelineStages".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "PipelineStages".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("pipeline_stage:{}", stage_name),
+                });
+            }
+        }
+
+        // Consume the pipeline stage
+        let before = current_usage;
+        identity.usage.consume_pipeline_stage();
+        let after = identity.usage.pipeline_stages.0;
+
+        // Record audit event
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::PipelineStageConsumed {
+                execution_id,
+                stage_name,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
     }
 
     /// Cancels an execution identity due to resource exhaustion
