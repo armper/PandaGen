@@ -1,0 +1,12 @@
+[package]
+name = "fs_view"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types.workspace = true
+services_storage.workspace = true
+serde.workspace = true
+thiserror.workspace = true

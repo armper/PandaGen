@@ -3,6 +3,8 @@
 //! This is a simple demonstration of wiring services together.
 //! It is NOT a shell and NOT intended for POSIX compatibility.
 
+pub mod commands;
+
 use kernel_api::{KernelApi, TaskDescriptor};
 use services_registry::ServiceRegistry;
 use sim_kernel::SimulatedKernel;

@@ -1,5 +1,5 @@
 [package]
-name = "cli_console"
+name = "services_fs_view"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,10 +7,7 @@ license.workspace = true
 
 [dependencies]
 core_types.workspace = true
-kernel_api.workspace = true
-ipc.workspace = true
-sim_kernel.workspace = true
-services_registry.workspace = true
 services_storage.workspace = true
-services_fs_view.workspace = true
 fs_view.workspace = true
+serde.workspace = true
+thiserror.workspace = true

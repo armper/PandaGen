@@ -12,6 +12,8 @@ members = [
     "services_logger",
     "services_storage",
     "services_pipeline_executor",
+    "services_fs_view",
+    "fs_view",
     "intent_router",
     "pipeline",
     "lifecycle",
@@ -45,6 +47,8 @@ services_process_manager = { path = "services_process_manager" }
 services_logger = { path = "services_logger" }
 services_storage = { path = "services_storage" }
 services_pipeline_executor = { path = "services_pipeline_executor" }
+services_fs_view = { path = "services_fs_view" }
+fs_view = { path = "fs_view" }
 intent_router = { path = "intent_router" }
 pipeline = { path = "pipeline" }
 lifecycle = { path = "lifecycle" }
