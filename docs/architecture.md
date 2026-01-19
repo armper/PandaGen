@@ -514,6 +514,148 @@ assert_eq!(invalid_count, expected_count);
 - Hardware memory protection prevents capability inspection/modification
 - Same semantics as SimulatedKernel, proven by tests
 
+### Phase 4: Interface Evolution Discipline
+
+**Phase 4 (Current)**: Disciplined evolution model for IPC and storage schemas.
+
+The system now includes:
+- **IPC Schema Evolution Policy**: Clear rules for breaking vs non-breaking changes
+- **Version Policy Enforcement**: Type-safe version checking with explicit errors
+- **Service Contract Tests**: Golden tests that prevent accidental interface drift
+- **Storage Schema Evolution**: Identity, versioning, and migration hooks for durable objects
+
+**Philosophy**:
+- **Explicit over implicit**: Version policies are written in code, not conventions
+- **Testability first**: Contract tests catch breaking changes before deployment
+- **Modularity first**: Services evolve independently within version contracts
+- **Mechanism not policy**: Core provides versioning primitives, services define policies
+- **No ossification**: Bounded compatibility prevents accumulating legacy baggage
+
+**Evolution Without Legacy Thinking**:
+
+Traditional systems struggle with evolution because backward compatibility becomes:
+- A constraint that prevents improvement
+- A source of complexity (compatibility layers, shims)
+- A maintenance burden (supporting ancient versions forever)
+- An accumulation of technical debt
+
+PandaGen takes a different approach:
+- **Bounded compatibility**: Support N and N-1, explicitly reject older versions
+- **Explicit version checks**: No silent failures or undefined behavior
+- **Contract testing**: Catch breaking changes in CI, not production
+- **Graceful migration**: Clear error messages guide upgrades
+- **Test-first evolution**: Version handling is tested like any other feature
+
+**IPC Schema Evolution Model**:
+
+1. **Schema Versioning**:
+   ```rust
+   pub struct SchemaVersion {
+       pub major: u32,  // Breaking changes
+       pub minor: u32,  // Backward-compatible additions
+   }
+   ```
+
+2. **Version Policy**:
+   ```rust
+   let policy = VersionPolicy::current(3, 0)
+       .with_min_major(2);  // Support v2.x and v3.x
+   
+   match policy.check_compatibility(&incoming_version) {
+       Compatibility::Compatible => { /* handle */ }
+       Compatibility::UpgradeRequired => { /* error */ }
+       Compatibility::Unsupported => { /* error */ }
+   }
+   ```
+
+3. **Explicit Error Handling**:
+   - Schema mismatch returns detailed error with versions and service identity
+   - Sender knows exactly what went wrong and how to fix it
+   - No silent failures or mysterious deserialization errors
+
+**Storage Schema Evolution Model**:
+
+Storage objects evolve over time. Each object has:
+- **Schema Identity**: What type of object (e.g., "user-profile", "audit-event")
+- **Schema Version**: Which version of that schema
+- **Migration Path**: How to transform old versions to new versions
+
+```rust
+pub struct ObjectSchemaId(String);
+pub struct ObjectSchemaVersion(u32);
+
+// Objects carry schema metadata
+pub struct StoredObject {
+    pub id: ObjectId,
+    pub version: VersionId,
+    pub schema_id: ObjectSchemaId,
+    pub schema_version: ObjectSchemaVersion,
+    pub data: Vec<u8>,
+}
+
+// Migration is a pure function
+pub trait Migrator {
+    fn migrate(
+        &self,
+        from_version: ObjectSchemaVersion,
+        to_version: ObjectSchemaVersion,
+        data: &[u8],
+    ) -> Result<Vec<u8>, MigrationError>;
+}
+```
+
+**Key Properties**:
+- Migrations are deterministic (same input → same output)
+- Migrations are testable (pure functions, no side effects)
+- Old versions remain accessible (version immutability)
+- Schema identity is explicit, not inferred from structure
+
+**Service Contract Testing**:
+
+Contract tests act as "golden" tests for service interfaces:
+- Define canonical message structures for each service operation
+- Fail CI if envelope fields change unexpectedly
+- Fail CI if schema versions change without intentional update
+- Fail CI if action identifiers drift
+
+Example:
+```rust
+#[test]
+fn test_registry_register_contract() {
+    // This test ensures the "register" action contract stays stable
+    let request = RegistryRegisterRequest {
+        service_id: ServiceId::new(),
+        channel: ChannelId::new(),
+    };
+    
+    let envelope = MessageEnvelope::new(
+        registry_service_id(),
+        "registry.register".to_string(),
+        SchemaVersion::new(1, 0),
+        MessagePayload::new(&request).unwrap(),
+    );
+    
+    // If these assertions fail, it's a breaking change
+    assert_eq!(envelope.action, "registry.register");
+    assert_eq!(envelope.schema_version.major, 1);
+}
+```
+
+**Why This Matters**:
+
+Evolution is a first-class design concern:
+- Systems don't stay static - they grow, change, adapt
+- Without discipline, evolution leads to fragmentation and breakage
+- With discipline, evolution is controlled, testable, and safe
+
+PandaGen proves that you can evolve without ossifying:
+- Explicit version policies prevent surprise breakage
+- Contract tests catch drift before it reaches production
+- Bounded compatibility avoids legacy accumulation
+- Clear errors make debugging straightforward
+
+This is **evolution as a feature**, not evolution as technical debt.
+
 ### Performance
 
 Currently optimized for clarity, not performance. Future work:

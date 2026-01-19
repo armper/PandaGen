@@ -11,6 +11,7 @@
 //! - Versioned objects (not files)
 //! - Transactional operations (not filesystem calls)
 //! - Explicit types (Blob, Log, Map)
+//! - Schema evolution with migration support
 //!
 //! ## Design
 //!
@@ -18,9 +19,13 @@
 //! - **ObjectId**: Unique identifier (not paths)
 //! - **VersionId**: Every object version is immutable and addressable
 //! - **Transactions**: Atomic operations with rollback
+//! - **Schema Evolution**: Objects have schema identity and version
+//! - **Migration**: Deterministic, testable data transformations
 
+pub mod migration;
 pub mod object;
 pub mod transaction;
 
+pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
 pub use transaction::{Transaction, TransactionError, TransactionState};

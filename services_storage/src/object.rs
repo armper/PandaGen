@@ -116,6 +116,12 @@ pub struct Object {
     pub version: VersionId,
     /// Object kind
     pub kind: ObjectKind,
+    /// Schema identifier (what type of data this object contains)
+    pub schema_id: Option<core_types::ObjectSchemaId>,
+    /// Schema version (which version of the schema)
+    pub schema_version: Option<core_types::ObjectSchemaVersion>,
+    /// Optional migration lineage
+    pub migration_lineage: Option<core_types::MigrationLineage>,
     /// Metadata (tags, timestamps, etc.)
     pub metadata: Vec<(String, String)>,
 }
@@ -127,8 +133,28 @@ impl Object {
             id: ObjectId::new(),
             version: VersionId::new(),
             kind,
+            schema_id: None,
+            schema_version: None,
+            migration_lineage: None,
             metadata: Vec::new(),
         }
+    }
+
+    /// Sets the schema identity for this object
+    pub fn with_schema(
+        mut self,
+        schema_id: core_types::ObjectSchemaId,
+        schema_version: core_types::ObjectSchemaVersion,
+    ) -> Self {
+        self.schema_id = Some(schema_id);
+        self.schema_version = Some(schema_version);
+        self
+    }
+
+    /// Sets migration lineage for this object
+    pub fn with_migration_lineage(mut self, lineage: core_types::MigrationLineage) -> Self {
+        self.migration_lineage = Some(lineage);
+        self
     }
 
     /// Adds metadata to the object

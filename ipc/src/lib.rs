@@ -25,4 +25,7 @@ pub mod channel;
 pub mod message;
 
 pub use channel::{ChannelEnd, ChannelId};
-pub use message::{Message, MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
+pub use message::{
+    Compatibility, Message, MessageEnvelope, MessageId, MessagePayload, SchemaMismatchError,
+    SchemaVersion, VersionPolicy,
+};

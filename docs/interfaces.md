@@ -386,6 +386,167 @@ if v1_0.is_compatible_with(&v1_1) {
 - Receiver checks version before deserializing
 - Mismatch is an error, not undefined behavior
 
+### IPC Schema Evolution Policy
+
+PandaGen implements a disciplined, testable evolution model for IPC message schemas.
+
+#### Schema Version Semantics
+
+Every `MessageEnvelope` contains a `schema_version` field with two components:
+- **Major version**: Incremented for breaking changes
+- **Minor version**: Incremented for backward-compatible changes
+
+```rust
+pub struct SchemaVersion {
+    pub major: u32,  // Breaking changes
+    pub minor: u32,  // Backward-compatible additions
+}
+```
+
+#### Breaking vs Non-Breaking Changes
+
+**NON-BREAKING Changes** (increment minor version only):
+- Adding optional fields to message payloads
+- Adding new action types (methods)
+- Adding new error variants (as long as unknown errors are handled gracefully)
+- Relaxing validation rules
+- Adding new metadata fields to envelopes
+
+Examples:
+```rust
+// v1.0: Original payload
+struct RequestV1 {
+    name: String,
+}
+
+// v1.1: Added optional field (non-breaking)
+struct RequestV1_1 {
+    name: String,
+    #[serde(default)]
+    timeout: Option<Duration>,
+}
+```
+
+**BREAKING Changes** (increment major version):
+- Removing fields from payloads
+- Renaming fields (without backward-compatibility shims)
+- Changing field types
+- Changing field semantics (same name, different meaning)
+- Removing action types (methods)
+- Reordering required fields (if using positional encoding)
+- Making optional fields required
+- Tightening validation rules
+
+Examples:
+```rust
+// v1.0: Original
+struct RequestV1 {
+    name: String,
+    size: u32,  // in bytes
+}
+
+// v2.0: Changed semantics (breaking)
+struct RequestV2 {
+    name: String,
+    size: u32,  // NOW in kilobytes - BREAKING!
+}
+```
+
+#### Supported Version Window Policy
+
+PandaGen uses a **"current + previous major version"** policy:
+- Services MUST support the current major version
+- Services SHOULD support the previous major version (N-1)
+- Services MAY reject versions older than N-1
+- All minor versions within a major version are compatible
+
+Example:
+- If current version is v3.x, service must support v3.x and should support v2.x
+- Service may reject v1.x requests with explicit error
+
+This policy:
+- Avoids infinite backward compatibility (not a legacy system)
+- Allows controlled evolution
+- Provides migration window for upgrades
+- Keeps implementation complexity bounded
+
+#### Version Negotiation and Error Handling
+
+When a service receives a message with an unsupported schema version:
+
+1. **Check version compatibility**:
+   ```rust
+   let policy = VersionPolicy::new(current_major, current_minor);
+   match policy.check_compatibility(&incoming_version) {
+       Compatibility::Compatible => { /* process message */ }
+       Compatibility::UpgradeRequired => {
+           // Sender too old, return upgrade error
+           return Err(SchemaMismatchError::upgrade_required(...));
+       }
+       Compatibility::Unsupported => {
+           // Version too new or too old
+           return Err(SchemaMismatchError::unsupported(...));
+       }
+   }
+   ```
+
+2. **Return explicit error**: Never fail silently or with generic errors
+   - Error MUST include: expected version range, received version, service identity
+   - Error SHOULD suggest remediation (upgrade sender, downgrade sender, wait for service update)
+
+3. **Log the mismatch**: For debugging and monitoring
+   - Track version mismatch patterns
+   - Identify clients needing upgrades
+
+#### Error Response Format
+
+```rust
+pub enum SchemaMismatchError {
+    /// Sender is using too old a version
+    UpgradeRequired {
+        service: ServiceId,
+        expected_min: SchemaVersion,
+        received: SchemaVersion,
+    },
+    /// Version is not supported (too new or too old)
+    Unsupported {
+        service: ServiceId,
+        supported_range: (SchemaVersion, SchemaVersion),
+        received: SchemaVersion,
+    },
+}
+```
+
+#### Testing Schema Evolution
+
+Contract tests MUST verify:
+- Envelope structure remains stable across versions
+- Schema version policy is enforced
+- Version mismatch errors are explicit and actionable
+- Services correctly reject unsupported versions
+
+Example:
+```rust
+#[test]
+fn test_reject_too_old_version() {
+    let policy = VersionPolicy::current(3, 0).with_min_major(2);
+    let old_version = SchemaVersion::new(1, 9);
+    
+    assert_eq!(
+        policy.check_compatibility(&old_version),
+        Compatibility::Unsupported
+    );
+}
+```
+
+#### Philosophy
+
+- **Explicit over implicit**: Version checks are explicit in code, not magical
+- **Testability first**: Version logic is pure functions, fully testable
+- **Bounded compatibility**: No "forever support" - controlled evolution
+- **Clear errors**: When versions mismatch, debugging is straightforward
+- **No negotiation overhead**: Static policies enforced by tests, not runtime discovery
+
 ### Correlation IDs
 
 ```rust
