@@ -253,83 +253,52 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
             })
         }
         "list" => Ok(WorkspaceCommand::List),
-        "focus" => {
-            if parts.len() < 2 {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Usage: focus <component_id>".to_string(),
-                ));
-            }
-
-            // Try to parse component ID
-            let id_str = parts[1];
-            if !id_str.starts_with("comp:") {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Component ID must start with 'comp:'".to_string(),
-                ));
-            }
-
-            let uuid_str = &id_str[5..];
-            let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|_| {
-                WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str))
-            })?;
-
-            Ok(WorkspaceCommand::Focus {
-                component_id: ComponentId(uuid),
-            })
-        }
+        "focus" => parse_component_id_command(&parts, "focus", |id| WorkspaceCommand::Focus {
+            component_id: id,
+        }),
         "next" => Ok(WorkspaceCommand::FocusNext),
         "prev" | "previous" => Ok(WorkspaceCommand::FocusPrev),
-        "close" => {
-            if parts.len() < 2 {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Usage: close <component_id>".to_string(),
-                ));
-            }
-
-            let id_str = parts[1];
-            if !id_str.starts_with("comp:") {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Component ID must start with 'comp:'".to_string(),
-                ));
-            }
-
-            let uuid_str = &id_str[5..];
-            let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|_| {
-                WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str))
-            })?;
-
-            Ok(WorkspaceCommand::Close {
-                component_id: ComponentId(uuid),
-            })
-        }
-        "status" => {
-            if parts.len() < 2 {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Usage: status <component_id>".to_string(),
-                ));
-            }
-
-            let id_str = parts[1];
-            if !id_str.starts_with("comp:") {
-                return Err(WorkspaceError::InvalidCommand(
-                    "Component ID must start with 'comp:'".to_string(),
-                ));
-            }
-
-            let uuid_str = &id_str[5..];
-            let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|_| {
-                WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str))
-            })?;
-
-            Ok(WorkspaceCommand::Status {
-                component_id: ComponentId(uuid),
-            })
-        }
+        "close" => parse_component_id_command(&parts, "close", |id| WorkspaceCommand::Close {
+            component_id: id,
+        }),
+        "status" => parse_component_id_command(&parts, "status", |id| WorkspaceCommand::Status {
+            component_id: id,
+        }),
         unknown => Err(WorkspaceError::InvalidCommand(format!(
             "Unknown command: {}",
             unknown
         ))),
     }
+}
+
+/// Helper function to parse commands that take a component ID
+fn parse_component_id_command<F>(
+    parts: &[&str],
+    command_name: &str,
+    constructor: F,
+) -> Result<WorkspaceCommand, WorkspaceError>
+where
+    F: FnOnce(ComponentId) -> WorkspaceCommand,
+{
+    if parts.len() < 2 {
+        return Err(WorkspaceError::InvalidCommand(format!(
+            "Usage: {} <component_id>",
+            command_name
+        )));
+    }
+
+    let id_str = parts[1];
+    if !id_str.starts_with("comp:") {
+        return Err(WorkspaceError::InvalidCommand(
+            "Component ID must start with 'comp:'".to_string(),
+        ));
+    }
+
+    let uuid_str = &id_str[5..];
+    let uuid = uuid::Uuid::parse_str(uuid_str)
+        .map_err(|_| WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str)))?;
+
+    Ok(constructor(ComponentId(uuid)))
 }
 
 #[cfg(test)]
