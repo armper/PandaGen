@@ -87,13 +87,13 @@ fn print_usage(program: &str) {
     eprintln!("Options:");
     eprintln!("  -m, --mode <MODE>        Host mode: sim (default)");
     #[cfg(feature = "hal_mode")]
-    eprintln!("                           or hal");
+    eprintln!("                           or hal (NOTE: hal mode is not yet functional)");
     eprintln!("  -s, --script <FILE>      Input script file (for sim mode)");
     eprintln!("  --max-steps <N>          Maximum steps to run (0 = unlimited)");
     eprintln!("  --exit-on-idle           Exit when no components are running");
     eprintln!("  -h, --help               Show this help message");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} --mode sim --script examples/hello.pgkeys", program);
+    eprintln!("  {} --mode sim --script examples/hello_editor.pgkeys", program);
     eprintln!("  {} --max-steps 100 --exit-on-idle", program);
 }

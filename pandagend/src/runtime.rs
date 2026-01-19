@@ -233,6 +233,10 @@ impl HostRuntime {
     }
 
     /// Pumps input from HAL (hal mode)
+    ///
+    /// **NOTE**: HAL mode is currently a stub and not functional.
+    /// This is a placeholder for future HAL keyboard integration.
+    /// Use sim mode for current functionality.
     #[cfg(feature = "hal_mode")]
     fn pump_hal_input(&mut self) -> Result<(), HostRuntimeError> {
         // TODO: Integrate with services_input_hal_bridge
@@ -269,6 +273,13 @@ impl HostRuntime {
     }
 
     /// Handles input in host control mode
+    ///
+    /// **NOTE**: This is a simplified implementation for basic command input.
+    /// Production implementation should support:
+    /// - Unicode characters and composing text
+    /// - Input method editors (IME)
+    /// - Command history and editing
+    /// - Tab completion
     fn handle_host_control_input(&mut self, event: InputEvent) -> Result<(), HostRuntimeError> {
         let InputEvent::Key(key_event) = event;
         match key_event.code {
@@ -289,7 +300,7 @@ impl HostRuntime {
                 self.command_buffer.pop();
             }
             _ => {
-                // Append character (simplified, real implementation would handle text properly)
+                // Append character (simplified, doesn't handle Shift or other modifiers)
                 if let Some(text) = &key_event.text {
                     self.command_buffer.push_str(text);
                 } else if let Some(c) = Self::keycode_to_char(key_event.code) {
@@ -302,6 +313,12 @@ impl HostRuntime {
     }
 
     /// Converts a KeyCode to a character (simplified)
+    ///
+    /// **NOTE**: This is a minimal implementation that:
+    /// - Only maps to lowercase letters
+    /// - Does not handle Shift modifier for uppercase
+    /// - Does not handle all punctuation
+    /// - Should be replaced with proper text input handling in production
     fn keycode_to_char(code: input_types::KeyCode) -> Option<char> {
         use input_types::KeyCode;
         match code {
