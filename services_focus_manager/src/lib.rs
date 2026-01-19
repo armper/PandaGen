@@ -143,13 +143,15 @@ impl FocusManager {
     ///
     /// Useful when a subscription is revoked or terminated.
     pub fn remove_subscription(&mut self, cap: &InputSubscriptionCap) -> Result<(), FocusError> {
-        let initial_len = self.focus_stack.len();
+        // Find the position of the subscription
+        let pos = self
+            .focus_stack
+            .iter()
+            .position(|c| c.id == cap.id)
+            .ok_or(FocusError::SubscriptionNotFound)?;
 
-        self.focus_stack.retain(|c| c.id != cap.id);
-
-        if self.focus_stack.len() == initial_len {
-            return Err(FocusError::SubscriptionNotFound);
-        }
+        // Remove at that position
+        self.focus_stack.remove(pos);
 
         let timestamp = self.next_timestamp();
         self.audit_trail.push(FocusEvent::Released {

@@ -21,27 +21,25 @@ pub mod input_injection {
     /// In a real system, this would be hardware events.
     /// In simulation, tests explicitly inject events.
     pub struct InputEventQueue {
-        events: Vec<InputEvent>,
+        events: std::collections::VecDeque<InputEvent>,
     }
 
     impl InputEventQueue {
         /// Creates a new input event queue
         pub fn new() -> Self {
-            Self { events: Vec::new() }
+            Self {
+                events: std::collections::VecDeque::new(),
+            }
         }
 
         /// Injects a key event into the queue
         pub fn inject_event(&mut self, event: InputEvent) {
-            self.events.push(event);
+            self.events.push_back(event);
         }
 
         /// Retrieves the next event, if any
         pub fn next_event(&mut self) -> Option<InputEvent> {
-            if self.events.is_empty() {
-                None
-            } else {
-                Some(self.events.remove(0))
-            }
+            self.events.pop_front()
         }
 
         /// Returns the number of pending events
