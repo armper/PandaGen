@@ -5,9 +5,16 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[example]]
+name = "fs_demo"
+path = "../examples/fs_demo.rs"
+
 [dependencies]
 core_types.workspace = true
 kernel_api.workspace = true
 ipc.workspace = true
 sim_kernel.workspace = true
 services_registry.workspace = true
+services_storage.workspace = true
+services_fs_view.workspace = true
+fs_view.workspace = true
