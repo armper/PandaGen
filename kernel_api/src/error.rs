@@ -34,8 +34,8 @@ pub enum KernelError {
     ServiceAlreadyRegistered(String),
 
     /// Insufficient authority
-    #[error("Insufficient authority to perform operation")]
-    InsufficientAuthority,
+    #[error("Insufficient authority: {0}")]
+    InsufficientAuthority(String),
 
     /// Invalid capability
     #[error("Invalid capability: {0}")]
