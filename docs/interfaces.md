@@ -1846,3 +1846,265 @@ PandaGen's interfaces are designed to be:
 - **Evolvable**: Versioning built-in
 
 These contracts form the foundation for a system that is both powerful and maintainable.
+
+## Phase 10: Policy-Driven Capability Derivation
+
+**Phase 10** extends the policy framework with capability derivation, allowing policies to restrict (but not escalate) capabilities for pipeline execution and individual stages.
+
+### Core Concepts
+
+**Derived Authority**: A restricted version of the current authority, containing a subset of available capabilities.
+
+**Capability Delta**: A structured explanation of what changed between the original and derived authority.
+
+**Scope**: Capability restrictions can be:
+- **Pipeline-scoped**: Applied at `OnPipelineStart`, affects entire pipeline
+- **Stage-scoped**: Applied at `OnPipelineStageStart`, affects only that stage
+
+### Type Definitions
+
+```rust
+/// Set of capabilities
+pub struct CapabilitySet {
+    pub capabilities: HashSet<u64>,
+}
+
+/// Derived (restricted) authority
+pub struct DerivedAuthority {
+    pub capabilities: CapabilitySet,
+    pub constraints: Vec<String>,  // For future use
+}
+
+/// Explanation of capability changes
+pub struct CapabilityDelta {
+    pub removed: Vec<u64>,
+    pub restricted: Vec<String>,  // For future use
+    pub added: Vec<u64>,  // Should be empty (no escalation)
+}
+
+/// Policy decision with optional derived authority
+pub enum PolicyDecision {
+    Allow { derived: Option<DerivedAuthority> },
+    Deny { reason: String },
+    Require { action: String },
+}
+```
+
+### Security Invariants
+
+1. **No Authority Escalation**: Derived authority must be a subset of current authority
+   ```rust
+   assert!(derived.capabilities.is_subset_of(&current_capabilities));
+   ```
+
+2. **Deterministic**: Policy evaluation is pure and reproducible
+   - Same inputs always produce same outputs
+   - No randomness, timestamps, or side effects
+
+3. **Scoped Isolation**: Stage-scoped derivations don't affect pipeline authority
+   - Stage loses capability only for its duration
+   - Next stage sees original pipeline authority
+
+4. **Explainable**: Reports include capability delta
+   ```rust
+   let delta = CapabilityDelta::from(&before, &after);
+   // Shows: removed: [3, 4], added: []
+   ```
+
+### Example: Read-Only Filesystem
+
+Policy restricts write capability at pipeline start:
+
+```rust
+struct ReadOnlyFsPolicy;
+
+impl PolicyEngine for ReadOnlyFsPolicy {
+    fn evaluate(&self, event: PolicyEvent, _context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnPipelineStart => {
+                // Remove write capability, keep read
+                let derived = DerivedAuthority::from_capabilities(vec![CAP_FS_READ])
+                    .with_constraint("read-only");
+                PolicyDecision::allow_with_derived(derived)
+            }
+            _ => PolicyDecision::allow()
+        }
+    }
+    fn name(&self) -> &str { "ReadOnlyFsPolicy" }
+}
+```
+
+**Effect**:
+- Pipeline starts with `[CAP_FS_READ, CAP_FS_WRITE]`
+- Policy derives `[CAP_FS_READ]`
+- All stages see only read capability
+- Attempts to write fail: `Missing required capability: CAP_FS_WRITE`
+
+### Example: Stage-Scoped Network Removal
+
+Policy removes network capability for one stage:
+
+```rust
+struct NoNetworkStagePolicy;
+
+impl PolicyEngine for NoNetworkStagePolicy {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnPipelineStageStart => {
+                // Check if this is the restricted stage
+                if context.stage_id == Some(SENSITIVE_STAGE_ID) {
+                    // Remove network, keep FS
+                    let derived = DerivedAuthority::from_capabilities(vec![CAP_FS_READ, CAP_FS_WRITE])
+                        .with_constraint("no-network");
+                    return PolicyDecision::allow_with_derived(derived);
+                }
+                PolicyDecision::allow()
+            }
+            _ => PolicyDecision::allow()
+        }
+    }
+    fn name(&self) -> &str { "NoNetworkStagePolicy" }
+}
+```
+
+**Effect**:
+- Pipeline has `[CAP_FS_READ, CAP_FS_WRITE, CAP_NETWORK]`
+- Stage 1 (normal): sees all capabilities
+- Stage 2 (sensitive): sees `[CAP_FS_READ, CAP_FS_WRITE]` (no network)
+- Stage 3 (normal): sees all capabilities again
+
+### Enforcement Flow
+
+1. **OnPipelineStart**:
+   ```
+   Evaluate policy → Check subset → Apply derived authority
+   ```
+   - If derived is not a subset → `PolicyDerivedAuthorityInvalid`
+   - Otherwise: `execution_authority = derived`
+
+2. **OnPipelineStageStart**:
+   ```
+   Evaluate policy → Check subset → Apply stage-scoped authority
+   ```
+   - Stage authority inherits pipeline authority
+   - Policy can further restrict for this stage only
+   - Validation: `stage_derived ⊆ execution_authority`
+
+3. **Capability Check**:
+   ```rust
+   if !has_capability_with_authority(cap_id, &stage_authority) {
+       return Err("Missing required capability");
+   }
+   ```
+
+### Error Handling
+
+**PolicyDerivedAuthorityInvalid**: Thrown when policy tries to grant capabilities not available
+
+```rust
+Err(ExecutorError::PolicyDerivedAuthorityInvalid {
+    policy: "MaliciousPolicy",
+    event: "OnPipelineStart",
+    reason: "Derived authority grants more capabilities than available",
+    delta: "removed: [], added: [999]",
+    pipeline_id: Some("pipeline-123"),
+})
+```
+
+### Capability Report
+
+Extended `PolicyDecisionReport` includes:
+
+```rust
+pub struct PolicyDecisionReport {
+    pub decision: PolicyDecision,
+    pub evaluated_policies: Vec<PolicyEvaluation>,
+    pub deny_reason: Option<String>,
+    pub required_actions: Vec<String>,
+    // Phase 10 additions:
+    pub input_capabilities: Option<CapabilitySet>,
+    pub output_capabilities: Option<CapabilitySet>,
+    pub capability_delta: Option<CapabilityDelta>,
+}
+```
+
+**Example output**:
+```json
+{
+  "decision": { "Allow": { "derived": { "capabilities": [1, 2] } } },
+  "input_capabilities": [1, 2, 3, 4],
+  "output_capabilities": [1, 2],
+  "capability_delta": {
+    "removed": [3, 4],
+    "restricted": [],
+    "added": []
+  }
+}
+```
+
+### Backwards Compatibility
+
+**No policy** (Phase pre-9/10):
+```rust
+let executor = PipelineExecutor::new();  // No policy engine
+// Behaves exactly as before - no restrictions
+```
+
+**Policy without derivation** (Phase 9):
+```rust
+impl PolicyEngine for MyPolicy {
+    fn evaluate(&self, event: PolicyEvent, _: &PolicyContext) -> PolicyDecision {
+        PolicyDecision::allow()  // No derived authority
+    }
+}
+// Behaves exactly as Phase 9 - policy checks but no derivation
+```
+
+### Testing
+
+Integration tests verify:
+
+1. **Pipeline-scoped derivation**: `test_policy_derives_readonly_fs_at_pipeline_start`
+   - Policy restricts capabilities at start
+   - Handler observes reduced capability set
+
+2. **Stage-scoped derivation**: `test_policy_derives_no_network_at_stage_start`
+   - One stage loses capability
+   - Next stage regains it
+
+3. **Subset enforcement**: `test_policy_derivation_is_subset_enforced`
+   - Malicious policy tries to grant extra capability
+   - Executor fails with `PolicyDerivedAuthorityInvalid`
+
+4. **Explainability**: `test_policy_report_includes_capability_delta`
+   - Report shows before/after and delta
+   - Serializable and stable
+
+5. **Cancellation coherence**: `test_policy_derivation_and_cancellation_coherent`
+   - Derived authority applied only to started stages
+   - Report remains consistent under cancellation
+
+6. **Backwards compatibility**: `test_no_policy_behavior_unchanged`
+   - Exact behavior preserved when policy=None
+
+### Future Extensions
+
+**Escalation path** (NOT implemented in Phase 10):
+- Explicit "grant" policy with trusted signature
+- Required for adding capabilities, not just restricting
+- Must be auditable and explicit
+
+**Fine-grained restrictions** (NOT implemented in Phase 10):
+- Constraints beyond simple removal
+- E.g., "read-only", "time-limited", "source-restricted"
+
+### Summary
+
+Phase 10 provides:
+- **Secure capability restriction** without escalation
+- **Scoped authority** (pipeline vs stage)
+- **Deterministic and explainable** policy decisions
+- **Backwards compatible** with existing code
+- **Defense in depth** via subset validation
+
+This enables least-privilege enforcement at the policy layer without modifying core capability semantics.

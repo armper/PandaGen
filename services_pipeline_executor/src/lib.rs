@@ -239,7 +239,10 @@ impl PipelineExecutor {
                                 event: "OnPipelineStart".to_string(),
                                 reason: "Derived authority grants more capabilities than available"
                                     .to_string(),
-                                delta: format!("removed: {:?}, added: {:?}", delta.removed, delta.added),
+                                delta: format!(
+                                    "removed: {:?}, added: {:?}",
+                                    delta.removed, delta.added
+                                ),
                                 pipeline_id: Some(spec.id.to_string()),
                             });
                         }
@@ -327,8 +330,9 @@ impl PipelineExecutor {
                     PolicyDecision::Allow { derived } => {
                         // Phase 10: Apply stage-scoped derived authority
                         if let Some(derived_auth) = derived {
-                            let current_authority =
-                                stage_authority.clone().unwrap_or_else(|| self.get_capability_set());
+                            let current_authority = stage_authority
+                                .clone()
+                                .unwrap_or_else(|| self.get_capability_set());
 
                             // Validate subset
                             if !derived_auth.capabilities.is_subset_of(&current_authority) {
@@ -338,13 +342,15 @@ impl PipelineExecutor {
                                 );
                                 trace.set_final_result(PipelineExecutionResult::Failed {
                                     stage_name: stage.name.clone(),
-                                    error: format!("Policy derived authority invalid: not a subset"),
+                                    error: "Policy derived authority invalid: not a subset"
+                                        .to_string(),
                                 });
                                 return Err(ExecutorError::PolicyDerivedAuthorityInvalid {
                                     policy: policy.name().to_string(),
                                     event: "OnPipelineStageStart".to_string(),
-                                    reason: "Derived authority grants more capabilities than available"
-                                        .to_string(),
+                                    reason:
+                                        "Derived authority grants more capabilities than available"
+                                            .to_string(),
                                     delta: format!(
                                         "removed: {:?}, added: {:?}",
                                         delta.removed, delta.added

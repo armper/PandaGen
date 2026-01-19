@@ -1735,3 +1735,301 @@ The answer:
 - ❌ Not production-ready (yet)
 
 This architecture proves that rejecting legacy constraints enables better design.
+
+## Phase 10: Policy-Driven Capability Derivation
+
+**Goals**: Extend policy from allow/deny/require into policy-driven capability derivation, enabling policies to restrict and/or grant scoped capabilities for a pipeline execution and its stages, without leaking authority and while preserving determinism.
+
+### Security Boundary Feature
+
+Phase 10 is not "just add a field" - it's a **security boundary**. The key challenge is preventing authority escalation while allowing restriction:
+
+**Challenge**: How do we let policies restrict capabilities without:
+1. Accidentally granting more authority than available?
+2. Leaking capabilities across scope boundaries?
+3. Breaking determinism?
+
+**Solution**: Strict subset enforcement + scoped authority:
+
+```
+Invariant: derived_caps ⊆ current_caps
+
+Enforcement:
+- OnPipelineStart: execution_authority ⊆ initial_authority
+- OnPipelineStageStart: stage_authority ⊆ execution_authority
+- Error: PolicyDerivedAuthorityInvalid if subset check fails
+```
+
+### Determinism Requirements
+
+**Hard Requirements**:
+
+1. **Deterministic Evaluation**:
+   - Policy evaluation is pure (no side effects)
+   - Same inputs → same outputs
+   - Serializable decisions
+   - No timestamps, randomness, or external state
+
+2. **No Authority Leaks**:
+   - Derived authority ≤ current authority
+   - No escalation without explicit "grant" path (not implemented)
+   - Subset validation is mandatory, not optional
+
+3. **Scoped**:
+   - Pipeline-scoped: affects all stages
+   - Stage-scoped: affects only that stage
+   - Stage-scoped doesn't widen pipeline authority
+
+4. **Explainable**:
+   - PolicyDecisionReport shows:
+     - input_capabilities
+     - output_capabilities
+     - delta (removed/restricted/added)
+   - UX can show users exactly what changed and why
+
+5. **Backwards Compatible**:
+   - No policy → behavior identical to pre-Phase-9/10
+   - Allow without derivation → behavior identical to Phase 9
+
+### Domain Model
+
+**CapabilitySet**:
+```rust
+pub struct CapabilitySet {
+    pub capabilities: HashSet<u64>,
+}
+
+impl CapabilitySet {
+    pub fn is_subset_of(&self, other: &CapabilitySet) -> bool;
+    pub fn intersection(&self, other: &CapabilitySet) -> CapabilitySet;
+    pub fn difference(&self, other: &CapabilitySet) -> CapabilitySet;
+}
+```
+
+**DerivedAuthority**:
+```rust
+pub struct DerivedAuthority {
+    pub capabilities: CapabilitySet,
+    pub constraints: Vec<String>,  // Future use
+}
+```
+
+**CapabilityDelta**:
+```rust
+pub struct CapabilityDelta {
+    pub removed: Vec<u64>,
+    pub restricted: Vec<String>,
+    pub added: Vec<u64>,  // Should be empty (no escalation)
+}
+
+impl CapabilityDelta {
+    pub fn from(before: &CapabilitySet, after: &CapabilitySet) -> Self;
+}
+```
+
+**Extended PolicyDecision**:
+```rust
+pub enum PolicyDecision {
+    Allow { derived: Option<DerivedAuthority> },
+    Deny { reason: String },
+    Require { action: String },
+}
+```
+
+### Enforcement Points
+
+**Pipeline Start** (`OnPipelineStart`):
+1. Evaluate policy with pipeline context
+2. If `Allow { derived: Some(auth) }`:
+   - Validate: `auth.capabilities ⊆ current_capabilities`
+   - If not subset → `PolicyDerivedAuthorityInvalid`
+   - If valid → `execution_authority = auth.capabilities`
+3. Continue with restricted authority
+
+**Stage Start** (`OnPipelineStageStart`):
+1. Evaluate policy with stage context
+2. If `Allow { derived: Some(auth) }`:
+   - Validate: `auth.capabilities ⊆ execution_authority`
+   - If not subset → `PolicyDerivedAuthorityInvalid`
+   - If valid → `stage_authority = auth.capabilities`
+3. Stage runs with `stage_authority`
+4. Next stage gets `execution_authority` (not stage_authority)
+
+**Stage End** (`OnPipelineStageEnd`):
+- Audit only, no mutation
+- Policy evaluation recorded but doesn't affect authority
+
+### Capability Checking
+
+**Before Phase 10**:
+```rust
+if !has_capability(cap_id) {
+    return Err("Missing required capability");
+}
+```
+
+**After Phase 10**:
+```rust
+if !has_capability_with_authority(cap_id, &stage_authority) {
+    return Err("Missing required capability");
+}
+
+fn has_capability_with_authority(
+    cap_id: u64,
+    authority: &Option<CapabilitySet>,
+) -> bool {
+    // Check if we have it
+    if !self.has_capability(cap_id) {
+        return false;
+    }
+    // Check against derived authority if present
+    if let Some(auth) = authority {
+        auth.capabilities.contains(&cap_id)
+    } else {
+        true
+    }
+}
+```
+
+### Error Handling
+
+**New Error Type**:
+```rust
+PolicyDerivedAuthorityInvalid {
+    policy: String,
+    event: String,
+    reason: String,
+    delta: String,  // "removed: [1], added: [999]"
+    pipeline_id: Option<String>,
+}
+```
+
+**Integration with Existing Errors**:
+- `PolicyDenied`: Policy says "no"
+- `PolicyRequire`: Policy says "not yet, add X"
+- `PolicyDerivedAuthorityInvalid`: Policy bug or malicious
+
+### Testing Strategy
+
+**Integration Tests** (6 minimum):
+
+1. `test_policy_derives_readonly_fs_at_pipeline_start`:
+   - Policy restricts FS to read-only
+   - Handler observes reduced capability set
+   - Validates pipeline-scoped derivation
+
+2. `test_policy_derives_no_network_at_stage_start`:
+   - Stage loses network capability
+   - Next stage regains it
+   - Validates stage-scoped isolation
+
+3. `test_policy_derivation_is_subset_enforced`:
+   - Malicious policy tries to grant extra capability
+   - Executor fails with `PolicyDerivedAuthorityInvalid`
+   - Validates defense against escalation
+
+4. `test_policy_report_includes_capability_delta`:
+   - Report includes input/output/delta
+   - Validates explainability
+   - Ensures serialization works
+
+5. `test_policy_derivation_and_cancellation_coherent`:
+   - Cancellation mid-execution
+   - Derived authority only for started stages
+   - Report remains consistent
+
+6. `test_no_policy_behavior_unchanged`:
+   - No policy engine set
+   - Exact behavior as pre-Phase-9/10
+   - Validates backwards compatibility
+
+**Unit Tests** (policy crate):
+- `CapabilitySet` operations (subset, intersection, difference)
+- `CapabilityDelta::from` correctness
+- Serialization/deserialization round-trips
+
+### Design Rationale
+
+**Why CapabilitySet in policy crate, not core_types?**
+- Policy-specific abstraction
+- Keeps core_types focused on kernel primitives
+- Easier to evolve independently
+- Policy needs set operations, kernel doesn't
+
+**Why not allow "add" in CapabilityDelta?**
+- No escalation without explicit grant path
+- Grant path requires trusted policy signature
+- Not implemented in Phase 10 - future work
+- `added` field exists but should be empty
+
+**Why stage-scoped authority doesn't affect pipeline authority?**
+- Least surprise: stage restrictions are temporary
+- Isolation: one stage can't widen authority for others
+- Determinism: next stage sees same authority regardless of previous stage
+- Exception: if desired, could add "tighten" mode in future
+
+**Why mandatory subset validation?**
+- Defense in depth
+- Catches policy bugs
+- Prevents accidental escalation
+- Better error message than silent failure
+
+**Why PolicyDerivedAuthorityInvalid vs PolicyDenied?**
+- Different failure modes:
+  - Denied: policy says "you can't do this"
+  - Invalid: policy logic is buggy
+- Invalid is more serious (policy implementation error)
+- Helps debugging policy engines
+
+### Integration with Previous Phases
+
+Phase 10 builds on:
+- **Phase 1**: Capability system, pipeline executor
+- **Phase 2**: Deterministic execution (no randomness in policy)
+- **Phase 3**: Capability lifecycle (no leaks on restriction)
+- **Phase 4**: Versioned, serializable types
+- **Phase 5**: Typed pipelines, stage boundaries
+- **Phase 6**: Cancellation awareness
+- **Phase 7**: Identity and trust domains for context
+- **Phase 8**: Policy engine framework
+- **Phase 9**: Policy enforcement at pipeline/stage boundaries
+
+Phase 10 extends Phase 9's "allow/deny/require" into "allow with derived authority".
+
+### Future Extensions
+
+**Not Implemented in Phase 10**:
+
+1. **Escalation Path**:
+   - Explicit "grant" policy with signature
+   - Required for adding capabilities
+   - Must be auditable and explicit
+   - E.g., `DerivedAuthority::from_grant(trusted_policy, new_caps)`
+
+2. **Fine-Grained Restrictions**:
+   - Beyond simple removal
+   - Time-limited capabilities
+   - Source-restricted capabilities
+   - Rate-limited capabilities
+
+3. **Cross-Pipeline Authority**:
+   - Currently pipeline-local
+   - Could extend to service-level authority
+   - Would need global authority manager
+
+4. **Dynamic Policy Update**:
+   - Currently policy is fixed at pipeline start
+   - Could allow mid-execution policy changes
+   - Would need careful synchronization
+
+### Summary
+
+Phase 10 provides:
+- **Secure**: No authority escalation, strict subset enforcement
+- **Scoped**: Pipeline vs stage authority
+- **Deterministic**: Pure, reproducible policy evaluation
+- **Explainable**: Detailed capability deltas
+- **Backwards compatible**: Works with or without policies
+- **Defense in depth**: Multiple validation points
+
+This enables least-privilege enforcement at the policy layer without compromising the core capability model. Policies can say "you have these capabilities, but you may only use these" without being able to grant capabilities they don't have.

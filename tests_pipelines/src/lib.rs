@@ -1393,10 +1393,7 @@ mod tests {
     fn test_policy_derives_readonly_fs_at_pipeline_start() {
         // Test A: Policy restricts FS to read-only at pipeline start
         // Pipeline runs; handler observes reduced capability set
-        use policy::{
-            DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine,
-            PolicyEvent,
-        };
+        use policy::{DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 
         struct ReadOnlyFsPolicy;
 
@@ -1405,9 +1402,8 @@ mod tests {
                 match event {
                     PolicyEvent::OnPipelineStart => {
                         // Remove write capability, keep read
-                        let derived =
-                            DerivedAuthority::from_capabilities(vec![1]) // Only read (1), no write (2)
-                                .with_constraint("read-only");
+                        let derived = DerivedAuthority::from_capabilities(vec![1]) // Only read (1), no write (2)
+                            .with_constraint("read-only");
                         PolicyDecision::allow_with_derived(derived)
                     }
                     _ => PolicyDecision::Allow { derived: None },
@@ -1488,10 +1484,7 @@ mod tests {
     fn test_policy_derives_no_network_at_stage_start() {
         // Test B: Policy removes network at stage-start
         // Pipeline has network capability, but one stage loses it
-        use policy::{
-            DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine,
-            PolicyEvent,
-        };
+        use policy::{DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 
         struct NoNetworkStagePolicy;
 
@@ -1583,10 +1576,7 @@ mod tests {
     fn test_policy_derivation_is_subset_enforced() {
         // Test C: Malicious policy tries to grant extra capabilities
         // Executor fails with PolicyDerivedAuthorityInvalid
-        use policy::{
-            DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine,
-            PolicyEvent,
-        };
+        use policy::{DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 
         struct MaliciousPolicy;
 
@@ -1667,7 +1657,10 @@ mod tests {
                 assert!(reason.contains("more capabilities"));
                 assert!(delta.contains("added"));
             }
-            _ => panic!("Expected PolicyDerivedAuthorityInvalid error, got: {:?}", err),
+            _ => panic!(
+                "Expected PolicyDerivedAuthorityInvalid error, got: {:?}",
+                err
+            ),
         }
     }
 
@@ -1695,10 +1688,7 @@ mod tests {
     fn test_policy_derivation_and_cancellation_coherent() {
         // Test E: Cancellation mid-stage
         // Ensure derived authority applied only to started stage and report consistent
-        use policy::{
-            DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine,
-            PolicyEvent,
-        };
+        use policy::{DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 
         struct TestPolicy;
 
@@ -1819,10 +1809,7 @@ mod tests {
             .unwrap();
 
         // Verify output - should work exactly as before
-        assert_eq!(
-            output.schema_id,
-            PayloadSchemaId::new("create_blob_output")
-        );
+        assert_eq!(output.schema_id, PayloadSchemaId::new("create_blob_output"));
         let output_data: CreateBlobOutput = deserialize_payload(&output).unwrap();
         assert_eq!(output_data.object_cap_id, 100);
         assert_eq!(output_data.content, "hello world");

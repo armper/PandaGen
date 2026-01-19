@@ -611,8 +611,9 @@ impl ComposedPolicy {
                             None => new_derived,
                             Some(existing) => {
                                 // Take the intersection of both capability sets
-                                let intersection =
-                                    existing.capabilities.intersection(&new_derived.capabilities);
+                                let intersection = existing
+                                    .capabilities
+                                    .intersection(&new_derived.capabilities);
                                 DerivedAuthority::new(intersection)
                             }
                         });
@@ -715,11 +716,7 @@ impl PolicyDecisionReport {
         input: CapabilitySet,
         output: Option<CapabilitySet>,
     ) -> Self {
-        let delta = if let Some(ref out) = output {
-            Some(CapabilityDelta::from(&input, out))
-        } else {
-            None
-        };
+        let delta = output.as_ref().map(|out| CapabilityDelta::from(&input, out));
 
         self.input_capabilities = Some(input);
         self.output_capabilities = output;
@@ -1251,8 +1248,8 @@ mod tests {
 
     #[test]
     fn test_derived_authority_serialization() {
-        let derived = DerivedAuthority::from_capabilities(vec![1, 2, 3])
-            .with_constraint("read-only");
+        let derived =
+            DerivedAuthority::from_capabilities(vec![1, 2, 3]).with_constraint("read-only");
 
         let json = serde_json::to_string(&derived).unwrap();
         let deserialized: DerivedAuthority = serde_json::from_str(&json).unwrap();
