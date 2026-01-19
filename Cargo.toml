@@ -15,6 +15,7 @@ members = [
     "intent_router",
     "pipeline",
     "lifecycle",
+    "identity",
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
@@ -45,6 +46,7 @@ services_pipeline_executor = { path = "services_pipeline_executor" }
 intent_router = { path = "intent_router" }
 pipeline = { path = "pipeline" }
 lifecycle = { path = "lifecycle" }
+identity = { path = "identity" }
 
 # Demo crates
 cli_console = { path = "cli_console" }

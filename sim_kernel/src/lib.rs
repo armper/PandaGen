@@ -30,6 +30,7 @@ use core_types::{
     TaskId,
 };
 use fault_injection::FaultInjector;
+use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use std::collections::{HashMap, VecDeque};
@@ -55,12 +56,20 @@ pub struct SimulatedKernel {
     capability_table: HashMap<u64, CapabilityMetadata>,
     /// Audit log for capability operations (test-only)
     capability_audit: capability_audit::CapabilityAuditLog,
+    /// Identity table: ExecutionId -> IdentityMetadata
+    identity_table: HashMap<ExecutionId, IdentityMetadata>,
+    /// Task to identity mapping
+    task_to_identity: HashMap<TaskId, ExecutionId>,
+    /// Exit notifications (for supervision)
+    exit_notifications: Vec<ExitNotification>,
 }
 
 #[derive(Debug)]
 struct TaskInfo {
     #[allow(dead_code)]
     descriptor: TaskDescriptor,
+    /// Execution identity for this task
+    execution_id: ExecutionId,
 }
 
 struct Channel {
@@ -87,6 +96,9 @@ impl SimulatedKernel {
             delayed_messages: Vec::new(),
             capability_table: HashMap::new(),
             capability_audit: capability_audit::CapabilityAuditLog::new(),
+            identity_table: HashMap::new(),
+            task_to_identity: HashMap::new(),
+            exit_notifications: Vec::new(),
         }
     }
 
@@ -190,6 +202,65 @@ impl SimulatedKernel {
     /// This is called when a task exits or crashes. It invalidates all
     /// capabilities owned by the task to prevent use-after-free.
     pub fn terminate_task(&mut self, task_id: TaskId) {
+        // Get execution ID and create exit notification
+        if let Some(execution_id) = self.task_to_identity.get(&task_id).copied() {
+            let notification = ExitNotification {
+                execution_id,
+                task_id: Some(task_id),
+                reason: ExitReason::Normal, // Default to normal; caller can specify reason
+                terminated_at_nanos: self.current_time.as_nanos(),
+            };
+            self.exit_notifications.push(notification);
+            
+            // Remove from task_to_identity mapping
+            self.task_to_identity.remove(&task_id);
+            // Note: we keep the identity metadata for audit purposes
+        }
+
+        // Remove task
+        self.tasks.remove(&task_id);
+
+        // Invalidate all capabilities owned by this task
+        let cap_ids: Vec<u64> = self
+            .capability_table
+            .iter()
+            .filter(|(_, meta)| meta.owner == task_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for cap_id in cap_ids {
+            if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+                meta.status = CapabilityStatus::Invalid;
+
+                // Record invalidation event
+                self.capability_audit.record_event(
+                    self.current_time,
+                    CapabilityEvent::Invalidated {
+                        cap_id,
+                        owner: task_id,
+                        cap_type: meta.cap_type.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Terminates a task with a specific exit reason
+    pub fn terminate_task_with_reason(&mut self, task_id: TaskId, reason: ExitReason) {
+        // Get execution ID and create exit notification
+        if let Some(execution_id) = self.task_to_identity.get(&task_id).copied() {
+            let notification = ExitNotification {
+                execution_id,
+                task_id: Some(task_id),
+                reason,
+                terminated_at_nanos: self.current_time.as_nanos(),
+            };
+            self.exit_notifications.push(notification);
+            
+            // Remove from task_to_identity mapping
+            self.task_to_identity.remove(&task_id);
+        }
+
         // Remove task
         self.tasks.remove(&task_id);
 
@@ -348,6 +419,40 @@ impl SimulatedKernel {
     pub fn is_capability_valid(&self, cap_id: u64, task_id: TaskId) -> bool {
         self.validate_capability(cap_id, task_id).is_ok()
     }
+
+    /// Creates a new identity with the given metadata
+    ///
+    /// This is called internally when spawning tasks or can be used
+    /// for supervisor-created identities.
+    pub fn create_identity(&mut self, metadata: IdentityMetadata) -> ExecutionId {
+        let execution_id = metadata.execution_id;
+        self.identity_table.insert(execution_id, metadata);
+        execution_id
+    }
+
+    /// Returns identity metadata for an execution
+    pub fn get_identity(&self, execution_id: ExecutionId) -> Option<&IdentityMetadata> {
+        self.identity_table.get(&execution_id)
+    }
+
+    /// Returns execution ID for a task
+    pub fn get_task_identity(&self, task_id: TaskId) -> Option<ExecutionId> {
+        self.task_to_identity.get(&task_id).copied()
+    }
+
+    /// Returns all exit notifications
+    ///
+    /// Used by supervisors to check for child terminations
+    pub fn get_exit_notifications(&self) -> &[ExitNotification] {
+        &self.exit_notifications
+    }
+
+    /// Clears exit notifications
+    ///
+    /// Should be called after supervisor processes notifications
+    pub fn clear_exit_notifications(&mut self) {
+        self.exit_notifications.clear();
+    }
 }
 
 impl Default for SimulatedKernel {
@@ -359,7 +464,27 @@ impl Default for SimulatedKernel {
 impl KernelApi for SimulatedKernel {
     fn spawn_task(&mut self, descriptor: TaskDescriptor) -> Result<TaskHandle, KernelError> {
         let task_id = TaskId::new();
-        let task_info = TaskInfo { descriptor };
+        
+        // Create identity metadata for this task
+        // Default to Component/user for now; can be extended in the future
+        let metadata = identity::IdentityMetadata::new(
+            identity::IdentityKind::Component,
+            identity::TrustDomain::user(),
+            descriptor.name.clone(),
+            self.current_time.as_nanos(),
+        )
+        .with_task_id(task_id);
+        
+        let execution_id = metadata.execution_id;
+        
+        // Store identity
+        self.identity_table.insert(execution_id, metadata);
+        self.task_to_identity.insert(task_id, execution_id);
+        
+        let task_info = TaskInfo {
+            descriptor,
+            execution_id,
+        };
         self.tasks.insert(task_id, task_info);
         Ok(TaskHandle::new(task_id))
     }
