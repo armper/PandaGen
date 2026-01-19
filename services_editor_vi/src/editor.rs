@@ -362,7 +362,7 @@ mod tests {
     use super::*;
     use input_types::Modifiers;
     use services_storage::ObjectId;
-    
+
     fn press_key(code: KeyCode) -> InputEvent {
         InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
     }

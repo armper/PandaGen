@@ -125,11 +125,11 @@ impl TextBuffer {
         };
         Self { lines }
     }
-    
+
     pub fn as_string(&self) -> String {
         self.lines.join("\n")
     }
-    
+
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
