@@ -3538,3 +3538,84 @@ Usage pattern:
 3. Process input events
 4. Handle actions (continue/saved/quit)
 5. Render output
+
+---
+
+## Workspace Manager Interface
+
+The Workspace Manager provides component orchestration without being a POSIX shell.
+
+### Core Interface
+
+```rust
+pub struct WorkspaceManager {
+    components: HashMap<ComponentId, ComponentInfo>,
+    focus_manager: FocusManager,
+    policy: Option<Box<dyn PolicyEngine>>,
+    audit_trail: Vec<WorkspaceEvent>,
+    workspace_identity: IdentityMetadata,
+}
+
+impl WorkspaceManager {
+    pub fn new(workspace_identity: IdentityMetadata) -> Self;
+    pub fn with_policy(self, policy: Box<dyn PolicyEngine>) -> Self;
+    
+    // Component lifecycle
+    pub fn launch_component(&mut self, config: LaunchConfig) 
+        -> Result<ComponentId, WorkspaceError>;
+    pub fn terminate_component(&mut self, component_id: ComponentId, 
+        reason: ExitReason) -> Result<(), WorkspaceError>;
+    
+    // Focus management
+    pub fn focus_component(&mut self, component_id: ComponentId) 
+        -> Result<(), WorkspaceError>;
+    pub fn focus_next(&mut self) -> Result<(), WorkspaceError>;
+    pub fn focus_previous(&mut self) -> Result<(), WorkspaceError>;
+    
+    // Observation
+    pub fn list_components(&self) -> Vec<&ComponentInfo>;
+    pub fn get_component(&self, component_id: ComponentId) 
+        -> Option<&ComponentInfo>;
+    pub fn get_focused_component(&self) -> Option<ComponentId>;
+    pub fn audit_trail(&self) -> &[WorkspaceEvent];
+    
+    // Input routing
+    pub fn route_input(&self, event: &InputEvent) -> Option<ComponentId>;
+    
+    // Budget enforcement
+    pub fn handle_budget_exhaustion(&mut self, component_id: ComponentId) 
+        -> Result<(), WorkspaceError>;
+    
+    // Command execution
+    pub fn execute_command(&mut self, command: WorkspaceCommand) 
+        -> CommandResult;
+}
+```
+
+### Launch Configuration
+
+```rust
+pub struct LaunchConfig {
+    pub component_type: ComponentType,
+    pub name: String,
+    pub identity_kind: IdentityKind,
+    pub trust_domain: TrustDomain,
+    pub focusable: bool,
+    pub budget: Option<ResourceBudget>,
+    pub metadata: HashMap<String, String>,
+}
+```
+
+### Command Interface
+
+Commands available: `open`, `list`, `focus`, `next`, `prev`, `close`, `status`
+
+**Example**:
+```rust
+let cmd = parse_command("open editor notes.txt")?;
+let result = workspace.execute_command(cmd);
+```
+
+### Summary
+
+The Workspace Manager provides component orchestration with explicit focus, observable lifecycle, and policy enforcement. See PHASE16_SUMMARY.md for complete details.

@@ -3077,3 +3077,294 @@ Phase 15 provides:
 - **Full testability**: 62 tests without hardware
 
 This demonstrates how classic Unix tools can be reimagined as modern, testable, capability-safe components.
+
+
+---
+
+## Phase 16: Workspace Manager — Component Orchestration
+
+### Motivation
+
+Traditional shells (bash, zsh) manage processes via stdin/stdout pipes and job control. This model has fundamental problems:
+
+**Problems with POSIX Shells**:
+1. **Ambient authority**: Any command inherits full shell environment
+2. **Byte streams**: Unstructured stdin/stdout loses type information
+3. **Implicit state**: Background jobs, environment variables, working directory
+4. **Poor testability**: Hard to test shell scripts deterministically
+5. **Tight coupling**: Components assume global I/O and terminal
+6. **No lifecycle visibility**: Can't observe component internal state
+
+### Solution: Workspace Manager
+
+The Workspace Manager is **NOT** a shell. It's a **component orchestrator**:
+
+- **Components not processes**: Manages high-level components (editor, CLI, pipeline)
+- **Focus not I/O**: Routes input via explicit focus, not stdin
+- **Observable lifecycle**: All component state changes are auditable
+- **Capability-driven**: Components have explicit identities and policies
+- **No ambient authority**: Components only have what they're explicitly granted
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│         Workspace Manager                    │
+│  ┌────────────────────────────────────┐     │
+│  │  Component Registry                │     │
+│  │  - ComponentId → ComponentInfo     │     │
+│  │  - State: Running/Exited/Cancelled │     │
+│  │  - Identity & ExecutionId          │     │
+│  └────────────────────────────────────┘     │
+│                                              │
+│  ┌────────────────────────────────────┐     │
+│  │  Focus Manager Integration         │     │
+│  │  - Grant/revoke focus              │     │
+│  │  - Route input events              │     │
+│  │  - Track focus changes             │     │
+│  └────────────────────────────────────┘     │
+│                                              │
+│  ┌────────────────────────────────────┐     │
+│  │  Policy & Budget Enforcement       │     │
+│  │  - Launch policy checks            │     │
+│  │  - Focus policy checks             │     │
+│  │  - Budget exhaustion handling      │     │
+│  └────────────────────────────────────┘     │
+│                                              │
+│  ┌────────────────────────────────────┐     │
+│  │  Audit Trail                       │     │
+│  │  - ComponentLaunched               │     │
+│  │  - ComponentFocused                │     │
+│  │  - ComponentTerminated             │     │
+│  └────────────────────────────────────┘     │
+└─────────────────────────────────────────────┘
+           │
+           ├─────► Editor Component
+           ├─────► CLI Component
+           └─────► Pipeline Executor
+```
+
+### Component Model
+
+Each component in the workspace has:
+
+```rust
+pub struct ComponentInfo {
+    pub id: ComponentId,              // Unique identifier
+    pub component_type: ComponentType, // Editor, CLI, Pipeline, Custom
+    pub identity: IdentityMetadata,    // ExecutionId, trust domain
+    pub state: ComponentState,         // Running, Exited, Cancelled, Failed
+    pub focusable: bool,               // Can receive input focus
+    pub subscription: Option<InputSubscriptionCap>, // Focus capability
+    pub cancellation: CancellationSource, // Lifecycle control
+    pub exit_reason: Option<ExitReason>, // Why terminated
+    pub name: String,                  // Human-readable name
+    pub metadata: HashMap<String, String>, // Component-specific data
+}
+```
+
+### Command Surface (Minimal)
+
+The workspace provides a minimal command interface:
+
+| Command | Example | Description |
+|---------|---------|-------------|
+| `open <type> [args]` | `open editor notes.txt` | Launch component |
+| `list` | `list` | Show all components |
+| `focus <id>` | `focus comp:abc123...` | Switch focus |
+| `next` | `next` | Focus next component |
+| `prev` | `prev` | Focus previous component |
+| `close <id>` | `close comp:abc123...` | Terminate component |
+| `status <id>` | `status comp:abc123...` | Get component info |
+
+**What commands do NOT do**:
+- Manipulate files (use `open editor` to launch editor)
+- Pipe data (components use IPC)
+- Redirect I/O (no stdin/stdout concept)
+- Background jobs (components run independently)
+- Variable expansion (pass metadata at launch)
+
+### Focus Integration
+
+The workspace integrates with `services_focus_manager`:
+
+**On component launch**:
+1. Create `InputSubscriptionCap` if focusable
+2. Attach to component
+3. Request focus (if no other component focused)
+
+**On focus switch**:
+1. Check policy (may deny cross-domain focus)
+2. Release old focus
+3. Grant new focus
+4. Record in audit trail
+
+**On component exit**:
+1. Remove from focus stack
+2. Cancel component via CancellationSource
+3. Update state to Exited/Cancelled/Failed
+4. Record termination in audit trail
+
+### Policy Enforcement
+
+Components are subject to policy at two points:
+
+**1. Launch Time** (PolicyEvent::OnSpawn):
+```rust
+let context = PolicyContext::for_spawn(workspace_identity, component_identity);
+let decision = policy.evaluate(PolicyEvent::OnSpawn, &context);
+
+match decision {
+    PolicyDecision::Allow { .. } => { /* launch */ },
+    PolicyDecision::Deny { reason } => { /* reject */ },
+    PolicyDecision::Require { action } => { /* prompt user */ },
+}
+```
+
+**2. Focus Time** (PolicyEvent::OnCapabilityDelegate):
+```rust
+let context = PolicyContext::for_capability_delegation(
+    workspace_identity, 
+    component_identity, 
+    subscription.id
+);
+let decision = policy.evaluate(PolicyEvent::OnCapabilityDelegate, &context);
+```
+
+Example policies:
+- TrustDomainPolicy: Sandbox can't spawn System services
+- PipelineSafetyPolicy: User pipelines must have timeouts
+- Custom policies: Per-organization rules
+
+### Budget Enforcement
+
+Components can have resource budgets:
+
+```rust
+let budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(1000))
+    .with_message_count(MessageCount::new(100));
+
+let config = LaunchConfig::new(ComponentType::Editor, "editor", ...)
+    .with_budget(budget);
+```
+
+When budget exhausted:
+1. Workspace calls `handle_budget_exhaustion(component_id)`
+2. Component terminates with `ExitReason::Failure`
+3. Focus automatically revoked
+4. Audit trail records termination
+
+### Observable Lifecycle
+
+Every operation is recorded:
+
+```rust
+pub enum WorkspaceEvent {
+    ComponentLaunched { component_id, component_type, execution_id, timestamp_ns },
+    ComponentStateChanged { component_id, old_state, new_state, timestamp_ns },
+    ComponentFocused { component_id, timestamp_ns },
+    ComponentUnfocused { component_id, timestamp_ns },
+    ComponentTerminated { component_id, reason, timestamp_ns },
+}
+```
+
+Access via:
+```rust
+let events = workspace.audit_trail();
+```
+
+This enables:
+- Debugging component failures
+- Auditing policy decisions
+- Understanding focus transitions
+- Reconstructing workspace session history
+
+### Comparison: Shell vs Workspace
+
+| Aspect | Traditional Shell | PandaGen Workspace |
+|--------|------------------|-------------------|
+| **Abstraction** | Process + file descriptors | Component + capabilities |
+| **Launch** | `command args` | `open type args` |
+| **Communication** | Pipes: `cmd1 \| cmd2` | IPC channels |
+| **Background** | `cmd &` (implicit) | All components independent |
+| **Focus** | Terminal focus (implicit) | Explicit focus management |
+| **Job control** | `fg`, `bg`, `jobs` | `focus`, `list` |
+| **I/O** | stdin/stdout/stderr | Component-specific interfaces |
+| **State** | Environment variables | Component metadata |
+| **Policy** | None (ambient authority) | Policy engine evaluation |
+| **Audit** | None | Full audit trail |
+| **Testability** | Difficult | Deterministic under SimKernel |
+
+### Testing Strategy
+
+All tests are deterministic and run under cargo test:
+
+**Unit Tests** (23 tests in lib.rs):
+- Component creation and launch
+- Focus management correctness
+- State transitions (Running → Exited/Cancelled/Failed)
+- Budget attachment and metadata
+- Audit trail recording
+
+**Integration Tests** (11 tests):
+- Policy enforcement (allow/deny launch and focus)
+- Budget exhaustion handling
+- Command parsing and execution
+- Multi-component focus switching
+- Audit trail completeness
+- Cross-domain scenarios
+
+No hardware, no terminal, no timing issues—pure determinism.
+
+### Why This Matters
+
+**Problem**: POSIX shells were designed in the 1970s for byte stream processing. They don't fit modern needs:
+- No type safety (everything is text)
+- No lifecycle management
+- No observability
+- No policy enforcement
+- Hard to test
+- Ambient authority everywhere
+
+**Solution**: Workspace Manager provides modern component orchestration:
+- Type-safe component interfaces
+- Observable lifecycle
+- Auditable operations
+- Policy-enforced actions
+- Deterministically testable
+- Explicit authority only
+
+**Impact**:
+- Users get a familiar command interface
+- System gets observability and control
+- Components remain independent
+- Testing is trivial
+- Security is enforceable
+- No POSIX baggage
+
+### Non-Goals (Enforced)
+
+The Workspace Manager explicitly does NOT:
+
+1. **Implement POSIX shell**: No $VAR, no &&/||, no wildcards
+2. **Provide global I/O**: No stdin/stdout/stderr routing
+3. **Support job control**: No suspend/resume, no &/%N
+4. **Execute scripts**: No interpreter, no control flow
+5. **Manage working directory**: Components use capabilities
+6. **Provide environment variables**: Use component metadata
+7. **Support pipes/redirects**: Components use IPC
+
+This is intentional. The workspace orchestrates components—it doesn't interpret commands.
+
+### Summary
+
+Phase 16 provides:
+- **Component orchestrator**: Manages components, not processes
+- **Focus-driven input**: Explicit focus, not stdin
+- **Observable lifecycle**: Full audit trail
+- **Policy-enforced**: Launch and focus checks
+- **Budget-aware**: Resource exhaustion handling
+- **Testable**: 34 deterministic tests
+
+This proves PandaGen can provide user-facing abstractions without recreating POSIX shells. The workspace is minimal, observable, and fits the PandaGen philosophy perfectly.
