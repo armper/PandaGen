@@ -27,8 +27,7 @@
 //!
 //! Policy provides governance, not control. Authority comes from capabilities.
 
-use core_types::ServiceId;
-use identity::{ExecutionId, IdentityKind, IdentityMetadata, TrustDomain};
+use identity::{IdentityKind, IdentityMetadata, TrustDomain};
 use pipeline::{PipelineId, StageId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -254,11 +253,9 @@ impl PolicyEngine for TrustDomainPolicy {
                     && context
                         .target_identity
                         .as_ref()
-                        .map_or(false, |t| t.kind == IdentityKind::System)
+                        .is_some_and(|t| t.kind == IdentityKind::System)
                 {
-                    return PolicyDecision::deny(
-                        "Sandbox domain cannot spawn System services",
-                    );
+                    return PolicyDecision::deny("Sandbox domain cannot spawn System services");
                 }
 
                 // Sandbox cannot spawn core services
@@ -266,7 +263,7 @@ impl PolicyEngine for TrustDomainPolicy {
                     && context
                         .target_identity
                         .as_ref()
-                        .map_or(false, |t| t.trust_domain == TrustDomain::core())
+                        .is_some_and(|t| t.trust_domain == TrustDomain::core())
                 {
                     return PolicyDecision::deny(
                         "Sandbox domain cannot spawn services in core domain",
@@ -333,11 +330,8 @@ impl PolicyEngine for PipelineSafetyPolicy {
                 // Pipelines in user domain must have timeout
                 if context.actor_identity.trust_domain == TrustDomain::user() {
                     // Check if timeout metadata is present
-                    let has_timeout = context
-                        .metadata
-                        .iter()
-                        .any(|(k, _)| k == "timeout_ms");
-                    
+                    let has_timeout = context.metadata.iter().any(|(k, _)| k == "timeout_ms");
+
                     if !has_timeout {
                         return PolicyDecision::require(
                             "Pipelines in user domain must specify a timeout",
@@ -346,10 +340,8 @@ impl PolicyEngine for PipelineSafetyPolicy {
                 }
 
                 // Check stage count if provided
-                if let Some((_, stage_count_str)) = context
-                    .metadata
-                    .iter()
-                    .find(|(k, _)| k == "stage_count")
+                if let Some((_, stage_count_str)) =
+                    context.metadata.iter().find(|(k, _)| k == "stage_count")
                 {
                     if let Ok(stage_count) = stage_count_str.parse::<usize>() {
                         if stage_count > self.max_stages_unsupervised {
@@ -483,18 +475,8 @@ mod tests {
     fn test_noop_policy() {
         let policy = NoOpPolicy;
         let context = PolicyContext::for_spawn(
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "test",
-                0,
-            ),
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "target",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "test", 0),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "target", 0),
         );
 
         let decision = policy.evaluate(PolicyEvent::OnSpawn, &context);
@@ -511,12 +493,7 @@ mod tests {
                 "sandboxed",
                 0,
             ),
-            IdentityMetadata::new(
-                IdentityKind::System,
-                TrustDomain::core(),
-                "system",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::System, TrustDomain::core(), "system", 0),
         );
 
         let decision = policy.evaluate(PolicyEvent::OnSpawn, &context);
@@ -549,12 +526,7 @@ mod tests {
     fn test_trust_domain_policy_cross_domain_delegation_requires() {
         let policy = TrustDomainPolicy;
         let context = PolicyContext::for_capability_delegation(
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "service1",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service1", 0),
             IdentityMetadata::new(
                 IdentityKind::Component,
                 TrustDomain::user(),
@@ -572,18 +544,8 @@ mod tests {
     fn test_trust_domain_policy_same_domain_delegation_allowed() {
         let policy = TrustDomainPolicy;
         let context = PolicyContext::for_capability_delegation(
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "service1",
-                0,
-            ),
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "service2",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service1", 0),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service2", 0),
             42,
         );
 
@@ -658,12 +620,7 @@ mod tests {
                 "sandboxed",
                 0,
             ),
-            IdentityMetadata::new(
-                IdentityKind::System,
-                TrustDomain::core(),
-                "system",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::System, TrustDomain::core(), "system", 0),
         );
 
         let decision = composed.evaluate(PolicyEvent::OnSpawn, &context);
@@ -677,12 +634,7 @@ mod tests {
         composed = composed.add_policy(Box::new(PipelineSafetyPolicy::new())); // Will require
 
         let context = PolicyContext::for_pipeline(
-            IdentityMetadata::new(
-                IdentityKind::Component,
-                TrustDomain::user(),
-                "pipeline",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::user(), "pipeline", 0),
             PipelineId::new(),
         );
 
@@ -698,18 +650,8 @@ mod tests {
         composed = composed.add_policy(Box::new(NoOpPolicy));
 
         let context = PolicyContext::for_spawn(
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "service1",
-                0,
-            ),
-            IdentityMetadata::new(
-                IdentityKind::Service,
-                TrustDomain::core(),
-                "service2",
-                0,
-            ),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service1", 0),
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service2", 0),
         );
 
         let decision = composed.evaluate(PolicyEvent::OnSpawn, &context);
