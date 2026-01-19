@@ -16,6 +16,8 @@ resources = { workspace = true }
 services_focus_manager = { workspace = true }
 input_types = { workspace = true }
 services_input = { workspace = true }
+view_types = { workspace = true }
+services_view_host = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

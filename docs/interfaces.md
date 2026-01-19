@@ -4036,3 +4036,464 @@ The HAL keyboard interface provides:
 
 This interface allows PandaGen to receive input from real hardware while maintaining the same abstractions, routing, and testing capabilities as simulation.
 
+---
+
+## View System (Phase 18)
+
+The view system provides structured output surfaces instead of byte streams (stdout/stderr).
+
+### Design Philosophy
+
+**Traditional Approach**: `printf("text")` → stdout stream
+**PandaGen Approach**: Publish structured view frames that the workspace renders
+
+**Benefits**:
+- Capability-gated (no ambient output authority)
+- Testable (frames can be captured and asserted)
+- Deterministic (revisions + timestamps enable replay)
+- Structured (semantic content, not bytes)
+
+### Core Types (view_types crate)
+
+#### ViewId
+
+Unique identifier for a view:
+
+```rust
+pub struct ViewId(Uuid);
+
+impl ViewId {
+    pub fn new() -> Self;
+    pub fn from_uuid(uuid: Uuid) -> Self;
+    pub fn as_uuid(&self) -> Uuid;
+}
+```
+
+#### ViewKind
+
+Type of view:
+
+```rust
+pub enum ViewKind {
+    TextBuffer,   // Main content (lines of text)
+    StatusLine,   // Single line of status
+    Panel,        // Container metadata (future)
+}
+```
+
+#### ViewContent
+
+Content of a view frame:
+
+```rust
+pub enum ViewContent {
+    TextBuffer { lines: Vec<String> },
+    StatusLine { text: String },
+    Panel { metadata: String },
+}
+
+impl ViewContent {
+    pub fn empty_text_buffer() -> Self;
+    pub fn text_buffer(lines: Vec<String>) -> Self;
+    pub fn status_line(text: impl Into<String>) -> Self;
+    pub fn panel(metadata: impl Into<String>) -> Self;
+    
+    pub fn line_count(&self) -> usize;
+    pub fn get_line(&self, index: usize) -> Option<&str>;
+}
+```
+
+#### ViewFrame
+
+Immutable snapshot of view state:
+
+```rust
+pub struct ViewFrame {
+    pub view_id: ViewId,
+    pub kind: ViewKind,
+    pub revision: u64,  // Monotonic, must increase with each update
+    pub content: ViewContent,
+    pub cursor: Option<CursorPosition>,
+    pub title: Option<String>,
+    pub component_id: Option<String>,
+    pub timestamp_ns: u64,  // Simulation time
+}
+
+impl ViewFrame {
+    pub fn new(
+        view_id: ViewId,
+        kind: ViewKind,
+        revision: u64,
+        content: ViewContent,
+        timestamp_ns: u64,
+    ) -> Self;
+    
+    pub fn with_cursor(self, cursor: CursorPosition) -> Self;
+    pub fn with_title(self, title: impl Into<String>) -> Self;
+    pub fn with_component_id(self, component_id: impl Into<String>) -> Self;
+    
+    pub fn is_newer_than(&self, other: &ViewFrame) -> bool;
+    pub fn is_valid_successor(&self, previous: &ViewFrame) -> bool;
+}
+```
+
+**Contract**:
+- Frames are immutable (updates create new frames)
+- Revisions must be strictly monotonic per view
+- Timestamp reflects simulation time (for replay)
+
+#### CursorPosition
+
+Cursor location in a view:
+
+```rust
+pub struct CursorPosition {
+    pub line: usize,    // 0-indexed
+    pub column: usize,  // 0-indexed
+}
+
+impl CursorPosition {
+    pub fn new(line: usize, column: usize) -> Self;
+    pub fn origin() -> Self;  // (0, 0)
+}
+```
+
+### View Host Service (services_view_host crate)
+
+Central service for managing views.
+
+#### Capabilities
+
+**ViewHandleCap**: Right to publish frames to a view
+
+```rust
+pub struct ViewHandleCap {
+    pub view_id: ViewId,
+    pub task_id: TaskId,
+    pub channel: ChannelId,
+    // Internal: secret token for verification
+}
+```
+
+**ViewSubscriptionCap**: Right to receive updates for a view
+
+```rust
+pub struct ViewSubscriptionCap {
+    pub view_id: ViewId,
+    pub task_id: TaskId,
+    pub channel: ChannelId,
+    // Internal: secret token for verification
+}
+```
+
+#### ViewHost API
+
+```rust
+impl ViewHost {
+    pub fn new() -> Self;
+    
+    // Create a new view
+    pub fn create_view(
+        &mut self,
+        kind: ViewKind,
+        title: Option<String>,
+        task_id: TaskId,
+        channel: ChannelId,
+    ) -> Result<ViewHandleCap, ViewHostError>;
+    
+    // Publish a frame (requires handle)
+    pub fn publish_frame(
+        &mut self,
+        handle: &ViewHandleCap,
+        frame: ViewFrame,
+    ) -> Result<(), ViewHostError>;
+    
+    // Subscribe to a view
+    pub fn subscribe(
+        &mut self,
+        view_id: ViewId,
+        task_id: TaskId,
+        channel: ChannelId,
+    ) -> Result<ViewSubscriptionCap, ViewHostError>;
+    
+    // Get latest frame
+    pub fn get_latest(&self, view_id: ViewId) 
+        -> Result<Option<ViewFrame>, ViewHostError>;
+    
+    // Remove a view (requires handle)
+    pub fn remove_view(&mut self, handle: &ViewHandleCap) 
+        -> Result<(), ViewHostError>;
+    
+    // List all views
+    pub fn list_views(&self) -> Vec<ViewId>;
+    
+    // Get view metadata
+    pub fn get_view_info(&self, view_id: ViewId) 
+        -> Result<(ViewKind, TaskId), ViewHostError>;
+}
+```
+
+**Contract**:
+- Only the owner (with correct handle) can publish to a view
+- Anyone can subscribe (future: may add access control)
+- Revisions must be monotonic (publish fails otherwise)
+- View ID in frame must match handle's view ID
+- Latest frame is stored; older frames are discarded
+
+#### Error Types
+
+```rust
+pub enum ViewHostError {
+    ViewNotFound(ViewId),
+    ViewAlreadyExists(ViewId),
+    InvalidCapability,
+    Unauthorized(ViewId),
+    RevisionNotMonotonic { expected: u64, actual: u64 },
+    ViewIdMismatch { expected: ViewId, actual: ViewId },
+    NoFrames(ViewId),
+}
+```
+
+### Workspace Integration
+
+Each component gets two views when launched:
+- **Main view** (TextBuffer): Primary content
+- **Status view** (StatusLine): Status information
+
+```rust
+// Workspace creates views for component
+let main_view = view_host.create_view(
+    ViewKind::TextBuffer,
+    Some(component_name.clone()),
+    task_id,
+    channel,
+)?;
+
+let status_view = view_host.create_view(
+    ViewKind::StatusLine,
+    Some(format!("{} - status", component_name)),
+    task_id,
+    channel,
+)?;
+
+// Component can now publish frames
+component.set_view_handles(main_view, status_view);
+```
+
+**WorkspaceRenderOutput**: Snapshot of current state
+
+```rust
+pub struct WorkspaceRenderOutput {
+    pub focused_component: Option<ComponentId>,
+    pub main_view: Option<ViewFrame>,
+    pub status_view: Option<ViewFrame>,
+    pub component_count: usize,
+    pub running_count: usize,
+}
+
+// Get current workspace state
+let output = workspace.render();
+if let Some(frame) = output.main_view {
+    // Display frame content
+}
+```
+
+### Component Integration
+
+#### Editor Example
+
+```rust
+use services_view_host::{ViewHandleCap, ViewHost};
+use view_types::{ViewFrame, ViewContent, CursorPosition};
+
+pub struct Editor {
+    main_view_handle: Option<ViewHandleCap>,
+    status_view_handle: Option<ViewHandleCap>,
+    main_view_revision: u64,
+    status_view_revision: u64,
+    // ... other fields
+}
+
+impl Editor {
+    pub fn set_view_handles(
+        &mut self,
+        main_view: ViewHandleCap,
+        status_view: ViewHandleCap,
+    ) {
+        self.main_view_handle = Some(main_view);
+        self.status_view_handle = Some(status_view);
+    }
+    
+    pub fn publish_views(
+        &mut self,
+        view_host: &mut ViewHost,
+        timestamp_ns: u64,
+    ) -> Result<(), EditorError> {
+        // Publish main view (buffer content)
+        if let Some(handle) = &self.main_view_handle {
+            let lines = self.get_buffer_lines();
+            let content = ViewContent::text_buffer(lines);
+            let cursor_pos = self.get_cursor_position();
+            let cursor = CursorPosition::new(cursor_pos.row, cursor_pos.col);
+            
+            let frame = ViewFrame::new(
+                handle.view_id,
+                ViewKind::TextBuffer,
+                self.main_view_revision,
+                content,
+                timestamp_ns,
+            ).with_cursor(cursor);
+            
+            view_host.publish_frame(handle, frame)?;
+            self.main_view_revision += 1;
+        }
+        
+        // Publish status view
+        if let Some(handle) = &self.status_view_handle {
+            let status_text = self.render_status_line();
+            let content = ViewContent::status_line(status_text);
+            
+            let frame = ViewFrame::new(
+                handle.view_id,
+                ViewKind::StatusLine,
+                self.status_view_revision,
+                content,
+                timestamp_ns,
+            );
+            
+            view_host.publish_frame(handle, frame)?;
+            self.status_view_revision += 1;
+        }
+        
+        Ok(())
+    }
+    
+    pub fn process_input_and_publish(
+        &mut self,
+        event: InputEvent,
+        view_host: &mut ViewHost,
+        timestamp_ns: u64,
+    ) -> EditorResult<EditorAction> {
+        let action = self.process_input(event)?;
+        self.publish_views(view_host, timestamp_ns)?;
+        Ok(action)
+    }
+}
+```
+
+### Testing Views
+
+#### Capture and Assert
+
+```rust
+#[test]
+fn test_editor_publishes_buffer() {
+    let mut editor = Editor::new();
+    let mut view_host = ViewHost::new();
+    
+    // Create views
+    let main_view = view_host.create_view(
+        ViewKind::TextBuffer,
+        Some("test".to_string()),
+        TaskId::new(),
+        ChannelId::new(),
+    ).unwrap();
+    
+    editor.set_view_handles(main_view, status_view);
+    
+    // Type some text
+    editor.process_input(key_event('H')).unwrap();
+    editor.process_input(key_event('i')).unwrap();
+    
+    // Publish and verify
+    editor.publish_views(&mut view_host, 1000).unwrap();
+    
+    let frame = view_host.get_latest(main_view.view_id).unwrap().unwrap();
+    assert_eq!(frame.revision, 1);
+    
+    match frame.content {
+        ViewContent::TextBuffer { lines } => {
+            assert_eq!(lines[0], "Hi");
+        }
+        _ => panic!("Expected TextBuffer content"),
+    }
+}
+```
+
+#### Test Revision Monotonicity
+
+```rust
+#[test]
+fn test_revision_must_increase() {
+    let mut view_host = ViewHost::new();
+    let handle = view_host.create_view(
+        ViewKind::TextBuffer,
+        None,
+        TaskId::new(),
+        ChannelId::new(),
+    ).unwrap();
+    
+    // Publish with revision 1
+    let frame1 = ViewFrame::new(
+        handle.view_id,
+        ViewKind::TextBuffer,
+        1,
+        ViewContent::empty_text_buffer(),
+        1000,
+    );
+    view_host.publish_frame(&handle, frame1).unwrap();
+    
+    // Try to publish with revision 1 again (should fail)
+    let frame2 = ViewFrame::new(
+        handle.view_id,
+        ViewKind::TextBuffer,
+        1,
+        ViewContent::empty_text_buffer(),
+        2000,
+    );
+    let result = view_host.publish_frame(&handle, frame2);
+    assert!(matches!(result, Err(ViewHostError::RevisionNotMonotonic { .. })));
+}
+```
+
+### Deterministic Replay
+
+Views support deterministic replay via:
+- **Revisions**: Monotonic ordering
+- **Timestamps**: Simulation time (not wall clock)
+- **Immutability**: Frames don't change once published
+
+```rust
+// Capture all views at a point in time
+let all_views = workspace.get_all_views();
+for (component_id, (main_view, status_view)) in all_views {
+    println!("Component {}: revision {}", 
+        component_id, 
+        main_view.as_ref().map(|f| f.revision).unwrap_or(0)
+    );
+}
+
+// Replay by re-publishing frames in order
+for frame in captured_frames.iter().sorted_by_key(|f| (f.timestamp_ns, f.revision)) {
+    view_host.publish_frame(&handle, frame.clone())?;
+}
+```
+
+### Summary
+
+The view system provides:
+- **Structured output**: ViewFrames with semantic content ✅
+- **Capability-gated**: ViewHandleCap and ViewSubscriptionCap ✅
+- **Monotonic revisions**: Enforced by ViewHost ✅
+- **Workspace rendering**: Focus-based display ✅
+- **Editor integration**: Publishes buffer and status ✅
+- **Full testability**: Capture, assert, replay ✅
+
+This interface enables components to provide output without:
+- Global stdout/stderr
+- Terminal emulation
+- Ambient authority
+- Complex escape codes
+
+**Output is now structured, testable, and capability-gated.**
+
