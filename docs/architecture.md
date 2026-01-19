@@ -1075,6 +1075,8 @@ The system now includes:
 **Execution Identity Model**:
 
 Every running task has an execution identity with:
+
+Every running task has an execution identity with:
 - `ExecutionId`: Unique identifier (never reused)
 - `IdentityKind`: System | Service | Component | PipelineStage
 - `TrustDomain`: "core" | "user" | "sandbox" | custom
@@ -1336,6 +1338,178 @@ Phase 8+ may add:
 - Resource quotas per trust domain
 - Enforcement of cross-domain delegation policies
 - Identity-based audit queries (show all actions by exec_id)
+
+### Phase 8: Pluggable Policy Engines (Explicit, Testable, Non-Invasive)
+
+**Phase 8 (Current)**: Pluggable policy framework for governance without hard-coded rules.
+
+The system now includes:
+- **Policy Engine Abstraction**: PolicyEngine trait for evaluating operations
+- **Policy Decisions**: Allow, Deny(reason), or Require(action)
+- **Policy Context**: Structured information about operations for policy evaluation
+- **Enforcement Points**: Spawn, capability delegation (with optional policy)
+- **Reference Policies**: NoOpPolicy, TrustDomainPolicy, PipelineSafetyPolicy
+- **Policy Composition**: Combine multiple policies with precedence rules
+- **Policy Audit**: Test-visible logging of all policy decisions
+
+**Philosophy**:
+- **Mechanism not policy**: Kernel provides primitives, policies are pluggable
+- **Policy observes; it does not own**: Authority comes from capabilities, not policy
+- **Explicit and testable**: All policy logic works under SimKernel
+- **Advisory + enforceable**: Policies make decisions, enforcement points apply them
+- **Pluggable and removable**: System works without policy engines
+
+**Policy Model**:
+
+Policy engines evaluate operations and return decisions:
+
+```rust
+pub trait PolicyEngine {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision;
+    fn name(&self) -> &str;
+}
+
+pub enum PolicyDecision {
+    Allow,                        // Operation may proceed
+    Deny { reason: String },      // Operation is blocked
+    Require { action: String },   // Additional action needed
+}
+```
+
+**Key Design Points**:
+
+1. **Policy Does NOT Replace Capabilities**: Policy is additive
+   - Capabilities are the ONLY source of authority
+   - Policy can deny operations, but cannot grant authority
+   - Identity provides context, not permission
+
+2. **Enforcement Points Are Explicit and Optional**:
+   - Spawn: `SimKernel::spawn_task_with_identity` checks OnSpawn policy
+   - Delegation: `SimKernel::delegate_capability` checks OnCapabilityDelegate policy
+   - If no policy engine is set, all operations are allowed
+
+3. **Policy Composition**:
+   - Multiple policies can be active via `ComposedPolicy`
+   - Decision precedence: Deny > Require > Allow
+   - First Deny wins (short-circuit evaluation)
+   - All Require decisions must be satisfied
+
+4. **Trust Domain Policy Example**:
+   ```rust
+   impl PolicyEngine for TrustDomainPolicy {
+       fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+           match event {
+               PolicyEvent::OnSpawn => {
+                   // Sandbox cannot spawn System services
+                   if context.actor_identity.trust_domain == TrustDomain::sandbox()
+                       && context.target_identity.kind == IdentityKind::System {
+                       return PolicyDecision::deny("Sandbox cannot spawn System services");
+                   }
+                   PolicyDecision::Allow
+               }
+               PolicyEvent::OnCapabilityDelegate => {
+                   // Cross-domain delegation requires approval
+                   if context.is_cross_domain() {
+                       return PolicyDecision::require("Cross-domain delegation needs approval");
+                   }
+                   PolicyDecision::Allow
+               }
+               _ => PolicyDecision::Allow,
+           }
+       }
+   }
+   ```
+
+**Policy Audit**:
+
+Policy decisions are logged for test verification:
+
+```rust
+// Set policy engine
+let kernel = SimulatedKernel::new()
+    .with_policy_engine(Box::new(TrustDomainPolicy));
+
+// Perform operations...
+
+// Verify policy decisions in tests
+let audit = kernel.policy_audit();
+assert!(audit.has_event(|e| {
+    matches!(e.event, PolicyEvent::OnSpawn) && e.decision.is_deny()
+}));
+```
+
+**Design Rationale**:
+
+**Why pluggable policy?**
+- Different deployments need different policies
+- Policies evolve independently from mechanisms
+- Easier to reason about (separation of concerns)
+- Testable in isolation
+
+**Why not bake policy into KernelApi?**
+- Would violate "mechanism not policy" principle
+- Would make kernel complex and opinionated
+- Would prevent experimentation with different policies
+- Would make testing harder
+
+**Why Allow/Deny/Require?**
+- Allow: Simple positive case
+- Deny: Explicit blocking with reason (debuggable)
+- Require: Allows conditional approval (e.g., "add timeout first")
+
+**Integration with Previous Phases**:
+
+Phase 8 builds on all previous phases:
+- **Phase 1**: Uses KernelApi, TaskId, ServiceId
+- **Phase 2**: Works under fault injection (deterministic policy evaluation)
+- **Phase 3**: Policies observe capability operations, don't own them
+- **Phase 4**: Policy decisions are versioned/serializable if needed
+- **Phase 5**: (Future) Pipelines have policy enforcement points
+- **Phase 6**: Policy can require timeouts on operations
+- **Phase 7**: Policy uses identity and trust domains for context
+
+All safety properties maintained:
+- No capability leaks (policy cannot grant authority)
+- No ambient authority (policy observes, doesn't own)
+- Deterministic testing (policy evaluation under SimKernel)
+- Optional enforcement (system works without policies)
+
+**Testing Policy Behavior**:
+
+Tests validate:
+- Individual policy engine logic
+- Policy composition precedence
+- Enforcement point integration
+- Policy disabled (NoOpPolicy allows all)
+- Audit trail completeness
+
+Example:
+```rust
+#[test]
+fn test_trust_domain_policy_denies_sandbox_spawn_system() {
+    let mut kernel = SimulatedKernel::new()
+        .with_policy_engine(Box::new(TrustDomainPolicy));
+    
+    // Sandbox task tries to spawn System service
+    let result = kernel.spawn_task_with_identity(...);
+    
+    // Should be denied
+    assert!(result.is_err());
+    
+    // Verify policy audit
+    assert!(kernel.policy_audit().has_event(|e| e.decision.is_deny()));
+}
+```
+
+**Future Work**:
+
+Phase 9+ may add:
+- Policy enforcement in pipeline executor
+- Policy hot-reload (swap policies without restart)
+- Policy decision caching for performance
+- Policy composition DSL for complex rules
+- Per-service policy overrides
+- Policy-based resource quotas
 
 ### Performance
 

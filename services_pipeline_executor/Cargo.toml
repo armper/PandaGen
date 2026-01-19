@@ -11,6 +11,8 @@ core_types = { workspace = true }
 kernel_api = { workspace = true }
 lifecycle = { workspace = true }
 ipc = { workspace = true }
+policy = { workspace = true }
+identity = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
