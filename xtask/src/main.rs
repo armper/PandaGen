@@ -91,9 +91,13 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     fs::create_dir_all(staging.join("limine"))?;
 
     let limine_conf = root.join("boot/limine.conf");
+    let limine_cfg = root.join("boot/limine.cfg");
     copy_file(limine_conf.clone(), staging.join("boot/limine.conf"))?;
     copy_file(limine_conf.clone(), staging.join("limine.conf"))?;
     copy_file(limine_conf, staging.join("limine/limine.conf"))?;
+    copy_file(limine_cfg.clone(), staging.join("boot/limine.cfg"))?;
+    copy_file(limine_cfg.clone(), staging.join("limine.cfg"))?;
+    copy_file(limine_cfg, staging.join("limine/limine.cfg"))?;
 
     let kernel_path = root
         .join("target")
