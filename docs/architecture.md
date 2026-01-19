@@ -843,6 +843,219 @@ Pipelines maintain all safety properties even under faults:
 - No double-commit in storage (fail-fast semantics)
 - Storage immutability and lineage preserved
 
+### Phase 6: Deterministic Cancellation, Timeouts, and Structured Lifecycle
+
+**Phase 6 (Current)**: Explicit, testable cancellation and timeout primitives for controlled operation lifecycles.
+
+The system now includes:
+- **Lifecycle Crate**: CancellationToken, CancellationSource, Deadline, and Timeout types
+- **Pipeline Cancellation**: Per-pipeline and per-stage timeout support with explicit cancellation checks
+- **Intent Handler Pattern**: Documented pattern for handlers to check cancellation at safe points
+- **Capability Safety**: No capability leaks on cancellation (capabilities only committed on success)
+- **Deterministic Behavior**: All cancellation and timeout logic uses SimKernel time
+
+**Philosophy**:
+- **Explicit over implicit**: Cancellation requires explicit token, never automatic
+- **Testability first**: Deterministic time, reproducible behavior, comprehensive tests
+- **Mechanism not policy**: Kernel provides primitives, services decide when to cancel
+- **Type safe**: Cancelled is distinct from Failed, compiler enforces handling
+- **No POSIX concepts**: Not signals, not EINTR - structured, explicit cancellation
+
+**Cancellation Model**:
+
+Operations can be cancelled through:
+
+1. **CancellationToken**: Cloneable handle for checking cancellation status
+   ```rust
+   let source = CancellationSource::new();
+   let token = source.token();
+   
+   // Later, from any context:
+   source.cancel(CancellationReason::UserCancel);
+   
+   // All tokens see the cancellation:
+   assert!(token.is_cancelled());
+   ```
+
+2. **CancellationReason**: Explicit reason enum
+   - `UserCancel`: User-initiated
+   - `Timeout`: Deadline exceeded
+   - `SupervisorCancel`: Orchestrator/parent cancelled
+   - `DependencyFailed`: Cascade cancellation
+   - `Custom(String)`: Domain-specific reasons
+
+3. **Deadline/Timeout**: Deterministic time-based cancellation
+   ```rust
+   let timeout = Timeout::from_secs(5);
+   let deadline = timeout.to_deadline(kernel.now());
+   
+   if deadline.has_passed(kernel.now()) {
+       // Timeout occurred
+   }
+   ```
+
+**Pipeline Integration**:
+
+Pipelines support cancellation at multiple levels:
+
+1. **Overall Pipeline Timeout**:
+   ```rust
+   let pipeline = PipelineSpec::new(...)
+       .add_stage(stage1)
+       .add_stage(stage2)
+       .with_timeout_ms(5000); // 5 second overall deadline
+   ```
+
+2. **Per-Stage Timeout**:
+   ```rust
+   let stage = StageSpec::new(...)
+       .with_timeout_ms(1000); // 1 second for this stage
+   ```
+
+3. **Explicit Cancellation**:
+   ```rust
+   let source = CancellationSource::new();
+   let token = source.token();
+   
+   // Start pipeline execution
+   let result = executor.execute(&mut kernel, &pipeline, input, token);
+   
+   // Can cancel from another context:
+   source.cancel(CancellationReason::SupervisorCancel);
+   ```
+
+**Cancellation Propagation**:
+
+The pipeline executor checks cancellation at key points:
+- Before pipeline starts
+- Before each stage execution
+- Before each retry attempt
+- Against pipeline and stage deadlines
+
+```rust
+// Executor checks before each stage:
+if cancellation_token.is_cancelled() {
+    trace.set_final_result(PipelineExecutionResult::Cancelled {
+        stage_name: stage.name.clone(),
+        reason: cancellation_token.reason().to_string(),
+    });
+    return Err(...);
+}
+```
+
+**Intent Handler Pattern**:
+
+Handlers should check cancellation at safe points:
+
+```rust
+fn handle_storage_write(
+    intent: &Intent,
+    cancellation_token: &CancellationToken,
+) -> Result<IntentResult, IntentError> {
+    // Check cancellation before starting
+    cancellation_token.throw_if_cancelled()?;
+    
+    // Do preparatory work
+    let data = prepare_data(intent)?;
+    
+    // Check again before expensive operation
+    cancellation_token.throw_if_cancelled()?;
+    
+    // Perform write
+    write_to_storage(data)?;
+    
+    Ok(IntentResult::Success)
+}
+```
+
+**Capability Safety on Cancellation**:
+
+Capabilities produced by cancelled stages are NOT committed:
+- Only successful stages add capabilities to the pipeline's pool
+- Cancelled stages don't produce capabilities (not added to trace)
+- No cleanup code needed - capabilities simply aren't propagated
+- Integrates with Phase 3 capability lifecycle tracking
+
+**Result Types**:
+
+All result types include distinct Cancelled variant:
+
+```rust
+pub enum StageResult {
+    Success { output, capabilities },
+    Failure { error },
+    Retryable { error },
+    Cancelled { reason },  // New in Phase 6
+}
+
+pub enum PipelineExecutionResult {
+    InProgress,
+    Success,
+    Failed { stage_name, error },
+    Cancelled { stage_name, reason },  // New in Phase 6
+}
+```
+
+**Timeout Semantics**:
+
+Timeouts trigger cancellation with reason=Timeout:
+- Pipeline timeout: overall deadline for entire pipeline
+- Stage timeout: deadline for individual stage (including retries)
+- Deterministic evaluation using SimKernel time
+- No implicit retries after timeout (unless retry policy explicitly allows)
+
+**Interaction with Retries**:
+
+Cancellation and timeout interact with retry policies:
+- Cancellation check happens before each retry attempt
+- Stage timeout includes all retry attempts
+- Max retries still enforced even if time remains
+- Explicit cancellation takes precedence over retry policy
+
+**Testing**:
+
+Phase 6 includes comprehensive cancellation tests:
+- Cancel before pipeline starts
+- Cancel mid-stage (handler cooperates)
+- Stage timeout configuration
+- Pipeline timeout (mechanism tested)
+- Cancellation propagation through stages
+
+**Design Rationale**:
+
+**Why explicit tokens?**
+- Clear ownership: who can cancel?
+- Type-safe: compiler enforces token handling
+- Composable: tokens can be passed through layers
+- Testable: deterministic behavior
+
+**Why not async cancellation?**
+- No async runtime required
+- Works with existing single-threaded SimKernel
+- Simpler to reason about
+- Compatible with future async integration if needed
+
+**Why distinct Cancelled result?**
+- Not an error - cancellation is intentional
+- Different handling: no retries, no error logging
+- Clear semantics: operation was stopped, not failed
+- Enables proper cleanup and resource management
+
+**Integration with Previous Phases**:
+
+Phase 6 builds on all previous phases:
+- **Phase 1**: Uses KernelApi time primitives (Instant, Duration)
+- **Phase 2**: Works under fault injection (deterministic timeouts)
+- **Phase 3**: Respects capability lifecycle (no leaks on cancel)
+- **Phase 4**: Cancelled status is version-compatible addition
+- **Phase 5**: Seamless integration with typed pipelines and retry semantics
+
+All safety properties maintained under cancellation:
+- No capability leaks (Phase 3)
+- No schema violations (Phase 4)
+- No infinite loops (Phase 5 + timeouts)
+- Deterministic behavior (Phase 2 + deterministic time)
+
 ### Performance
 
 Currently optimized for clarity, not performance. Future work:

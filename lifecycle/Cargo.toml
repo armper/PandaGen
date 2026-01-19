@@ -1,13 +1,11 @@
 [package]
-name = "pipeline"
+name = "lifecycle"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-core_types = { workspace = true }
-lifecycle = { workspace = true }
+kernel_api = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true }
 thiserror = { workspace = true }

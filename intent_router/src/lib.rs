@@ -100,6 +100,44 @@ impl Default for IntentRouter {
     }
 }
 
+/// Example of how intent handlers would use cancellation tokens
+///
+/// In a real implementation, handlers would be functions/closures that accept:
+/// - Intent parameters
+/// - CancellationToken for cooperative cancellation
+/// - Other context (kernel access, capabilities, etc.)
+///
+/// ## Example Handler Signature
+///
+/// ```ignore
+/// use lifecycle::CancellationToken;
+///
+/// fn handle_storage_write(
+///     intent: &Intent,
+///     cancellation_token: &CancellationToken,
+/// ) -> Result<IntentResult, IntentError> {
+///     // Check cancellation at safe points
+///     cancellation_token.throw_if_cancelled()?;
+///     
+///     // Do some work
+///     let data = prepare_data(intent)?;
+///     
+///     // Check again before expensive operation
+///     cancellation_token.throw_if_cancelled()?;
+///     
+///     // Perform write
+///     write_to_storage(data)?;
+///     
+///     Ok(IntentResult::Success)
+/// }
+/// ```
+///
+/// The key principle is that handlers should:
+/// 1. Check cancellation at regular intervals
+/// 2. Return a Cancelled result (distinct from Failure)
+/// 3. Clean up resources before returning
+/// 4. Not leak capabilities on cancellation
+
 #[cfg(test)]
 mod tests {
     use super::*;

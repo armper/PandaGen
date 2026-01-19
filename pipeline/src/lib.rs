@@ -126,6 +126,8 @@ pub enum StageResult {
     Failure { error: String },
     /// Stage failed but can be retried
     Retryable { error: String },
+    /// Stage was cancelled
+    Cancelled { reason: String },
 }
 
 /// Retry policy for a stage
@@ -206,6 +208,8 @@ pub struct StageSpec {
     pub retry_policy: RetryPolicy,
     /// Required capability IDs (must be available at stage start)
     pub required_capabilities: Vec<u64>,
+    /// Optional timeout for this stage in milliseconds
+    pub timeout_ms: Option<u64>,
 }
 
 impl StageSpec {
@@ -226,6 +230,7 @@ impl StageSpec {
             output_schema,
             retry_policy: RetryPolicy::none(),
             required_capabilities: Vec::new(),
+            timeout_ms: None,
         }
     }
 
@@ -238,6 +243,12 @@ impl StageSpec {
     /// Adds required capabilities for this stage
     pub fn with_capabilities(mut self, cap_ids: Vec<u64>) -> Self {
         self.required_capabilities = cap_ids;
+        self
+    }
+
+    /// Sets timeout for this stage
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
         self
     }
 }
@@ -255,6 +266,8 @@ pub struct PipelineSpec {
     pub initial_input_schema: PayloadSchemaId,
     /// Final output schema produced by last stage
     pub final_output_schema: PayloadSchemaId,
+    /// Optional overall timeout for the entire pipeline in milliseconds
+    pub timeout_ms: Option<u64>,
 }
 
 impl PipelineSpec {
@@ -270,12 +283,19 @@ impl PipelineSpec {
             stages: Vec::new(),
             initial_input_schema,
             final_output_schema,
+            timeout_ms: None,
         }
     }
 
     /// Adds a stage to the pipeline
     pub fn add_stage(mut self, stage: StageSpec) -> Self {
         self.stages.push(stage);
+        self
+    }
+
+    /// Sets overall pipeline timeout
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
         self
     }
 
@@ -377,6 +397,7 @@ pub enum StageExecutionResult {
     Success,
     Failure { error: String },
     Retrying { error: String },
+    Cancelled { reason: String },
 }
 
 /// Complete execution trace for a pipeline run
@@ -425,6 +446,7 @@ pub enum PipelineExecutionResult {
     InProgress,
     Success,
     Failed { stage_name: String, error: String },
+    Cancelled { stage_name: String, reason: String },
 }
 
 #[cfg(test)]
