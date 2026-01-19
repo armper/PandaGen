@@ -1,12 +1,12 @@
 [package]
-name = "kernel_api"
+name = "identity"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-core_types.workspace = true
-ipc.workspace = true
-thiserror.workspace = true
+core_types = { workspace = true }
 serde = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

@@ -1056,6 +1056,287 @@ All safety properties maintained under cancellation:
 - No infinite loops (Phase 5 + timeouts)
 - Deterministic behavior (Phase 2 + deterministic time)
 
+### Phase 7: Execution Identity, Supervision Trees, and Trust Boundaries
+
+**Phase 7 (Current)**: Principled model of execution identity and supervision without POSIX concepts.
+
+The system now includes:
+- **Execution Identity Model**: ExecutionId, IdentityKind, IdentityMetadata
+- **Identity Tracking in SimKernel**: Automatic identity creation and lifecycle management
+- **Trust Boundaries**: Trust domain tags with cross-domain delegation auditing
+- **Exit Notifications**: Structured termination reasons for supervision
+
+**Philosophy**:
+- **Identity is explicit and contextual, not global**: No POSIX users or UIDs
+- **Authority comes from capabilities, not names**: Identity ≠ authority
+- **Supervision is structure, not ad-hoc error handling**: Explicit relationships
+- **Testability first**: All identity logic works under SimKernel
+
+**Execution Identity Model**:
+
+Every running task has an execution identity with:
+- `ExecutionId`: Unique identifier (never reused)
+- `IdentityKind`: System | Service | Component | PipelineStage
+- `TrustDomain`: "core" | "user" | "sandbox" | custom
+- Parent/creator relationships for supervision
+- Creation timestamp
+
+```rust
+// Create identity with full metadata
+let metadata = IdentityMetadata::new(
+    IdentityKind::Service,
+    TrustDomain::core(),
+    "storage-service",
+    created_at_nanos,
+)
+.with_parent(supervisor_exec_id)
+.with_task_id(task_id);
+
+let exec_id = kernel.create_identity(metadata);
+```
+
+**Key Design Points**:
+
+1. **Identity ≠ Authority**: Having an identity does NOT grant any privileges
+   - Capabilities are the ONLY source of authority
+   - Identity is for supervision and audit, not access control
+   - No "run as user X" or privilege escalation concepts
+
+2. **Explicit Parent-Child Relationships**:
+   - Parent execution ID recorded at spawn time
+   - Creator execution ID (who spawned this task)
+   - Immutable after creation (no reparenting)
+
+3. **Trust Domains**:
+   - String-based tags: "core", "user", "sandbox", etc.
+   - Cross-domain capability delegation is audited
+   - NOT security enforcement (yet) - structural intent
+   - Delegation within domain = normal
+   - Delegation across domains = logged for review
+
+4. **Exit Notifications**:
+   ```rust
+   pub enum ExitReason {
+       Normal,                         // Successful completion
+       Failure { error: String },      // Crashed or failed
+       Cancelled { reason: String },   // Cancelled by supervisor
+       Timeout,                        // Deadline exceeded
+   }
+   
+   pub struct ExitNotification {
+       pub execution_id: ExecutionId,
+       pub task_id: Option<TaskId>,
+       pub reason: ExitReason,
+       pub terminated_at_nanos: u64,
+   }
+   ```
+
+**SimKernel Integration**:
+
+SimKernel automatically manages identity lifecycle:
+
+```rust
+// Spawn creates identity automatically
+let handle = kernel.spawn_task(descriptor)?;
+let exec_id = kernel.get_task_identity(handle.task_id)?;
+
+// Or spawn with full identity control
+let (handle, exec_id) = kernel.spawn_task_with_identity(
+    descriptor,
+    IdentityKind::Service,
+    TrustDomain::core(),
+    Some(parent_exec_id),
+    Some(creator_exec_id),
+)?;
+
+// Terminate generates exit notification
+kernel.terminate_task_with_reason(
+    task_id,
+    ExitReason::Failure { error: "crash".to_string() },
+);
+
+// Supervisor can check notifications
+let notifications = kernel.get_exit_notifications();
+for notif in notifications {
+    match notif.reason {
+        ExitReason::Normal => { /* child exited cleanly */ }
+        ExitReason::Failure { .. } => { /* maybe restart */ }
+        ExitReason::Cancelled { .. } => { /* intentional */ }
+        ExitReason::Timeout => { /* took too long */ }
+    }
+}
+kernel.clear_exit_notifications();
+```
+
+**Trust Boundary Auditing**:
+
+Cross-domain delegation is tracked in capability audit log:
+
+```rust
+// Task A (core domain) delegates to Task B (user domain)
+kernel.delegate_capability(cap_id, task_a, task_b)?;
+
+// Audit log records:
+CapabilityEvent::CrossDomainDelegation {
+    cap_id,
+    from_task,
+    from_domain: "core",
+    to_task,
+    to_domain: "user",
+}
+```
+
+Tests can verify trust boundary behavior:
+```rust
+let audit = kernel.audit_log();
+assert!(audit.has_event(|e| matches!(
+    e,
+    CapabilityEvent::CrossDomainDelegation { .. }
+)));
+```
+
+**Supervision Pattern** (future work in services_process_manager):
+
+```rust
+// Supervisor maintains child identity mapping
+struct Supervisor {
+    children: HashMap<ExecutionId, RestartPolicy>,
+}
+
+impl Supervisor {
+    fn spawn_child(&mut self, kernel: &mut SimKernel) -> ExecutionId {
+        let (handle, exec_id) = kernel.spawn_task_with_identity(
+            descriptor,
+            IdentityKind::Component,
+            TrustDomain::user(),
+            Some(self.exec_id),  // Parent
+            Some(self.exec_id),  // Creator
+        )?;
+        
+        self.children.insert(exec_id, RestartPolicy::OnFailure);
+        exec_id
+    }
+    
+    fn handle_notifications(&mut self, kernel: &mut SimKernel) {
+        for notif in kernel.get_exit_notifications() {
+            if let Some(policy) = self.children.get(&notif.execution_id) {
+                // This is our child - apply restart policy
+                match (notif.reason, policy) {
+                    (ExitReason::Normal, _) => {
+                        // Clean exit - don't restart
+                        self.children.remove(&notif.execution_id);
+                    }
+                    (ExitReason::Failure { .. }, RestartPolicy::OnFailure) => {
+                        // Restart the child
+                        self.restart_child(kernel, notif.execution_id);
+                    }
+                    _ => { /* other policies */ }
+                }
+            }
+        }
+        kernel.clear_exit_notifications();
+    }
+}
+```
+
+**Design Rationale**:
+
+**Why not POSIX users/groups?**
+- POSIX UIDs are global numeric IDs (0-65535) with ambient authority
+- PandaGen identities are contextual: parent/child relationships matter
+- Authority comes from capabilities, not numeric identity
+- No setuid, setgid, or privilege escalation complexity
+
+**Why not authentication/crypto?**
+- Phase 7 is about structure, not enforcement
+- Trust domains are tags for supervision, not security boundaries (yet)
+- Authentication requires key management, which is out of scope
+- Focus: testable supervision patterns, not production security
+
+**Why immutable identity metadata?**
+- No reparenting or identity theft
+- Clear audit trail (who created whom, when)
+- Simpler to reason about (no state changes)
+- Matches Rust ownership model (move, not mutate)
+
+**Why exit notifications?**
+- Supervisor needs structured information, not just "child died"
+- Different exit reasons require different handling
+- Timeout vs failure vs cancellation are distinct concepts
+- Enables proper supervision without polling
+
+**Testing Identity and Trust Boundaries**:
+
+Tests validate:
+- Identity creation and immutability
+- Parent-child relationships
+- Trust domain same/different detection
+- Cross-domain delegation audit events
+- Exit notification generation
+- Identity retirement on termination
+
+Example:
+```rust
+#[test]
+fn test_trust_domain_delegation_cross_domain() {
+    let mut kernel = SimulatedKernel::new();
+    
+    // Spawn in different trust domains
+    let (task1_handle, _) = kernel.spawn_task_with_identity(
+        descriptor1,
+        IdentityKind::Component,
+        TrustDomain::core(),
+        None, None,
+    )?;
+    
+    let (task2_handle, _) = kernel.spawn_task_with_identity(
+        descriptor2,
+        IdentityKind::Component,
+        TrustDomain::user(),
+        None, None,
+    )?;
+    
+    // Grant and delegate across domains
+    kernel.grant_capability(task1_handle.task_id, cap)?;
+    kernel.delegate_capability(cap_id, task1_handle.task_id, task2_handle.task_id)?;
+    
+    // Verify cross-domain event recorded
+    let audit = kernel.audit_log();
+    assert!(audit.has_event(|e| matches!(
+        e,
+        CapabilityEvent::CrossDomainDelegation {
+            from_domain, to_domain, ..
+        } if from_domain == "core" && to_domain == "user"
+    )));
+}
+```
+
+**Integration with Previous Phases**:
+
+Phase 7 builds on all previous phases:
+- **Phase 1**: Uses TaskId, KernelApi, spawn semantics
+- **Phase 2**: Works under fault injection
+- **Phase 3**: Integrates with capability lifecycle (delegation, invalidation)
+- **Phase 4**: Identity metadata is versioned/serializable if needed
+- **Phase 5**: (Future) Pipeline stages have execution identities
+- **Phase 6**: Exit notifications include Timeout and Cancelled reasons
+
+All safety properties maintained:
+- No capability leaks (identities retired, capabilities invalidated)
+- No identity reuse (ExecutionId is UUID v4)
+- No ambient authority (identity ≠ privilege)
+- Deterministic testing (identity creation uses SimKernel time)
+
+**Future Work**:
+
+Phase 8+ may add:
+- Supervisor restart policies with exponential backoff
+- Health checks and heartbeat monitoring
+- Cascade termination (kill supervisor → kill children)
+- Resource quotas per trust domain
+- Enforcement of cross-domain delegation policies
+- Identity-based audit queries (show all actions by exec_id)
+
 ### Performance
 
 Currently optimized for clarity, not performance. Future work:

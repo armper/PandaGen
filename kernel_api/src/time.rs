@@ -1,5 +1,6 @@
 //! Time abstractions
 
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, Sub};
 
 /// A point in time
@@ -7,7 +8,7 @@ use std::ops::{Add, Sub};
 /// Unlike POSIX time (seconds since epoch), this is an opaque type.
 /// In simulated kernels, time can be virtual. In real kernels, it
 /// maps to hardware time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Instant {
     /// Nanoseconds since some arbitrary epoch
     nanos: u64,
@@ -50,7 +51,7 @@ impl Sub<Duration> for Instant {
 ///
 /// This is explicit and type-safe. Unlike POSIX (where durations are
 /// often implicit or confused with absolute times), Duration is distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Duration {
     /// Nanoseconds
     nanos: u64,

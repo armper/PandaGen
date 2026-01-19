@@ -1096,6 +1096,267 @@ Pipelines maintain these invariants:
 - Verify pipelines remain safe under faults
 - Assert no capability leaks
 
+## Execution Identity and Supervision
+
+### Execution Identity Types
+
+PandaGen introduces explicit execution identity for supervision and audit.
+
+```rust
+/// Unique identifier for an execution context
+pub struct ExecutionId(Uuid);
+
+/// Type of execution context
+pub enum IdentityKind {
+    System,         // Core system component
+    Service,        // User-space service
+    Component,      // Application component
+    PipelineStage,  // Pipeline stage execution
+}
+
+/// Trust domain tag
+pub struct TrustDomain(String);
+
+impl TrustDomain {
+    pub fn core() -> Self;      // "core"
+    pub fn user() -> Self;      // "user"
+    pub fn sandbox() -> Self;   // "sandbox"
+    pub fn new(name: impl Into<String>) -> Self;
+}
+```
+
+### Identity Metadata
+
+```rust
+pub struct IdentityMetadata {
+    pub execution_id: ExecutionId,
+    pub kind: IdentityKind,
+    pub task_id: Option<TaskId>,
+    pub parent_id: Option<ExecutionId>,
+    pub creator_id: Option<ExecutionId>,
+    pub created_at_nanos: u64,
+    pub trust_domain: TrustDomain,
+    pub name: String,
+}
+
+impl IdentityMetadata {
+    pub fn new(
+        kind: IdentityKind,
+        trust_domain: TrustDomain,
+        name: impl Into<String>,
+        created_at_nanos: u64,
+    ) -> Self;
+    
+    pub fn with_task_id(self, task_id: TaskId) -> Self;
+    pub fn with_parent(self, parent_id: ExecutionId) -> Self;
+    pub fn with_creator(self, creator_id: ExecutionId) -> Self;
+    
+    pub fn same_domain(&self, other: &IdentityMetadata) -> bool;
+    pub fn is_child_of(&self, parent_id: ExecutionId) -> bool;
+}
+```
+
+**Contract**:
+- Identity metadata is immutable after creation
+- ExecutionId is never reused (even after termination)
+- Identity does NOT grant authority (capabilities do)
+- Parent/child relationships are structural, not access control
+
+### Exit Notifications
+
+```rust
+pub enum ExitReason {
+    Normal,
+    Failure { error: String },
+    Cancelled { reason: String },
+    Timeout,
+}
+
+pub struct ExitNotification {
+    pub execution_id: ExecutionId,
+    pub task_id: Option<TaskId>,
+    pub reason: ExitReason,
+    pub terminated_at_nanos: u64,
+}
+```
+
+**Contract**:
+- Every task termination generates an ExitNotification
+- Exit notifications are available to all (supervision checks parent-child)
+- Exit reason is structural information, not enforcement
+- Supervisor is responsible for interpreting and acting on notifications
+
+### SimKernel Identity Operations
+
+```rust
+impl SimulatedKernel {
+    /// Create identity with metadata
+    pub fn create_identity(&mut self, metadata: IdentityMetadata) -> ExecutionId;
+    
+    /// Get identity metadata
+    pub fn get_identity(&self, execution_id: ExecutionId) -> Option<&IdentityMetadata>;
+    
+    /// Get execution ID for a task
+    pub fn get_task_identity(&self, task_id: TaskId) -> Option<ExecutionId>;
+    
+    /// Spawn task with full identity control
+    pub fn spawn_task_with_identity(
+        &mut self,
+        descriptor: TaskDescriptor,
+        kind: IdentityKind,
+        trust_domain: TrustDomain,
+        parent_id: Option<ExecutionId>,
+        creator_id: Option<ExecutionId>,
+    ) -> Result<(TaskHandle, ExecutionId), KernelError>;
+    
+    /// Terminate task with specific exit reason
+    pub fn terminate_task_with_reason(&mut self, task_id: TaskId, reason: ExitReason);
+    
+    /// Get exit notifications (for supervision)
+    pub fn get_exit_notifications(&self) -> &[ExitNotification];
+    
+    /// Clear exit notifications after processing
+    pub fn clear_exit_notifications(&mut self);
+}
+```
+
+**Usage Example**:
+
+```rust
+// Supervisor spawns child
+let (child_handle, child_exec_id) = kernel.spawn_task_with_identity(
+    TaskDescriptor::new("worker".to_string()),
+    IdentityKind::Component,
+    TrustDomain::user(),
+    Some(supervisor_exec_id),  // Parent
+    Some(supervisor_exec_id),  // Creator
+)?;
+
+// Later, check for child termination
+let notifications = kernel.get_exit_notifications();
+for notif in notifications {
+    if notif.execution_id == child_exec_id {
+        match notif.reason {
+            ExitReason::Normal => {
+                // Child completed successfully
+            }
+            ExitReason::Failure { error } => {
+                // Child crashed - maybe restart
+                eprintln!("Child failed: {}", error);
+            }
+            ExitReason::Timeout => {
+                // Child took too long
+            }
+            ExitReason::Cancelled { reason } => {
+                // Intentional cancellation
+            }
+        }
+    }
+}
+kernel.clear_exit_notifications();
+```
+
+### Trust Boundaries
+
+Trust boundaries are enforced through audit, not blocking:
+
+```rust
+// Same trust domain - delegation proceeds normally
+let task1 = spawn_in_domain(TrustDomain::core());
+let task2 = spawn_in_domain(TrustDomain::core());
+kernel.delegate_capability(cap_id, task1, task2)?;
+// No special audit event
+
+// Cross trust domain - delegation proceeds but is audited
+let task3 = spawn_in_domain(TrustDomain::user());
+kernel.delegate_capability(cap_id, task1, task3)?;
+// Audit log records CapabilityEvent::CrossDomainDelegation
+
+// Tests can verify trust boundary behavior
+let audit = kernel.audit_log();
+assert!(audit.has_event(|e| matches!(
+    e,
+    CapabilityEvent::CrossDomainDelegation {
+        from_domain, to_domain, ..
+    } if from_domain == "core" && to_domain == "user"
+)));
+```
+
+**Contract**:
+- Trust domains are string-based tags, not enforcement boundaries
+- Cross-domain delegation is allowed but audited
+- Tests verify correct audit events are generated
+- Future: explicit policies for blocking cross-domain delegation
+
+### Supervision Rules
+
+**Identity-based supervision** (future work in services_process_manager):
+
+1. **Supervisor owns children**: Only the parent can restart/terminate direct children
+2. **Exit notifications**: Supervisor receives structured exit information
+3. **Restart policies**: Per-child restart policy (Never, Always, OnFailure, Backoff)
+4. **No global control**: Cannot control unrelated identities
+
+**Example supervision pattern**:
+
+```rust
+struct Supervisor {
+    exec_id: ExecutionId,
+    children: HashMap<ExecutionId, ChildInfo>,
+}
+
+struct ChildInfo {
+    task_id: TaskId,
+    restart_policy: RestartPolicy,
+    restart_count: u32,
+}
+
+impl Supervisor {
+    fn handle_exit_notifications(&mut self, kernel: &mut SimKernel) {
+        for notif in kernel.get_exit_notifications() {
+            if let Some(child) = self.children.get_mut(&notif.execution_id) {
+                // This is our child - we own it
+                match (notif.reason, &child.restart_policy) {
+                    (ExitReason::Normal, _) => {
+                        // Clean exit - don't restart
+                        self.children.remove(&notif.execution_id);
+                    }
+                    (ExitReason::Failure { .. }, RestartPolicy::OnFailure) => {
+                        // Restart with backoff
+                        self.restart_child(kernel, notif.execution_id)?;
+                    }
+                    _ => {
+                        // Other policy/reason combinations
+                    }
+                }
+            }
+            // Not our child - ignore
+        }
+        kernel.clear_exit_notifications();
+    }
+}
+```
+
+### Design Guidelines
+
+**For Identity**:
+1. Identity is for supervision and audit, not access control
+2. Authority comes from capabilities, not identity
+3. Use trust domains as structural hints, not security boundaries
+4. Parent-child relationships are immutable (no reparenting)
+
+**For Supervision**:
+1. Only supervise your direct children (check parent_id)
+2. Use exit notifications, don't poll task status
+3. Restart policies should be explicit and bounded
+4. Log supervision actions for audit
+
+**For Trust Boundaries**:
+1. Cross-domain delegation should be intentional
+2. Test trust boundary behavior with audit assertions
+3. Document why cross-domain delegation is needed
+4. Future: explicit delegation policies per trust domain pair
+
 ## Summary
 
 PandaGen's interfaces are designed to be:
