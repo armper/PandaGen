@@ -18,6 +18,7 @@ members = [
     "services_focus_manager",
     "services_editor_vi",
     "services_workspace_manager",
+    "services_view_host",
     "fs_view",
     "intent_router",
     "pipeline",
@@ -72,6 +73,7 @@ services_workspace_manager = { path = "services_workspace_manager" }
 
 # View system crates
 view_types = { path = "view_types" }
+services_view_host = { path = "services_view_host" }
 
 # Demo crates
 cli_console = { path = "cli_console" }
