@@ -10,6 +10,10 @@
 use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};
 
+pub mod keyboard;
+
+pub use keyboard::X86Ps2Keyboard;
+
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;
 

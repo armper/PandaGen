@@ -18,8 +18,12 @@
 
 pub mod cpu;
 pub mod interrupts;
+pub mod keyboard;
+pub mod keyboard_translation;
 pub mod memory;
 
 pub use cpu::CpuHal;
 pub use interrupts::InterruptHal;
+pub use keyboard::{HalKeyEvent, KeyboardDevice};
+pub use keyboard_translation::{KeyboardTranslator, scancode_to_keycode};
 pub use memory::MemoryHal;
