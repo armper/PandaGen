@@ -656,6 +656,193 @@ PandaGen proves that you can evolve without ossifying:
 
 This is **evolution as a feature**, not evolution as technical debt.
 
+### Phase 5: Typed Intent Pipelines, Composition Semantics, and Failure Propagation
+
+**Phase 5 (Current)**: Safe composition of typed operations with explicit failure handling.
+
+The system now includes:
+- **Typed Pipeline System**: Compose handler stages with schema-validated input/output chaining
+- **Explicit Capability Flow**: Track capabilities through pipeline stages without ambient authority
+- **Bounded Failure Semantics**: Explicit retry policies with deterministic backoff (no infinite loops)
+- **Execution Tracing**: Minimal, test-visible traces of stage execution and capability flow
+- **Fail-Fast Behavior**: Pipelines stop at first non-retryable failure
+
+**Philosophy**:
+- **Explicit over implicit**: Failure modes are explicit, not hidden in abstraction
+- **Testability first**: Pipelines work deterministically with SimKernel + fault injection
+- **Modularity first**: Each stage is independent and composable
+- **Mechanism not policy**: Kernel provides primitives, services orchestrate
+- **Capabilities over ambient authority**: No capability leaks through composition
+- **No legacy compatibility**: Not POSIX pipes, not shell pipelines, not stringly-typed
+
+**Typed Intent Pipelines**:
+
+Traditional shells compose commands via text pipes (`cmd1 | cmd2`). This is:
+- Stringly-typed (all data becomes text)
+- Error-prone (silent failures, no type checking)
+- Ambient authority (commands inherit all privileges)
+- No structured failure handling
+
+PandaGen pipelines are fundamentally different:
+
+1. **Typed Composition**: Each stage declares input/output schemas
+   ```rust
+   let stage1 = StageSpec::new(
+       "CreateBlob",
+       handler_service,
+       "create",
+       PayloadSchemaId::new("blob_params"),
+       PayloadSchemaId::new("blob_capability"),
+   );
+   
+   let stage2 = StageSpec::new(
+       "TransformBlob",
+       transformer_service,
+       "transform",
+       PayloadSchemaId::new("blob_capability"), // Must match stage1 output
+       PayloadSchemaId::new("transformed_blob"),
+   );
+   ```
+
+2. **Schema Validation**: Pipeline validates schema chaining at construction time
+   - First stage input must match pipeline input
+   - Each stage output must match next stage input
+   - Last stage output must match pipeline output
+   - Compilation-time and runtime validation
+
+3. **Explicit Capability Flow**:
+   ```rust
+   stage2.with_capabilities(vec![cap_from_stage1]);
+   // Stage 2 explicitly requires a capability produced by stage 1
+   // Executor validates capability availability before execution
+   ```
+
+4. **Bounded Retry Policies**:
+   ```rust
+   stage.with_retry_policy(RetryPolicy::exponential_backoff(3, 100));
+   // Max 3 retries, 100ms initial backoff, exponentially increasing
+   // No infinite retries - ever
+   ```
+
+**Failure Semantics**:
+
+Every stage returns one of three outcomes:
+- `Success { output, capabilities }` - Stage succeeded, pipeline continues
+- `Failure { error }` - Permanent failure, pipeline stops (fail-fast)
+- `Retryable { error }` - Transient failure, retry with backoff
+
+Pipeline execution rules:
+- **Fail-Fast**: First permanent failure stops the entire pipeline
+- **Bounded Retries**: Retryable stages retry up to `max_retries`, then convert to permanent failure
+- **Deterministic Backoff**: Uses SimKernel time for reproducible retry timing
+- **No Hidden State**: All failures are explicit in execution trace
+
+**Execution Trace**:
+
+Pipelines record a minimal trace for testing:
+```rust
+struct StageTraceEntry {
+    stage_id: StageId,
+    stage_name: String,
+    start_time_ms: u64,      // Deterministic SimKernel time
+    end_time_ms: u64,
+    attempt: u32,            // 0 for first attempt, increments on retry
+    result: StageExecutionResult,
+    capabilities_in: Vec<u64>,  // Caps required by this stage
+    capabilities_out: Vec<u64>, // Caps produced by this stage
+}
+```
+
+This is NOT a production observability platform. It's:
+- Minimal (stage boundaries, timestamps, cap IDs only)
+- Test-visible (assertions can query trace)
+- Deterministic (replay-able under SimKernel)
+
+**Why This Matters**:
+
+Composition is the heart of building complex systems:
+- Without safe composition, systems become monolithic
+- Without typed composition, systems become fragile
+- Without explicit failure handling, systems become unpredictable
+
+PandaGen proves that composition can be:
+- **Type-safe**: Schemas validate at construction time
+- **Capability-safe**: No authority leaks through stages
+- **Failure-safe**: Bounded retries prevent infinite loops
+- **Test-safe**: Deterministic execution under faults
+
+This is **composition as a first-class feature**, not composition as an afterthought.
+
+**Example: Three-Stage Blob Pipeline**:
+
+```rust
+// Stage 1: Create a blob in storage
+let create_stage = StageSpec::new(
+    "CreateBlob",
+    storage_service_id,
+    "create_blob",
+    PayloadSchemaId::new("create_blob_input"),
+    PayloadSchemaId::new("create_blob_output"),
+);
+
+// Stage 2: Transform blob (e.g., uppercase)
+// Requires capability from stage 1
+let transform_stage = StageSpec::new(
+    "TransformBlob",
+    transformer_service_id,
+    "transform",
+    PayloadSchemaId::new("create_blob_output"),  // Chained from stage 1
+    PayloadSchemaId::new("transform_blob_output"),
+).with_capabilities(vec![blob_cap_id_from_stage1])
+ .with_retry_policy(RetryPolicy::fixed_retries(2, 50));
+
+// Stage 3: Annotate with metadata
+// Requires capability from stage 2
+let annotate_stage = StageSpec::new(
+    "AnnotateMetadata",
+    metadata_service_id,
+    "annotate",
+    PayloadSchemaId::new("transform_blob_output"), // Chained from stage 2
+    PayloadSchemaId::new("annotate_metadata_output"),
+).with_capabilities(vec![transformed_cap_id_from_stage2]);
+
+// Compose into pipeline
+let pipeline = PipelineSpec::new(
+    "blob_processing_pipeline",
+    PayloadSchemaId::new("create_blob_input"),
+    PayloadSchemaId::new("annotate_metadata_output"),
+)
+.add_stage(create_stage)
+.add_stage(transform_stage)
+.add_stage(annotate_stage);
+
+// Validate schema chaining
+pipeline.validate()?;
+
+// Execute
+let executor = PipelineExecutor::new();
+executor.add_capabilities(initial_caps);
+let (final_output, trace) = executor.execute(&mut kernel, &pipeline, input)?;
+
+// Verify execution
+assert_eq!(trace.entries.len(), 3);
+assert_eq!(trace.final_result, PipelineExecutionResult::Success);
+```
+
+**Integration with Prior Phases**:
+
+Phase 5 builds on all previous phases:
+- **Phase 1**: Uses KernelApi, IPC, and service framework
+- **Phase 2**: Works with fault injection (message drop/delay/reorder)
+- **Phase 3**: Enforces capability lifecycle (no leaks through stages)
+- **Phase 4**: Respects schema versioning and migration rules
+
+Pipelines maintain all safety properties even under faults:
+- No capability use after transfer (move semantics)
+- No capability leaks through dropped messages
+- No double-commit in storage (fail-fast semantics)
+- Storage immutability and lineage preserved
+
 ### Performance
 
 Currently optimized for clarity, not performance. Future work:

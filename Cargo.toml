@@ -11,9 +11,13 @@ members = [
     "services_process_manager",
     "services_logger",
     "services_storage",
+    "services_pipeline_executor",
     "intent_router",
+    "pipeline",
     "cli_console",
-    "tests_resilience", "contract_tests",
+    "tests_resilience",
+    "tests_pipelines",
+    "contract_tests",
 ]
 
 [workspace.package]
@@ -36,7 +40,9 @@ services_registry = { path = "services_registry" }
 services_process_manager = { path = "services_process_manager" }
 services_logger = { path = "services_logger" }
 services_storage = { path = "services_storage" }
+services_pipeline_executor = { path = "services_pipeline_executor" }
 intent_router = { path = "intent_router" }
+pipeline = { path = "pipeline" }
 
 # Demo crates
 cli_console = { path = "cli_console" }
