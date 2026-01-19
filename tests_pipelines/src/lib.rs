@@ -1159,9 +1159,9 @@ mod tests {
                         if context.actor_identity.trust_domain == TrustDomain::sandbox() {
                             return PolicyDecision::deny("Sandbox cannot run pipelines");
                         }
-                        PolicyDecision::Allow
+                        PolicyDecision::Allow { derived: None }
                     }
-                    _ => PolicyDecision::Allow,
+                    _ => PolicyDecision::Allow { derived: None },
                 }
             }
 
@@ -1243,7 +1243,7 @@ mod tests {
                     PolicyEvent::OnPipelineStageStart => {
                         PolicyDecision::deny("Stage execution not allowed")
                     }
-                    _ => PolicyDecision::Allow,
+                    _ => PolicyDecision::Allow { derived: None },
                 }
             }
 

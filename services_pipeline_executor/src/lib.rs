@@ -62,6 +62,15 @@ pub enum ExecutorError {
         action: String,
         pipeline_id: Option<String>,
     },
+
+    #[error("Policy derived authority invalid for {event} by {policy}: {reason}. Delta: {delta}")]
+    PolicyDerivedAuthorityInvalid {
+        policy: String,
+        event: String,
+        reason: String,
+        delta: String,
+        pipeline_id: Option<String>,
+    },
 }
 
 /// Pipeline executor orchestrates pipeline execution
@@ -109,6 +118,37 @@ impl PipelineExecutor {
             .get(&cap_id)
             .copied()
             .unwrap_or(false)
+    }
+
+    /// Gets the current capability set
+    /// Phase 10: Helper for capability derivation
+    fn get_capability_set(&self) -> policy::CapabilitySet {
+        let caps: Vec<u64> = self
+            .available_capabilities
+            .iter()
+            .filter_map(|(id, &present)| if present { Some(*id) } else { None })
+            .collect();
+        policy::CapabilitySet::from_capabilities(caps)
+    }
+
+    /// Checks if a capability is available, considering execution authority
+    /// Phase 10: Authority-aware capability checking
+    fn has_capability_with_authority(
+        &self,
+        cap_id: u64,
+        authority: &Option<policy::CapabilitySet>,
+    ) -> bool {
+        // First check if we have it at all
+        if !self.has_capability(cap_id) {
+            return false;
+        }
+
+        // If authority is restricted, check against that
+        if let Some(auth) = authority {
+            auth.capabilities.contains(&cap_id)
+        } else {
+            true
+        }
     }
 
     /// Executes a pipeline with the given input
@@ -160,6 +200,9 @@ impl PipelineExecutor {
         }
 
         // Check policy for pipeline start
+        // Phase 10: Apply derived authority if present
+        let mut execution_authority: Option<policy::CapabilitySet> = None;
+
         if let Some(policy) = &self.policy_engine {
             let context = self.build_pipeline_context(spec, kernel);
             let decision = policy.evaluate(PolicyEvent::OnPipelineStart, &context);
@@ -181,8 +224,29 @@ impl PipelineExecutor {
                         pipeline_id: Some(spec.id.to_string()),
                     });
                 }
-                PolicyDecision::Allow => {
-                    // Continue
+                PolicyDecision::Allow { derived } => {
+                    // Phase 10: Apply derived authority if present
+                    if let Some(derived_auth) = derived {
+                        // Validate that derived authority is a subset
+                        let current_caps = self.get_capability_set();
+                        if !derived_auth.capabilities.is_subset_of(&current_caps) {
+                            let delta = policy::CapabilityDelta::from(
+                                &current_caps,
+                                &derived_auth.capabilities,
+                            );
+                            return Err(ExecutorError::PolicyDerivedAuthorityInvalid {
+                                policy: policy.name().to_string(),
+                                event: "OnPipelineStart".to_string(),
+                                reason: "Derived authority grants more capabilities than available"
+                                    .to_string(),
+                                delta: format!("removed: {:?}, added: {:?}", delta.removed, delta.added),
+                                pipeline_id: Some(spec.id.to_string()),
+                            });
+                        }
+
+                        // Apply the derived authority
+                        execution_authority = Some(derived_auth.capabilities);
+                    }
                 }
             }
         }
@@ -228,6 +292,9 @@ impl PipelineExecutor {
             }
 
             // Check policy for stage start
+            // Phase 10: Can derive stage-scoped authority
+            let mut stage_authority = execution_authority.clone();
+
             if let Some(policy) = &self.policy_engine {
                 let context = self.build_stage_context(spec, stage, kernel);
                 let decision = policy.evaluate(PolicyEvent::OnPipelineStageStart, &context);
@@ -257,15 +324,45 @@ impl PipelineExecutor {
                             pipeline_id: Some(spec.id.to_string()),
                         });
                     }
-                    PolicyDecision::Allow => {
-                        // Continue
+                    PolicyDecision::Allow { derived } => {
+                        // Phase 10: Apply stage-scoped derived authority
+                        if let Some(derived_auth) = derived {
+                            let current_authority =
+                                stage_authority.clone().unwrap_or_else(|| self.get_capability_set());
+
+                            // Validate subset
+                            if !derived_auth.capabilities.is_subset_of(&current_authority) {
+                                let delta = policy::CapabilityDelta::from(
+                                    &current_authority,
+                                    &derived_auth.capabilities,
+                                );
+                                trace.set_final_result(PipelineExecutionResult::Failed {
+                                    stage_name: stage.name.clone(),
+                                    error: format!("Policy derived authority invalid: not a subset"),
+                                });
+                                return Err(ExecutorError::PolicyDerivedAuthorityInvalid {
+                                    policy: policy.name().to_string(),
+                                    event: "OnPipelineStageStart".to_string(),
+                                    reason: "Derived authority grants more capabilities than available"
+                                        .to_string(),
+                                    delta: format!(
+                                        "removed: {:?}, added: {:?}",
+                                        delta.removed, delta.added
+                                    ),
+                                    pipeline_id: Some(spec.id.to_string()),
+                                });
+                            }
+
+                            // Apply stage-scoped authority (doesn't affect pipeline authority)
+                            stage_authority = Some(derived_auth.capabilities);
+                        }
                     }
                 }
             }
 
-            // Check required capabilities
+            // Check required capabilities (against stage authority)
             for &cap_id in &stage.required_capabilities {
-                if !self.has_capability(cap_id) {
+                if !self.has_capability_with_authority(cap_id, &stage_authority) {
                     trace.set_final_result(PipelineExecutionResult::Failed {
                         stage_name: stage.name.clone(),
                         error: format!("Missing required capability: {}", cap_id),
