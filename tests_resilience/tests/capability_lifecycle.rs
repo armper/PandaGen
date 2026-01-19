@@ -57,7 +57,8 @@ fn test_capability_invalidation_on_task_termination() {
 
     // Verify audit trail
     let audit = kernel.audit_log();
-    let invalidated_count = audit.count_events(|e| matches!(e, CapabilityEvent::Invalidated { .. }));
+    let invalidated_count =
+        audit.count_events(|e| matches!(e, CapabilityEvent::Invalidated { .. }));
     assert_eq!(invalidated_count, 2);
 }
 
@@ -197,7 +198,7 @@ fn test_cannot_grant_to_nonexistent_task() {
 
     let fake_task = TaskId::new();
     let cap: Cap<()> = Cap::new(100);
-    
+
     let result = kernel.grant_capability(fake_task, cap);
     assert!(result.is_err());
 }
@@ -245,20 +246,20 @@ fn test_capability_audit_trail_chronological() {
     // Perform operations with time advancing
     let cap: Cap<()> = Cap::new(100);
     kernel.grant_capability(task1, cap).unwrap();
-    
+
     kernel.advance_time(kernel_api::Duration::from_millis(100));
-    
+
     kernel.delegate_capability(100, task1, task2).unwrap();
-    
+
     kernel.advance_time(kernel_api::Duration::from_millis(100));
-    
+
     kernel.drop_capability(100, task2).unwrap();
 
     // Verify chronological order
     let audit = kernel.audit_log();
     let events = audit.get_events();
     assert_eq!(events.len(), 3);
-    
+
     // Timestamps should be increasing
     for i in 1..events.len() {
         assert!(events[i].timestamp >= events[i - 1].timestamp);

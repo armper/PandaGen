@@ -173,6 +173,44 @@ pub struct Cap<T> {
 - **Typed**: `Cap<FileRead>` ≠ `Cap<FileWrite>`
 - **Transferable**: Can be passed in messages
 - **Traceable**: Unique ID for auditing
+- **Move-only by default**: Capabilities use move semantics (no implicit cloning)
+
+### Capability Lifecycle
+
+PandaGen implements a rigorous capability lifecycle model with explicit operations and strong enforcement:
+
+#### Lifecycle Operations
+
+1. **Grant**: Initial capability issuance from kernel/authority to a task
+   - Only the kernel or authorized services can grant capabilities
+   - Creates an entry in the capability authority table
+   - Recorded in audit log
+
+2. **Delegate/Transfer**: Move ownership from one task to another
+   - **Move semantics**: Original owner loses access after delegation
+   - Validates that source task owns the capability
+   - Updates ownership in authority table
+   - Recorded in audit log
+
+3. **Drop**: Explicit release of a capability
+   - Owner voluntarily releases the capability
+   - Capability becomes invalid
+   - Recorded in audit log
+
+4. **Invalidate**: Automatic invalidation on owner death
+   - When a task terminates (crash or normal exit), all its capabilities are invalidated
+   - Prevents use-after-free and dangling capability references
+   - Recorded in audit log
+
+#### Capability Semantics
+
+**Move-Only Transfer** (default):
+- When a capability is delegated from Task A to Task B, Task A can no longer use it
+- No implicit cloning or duplication
+- Clear ownership model: exactly one task owns a capability at any time
+- Prevents confused deputy attacks and capability leaks
+
+**Exception**: Some service capabilities (like Storage object capabilities) may be marked as "durable" and survive service restarts, but this is explicit and documented.
 
 ### Creating Capabilities
 
@@ -184,21 +222,111 @@ let cap: Cap<FileRead> = Cap::new(42);
 ### Granting Capabilities
 
 ```rust
-let grant = CapabilityGrant::new(cap, Some(grantor_id));
-// Include in message or pass to kernel
+// Kernel API
+kernel.grant_capability(task_id, cap)?;
+
+// This creates an authority table entry:
+// - cap_id: 42
+// - owner: task_id
+// - status: Valid
 ```
 
-### Transferring Capabilities
+### Delegating Capabilities (Move Semantics)
+
+```rust
+// Move ownership from task1 to task2
+kernel.delegate_capability(cap_id, task1, task2)?;
+
+// After delegation:
+// - task1 can NO LONGER use cap_id
+// - task2 is the new owner
+// - Audit log records the delegation
+```
+
+**Enforcement**:
+- `delegate_capability` validates that `task1` currently owns `cap_id`
+- Returns error if task doesn't own the capability
+- Returns error if target task doesn't exist
+
+### Dropping Capabilities
+
+```rust
+// Explicitly release a capability
+kernel.drop_capability(cap_id, task_id)?;
+
+// Capability becomes invalid
+// Cannot be used again
+```
+
+### Lifetime Rules
+
+1. **Task-bound capabilities**: Most capabilities are bound to their owner task
+   - When the task terminates, capabilities are automatically invalidated
+   - No manual cleanup needed in most cases
+
+2. **Durable capabilities**: Some capabilities survive owner death (e.g., Storage object capabilities)
+   - Explicitly marked as durable in service design
+   - Tied to service identity, not individual task
+   - Must be explicitly documented why durability is needed
+
+3. **Validation before use**: Every capability operation validates:
+   - Capability exists in authority table
+   - Capability status is Valid (not Transferred or Invalid)
+   - Owner task is still alive
+   - Requesting task is the current owner
+
+### Audit Trail (Simulation/Test Mode)
+
+SimulatedKernel maintains a capability audit log for testing:
+
+```rust
+// Access audit log
+let audit = kernel.audit_log();
+
+// Query events
+let events = audit.get_events_for_cap(cap_id);
+let grant_count = audit.count_events(|e| matches!(e, CapabilityEvent::Granted { .. }));
+
+// Verify no leaks
+assert!(!audit.has_event(|e| matches!(e, CapabilityEvent::InvalidUseAttempt { .. })));
+```
+
+**Audit Events**:
+- `Granted`: Capability issued to a task
+- `Delegated`: Capability transferred between tasks
+- `Cloned`: Capability duplicated (rare, must be explicit)
+- `Dropped`: Capability explicitly released
+- `InvalidUseAttempt`: Failed attempt to use invalid capability
+- `Invalidated`: Capability invalidated due to owner termination
+
+### Security Properties
+
+**Enforced by SimulatedKernel**:
+1. No capability forgery (only kernel creates capabilities)
+2. No capability use after transfer (move semantics)
+3. No capability use after owner death (automatic invalidation)
+4. No capability leak through message loss (fault injection tested)
+
+**Future Real Kernel**:
+- Will enforce same semantics at syscall boundary
+- Capability table maintained in kernel space
+- User space cannot manipulate capability ownership
+- Hardware memory protection prevents capability forgery
+
+### Transferring Capabilities (Legacy Documentation)
 
 ```rust
 let transfer = CapabilityTransfer::new(cap, from_task, to_task);
 let transferred = transfer.complete();
 ```
 
+**Note**: This is a helper type for message-based transfers. The actual enforcement happens via `kernel.delegate_capability()`.
+
 **Contract**:
 - Type system prevents capability confusion
 - Cannot cast `Cap<T>` to `Cap<U>`
 - Compiler enforces correct usage
+- Runtime enforces ownership and liveness
 
 ## Message Passing
 

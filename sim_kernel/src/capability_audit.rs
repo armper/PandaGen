@@ -59,9 +59,7 @@ pub struct CapabilityAuditLog {
 impl CapabilityAuditLog {
     /// Creates a new empty audit log
     pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-        }
+        Self { events: Vec::new() }
     }
 
     /// Records a capability event at the specified time

@@ -370,7 +370,9 @@ mod tests {
         };
 
         match event {
-            CapabilityEvent::Delegated { from_task, to_task, .. } => {
+            CapabilityEvent::Delegated {
+                from_task, to_task, ..
+            } => {
                 assert_eq!(from_task, task1);
                 assert_eq!(to_task, task2);
             }
