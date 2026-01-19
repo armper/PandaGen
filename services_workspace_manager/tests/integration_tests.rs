@@ -367,3 +367,172 @@ fn test_component_metadata_preserved() {
     );
     assert_eq!(component.metadata.get("line"), Some(&"42".to_string()));
 }
+
+#[test]
+fn test_component_has_views_on_launch() {
+    let workspace_identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let mut workspace = WorkspaceManager::new(workspace_identity);
+
+    let config = LaunchConfig::new(
+        ComponentType::Editor,
+        "test-editor",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+
+    let component_id = workspace.launch_component(config).unwrap();
+
+    let component = workspace.get_component(component_id).unwrap();
+    assert!(component.main_view.is_some(), "Component should have main view");
+    assert!(
+        component.status_view.is_some(),
+        "Component should have status view"
+    );
+}
+
+#[test]
+fn test_workspace_render_focused_component() {
+    let workspace_identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let mut workspace = WorkspaceManager::new(workspace_identity);
+
+    let config = LaunchConfig::new(
+        ComponentType::Editor,
+        "test-editor",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+
+    let component_id = workspace.launch_component(config).unwrap();
+
+    // Render workspace
+    let output = workspace.render();
+    assert_eq!(output.focused_component, Some(component_id));
+    assert!(output.main_view.is_some(), "Should have main view in render output");
+    assert!(
+        output.status_view.is_some(),
+        "Should have status view in render output"
+    );
+}
+
+#[test]
+fn test_workspace_render_switches_with_focus() {
+    let workspace_identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let mut workspace = WorkspaceManager::new(workspace_identity);
+
+    let config1 = LaunchConfig::new(
+        ComponentType::Editor,
+        "editor1",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+    let config2 = LaunchConfig::new(
+        ComponentType::Cli,
+        "cli1",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+
+    let id1 = workspace.launch_component(config1).unwrap();
+    let id2 = workspace.launch_component(config2).unwrap();
+
+    // Second component should be focused
+    let output1 = workspace.render();
+    assert_eq!(output1.focused_component, Some(id2));
+
+    // Switch focus to first
+    workspace.focus_component(id1).unwrap();
+    let output2 = workspace.render();
+    assert_eq!(output2.focused_component, Some(id1));
+}
+
+#[test]
+fn test_views_cleaned_up_on_terminate() {
+    let workspace_identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let mut workspace = WorkspaceManager::new(workspace_identity);
+
+    let config = LaunchConfig::new(
+        ComponentType::Editor,
+        "test-editor",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+
+    let component_id = workspace.launch_component(config).unwrap();
+    let component = workspace.get_component(component_id).unwrap();
+    let main_view_id = component.main_view.as_ref().unwrap().view_id;
+    let status_view_id = component.status_view.as_ref().unwrap().view_id;
+
+    // Verify views exist
+    assert!(workspace.view_host().get_latest(main_view_id).is_ok());
+    assert!(workspace.view_host().get_latest(status_view_id).is_ok());
+
+    // Terminate component
+    workspace
+        .terminate_component(component_id, identity::ExitReason::Normal)
+        .unwrap();
+
+    // Views should be cleaned up
+    assert!(workspace.view_host().get_latest(main_view_id).is_err());
+    assert!(workspace.view_host().get_latest(status_view_id).is_err());
+}
+
+#[test]
+fn test_get_all_views() {
+    let workspace_identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let mut workspace = WorkspaceManager::new(workspace_identity);
+
+    let config1 = LaunchConfig::new(
+        ComponentType::Editor,
+        "editor1",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+    let config2 = LaunchConfig::new(
+        ComponentType::Cli,
+        "cli1",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+
+    let id1 = workspace.launch_component(config1).unwrap();
+    let id2 = workspace.launch_component(config2).unwrap();
+
+    // Get all views
+    let all_views = workspace.get_all_views();
+    assert_eq!(all_views.len(), 2);
+    assert!(all_views.contains_key(&id1));
+    assert!(all_views.contains_key(&id2));
+
+    // Each component should have views
+    let (main1, status1) = &all_views[&id1];
+    let (main2, status2) = &all_views[&id2];
+    assert!(main1.is_some());
+    assert!(status1.is_some());
+    assert!(main2.is_some());
+    assert!(status2.is_some());
+}

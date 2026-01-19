@@ -30,9 +30,11 @@ use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
+use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
 use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
+use view_types::{ViewFrame, ViewId, ViewKind};
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +140,10 @@ pub struct ComponentInfo {
     pub name: String,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+    /// Main view handle (TextBuffer)
+    pub main_view: Option<ViewHandleCap>,
+    /// Status view handle (StatusLine)
+    pub status_view: Option<ViewHandleCap>,
 }
 
 impl ComponentInfo {
@@ -159,6 +165,8 @@ impl ComponentInfo {
             exit_reason: None,
             name: name.into(),
             metadata: HashMap::new(),
+            main_view: None,
+            status_view: None,
         }
     }
 
@@ -171,6 +179,18 @@ impl ComponentInfo {
     /// Sets the input subscription capability
     pub fn with_subscription(mut self, subscription: InputSubscriptionCap) -> Self {
         self.subscription = Some(subscription);
+        self
+    }
+
+    /// Sets the main view handle
+    pub fn with_main_view(mut self, handle: ViewHandleCap) -> Self {
+        self.main_view = Some(handle);
+        self
+    }
+
+    /// Sets the status view handle
+    pub fn with_status_view(mut self, handle: ViewHandleCap) -> Self {
+        self.status_view = Some(handle);
         self
     }
 
@@ -331,6 +351,10 @@ pub struct WorkspaceManager {
     components: HashMap<ComponentId, ComponentInfo>,
     /// Focus manager
     focus_manager: FocusManager,
+    /// View host for managing component views
+    view_host: ViewHost,
+    /// View subscriptions for workspace (to receive updates)
+    view_subscriptions: HashMap<ViewId, ViewSubscriptionCap>,
     /// Policy engine (optional)
     policy: Option<Box<dyn PolicyEngine>>,
     /// Audit trail of workspace events
@@ -347,6 +371,8 @@ impl WorkspaceManager {
         Self {
             components: HashMap::new(),
             focus_manager: FocusManager::new(),
+            view_host: ViewHost::new(),
+            view_subscriptions: HashMap::new(),
             policy: None,
             audit_trail: Vec::new(),
             next_timestamp: 0,
@@ -415,6 +441,47 @@ impl WorkspaceManager {
             );
             component = component.with_subscription(subscription);
         }
+
+        // Create views for the component
+        let task_id = TaskId::new();
+        
+        // Main view (TextBuffer)
+        let main_view = self
+            .view_host
+            .create_view(
+                ViewKind::TextBuffer,
+                Some(config.name.clone()),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to create main view: {}", e)))?;
+        component = component.with_main_view(main_view);
+
+        // Subscribe workspace to main view
+        let main_sub = self
+            .view_host
+            .subscribe(main_view.view_id, TaskId::new(), ipc::ChannelId::new())
+            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e)))?;
+        self.view_subscriptions.insert(main_view.view_id, main_sub);
+
+        // Status view (StatusLine)
+        let status_view = self
+            .view_host
+            .create_view(
+                ViewKind::StatusLine,
+                Some(format!("{} - status", config.name)),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to create status view: {}", e)))?;
+        component = component.with_status_view(status_view);
+
+        // Subscribe workspace to status view
+        let status_sub = self
+            .view_host
+            .subscribe(status_view.view_id, TaskId::new(), ipc::ChannelId::new())
+            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e)))?;
+        self.view_subscriptions.insert(status_view.view_id, status_sub);
 
         let component_id = component.id;
 
@@ -580,6 +647,16 @@ impl WorkspaceManager {
             let _ = self.focus_manager.remove_subscription(subscription);
         }
 
+        // Clean up views
+        if let Some(main_view) = &component.main_view {
+            let _ = self.view_host.remove_view(main_view);
+            self.view_subscriptions.remove(&main_view.view_id);
+        }
+        if let Some(status_view) = &component.status_view {
+            let _ = self.view_host.remove_view(status_view);
+            self.view_subscriptions.remove(&status_view.view_id);
+        }
+
         // Record event
         let timestamp = self.next_timestamp();
         self.audit_trail.push(WorkspaceEvent::ComponentTerminated {
@@ -659,6 +736,81 @@ impl WorkspaceManager {
         self.next_timestamp += 1;
         ts
     }
+
+    /// Renders the current workspace state
+    ///
+    /// Returns a snapshot of the focused component's views and status.
+    pub fn render(&self) -> WorkspaceRenderOutput {
+        let focused_component_id = self.get_focused_component();
+
+        let focused_component = focused_component_id.and_then(|id| self.get_component(id));
+
+        let main_view_frame = focused_component
+            .and_then(|c| c.main_view.as_ref())
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+
+        let status_view_frame = focused_component
+            .and_then(|c| c.status_view.as_ref())
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+
+        WorkspaceRenderOutput {
+            focused_component: focused_component_id,
+            main_view: main_view_frame,
+            status_view: status_view_frame,
+            component_count: self.components.len(),
+            running_count: self.components.values().filter(|c| c.is_running()).count(),
+        }
+    }
+
+    /// Gets all view frames for all components
+    ///
+    /// Returns a map of component ID to (main_view, status_view) frames.
+    /// Useful for debugging and deterministic replay.
+    pub fn get_all_views(&self) -> HashMap<ComponentId, (Option<ViewFrame>, Option<ViewFrame>)> {
+        self.components
+            .iter()
+            .map(|(id, component)| {
+                let main_view = component
+                    .main_view
+                    .as_ref()
+                    .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+                    .flatten();
+                let status_view = component
+                    .status_view
+                    .as_ref()
+                    .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+                    .flatten();
+                (*id, (main_view, status_view))
+            })
+            .collect()
+    }
+
+    /// Gets the view host (for testing or advanced operations)
+    pub fn view_host(&self) -> &ViewHost {
+        &self.view_host
+    }
+
+    /// Gets a mutable reference to the view host (for testing)
+    pub fn view_host_mut(&mut self) -> &mut ViewHost {
+        &mut self.view_host
+    }
+}
+
+/// Output from rendering the workspace
+#[derive(Debug, Clone)]
+pub struct WorkspaceRenderOutput {
+    /// ID of focused component (if any)
+    pub focused_component: Option<ComponentId>,
+    /// Main view frame of focused component
+    pub main_view: Option<ViewFrame>,
+    /// Status view frame of focused component
+    pub status_view: Option<ViewFrame>,
+    /// Total number of components
+    pub component_count: usize,
+    /// Number of running components
+    pub running_count: usize,
 }
 
 #[cfg(test)]
