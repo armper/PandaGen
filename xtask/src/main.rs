@@ -89,10 +89,9 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     fs::create_dir_all(staging.join("boot"))?;
     fs::create_dir_all(staging.join("EFI/BOOT"))?;
 
-    copy_file(
-        root.join("boot/limine.cfg"),
-        staging.join("boot/limine.cfg"),
-    )?;
+    let limine_cfg = root.join("boot/limine.cfg");
+    copy_file(limine_cfg.clone(), staging.join("boot/limine.cfg"))?;
+    copy_file(limine_cfg, staging.join("limine.cfg"))?;
 
     let kernel_path = root
         .join("target")
@@ -108,10 +107,9 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     }
     copy_file(kernel_path, staging.join("boot/kernel.elf"))?;
 
-    copy_file(
-        vendor.join("limine-bios.sys"),
-        staging.join("boot/limine-bios.sys"),
-    )?;
+    let bios_sys = vendor.join("limine-bios.sys");
+    copy_file(bios_sys.clone(), staging.join("boot/limine-bios.sys"))?;
+    copy_file(bios_sys, staging.join("limine-bios.sys"))?;
     copy_file(
         vendor.join("limine-bios-cd.bin"),
         staging.join("boot/limine-bios-cd.bin"),
