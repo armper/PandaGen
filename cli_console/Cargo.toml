@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[example]]
+name = "fs_demo"
+path = "../examples/fs_demo.rs"
+
 [dependencies]
 core_types.workspace = true
 kernel_api.workspace = true
