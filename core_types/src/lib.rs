@@ -14,12 +14,16 @@
 //! - [`Cap<T>`]: A strongly-typed capability handle
 //! - [`ServiceId`]: Unique identifier for services
 //! - [`TaskId`]: Unique identifier for tasks
+//! - [`ObjectSchemaId`]: Identifier for storage object schema types
+//! - [`ObjectSchemaVersion`]: Version number for storage object schemas
 
 pub mod capability;
 pub mod ids;
+pub mod storage_schema;
 
 pub use capability::{
     Cap, CapabilityError, CapabilityEvent, CapabilityGrant, CapabilityInvalidReason,
     CapabilityMetadata, CapabilityStatus, CapabilityTransfer,
 };
 pub use ids::{ServiceId, TaskId};
+pub use storage_schema::{MigrationLineage, ObjectSchemaId, ObjectSchemaVersion};
