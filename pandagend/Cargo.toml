@@ -1,0 +1,48 @@
+[package]
+name = "pandagend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Core infrastructure
+core_types = { workspace = true }
+ipc = { workspace = true }
+kernel_api = { workspace = true }
+sim_kernel = { workspace = true }
+
+# Service crates
+services_registry = { workspace = true }
+services_logger = { workspace = true }
+services_view_host = { workspace = true }
+services_input = { workspace = true }
+services_focus_manager = { workspace = true }
+services_workspace_manager = { workspace = true }
+services_fs_view = { workspace = true }
+services_editor_vi = { workspace = true }
+
+# Input and view system
+input_types = { workspace = true }
+view_types = { workspace = true }
+text_renderer_host = { workspace = true }
+
+# Component crates
+cli_console = { workspace = true }
+identity = { workspace = true }
+resources = { workspace = true }
+policy = { workspace = true }
+
+# External dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+# Optional HAL support (feature-gated)
+services_input_hal_bridge = { workspace = true, optional = true }
+hal = { workspace = true, optional = true }
+
+[features]
+default = []
+hal_mode = ["services_input_hal_bridge", "hal"]
