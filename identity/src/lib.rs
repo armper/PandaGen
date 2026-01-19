@@ -529,13 +529,9 @@ mod tests {
         let now = 1000u64;
         let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
 
-        let parent = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "parent",
-            now,
-        )
-        .with_budget(parent_budget);
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
 
         // Child with smaller budget - valid
         let child_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
@@ -574,13 +570,9 @@ mod tests {
         let now = 1000u64;
         let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
 
-        let parent = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "parent",
-            now,
-        )
-        .with_budget(parent_budget);
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
 
         // Child with larger budget - invalid
         let child_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
@@ -617,13 +609,9 @@ mod tests {
         let now = 1000u64;
         let parent_budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
 
-        let parent = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "parent",
-            now,
-        )
-        .with_budget(parent_budget);
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_budget(parent_budget);
 
         // Child has no budget - valid (no constraint)
         let child =

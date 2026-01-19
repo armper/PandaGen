@@ -716,7 +716,9 @@ impl PolicyDecisionReport {
         input: CapabilitySet,
         output: Option<CapabilitySet>,
     ) -> Self {
-        let delta = output.as_ref().map(|out| CapabilityDelta::from(&input, out));
+        let delta = output
+            .as_ref()
+            .map(|out| CapabilityDelta::from(&input, out));
 
         self.input_capabilities = Some(input);
         self.output_capabilities = output;

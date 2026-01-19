@@ -576,30 +576,65 @@ impl fmt::Display for ResourceUsage {
 /// Indicates which resource exceeded its limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceExceeded {
-    CpuTicks { limit: CpuTicks, usage: CpuTicks },
-    MemoryUnits { limit: MemoryUnits, usage: MemoryUnits },
-    MessageCount { limit: MessageCount, usage: MessageCount },
-    StorageOps { limit: StorageOps, usage: StorageOps },
-    PipelineStages { limit: PipelineStages, usage: PipelineStages },
+    CpuTicks {
+        limit: CpuTicks,
+        usage: CpuTicks,
+    },
+    MemoryUnits {
+        limit: MemoryUnits,
+        usage: MemoryUnits,
+    },
+    MessageCount {
+        limit: MessageCount,
+        usage: MessageCount,
+    },
+    StorageOps {
+        limit: StorageOps,
+        usage: StorageOps,
+    },
+    PipelineStages {
+        limit: PipelineStages,
+        usage: PipelineStages,
+    },
 }
 
 impl fmt::Display for ResourceExceeded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CpuTicks { limit, usage } => {
-                write!(f, "CPU ticks exceeded: limit={}, usage={}", limit.0, usage.0)
+                write!(
+                    f,
+                    "CPU ticks exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
             }
             Self::MemoryUnits { limit, usage } => {
-                write!(f, "Memory units exceeded: limit={}, usage={}", limit.0, usage.0)
+                write!(
+                    f,
+                    "Memory units exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
             }
             Self::MessageCount { limit, usage } => {
-                write!(f, "Message count exceeded: limit={}, usage={}", limit.0, usage.0)
+                write!(
+                    f,
+                    "Message count exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
             }
             Self::StorageOps { limit, usage } => {
-                write!(f, "Storage ops exceeded: limit={}, usage={}", limit.0, usage.0)
+                write!(
+                    f,
+                    "Storage ops exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
             }
             Self::PipelineStages { limit, usage } => {
-                write!(f, "Pipeline stages exceeded: limit={}, usage={}", limit.0, usage.0)
+                write!(
+                    f,
+                    "Pipeline stages exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
             }
         }
     }
@@ -738,10 +773,8 @@ mod tests {
 
     #[test]
     fn test_resource_budget_subset_child_limited() {
-        let parent = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(1000));
-        let child = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(500));
+        let parent = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
+        let child = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
 
         assert!(child.is_subset_of(&parent));
         assert!(!parent.is_subset_of(&child));
@@ -760,10 +793,8 @@ mod tests {
 
     #[test]
     fn test_resource_budget_subset_violates() {
-        let parent = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(500));
-        let child = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(1000)); // Exceeds parent
+        let parent = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(500));
+        let child = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000)); // Exceeds parent
 
         assert!(!child.is_subset_of(&parent));
     }
@@ -804,8 +835,7 @@ mod tests {
     #[test]
     fn test_resource_usage_exceeds_none() {
         let usage = ResourceUsage::zero();
-        let budget = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(1000));
+        let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
 
         assert_eq!(usage.exceeds(&budget), None);
     }
@@ -815,8 +845,7 @@ mod tests {
         let mut usage = ResourceUsage::zero();
         usage.consume_cpu_ticks(CpuTicks::new(1001));
 
-        let budget = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(1000));
+        let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
 
         let exceeded = usage.exceeds(&budget);
         assert!(exceeded.is_some());
@@ -836,8 +865,7 @@ mod tests {
             usage.consume_message();
         }
 
-        let budget = ResourceBudget::unlimited()
-            .with_message_count(MessageCount::new(10));
+        let budget = ResourceBudget::unlimited().with_message_count(MessageCount::new(10));
 
         let exceeded = usage.exceeds(&budget);
         assert!(exceeded.is_some());
@@ -870,8 +898,7 @@ mod tests {
         let mut usage = ResourceUsage::zero();
         usage.consume_cpu_ticks(CpuTicks::new(1500));
 
-        let budget = ResourceBudget::unlimited()
-            .with_cpu_ticks(CpuTicks::new(1000));
+        let budget = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1000));
 
         let remaining = usage.remaining(&budget);
         assert_eq!(remaining.cpu_ticks, Some(CpuTicks::zero()));

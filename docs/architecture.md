@@ -2033,3 +2033,354 @@ Phase 10 provides:
 - **Defense in depth**: Multiple validation points
 
 This enables least-privilege enforcement at the policy layer without compromising the core capability model. Policies can say "you have these capabilities, but you may only use these" without being able to grant capabilities they don't have.
+
+## Phase 11: Resource Quotas, Budgets, and Deterministic Accounting
+
+**Goals**: Introduce deterministic resource budgets enforced per identity and trust domain, driven by policy, fully testable under SimKernel.
+
+### Resource Philosophy
+
+Authority must be bounded. Even correct capabilities must have limits.
+
+**Core Principles**:
+- **Resources are finite and must be explicit**: No implicit unlimited resources
+- **Budgets are enforced, not advisory**: Hard limits, not soft guidelines
+- **Accounting is deterministic and testable**: Reproducible under SimKernel
+- **Policy may require or limit resources, but does not implement accounting**: Separation of concerns
+- **No POSIX concepts**: Not ulimits, not nice, not cgroups
+- **No real hardware yet**: Simulation-first, hardware later
+
+**Why No Throttling?**
+
+Traditional systems use "nice" values, CPU shares, and best-effort resource management. PandaGen rejects this:
+- **Throttling is unpredictable**: Cannot reason about timing or completion
+- **Best-effort is not deterministic**: Cannot test reliably
+- **Implicit limits are dangerous**: Resource exhaustion becomes surprise failure
+
+Instead, PandaGen uses **deterministic hard limits**:
+- Operations either succeed or fail explicitly
+- No silent slowdown or starvation
+- Testable under fault injection
+- Clear error messages with resource type, limit, usage
+
+**Budgeting vs Authority**
+
+Resources and capabilities are orthogonal:
+- **Capabilities**: What you may do (authority)
+- **Budgets**: How much you may do (quota)
+
+Both are required:
+- Having a capability without budget: Cannot act (no quota)
+- Having budget without capability: Cannot act (no authority)
+- Having both: Can act until budget exhausted
+
+Example:
+```rust
+// Task has FileWrite capability (authority)
+// Task has StorageOps budget of 100 (quota)
+// First 100 writes succeed
+// 101st write fails with ResourceBudgetExceeded
+```
+
+### Resource Types
+
+Phase 11 introduces five abstract resource types:
+
+1. **CpuTicks**: Simulated execution steps
+   - Not real CPU cycles
+   - Deterministic consumption under SimKernel
+   - Used for computational work tracking
+
+2. **MemoryUnits**: Abstract memory allocation units
+   - Not bytes or pages
+   - Platform-independent
+   - Used for memory quota enforcement
+
+3. **MessageCount**: Number of messages sent/received
+   - Explicit per-message accounting
+   - Prevents message flooding
+   - Deterministic under fault injection
+
+4. **StorageOps**: Storage read/write operations
+   - Not bytes or blocks
+   - Operation-level tracking
+   - Independent of storage size
+
+5. **PipelineStages**: Number of pipeline stages executed
+   - Limits pipeline complexity
+   - Prevents runaway composition
+   - Stage-level granularity
+
+All types are:
+- Strong newtypes (not raw integers)
+- Saturating arithmetic (no panic on overflow)
+- Serializable for persistence
+- Testable with deterministic behavior
+
+### Budget Structure
+
+**ResourceBudget**: Immutable limits for resources
+```rust
+let budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(1000))
+    .with_message_count(MessageCount::new(50));
+```
+
+Properties:
+- Immutable once created
+- Can only be replaced by policy (with validation)
+- Never grows unless explicitly derived
+- Optional per resource (None = unlimited)
+
+**ResourceUsage**: Current consumption tracking
+```rust
+let mut usage = ResourceUsage::zero();
+usage.consume_cpu_ticks(CpuTicks::new(10));
+usage.consume_message();
+```
+
+Properties:
+- Mutable, updated as resources consumed
+- Checked against budget at enforcement points
+- Tracked per ExecutionId
+
+**ResourceDelta**: Changes in consumption
+```rust
+let delta = ResourceDelta::from(&before, &after);
+// Shows: cpu=+10, msg=+1, ...
+```
+
+### Budget Attachment to Identity
+
+Every ExecutionId may have an optional ResourceBudget:
+
+```rust
+let identity = IdentityMetadata::new(...)
+    .with_budget(budget);
+```
+
+**Inheritance Rules**:
+- Child budget must be ≤ parent budget (subset check)
+- Validation happens at spawn time
+- Violation results in explicit error
+- No implicit escalation
+
+**Lifetime Scoping**:
+- Budget scoped to identity lifetime
+- Termination releases budget immediately
+- No cleanup code needed (automatic)
+- No dangling budget references
+
+### Enforcement Points
+
+SimKernel enforces budgets at specific points:
+
+1. **Task Spawn** (initial budget assignment):
+   - Validate budget inheritance
+   - Create usage tracker
+   - Fail if invalid
+
+2. **Message Send/Receive** (MessageCount):
+   - Check budget before operation
+   - Consume one message unit
+   - Fail with explicit error if exceeded
+
+3. **Simulated Execution Steps** (CpuTicks):
+   - Track computational work
+   - Increment on kernel operations
+   - Fail if budget exhausted
+
+4. **Storage Operations** (StorageOps):
+   - Track read/write operations
+   - One unit per operation
+   - Independent of data size
+
+**Enforcement Behavior**:
+- Exceeding budget results in deterministic failure
+- Failure reason is explicit:
+  - Which resource exceeded
+  - Limit value
+  - Current usage
+  - Identity context
+- No silent throttling or degradation
+- No recovery without explicit budget increase
+
+### Integration with Cancellation
+
+Budget exhaustion may trigger cancellation:
+
+```rust
+if let Some(exceeded) = usage.exceeds(&budget) {
+    // Option 1: Fail immediately
+    return Err(ResourceBudgetExceeded(exceeded));
+    
+    // Option 2: Cancel with reason
+    cancel_token.cancel(CancellationReason::Custom(
+        format!("Budget exhausted: {}", exceeded)
+    ));
+}
+```
+
+Properties:
+- Budget exhaustion is distinct from cancellation
+- Cancellation may be triggered by budget
+- Both recorded in audit log
+- Both deterministic and testable
+
+### Policy Integration
+
+Policies can:
+- **Require budgets**: "You must have MessageCount budget to proceed"
+- **Deny if exceeds**: "Your budget is too large for sandbox"
+- **Derive restricted budgets**: Subset enforcement
+
+Example policies:
+```rust
+// Require budget for user domain
+PolicyDecision::require("User tasks must specify MessageCount budget");
+
+// Deny if budget too large
+if budget.message_count > Some(MessageCount::new(100)) {
+    PolicyDecision::deny("Sandbox limited to 100 messages");
+}
+
+// Derive restricted budget (subset only)
+let derived = budget.min(&sandbox_limit);
+PolicyDecision::allow_with_derived(DerivedAuthority::with_budget(derived));
+```
+
+Policy rules:
+- Policy may deny if no budget present
+- Policy may derive restricted budget (subset only)
+- Policy cannot increase budget (no escalation)
+- Budget derivation follows Phase 10 subset invariants
+
+### Error Types
+
+**ResourceBudgetExceeded**:
+```rust
+ResourceError::BudgetExceeded(ResourceExceeded::CpuTicks {
+    limit: CpuTicks::new(1000),
+    usage: CpuTicks::new(1001),
+})
+```
+
+**ResourceBudgetMissing**:
+```rust
+ResourceError::BudgetMissing {
+    operation: "send_message".to_string(),
+}
+```
+
+**InvalidBudgetDerivation**:
+```rust
+ResourceError::InvalidBudgetDerivation {
+    reason: "Child budget exceeds parent".to_string(),
+}
+```
+
+All errors include:
+- Resource type
+- Limit and usage values
+- Identity context
+- Pipeline/stage context (if applicable)
+- Human-readable explanation
+
+### Testing Strategy
+
+**Unit Tests** (resources crate):
+- Arithmetic boundary conditions
+- Budget subset validation
+- Usage tracking
+- Delta computation
+
+**Integration Tests** (sim_kernel, pipelines):
+- Budget exhaustion scenarios
+- Inheritance validation
+- Policy-required budgets
+- Fault injection + budgets
+- Cancellation interaction
+
+**Properties Verified**:
+- Deterministic: Same operations → same consumption
+- No double-counting: Delayed messages counted once
+- No leaks: Cancelled operations don't consume
+- No escalation: Child ≤ parent always
+
+### Design Rationale
+
+**Why abstract resource types, not bytes/cycles?**
+- Platform-independent
+- Easier to test (no hardware needed)
+- Simpler accounting (no conversion factors)
+- Clear semantics (one message = one unit)
+
+**Why immutable budgets?**
+- Prevents accidental modification
+- Clear audit trail (replace, don't mutate)
+- Matches Rust ownership model
+- Easier to reason about
+
+**Why deterministic enforcement?**
+- Testability is first-class constraint
+- Reproducible behavior under faults
+- No flaky tests from timing
+- Clear semantics (succeed or fail)
+
+**Why no global counters?**
+- Per-identity tracking prevents interference
+- No shared mutable state
+- Easier to test in isolation
+- Natural fit for distributed systems
+
+**Why fail explicitly, not throttle?**
+- Predictable behavior (no slowdown surprise)
+- Testable outcomes (pass or fail)
+- Clear error messages (know why it failed)
+- No hidden performance degradation
+
+### Future Extensions
+
+**Not Implemented in Phase 11**:
+
+1. **Real Hardware Integration**:
+   - Map CpuTicks to real CPU cycles
+   - Map MemoryUnits to bytes/pages
+   - Hardware counters for enforcement
+   - Preemption on budget exhaustion
+
+2. **Dynamic Budget Adjustment**:
+   - Increase budget at runtime (with policy approval)
+   - Budget borrowing between siblings
+   - Budget pooling for trust domains
+   - Exponential backoff for exhaustion
+
+3. **Budget Pooling**:
+   - Shared budget across trust domain
+   - Subtract from pool on allocation
+   - Return to pool on termination
+   - Prevents starvation in large systems
+
+4. **Fine-Grained Storage Accounting**:
+   - Track bytes written, not just operations
+   - Separate read/write budgets
+   - Storage quota per object
+   - Garbage collection triggers
+
+5. **Preemptive Scheduling**:
+   - Budget-driven preemption
+   - Fair share scheduling
+   - Priority-based budget allocation
+   - Work-conserving policies
+
+### Summary
+
+Phase 11 provides:
+- **Deterministic resource limits**: No throttling, explicit failure
+- **Per-identity budgets**: Scoped to execution lifetime
+- **Inheritance validation**: Child ≤ parent enforced
+- **Policy integration**: Budgets as first-class policy concern
+- **Testable enforcement**: Works under SimKernel with fault injection
+- **Explainable errors**: Clear resource type, limit, usage
+
+This completes the authority model: capabilities (what) + budgets (how much) = controlled execution.

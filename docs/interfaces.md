@@ -2108,3 +2108,397 @@ Phase 10 provides:
 - **Defense in depth** via subset validation
 
 This enables least-privilege enforcement at the policy layer without modifying core capability semantics.
+
+## Phase 11: Resource Budget Interface
+
+### Resource Types
+
+PandaGen provides five abstract resource types for deterministic accounting:
+
+```rust
+// All are strong newtypes with saturating arithmetic
+pub struct CpuTicks(pub u64);        // Simulated execution steps
+pub struct MemoryUnits(pub u64);     // Abstract memory units
+pub struct MessageCount(pub u64);    // Number of messages
+pub struct StorageOps(pub u64);      // Storage operations
+pub struct PipelineStages(pub u64);  // Pipeline stages executed
+```
+
+**Common Operations**:
+```rust
+let ticks = CpuTicks::new(100);
+let more = CpuTicks::new(50);
+
+// Checked arithmetic (returns Option)
+let sum = ticks.checked_add(more)?;  // Some(150)
+
+// Saturating arithmetic (never panics)
+let total = ticks.saturating_add(more);  // 150
+```
+
+### ResourceBudget
+
+Immutable limits for resource consumption:
+
+```rust
+pub struct ResourceBudget {
+    pub cpu_ticks: Option<CpuTicks>,
+    pub memory_units: Option<MemoryUnits>,
+    pub message_count: Option<MessageCount>,
+    pub storage_ops: Option<StorageOps>,
+    pub pipeline_stages: Option<PipelineStages>,
+}
+```
+
+**Creation**:
+```rust
+// Unlimited budget (no constraints)
+let unlimited = ResourceBudget::unlimited();
+
+// Zero budget (all resources exhausted)
+let zero = ResourceBudget::zero();
+
+// Builder pattern
+let budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(1000))
+    .with_message_count(MessageCount::new(50));
+```
+
+**Operations**:
+```rust
+// Check subset (child ≤ parent)
+let is_valid = child_budget.is_subset_of(&parent_budget);
+
+// Compute minimum (most restrictive)
+let min = budget1.min(&budget2);
+```
+
+**Contract**:
+- Once created, immutable
+- Can only be replaced (not modified)
+- `None` for a resource = unlimited
+- Subset check validates inheritance
+
+### ResourceUsage
+
+Mutable tracker for current consumption:
+
+```rust
+pub struct ResourceUsage {
+    pub cpu_ticks: CpuTicks,
+    pub memory_units: MemoryUnits,
+    pub message_count: MessageCount,
+    pub storage_ops: StorageOps,
+    pub pipeline_stages: PipelineStages,
+}
+```
+
+**Operations**:
+```rust
+let mut usage = ResourceUsage::zero();
+
+// Consume resources
+usage.consume_cpu_ticks(CpuTicks::new(10));
+usage.consume_message();
+usage.consume_storage_op();
+usage.consume_pipeline_stage();
+
+// Check if exceeds budget
+if let Some(exceeded) = usage.exceeds(&budget) {
+    return Err(ResourceError::BudgetExceeded(exceeded));
+}
+
+// Compute remaining budget
+let remaining = usage.remaining(&budget);
+```
+
+**Contract**:
+- All values start at zero
+- Saturating addition (never panics)
+- Exceeds returns first violated limit
+- Remaining uses saturating subtraction
+
+### Budget Attachment to Identity
+
+Identity metadata includes optional budget:
+
+```rust
+pub struct IdentityMetadata {
+    // ... existing fields ...
+    pub budget: Option<ResourceBudget>,
+    pub usage: ResourceUsage,
+}
+```
+
+**Usage**:
+```rust
+// Create identity with budget
+let identity = IdentityMetadata::new(...)
+    .with_budget(budget);
+
+// Check if has budget
+if identity.has_budget() {
+    // Budget is present
+}
+
+// Validate inheritance
+if child.budget_inherits_from(&parent) {
+    // Child budget ≤ parent budget
+}
+```
+
+**Contract**:
+- Budget is optional (None = no limit)
+- Usage always tracked (starts at zero)
+- Inheritance validated at spawn time
+- Budget scoped to identity lifetime
+
+### Enforcement Points
+
+SimKernel enforces budgets at deterministic points:
+
+#### 1. Task Spawn
+```rust
+pub fn spawn_task_with_identity(
+    &mut self,
+    descriptor: TaskDescriptor,
+    kind: IdentityKind,
+    trust_domain: TrustDomain,
+    parent_id: Option<ExecutionId>,
+    creator_id: Option<ExecutionId>,
+) -> Result<(TaskHandle, ExecutionId), KernelError>;
+```
+
+**Enforcement**:
+- Validates budget inheritance (child ≤ parent)
+- Returns error if violation detected
+- Creates usage tracker for new identity
+
+**Example**:
+```rust
+// Parent with budget
+let parent_budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(1000));
+
+// Child with larger budget - fails
+let child_budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(2000));
+
+let result = kernel.spawn_task_with_identity(...);
+// Returns: Err(KernelError::InsufficientAuthority(
+//   "Budget inheritance violation: child budget exceeds parent"
+// ))
+```
+
+#### 2. Message Send/Receive
+```rust
+kernel.send_message(channel, message)?;
+kernel.receive_message(channel, timeout)?;
+```
+
+**Enforcement** (planned):
+- Check MessageCount budget before operation
+- Increment usage after validation
+- Return error if budget exceeded
+
+**Example**:
+```rust
+// Task with MessageCount budget of 10
+for i in 0..11 {
+    let result = kernel.send_message(channel, msg);
+    if i < 10 {
+        assert!(result.is_ok());  // First 10 succeed
+    } else {
+        // 11th message fails
+        assert!(matches!(result, Err(KernelError::ResourceExhausted(_))));
+    }
+}
+```
+
+#### 3. Simulated Execution Steps (future)
+```rust
+kernel.execute_steps(task_id, CpuTicks::new(100))?;
+```
+
+**Enforcement** (planned):
+- Track computational work
+- Increment CpuTicks usage
+- Fail if budget exhausted
+
+#### 4. Storage Operations (future)
+```rust
+storage.read(object_id)?;
+storage.write(object_id, data)?;
+```
+
+**Enforcement** (planned):
+- Track read/write operations
+- Increment StorageOps usage
+- Independent of data size
+
+### Error Types
+
+**ResourceBudgetExceeded**:
+```rust
+pub enum ResourceExceeded {
+    CpuTicks { limit: CpuTicks, usage: CpuTicks },
+    MemoryUnits { limit: MemoryUnits, usage: MemoryUnits },
+    MessageCount { limit: MessageCount, usage: MessageCount },
+    StorageOps { limit: StorageOps, usage: StorageOps },
+    PipelineStages { limit: PipelineStages, usage: PipelineStages },
+}
+
+// Returns detailed information
+let exceeded = ResourceExceeded::MessageCount {
+    limit: MessageCount::new(10),
+    usage: MessageCount::new(11),
+};
+```
+
+**ResourceBudgetMissing**:
+```rust
+ResourceError::BudgetMissing {
+    operation: "send_message".to_string(),
+}
+```
+
+**InvalidBudgetDerivation**:
+```rust
+ResourceError::InvalidBudgetDerivation {
+    reason: "Child budget exceeds parent".to_string(),
+}
+```
+
+**Contract**:
+- All errors include resource type
+- Limit and usage values provided
+- Human-readable error messages
+- Suitable for logging and debugging
+
+### Budget Lifecycle
+
+1. **Creation**:
+   ```rust
+   let budget = ResourceBudget::unlimited()
+       .with_cpu_ticks(CpuTicks::new(1000));
+   ```
+
+2. **Attachment**:
+   ```rust
+   let identity = IdentityMetadata::new(...)
+       .with_budget(budget);
+   ```
+
+3. **Validation**:
+   ```rust
+   // At spawn time
+   if !child.budget_inherits_from(&parent) {
+       return Err(...);
+   }
+   ```
+
+4. **Enforcement**:
+   ```rust
+   // At each enforcement point
+   usage.consume_message();
+   if let Some(exceeded) = usage.exceeds(&budget) {
+       return Err(...);
+   }
+   ```
+
+5. **Termination**:
+   ```rust
+   // Budget automatically released
+   kernel.terminate_task(task_id);
+   // No cleanup needed
+   ```
+
+### Design Guidelines
+
+**For Budget Users**:
+1. Always check budget before operations
+2. Use saturating arithmetic to prevent panics
+3. Validate inheritance explicitly
+4. Handle errors with clear messages
+5. Test with deterministic scenarios
+
+**For Policy Writers**:
+1. Use budgets to limit resource consumption
+2. Require budgets for untrusted domains
+3. Derive restricted budgets (subset only)
+4. Never escalate budget (no increase)
+5. Explain budget decisions clearly
+
+**For Kernel Implementers**:
+1. Enforce budgets at deterministic points
+2. Check before consuming (fail-fast)
+3. Record budget events in audit log
+4. Release budgets on termination
+5. Test under fault injection
+
+### Example: Budget-Limited Pipeline
+
+```rust
+use resources::{CpuTicks, MessageCount, ResourceBudget};
+
+// Create budget for pipeline executor
+let executor_budget = ResourceBudget::unlimited()
+    .with_cpu_ticks(CpuTicks::new(5000))
+    .with_message_count(MessageCount::new(100))
+    .with_pipeline_stages(PipelineStages::new(10));
+
+// Create executor identity with budget
+let executor_identity = IdentityMetadata::new(
+    IdentityKind::PipelineStage,
+    TrustDomain::user(),
+    "data-processor",
+    kernel.now().as_nanos(),
+)
+.with_budget(executor_budget);
+
+let exec_id = kernel.create_identity(executor_identity);
+
+// Execute pipeline
+// - Each stage consumes PipelineStages
+// - Each message consumes MessageCount
+// - Each computation consumes CpuTicks
+// - Pipeline fails if any budget exceeded
+
+let result = executor.execute(&mut kernel, &pipeline, input, token);
+
+match result {
+    Ok((output, trace)) => {
+        // Success - budget not exhausted
+        let final_usage = kernel.get_identity(exec_id).unwrap().usage;
+        println!("Used: {}", final_usage);
+    }
+    Err(ExecutorError::ResourceExhausted(exceeded)) => {
+        // Budget exhausted during execution
+        eprintln!("Budget exceeded: {}", exceeded);
+    }
+    Err(e) => {
+        // Other error
+        eprintln!("Error: {}", e);
+    }
+}
+```
+
+### Integration with Previous Phases
+
+Phase 11 builds on all previous phases:
+- **Phase 1**: Uses KernelApi, TaskId, ExecutionId
+- **Phase 2**: Deterministic under fault injection
+- **Phase 3**: Budgets tied to identity lifetime (like capabilities)
+- **Phase 4**: ResourceBudget is serializable/versioned
+- **Phase 5**: Pipeline stages tracked as resource
+- **Phase 6**: Budget exhaustion may trigger cancellation
+- **Phase 7**: Budgets attached to ExecutionId
+- **Phase 8**: Policies can require/deny based on budgets
+- **Phase 9**: Budget enforcement integrated with pipelines
+- **Phase 10**: Budget derivation follows capability derivation rules
+
+All safety properties preserved:
+- Deterministic: Same operations → same consumption
+- No leaks: Budgets released on termination
+- No escalation: Child ≤ parent enforced
+- Explainable: Clear error messages with context
