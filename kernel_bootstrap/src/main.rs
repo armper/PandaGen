@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 // Provide a small, deterministic stack and jump into Rust.
 global_asm!(
     r#"
-.section .text.entry, \"ax\"
+.section .text.entry, "ax"
 .global _start
 .extern rust_main
 _start:
@@ -18,7 +18,7 @@ _start:
     hlt
     jmp 1b
 
-.section .bss.stack, \"aw\", @nobits
+.section .bss.stack, "aw", @nobits
 .align 16
 stack_bottom:
     .skip 65536
