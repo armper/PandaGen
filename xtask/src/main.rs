@@ -355,7 +355,18 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     command.stdout(Stdio::inherit());
     command.stderr(Stdio::inherit());
 
-    let status = command.status()?;
+    let program = command.get_program().to_string_lossy().to_string();
+    let status = match command.status() {
+        Ok(status) => status,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("{program} not found; ensure it is installed and on PATH"),
+            )
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
     if status.success() {
         Ok(())
     } else {
