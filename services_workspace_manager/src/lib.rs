@@ -44,6 +44,11 @@ impl ComponentId {
         Self(Uuid::new_v4())
     }
 
+    /// Creates a ComponentId from an existing UUID
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     /// Returns the inner UUID value
     pub fn as_uuid(&self) -> Uuid {
         self.0

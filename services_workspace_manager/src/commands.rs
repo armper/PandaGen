@@ -298,7 +298,7 @@ where
     let uuid = uuid::Uuid::parse_str(uuid_str)
         .map_err(|_| WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str)))?;
 
-    Ok(constructor(ComponentId(uuid)))
+    Ok(constructor(ComponentId::from_uuid(uuid)))
 }
 
 #[cfg(test)]
