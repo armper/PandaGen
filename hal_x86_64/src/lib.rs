@@ -11,8 +11,10 @@ use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};
 
 pub mod keyboard;
+pub mod port_io;
 
 pub use keyboard::X86Ps2Keyboard;
+pub use port_io::{FakePortIo, PortIo, RealPortIo};
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;

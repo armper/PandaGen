@@ -94,6 +94,9 @@ fn print_usage(program: &str) {
     eprintln!("  -h, --help               Show this help message");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} --mode sim --script examples/hello_editor.pgkeys", program);
+    eprintln!(
+        "  {} --mode sim --script examples/hello_editor.pgkeys",
+        program
+    );
     eprintln!("  {} --max-steps 100 --exit-on-idle", program);
 }

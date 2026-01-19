@@ -16,7 +16,7 @@
 //! - Released keys have bit 7 set (scancode | 0x80)
 //! - Extended keys are prefixed with 0xE0 (not fully handled yet)
 
-use crate::keyboard::HalKeyEvent;
+use crate::keyboard::{HalKeyEvent, HalScancode};
 use input_types::{KeyCode, KeyEvent, KeyState, Modifiers};
 
 /// Modifier key tracking state
@@ -82,10 +82,17 @@ impl ModifierState {
 ///
 /// Returns KeyCode::Unknown for unmapped scan codes.
 ///
-/// Note: Some scan codes overlap between navigation keys and numpad.
-/// We prioritize navigation keys. Extended scan codes (0xE0 prefix)
-/// would disambiguate, but that's not fully implemented yet.
-pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
+/// Handles both base and E0-prefixed scancodes.
+/// E0 prefix disambiguates navigation keys from numpad.
+pub fn scancode_to_keycode(scancode: HalScancode) -> KeyCode {
+    match scancode {
+        HalScancode::Base(code) => scancode_base_to_keycode(code),
+        HalScancode::E0(code) => scancode_e0_to_keycode(code),
+    }
+}
+
+/// Translates base (non-extended) scancodes
+fn scancode_base_to_keycode(scancode: u8) -> KeyCode {
     match scancode {
         // Row 1: ESC, function keys
         0x01 => KeyCode::Escape,
@@ -179,20 +186,55 @@ pub fn scancode_to_keycode(scancode: u8) -> KeyCode {
         // 0x35 => NumpadDivide (extended), conflicts with Slash
 
         // Navigation cluster (prioritized over numpad when ambiguous)
-        // Note: With 0xE0 prefix these would be distinct, but we handle base codes
-        0x47 => KeyCode::Home,     // Also Numpad7
-        0x48 => KeyCode::Up,       // Also Numpad8
-        0x49 => KeyCode::PageUp,   // Also Numpad9
-        0x4B => KeyCode::Left,     // Also Numpad4
-        0x4C => KeyCode::Numpad5,  // Center key (no nav equivalent)
-        0x4D => KeyCode::Right,    // Also Numpad6
-        0x4F => KeyCode::End,      // Also Numpad1
-        0x50 => KeyCode::Down,     // Also Numpad2
-        0x51 => KeyCode::PageDown, // Also Numpad3
-        0x52 => KeyCode::Insert,   // Also Numpad0
-        0x53 => KeyCode::Delete,   // Also NumpadPeriod
+        // Note: With 0xE0 prefix these would be distinct
+        0x47 => KeyCode::Numpad7,      // Home is E0 0x47
+        0x48 => KeyCode::Numpad8,      // Up is E0 0x48
+        0x49 => KeyCode::Numpad9,      // PageUp is E0 0x49
+        0x4B => KeyCode::Numpad4,      // Left is E0 0x4B
+        0x4C => KeyCode::Numpad5,      // Center key (no nav equivalent)
+        0x4D => KeyCode::Numpad6,      // Right is E0 0x4D
+        0x4F => KeyCode::Numpad1,      // End is E0 0x4F
+        0x50 => KeyCode::Numpad2,      // Down is E0 0x50
+        0x51 => KeyCode::Numpad3,      // PageDown is E0 0x51
+        0x52 => KeyCode::Numpad0,      // Insert is E0 0x52
+        0x53 => KeyCode::NumpadPeriod, // Delete is E0 0x53
 
         // Unmapped
+        _ => KeyCode::Unknown,
+    }
+}
+
+/// Translates E0-prefixed (extended) scancodes
+fn scancode_e0_to_keycode(scancode: u8) -> KeyCode {
+    match scancode {
+        // Navigation cluster (E0-prefixed)
+        0x47 => KeyCode::Home,
+        0x48 => KeyCode::Up,
+        0x49 => KeyCode::PageUp,
+        0x4B => KeyCode::Left,
+        0x4D => KeyCode::Right,
+        0x4F => KeyCode::End,
+        0x50 => KeyCode::Down,
+        0x51 => KeyCode::PageDown,
+        0x52 => KeyCode::Insert,
+        0x53 => KeyCode::Delete,
+
+        // Right modifiers (E0-prefixed to distinguish from left)
+        0x1D => KeyCode::RightCtrl,
+        0x38 => KeyCode::RightAlt,
+        0x5B => KeyCode::LeftMeta,  // Left Windows key
+        0x5C => KeyCode::RightMeta, // Right Windows key
+
+        // Numpad divide (E0-prefixed)
+        0x35 => KeyCode::NumpadDivide,
+
+        // Numpad enter (E0-prefixed)
+        0x1C => KeyCode::NumpadEnter,
+
+        // Print Screen (E0 0x2A E0 0x37 sequence, but we handle 0x37)
+        0x37 => KeyCode::PrintScreen,
+
+        // Unmapped E0 codes
         _ => KeyCode::Unknown,
     }
 }
@@ -260,54 +302,123 @@ mod tests {
 
     #[test]
     fn test_scancode_to_keycode_letters() {
-        assert_eq!(scancode_to_keycode(0x1E), KeyCode::A);
-        assert_eq!(scancode_to_keycode(0x30), KeyCode::B);
-        assert_eq!(scancode_to_keycode(0x2E), KeyCode::C);
-        assert_eq!(scancode_to_keycode(0x2C), KeyCode::Z);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x1E)), KeyCode::A);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x30)), KeyCode::B);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x2E)), KeyCode::C);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x2C)), KeyCode::Z);
     }
 
     #[test]
     fn test_scancode_to_keycode_numbers() {
-        assert_eq!(scancode_to_keycode(0x02), KeyCode::Num1);
-        assert_eq!(scancode_to_keycode(0x0B), KeyCode::Num0);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x02)), KeyCode::Num1);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x0B)), KeyCode::Num0);
     }
 
     #[test]
     fn test_scancode_to_keycode_special() {
-        assert_eq!(scancode_to_keycode(0x01), KeyCode::Escape);
-        assert_eq!(scancode_to_keycode(0x1C), KeyCode::Enter);
-        assert_eq!(scancode_to_keycode(0x0E), KeyCode::Backspace);
-        assert_eq!(scancode_to_keycode(0x39), KeyCode::Space);
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x01)),
+            KeyCode::Escape
+        );
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x1C)), KeyCode::Enter);
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x0E)),
+            KeyCode::Backspace
+        );
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x39)), KeyCode::Space);
     }
 
     #[test]
-    fn test_scancode_to_keycode_arrows() {
-        assert_eq!(scancode_to_keycode(0x48), KeyCode::Up);
-        assert_eq!(scancode_to_keycode(0x50), KeyCode::Down);
-        assert_eq!(scancode_to_keycode(0x4B), KeyCode::Left);
-        assert_eq!(scancode_to_keycode(0x4D), KeyCode::Right);
+    fn test_scancode_to_keycode_arrows_e0() {
+        // E0-prefixed arrow keys
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x48)), KeyCode::Up);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x50)), KeyCode::Down);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x4B)), KeyCode::Left);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x4D)), KeyCode::Right);
+    }
+
+    #[test]
+    fn test_scancode_to_keycode_numpad() {
+        // Base codes map to numpad
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x48)),
+            KeyCode::Numpad8
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x50)),
+            KeyCode::Numpad2
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x4B)),
+            KeyCode::Numpad4
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x4D)),
+            KeyCode::Numpad6
+        );
+    }
+
+    #[test]
+    fn test_scancode_to_keycode_nav_cluster() {
+        // E0-prefixed navigation keys
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x47)), KeyCode::Home);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x4F)), KeyCode::End);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x49)), KeyCode::PageUp);
+        assert_eq!(
+            scancode_to_keycode(HalScancode::e0(0x51)),
+            KeyCode::PageDown
+        );
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x52)), KeyCode::Insert);
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0x53)), KeyCode::Delete);
     }
 
     #[test]
     fn test_scancode_to_keycode_function_keys() {
-        assert_eq!(scancode_to_keycode(0x3B), KeyCode::F1);
-        assert_eq!(scancode_to_keycode(0x44), KeyCode::F10);
-        assert_eq!(scancode_to_keycode(0x57), KeyCode::F11);
-        assert_eq!(scancode_to_keycode(0x58), KeyCode::F12);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x3B)), KeyCode::F1);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x44)), KeyCode::F10);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x57)), KeyCode::F11);
+        assert_eq!(scancode_to_keycode(HalScancode::base(0x58)), KeyCode::F12);
     }
 
     #[test]
     fn test_scancode_to_keycode_modifiers() {
-        assert_eq!(scancode_to_keycode(0x2A), KeyCode::LeftShift);
-        assert_eq!(scancode_to_keycode(0x36), KeyCode::RightShift);
-        assert_eq!(scancode_to_keycode(0x1D), KeyCode::LeftCtrl);
-        assert_eq!(scancode_to_keycode(0x38), KeyCode::LeftAlt);
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x2A)),
+            KeyCode::LeftShift
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x36)),
+            KeyCode::RightShift
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x1D)),
+            KeyCode::LeftCtrl
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::e0(0x1D)),
+            KeyCode::RightCtrl
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x38)),
+            KeyCode::LeftAlt
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::e0(0x38)),
+            KeyCode::RightAlt
+        );
     }
 
     #[test]
     fn test_scancode_to_keycode_unknown() {
-        assert_eq!(scancode_to_keycode(0xFF), KeyCode::Unknown);
-        assert_eq!(scancode_to_keycode(0x00), KeyCode::Unknown);
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0xFF)),
+            KeyCode::Unknown
+        );
+        assert_eq!(
+            scancode_to_keycode(HalScancode::base(0x00)),
+            KeyCode::Unknown
+        );
+        assert_eq!(scancode_to_keycode(HalScancode::e0(0xFF)), KeyCode::Unknown);
     }
 
     #[test]

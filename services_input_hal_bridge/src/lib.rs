@@ -344,4 +344,64 @@ mod tests {
         // After reset, translator should have no modifiers
         // (can't directly test internal state, but this exercises the code)
     }
+
+    #[test]
+    fn test_bridge_arrow_keys_e0() {
+        use hal::HalScancode;
+
+        let exec_id = ExecutionId::new();
+        let task_id = TaskId::new();
+        let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
+
+        // Arrow keys with E0 prefix
+        let events = vec![
+            HalKeyEvent::with_scancode(HalScancode::e0(0x48), true), // Up pressed
+            HalKeyEvent::with_scancode(HalScancode::e0(0x48), false), // Up released
+            HalKeyEvent::with_scancode(HalScancode::e0(0x50), true), // Down pressed
+            HalKeyEvent::with_scancode(HalScancode::e0(0x4B), true), // Left pressed
+            HalKeyEvent::with_scancode(HalScancode::e0(0x4D), true), // Right pressed
+        ];
+        let keyboard = Box::new(FakeKeyboard::new(events));
+
+        let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
+
+        // Verify we can poll events (we can't inspect the KeyEvent directly
+        // without more infrastructure, but we can verify they're delivered)
+        assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        assert_eq!(bridge.poll().unwrap(), PollResult::NoEvent);
+
+        assert_eq!(bridge.events_delivered(), 5);
+    }
+
+    #[test]
+    fn test_bridge_navigation_cluster_e0() {
+        use hal::HalScancode;
+
+        let exec_id = ExecutionId::new();
+        let task_id = TaskId::new();
+        let subscription = InputSubscriptionCap::new(1, task_id, ChannelId::new());
+
+        // Navigation cluster with E0 prefix
+        let events = vec![
+            HalKeyEvent::with_scancode(HalScancode::e0(0x47), true), // Home
+            HalKeyEvent::with_scancode(HalScancode::e0(0x4F), true), // End
+            HalKeyEvent::with_scancode(HalScancode::e0(0x49), true), // PageUp
+            HalKeyEvent::with_scancode(HalScancode::e0(0x51), true), // PageDown
+            HalKeyEvent::with_scancode(HalScancode::e0(0x52), true), // Insert
+            HalKeyEvent::with_scancode(HalScancode::e0(0x53), true), // Delete
+        ];
+        let keyboard = Box::new(FakeKeyboard::new(events));
+
+        let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
+
+        for _ in 0..6 {
+            assert_eq!(bridge.poll().unwrap(), PollResult::EventDelivered);
+        }
+        assert_eq!(bridge.poll().unwrap(), PollResult::NoEvent);
+        assert_eq!(bridge.events_delivered(), 6);
+    }
 }
