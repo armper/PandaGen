@@ -32,6 +32,10 @@
 
 use view_types::{CursorPosition, ViewContent, ViewFrame};
 
+/// Default separator width for status line
+/// This could be made configurable in the future based on terminal width
+const SEPARATOR_WIDTH: usize = 80;
+
 /// Text renderer that converts ViewFrames to text output
 pub struct TextRenderer {
     /// Last rendered revision (to detect changes)
@@ -82,7 +86,7 @@ impl TextRenderer {
 
         // Separator line
         output.push('\n');
-        output.push_str(&"─".repeat(80));
+        output.push_str(&"─".repeat(SEPARATOR_WIDTH));
         output.push('\n');
 
         // Render status view (if present)
@@ -116,17 +120,23 @@ impl TextRenderer {
             if let Some(cursor_pos) = cursor {
                 if cursor_pos.line == line_idx {
                     // Insert cursor marker at the correct column
+                    // Use character-based indexing to handle Unicode correctly
                     let col = cursor_pos.column;
-                    if col <= line.len() {
-                        let (before, after) = line.split_at(col);
-                        output.push_str(before);
+                    let chars: Vec<char> = line.chars().collect();
+                    
+                    if col <= chars.len() {
+                        // Cursor within or at end of line
+                        let before: String = chars.iter().take(col).collect();
+                        let after: String = chars.iter().skip(col).collect();
+                        output.push_str(&before);
                         output.push('|'); // Cursor marker
-                        output.push_str(after);
+                        output.push_str(&after);
                         output.push('\n');
                     } else {
-                        // Cursor beyond line end
+                        // Cursor beyond line end - limit padding to reasonable max (1000 chars)
+                        let padding = (col.saturating_sub(chars.len())).min(1000);
                         output.push_str(line);
-                        output.push_str(&" ".repeat(col.saturating_sub(line.len())));
+                        output.push_str(&" ".repeat(padding));
                         output.push('|');
                         output.push('\n');
                     }
@@ -137,13 +147,14 @@ impl TextRenderer {
             output.push('\n');
         }
 
-        // If cursor is on a line beyond the buffer
+        // If cursor is on a line beyond the buffer (limit to reasonable max of 1000 lines)
         if let Some(cursor_pos) = cursor {
-            if cursor_pos.line >= lines.len() {
+            if cursor_pos.line >= lines.len() && cursor_pos.line < lines.len() + 1000 {
                 for _ in lines.len()..cursor_pos.line {
                     output.push('\n');
                 }
-                output.push_str(&" ".repeat(cursor_pos.column));
+                let padding = cursor_pos.column.min(1000);
+                output.push_str(&" ".repeat(padding));
                 output.push_str("|\n");
             }
         }
