@@ -1,0 +1,21 @@
+[package]
+name = "services_editor_vi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types = { workspace = true }
+ipc = { workspace = true }
+input_types = { workspace = true }
+services_input = { workspace = true }
+services_focus_manager = { workspace = true }
+services_storage = { workspace = true }
+services_fs_view = { workspace = true }
+fs_view = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+sim_kernel = { workspace = true }
