@@ -89,7 +89,7 @@ impl FileSystemViewService {
         let (parent_dir, name) = self.resolve_parent(root, path)?;
         parent_dir
             .get_entry(&name)
-            .ok_or_else(|| OperationError::NotFound(name))
+            .ok_or(OperationError::NotFound(name))
     }
 }
 

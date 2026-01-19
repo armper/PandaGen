@@ -20,7 +20,7 @@ impl CommandHandler {
         let root_id = ObjectId::new();
         let root = DirectoryView::new(root_id);
         let mut fs_service = FileSystemViewService::new();
-        
+
         // Register the root directory with the service
         fs_service.register_directory(root.clone());
 
@@ -68,7 +68,12 @@ impl CommandHandler {
     /// Links an object to a path
     ///
     /// Example: `pg link docs/todo.txt <object_id>`
-    pub fn link(&mut self, path: &str, object_id: ObjectId, kind: ObjectKind) -> Result<String, String> {
+    pub fn link(
+        &mut self,
+        path: &str,
+        object_id: ObjectId,
+        kind: ObjectKind,
+    ) -> Result<String, String> {
         self.fs_service
             .link(&mut self.root, path, object_id, kind)
             .map_err(|e| format!("link failed: {}", e))?;
@@ -126,7 +131,7 @@ mod tests {
     fn test_link_and_cat_command() {
         let mut handler = CommandHandler::new();
         let obj_id = ObjectId::new();
-        
+
         let link_result = handler.link("file.txt", obj_id, ObjectKind::Blob);
         assert!(link_result.is_ok());
 
@@ -164,14 +169,14 @@ mod tests {
     fn test_nested_mkdir_and_ls() {
         let mut handler = CommandHandler::new();
         handler.mkdir("docs").unwrap();
-        
+
         // Register docs directory so we can create subdirectories
         let docs_entry = handler.root.get_entry("docs").unwrap();
         let docs_dir = DirectoryView::new(docs_entry.object_id);
         handler.fs_service.register_directory(docs_dir);
-        
+
         handler.mkdir("docs/notes").unwrap();
-        
+
         let result = handler.ls("docs");
         assert!(result.is_ok());
         let entries = result.unwrap();

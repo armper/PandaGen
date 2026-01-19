@@ -2,7 +2,7 @@
 //!
 //! This module defines the operations provided by the filesystem view service.
 
-use fs_view::{DirectoryEntry, DirectoryView, PathError, PathResolver};
+use fs_view::{DirectoryEntry, DirectoryView, PathError};
 use services_storage::{ObjectId, ObjectKind};
 use thiserror::Error;
 
@@ -93,6 +93,7 @@ pub trait FileSystemOperations {
 #[cfg(test)]
 mod test_helpers {
     use super::*;
+    use fs_view::PathResolver;
 
     /// Resolves a path within a directory tree (test helper)
     pub fn resolve_parent<'a>(

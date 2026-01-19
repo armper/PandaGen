@@ -234,9 +234,7 @@ impl SimulatedKernel {
 
         // Consume the CPU ticks
         let before = current_usage;
-        identity
-            .usage
-            .consume_cpu_ticks(CpuTicks::new(amount));
+        identity.usage.consume_cpu_ticks(CpuTicks::new(amount));
         let after = identity.usage.cpu_ticks.0;
 
         // Record audit event

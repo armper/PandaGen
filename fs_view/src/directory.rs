@@ -2,8 +2,8 @@
 //!
 //! This module defines how directories are represented in the filesystem view.
 
-use services_storage::{ObjectId, ObjectKind};
 use serde::{Deserialize, Serialize};
+use services_storage::{ObjectId, ObjectKind};
 use std::collections::HashMap;
 
 /// Marker type for object capabilities in the filesystem view
@@ -98,7 +98,7 @@ mod tests {
     fn test_directory_entry_creation() {
         let obj_id = ObjectId::new();
         let entry = DirectoryEntry::new("test.txt".to_string(), obj_id, ObjectKind::Blob);
-        
+
         assert_eq!(entry.name, "test.txt");
         assert_eq!(entry.object_id, obj_id);
         assert_eq!(entry.kind, ObjectKind::Blob);
@@ -108,7 +108,7 @@ mod tests {
     fn test_directory_view_creation() {
         let dir_id = ObjectId::new();
         let dir = DirectoryView::new(dir_id);
-        
+
         assert_eq!(dir.id, dir_id);
         assert_eq!(dir.count(), 0);
     }
@@ -117,10 +117,10 @@ mod tests {
     fn test_add_entry() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let obj_id = ObjectId::new();
         let entry = DirectoryEntry::new("file.txt".to_string(), obj_id, ObjectKind::Blob);
-        
+
         assert!(dir.add_entry(entry));
         assert_eq!(dir.count(), 1);
     }
@@ -129,11 +129,11 @@ mod tests {
     fn test_add_duplicate_entry() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let obj_id = ObjectId::new();
         let entry1 = DirectoryEntry::new("file.txt".to_string(), obj_id, ObjectKind::Blob);
         let entry2 = DirectoryEntry::new("file.txt".to_string(), obj_id, ObjectKind::Blob);
-        
+
         assert!(dir.add_entry(entry1));
         assert!(!dir.add_entry(entry2)); // Duplicate should fail
         assert_eq!(dir.count(), 1);
@@ -143,11 +143,11 @@ mod tests {
     fn test_remove_entry() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let obj_id = ObjectId::new();
         let entry = DirectoryEntry::new("file.txt".to_string(), obj_id, ObjectKind::Blob);
         dir.add_entry(entry);
-        
+
         let removed = dir.remove_entry("file.txt");
         assert!(removed.is_some());
         assert_eq!(dir.count(), 0);
@@ -157,7 +157,7 @@ mod tests {
     fn test_remove_nonexistent_entry() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let removed = dir.remove_entry("nonexistent.txt");
         assert!(removed.is_none());
     }
@@ -166,11 +166,11 @@ mod tests {
     fn test_get_entry() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let obj_id = ObjectId::new();
         let entry = DirectoryEntry::new("file.txt".to_string(), obj_id, ObjectKind::Blob);
         dir.add_entry(entry);
-        
+
         let retrieved = dir.get_entry("file.txt");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "file.txt");
@@ -180,13 +180,21 @@ mod tests {
     fn test_list_entries() {
         let dir_id = ObjectId::new();
         let mut dir = DirectoryView::new(dir_id);
-        
+
         let obj1 = ObjectId::new();
         let obj2 = ObjectId::new();
-        
-        dir.add_entry(DirectoryEntry::new("file1.txt".to_string(), obj1, ObjectKind::Blob));
-        dir.add_entry(DirectoryEntry::new("file2.txt".to_string(), obj2, ObjectKind::Blob));
-        
+
+        dir.add_entry(DirectoryEntry::new(
+            "file1.txt".to_string(),
+            obj1,
+            ObjectKind::Blob,
+        ));
+        dir.add_entry(DirectoryEntry::new(
+            "file2.txt".to_string(),
+            obj2,
+            ObjectKind::Blob,
+        ));
+
         let entries = dir.list_entries();
         assert_eq!(entries.len(), 2);
     }

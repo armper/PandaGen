@@ -16,8 +16,8 @@
 //! - Path resolution walks Map objects step-by-step
 //! - Resolution consumes no authority beyond what is already held
 
-pub mod path;
 pub mod directory;
+pub mod path;
 
-pub use path::{PathError, PathResolver};
 pub use directory::{DirectoryEntry, DirectoryView};
+pub use path::{PathError, PathResolver};

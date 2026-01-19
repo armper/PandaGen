@@ -76,9 +76,9 @@ impl PathResolver {
     ///
     /// Returns true if the name is valid for a directory entry.
     pub fn is_valid_name(name: &str) -> bool {
-        !name.is_empty() 
-            && name != "." 
-            && name != ".." 
+        !name.is_empty()
+            && name != "."
+            && name != ".."
             && !name.contains('/')
             && !name.contains('\0')
     }
@@ -152,7 +152,7 @@ mod tests {
         assert!(PathResolver::is_valid_name("todo.txt"));
         assert!(PathResolver::is_valid_name("my-file"));
         assert!(PathResolver::is_valid_name("file_123"));
-        
+
         assert!(!PathResolver::is_valid_name(""));
         assert!(!PathResolver::is_valid_name("."));
         assert!(!PathResolver::is_valid_name(".."));
