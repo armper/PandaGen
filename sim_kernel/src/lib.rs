@@ -1171,6 +1171,9 @@ impl SimulatedKernel {
         self.scheduler.enqueue(task_id);
 
         // Phase 24: Create address space for this task
+        // Result is intentionally discarded - address space creation cannot fail
+        // in current simulation implementation. The AddressSpaceCap is stored
+        // internally and can be retrieved via create_address_space() later.
         let _ = self
             .address_space_manager
             .create_address_space(execution_id, self.current_time.as_nanos());
@@ -1343,6 +1346,7 @@ impl KernelApi for SimulatedKernel {
         self.scheduler.enqueue(task_id);
 
         // Phase 24: Create address space for this task
+        // Result intentionally discarded (see spawn_task_with_identity for details)
         let _ = self
             .address_space_manager
             .create_address_space(execution_id, self.current_time.as_nanos());
@@ -2677,7 +2681,9 @@ mod tests {
         let exec_id1 = kernel.get_task_identity(handle1.task_id).unwrap();
         let exec_id2 = kernel.get_task_identity(handle2.task_id).unwrap();
 
-        // Task 1 allocates a region
+        // Task 1 gets explicit AddressSpaceCap to allocate regions
+        // Note: Address space was already created automatically on spawn,
+        // this just gets a capability to manage it
         let space_cap1 = kernel.create_address_space(exec_id1).unwrap();
         let region_cap1 = kernel
             .allocate_region(
@@ -2694,8 +2700,10 @@ mod tests {
             .access_region(&region_cap1, MemoryAccessType::Read, exec_id2)
             .is_err());
 
-        // To share, Task 1 would delegate the MemoryRegionCap to Task 2
-        // (This would be done through the capability delegation API)
-        // For now, we just verify isolation is maintained without delegation
+        // To share, Task 1 would delegate the MemoryRegionCap to Task 2 via:
+        // kernel.delegate_capability(region_cap1.cap_id, task1_id, task2_id)?;
+        //
+        // Capability delegation is implemented in Phase 3 but not yet integrated
+        // with MemoryRegionCap. For now, we verify isolation is maintained.
     }
 }
