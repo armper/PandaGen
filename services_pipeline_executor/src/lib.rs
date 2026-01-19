@@ -170,7 +170,7 @@ impl PipelineExecutor {
                         policy: policy.name().to_string(),
                         event: "OnPipelineStart".to_string(),
                         reason,
-                        pipeline_id: Some(format!("{:?}", spec.id)),
+                        pipeline_id: Some(spec.id.to_string()),
                     });
                 }
                 PolicyDecision::Require { action } => {
@@ -178,7 +178,7 @@ impl PipelineExecutor {
                         policy: policy.name().to_string(),
                         event: "OnPipelineStart".to_string(),
                         action,
-                        pipeline_id: Some(format!("{:?}", spec.id)),
+                        pipeline_id: Some(spec.id.to_string()),
                     });
                 }
                 PolicyDecision::Allow => {
@@ -242,7 +242,7 @@ impl PipelineExecutor {
                             policy: policy.name().to_string(),
                             event: "OnPipelineStageStart".to_string(),
                             reason,
-                            pipeline_id: Some(format!("{:?}", spec.id)),
+                            pipeline_id: Some(spec.id.to_string()),
                         });
                     }
                     PolicyDecision::Require { action } => {
@@ -254,7 +254,7 @@ impl PipelineExecutor {
                             policy: policy.name().to_string(),
                             event: "OnPipelineStageStart".to_string(),
                             action,
-                            pipeline_id: Some(format!("{:?}", spec.id)),
+                            pipeline_id: Some(spec.id.to_string()),
                         });
                     }
                     PolicyDecision::Allow => {
