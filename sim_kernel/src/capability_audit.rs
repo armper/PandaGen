@@ -84,6 +84,8 @@ impl CapabilityAuditLog {
                 CapabilityEvent::Dropped { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::InvalidUseAttempt { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::Invalidated { cap_id: id, .. } => *id == cap_id,
+                CapabilityEvent::Revoked { cap_id: id, .. } => *id == cap_id,
+                CapabilityEvent::LeaseExpired { cap_id: id, .. } => *id == cap_id,
             })
             .collect()
     }

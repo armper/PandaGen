@@ -11,7 +11,11 @@ members = [
     "services_process_manager",
     "services_logger",
     "services_storage",
+    "services_device_manager",
     "services_network",
+    "secure_boot",
+    "developer_sdk",
+    "services_gui_host",
     "services_pipeline_executor",
     "services_fs_view",
     "services_input",
@@ -58,7 +62,11 @@ services_registry = { path = "services_registry" }
 services_process_manager = { path = "services_process_manager" }
 services_logger = { path = "services_logger" }
 services_storage = { path = "services_storage" }
+services_device_manager = { path = "services_device_manager" }
 services_network = { path = "services_network" }
+secure_boot = { path = "secure_boot" }
+developer_sdk = { path = "developer_sdk" }
+services_gui_host = { path = "services_gui_host" }
 services_pipeline_executor = { path = "services_pipeline_executor" }
 services_fs_view = { path = "services_fs_view" }
 fs_view = { path = "fs_view" }
@@ -93,3 +101,4 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 thiserror = "1.0"
 tempfile = "3"
+sha2 = "0.10"

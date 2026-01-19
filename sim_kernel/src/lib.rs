@@ -27,6 +27,7 @@ pub mod fault_injection;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod scheduler;
+pub mod smp;
 pub mod test_utils;
 pub mod timer;
 
@@ -88,6 +89,8 @@ pub struct SimulatedKernel {
     current_receive_task: Option<TaskId>,
     /// Preemptive scheduler (Phase 23)
     scheduler: scheduler::Scheduler,
+    /// SMP runtime (Phase 30)
+    smp: Option<smp::SmpRuntime>,
     /// Address space manager (Phase 24)
     address_space_manager: address_space::AddressSpaceManager,
 }
@@ -148,6 +151,7 @@ impl SimulatedKernel {
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
             scheduler: scheduler::Scheduler::new(),
+            smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
         }
     }
@@ -166,6 +170,25 @@ impl SimulatedKernel {
         &mut self.timer
     }
 
+    /// Enables SMP runtime with the given core count.
+    pub fn enable_smp(&mut self, core_count: usize) {
+        let config = smp::SmpConfig {
+            core_count,
+            ..Default::default()
+        };
+        self.smp = Some(smp::SmpRuntime::new(config));
+    }
+
+    /// Returns the SMP runtime if enabled.
+    pub fn smp(&self) -> Option<&smp::SmpRuntime> {
+        self.smp.as_ref()
+    }
+
+    /// Returns a mutable SMP runtime if enabled.
+    pub fn smp_mut(&mut self) -> Option<&mut smp::SmpRuntime> {
+        self.smp.as_mut()
+    }
+
     /// Updates current_time based on timer ticks
     ///
     /// This is called internally after advancing the timer.
@@ -173,6 +196,7 @@ impl SimulatedKernel {
         let ticks = self.timer.poll_ticks();
         let nanos = ticks * self.nanos_per_tick;
         self.current_time = Instant::from_nanos(nanos);
+        self.expire_capability_leases();
     }
 
     /// Sets the fault injector for this kernel
@@ -778,9 +802,23 @@ impl SimulatedKernel {
         match self.capability_table.get(&cap_id) {
             None => Err(CapabilityInvalidReason::NeverGranted),
             Some(meta) => {
+                // Check lease expiration
+                if let Some(expires_at) = meta.lease_expires_at_nanos {
+                    if expires_at <= self.current_time.as_nanos() {
+                        return Err(CapabilityInvalidReason::LeaseExpired);
+                    }
+                }
+
+                if meta.revoked {
+                    return Err(CapabilityInvalidReason::Revoked);
+                }
+
                 // Check if capability is invalid
                 if meta.status != CapabilityStatus::Valid {
-                    return Err(CapabilityInvalidReason::TransferredAway);
+                    if meta.status == CapabilityStatus::Transferred {
+                        return Err(CapabilityInvalidReason::TransferredAway);
+                    }
+                    return Err(CapabilityInvalidReason::OwnerDead);
                 }
 
                 // Check if owner is still alive
@@ -805,6 +843,7 @@ impl SimulatedKernel {
         grantee: TaskId,
         cap_type: String,
         grantor: Option<TaskId>,
+        lease_expires_at_nanos: Option<u64>,
     ) {
         let metadata = CapabilityMetadata {
             cap_id,
@@ -812,6 +851,8 @@ impl SimulatedKernel {
             cap_type: cap_type.clone(),
             status: CapabilityStatus::Valid,
             grantor,
+            revoked: false,
+            lease_expires_at_nanos,
         };
 
         self.capability_table.insert(cap_id, metadata);
@@ -825,6 +866,93 @@ impl SimulatedKernel {
                 cap_type,
             },
         );
+    }
+
+    /// Revokes a capability from its owner.
+    pub fn revoke_capability(
+        &mut self,
+        cap_id: u64,
+        owner: TaskId,
+        reason: String,
+    ) -> Result<(), KernelError> {
+        self.validate_capability(cap_id, owner)
+            .map_err(|reason| {
+                KernelError::InvalidCapability(format!("Cannot revoke: {:?}", reason))
+            })?;
+
+        if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+            meta.status = CapabilityStatus::Invalid;
+            meta.revoked = true;
+
+            self.capability_audit.record_event(
+                self.current_time,
+                CapabilityEvent::Revoked {
+                    cap_id,
+                    owner,
+                    cap_type: meta.cap_type.clone(),
+                    reason,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Grants a capability with a time-bound lease.
+    pub fn grant_capability_with_lease(
+        &mut self,
+        task: TaskId,
+        capability: Cap<()>,
+        lease: Duration,
+    ) -> Result<(), KernelError> {
+        if !self.tasks.contains_key(&task) {
+            return Err(KernelError::SendFailed("Target task not found".to_string()));
+        }
+
+        let expires_at = self.current_time.as_nanos().saturating_add(lease.as_nanos());
+
+        self.record_capability_grant(
+            capability.id(),
+            task,
+            "Generic".to_string(),
+            None,
+            Some(expires_at),
+        );
+
+        Ok(())
+    }
+
+    fn expire_capability_leases(&mut self) {
+        let now = self.current_time.as_nanos();
+        let expired: Vec<u64> = self
+            .capability_table
+            .iter()
+            .filter_map(|(cap_id, meta)| {
+                if meta.status == CapabilityStatus::Valid {
+                    if let Some(expires_at) = meta.lease_expires_at_nanos {
+                        if expires_at <= now {
+                            return Some(*cap_id);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for cap_id in expired {
+            if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+                meta.status = CapabilityStatus::Invalid;
+                self.capability_audit.record_event(
+                    self.current_time,
+                    CapabilityEvent::LeaseExpired {
+                        cap_id,
+                        owner: meta.owner,
+                        cap_type: meta.cap_type.clone(),
+                        expired_at_nanos: now,
+                    },
+                );
+            }
+        }
     }
 
     /// Delegates a capability from one task to another (move semantics)
@@ -1609,7 +1737,7 @@ impl KernelApi for SimulatedKernel {
 
         // Record the capability grant in the authority table
         // For now, we use a generic type name since Cap<()> is type-erased
-        self.record_capability_grant(capability.id(), task, "Generic".to_string(), None);
+        self.record_capability_grant(capability.id(), task, "Generic".to_string(), None, None);
 
         Ok(())
     }
@@ -1837,6 +1965,53 @@ mod tests {
         // Check audit log
         let audit = kernel.audit_log();
         assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Dropped { .. })));
+    }
+
+    #[test]
+    fn test_capability_lease_expiration() {
+        let mut kernel = SimulatedKernel::new();
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("lease-task".to_string()))
+            .unwrap()
+            .task_id;
+        let cap: Cap<()> = Cap::new(77);
+
+        kernel
+            .grant_capability_with_lease(task, cap.clone(), Duration::from_millis(10))
+            .unwrap();
+
+        assert!(kernel.is_capability_valid(cap.id(), task));
+
+        kernel.advance_time(Duration::from_millis(11));
+        assert!(!kernel.is_capability_valid(cap.id(), task));
+
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| {
+            matches!(e, CapabilityEvent::LeaseExpired { cap_id, .. } if *cap_id == 77)
+        }));
+    }
+
+    #[test]
+    fn test_capability_revocation() {
+        let mut kernel = SimulatedKernel::new();
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("revoke-task".to_string()))
+            .unwrap()
+            .task_id;
+        let cap: Cap<()> = Cap::new(88);
+
+        kernel.grant_capability(task, cap.clone()).unwrap();
+        assert!(kernel.is_capability_valid(cap.id(), task));
+
+        kernel
+            .revoke_capability(cap.id(), task, "test revoke".to_string())
+            .unwrap();
+        assert!(!kernel.is_capability_valid(cap.id(), task));
+
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| {
+            matches!(e, CapabilityEvent::Revoked { cap_id, .. } if *cap_id == 88)
+        }));
     }
 
     #[test]
@@ -2394,6 +2569,19 @@ mod tests {
             kernel1.now().as_nanos(),
             Duration::from_millis(10 + 20 + 30 + 40 + 50).as_nanos()
         );
+    }
+
+    #[test]
+    fn test_smp_enable_and_per_core_time() {
+        let mut kernel = SimulatedKernel::new();
+        kernel.enable_smp(2);
+
+        let smp = kernel.smp_mut().unwrap();
+        smp.advance_core_time(smp::CoreId(0), 5);
+        smp.advance_core_time(smp::CoreId(1), 8);
+
+        assert_eq!(smp.time.ticks(smp::CoreId(0)), 5);
+        assert_eq!(smp.time.ticks(smp::CoreId(1)), 8);
     }
 
     #[test]
