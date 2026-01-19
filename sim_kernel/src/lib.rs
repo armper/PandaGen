@@ -36,7 +36,6 @@ use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
-use resources::MessageCount;
 use std::collections::{HashMap, VecDeque};
 
 /// Simulated kernel state
@@ -148,6 +147,13 @@ impl SimulatedKernel {
         &self.policy_audit
     }
 
+    /// Returns a reference to the resource audit log
+    ///
+    /// Phase 12: Used in tests to verify resource consumption and exhaustion.
+    pub fn resource_audit(&self) -> &resource_audit::ResourceAuditLog {
+        &self.resource_audit
+    }
+
     /// Sets the current receive task context
     ///
     /// Phase 12: Workaround for KernelApi not passing TaskId to receive_message.
@@ -168,7 +174,8 @@ impl SimulatedKernel {
     /// Phase 12: Marks the identity as cancelled. Further operations for this
     /// identity will be rejected.
     fn cancel_identity(&mut self, execution_id: ExecutionId, reason: String) {
-        self.cancelled_identities.insert(execution_id, reason.clone());
+        self.cancelled_identities
+            .insert(execution_id, reason.clone());
 
         // Record in resource audit
         self.resource_audit.record_event(

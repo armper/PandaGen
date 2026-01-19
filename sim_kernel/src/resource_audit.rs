@@ -145,14 +145,24 @@ impl ResourceAuditLog {
         self.entries
             .iter()
             .filter(|entry| match &entry.event {
-                ResourceEvent::MessageConsumed { execution_id: eid, .. }
-                | ResourceEvent::CpuConsumed { execution_id: eid, .. }
-                | ResourceEvent::StorageOpConsumed { execution_id: eid, .. }
-                | ResourceEvent::PipelineStageConsumed { execution_id: eid, .. }
-                | ResourceEvent::BudgetExhausted { execution_id: eid, .. }
-                | ResourceEvent::CancelledDueToExhaustion { execution_id: eid, .. } => {
-                    eid == &execution_id
+                ResourceEvent::MessageConsumed {
+                    execution_id: eid, ..
                 }
+                | ResourceEvent::CpuConsumed {
+                    execution_id: eid, ..
+                }
+                | ResourceEvent::StorageOpConsumed {
+                    execution_id: eid, ..
+                }
+                | ResourceEvent::PipelineStageConsumed {
+                    execution_id: eid, ..
+                }
+                | ResourceEvent::BudgetExhausted {
+                    execution_id: eid, ..
+                }
+                | ResourceEvent::CancelledDueToExhaustion {
+                    execution_id: eid, ..
+                } => eid == &execution_id,
             })
             .collect()
     }
