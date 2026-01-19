@@ -249,6 +249,152 @@ fn timer_interrupt() {
 }
 ```
 
+### 7. Virtual Memory and Address Spaces (Phase 24)
+
+**Problem**: Memory is often treated as ambient authority - any code can access any memory in its address space. Traditional systems use implicit sharing (fork), copy-on-write, and implicit inheritance, making it difficult to reason about memory safety and isolation.
+
+**Solution**:
+- Address spaces as explicit, capability-governed objects
+- Memory regions with explicit permissions (Read/Write/Execute)
+- No implicit sharing - all sharing requires explicit capability delegation
+- Each component gets its own isolated address space
+- Logical isolation in simulation, ready for MMU integration later
+
+**Impact**:
+- Memory is authority, not a side effect
+- Components cannot access each other's memory without explicit grant
+- Clear seams for future MMU integration
+- Fully testable under SimKernel
+- No fork/exec or POSIX baggage
+
+**Design**:
+
+**Core Types** (core_types::memory):
+- `AddressSpaceId`: Unique identifier for address spaces
+- `AddressSpace`: Contains non-overlapping memory regions
+- `MemoryRegion`: Size, permissions, and backing type
+- `MemoryPerms`: Read/Write/Execute flags
+- `MemoryBacking`: Anonymous/Shared/Device (logical)
+
+**Capabilities**:
+- `AddressSpaceCap`: Grants ability to allocate/deallocate regions
+- `MemoryRegionCap`: Grants access to a specific region
+
+**SimKernel Integration**:
+```rust
+// Automatically created when task spawns
+let handle = kernel.spawn_task(descriptor)?;
+let exec_id = kernel.get_task_identity(handle.task_id)?;
+
+// Explicit address space creation
+let space_cap = kernel.create_address_space(exec_id)?;
+
+// Explicit region allocation
+let region_cap = kernel.allocate_region(
+    &space_cap,
+    4096,  // size in bytes
+    MemoryPerms::read_write(),
+    MemoryBacking::Anonymous,
+    exec_id,
+)?;
+
+// Explicit access check
+kernel.access_region(&region_cap, MemoryAccessType::Read, exec_id)?;
+```
+
+**Isolation Guarantees**:
+1. Each task/component gets its own address space on spawn
+2. Regions within a space cannot overlap (enforced at allocation)
+3. Cross-space access requires explicit MemoryRegionCap delegation
+4. Permissions are enforced on every access
+5. Address spaces are destroyed when tasks terminate
+
+**Budget Integration**:
+- Memory allocation consumes MemoryUnits from resource budget
+- Allocation fails if budget is exhausted
+- Budget is tracked per-execution-identity
+- Size is rounded up to 4KB pages
+
+**Audit Trail** (test-visible):
+```rust
+pub enum AddressSpaceEvent {
+    SpaceCreated { space_id, execution_id, timestamp_nanos },
+    SpaceActivated { space_id, execution_id, timestamp_nanos },
+    RegionAllocated { space_id, region_id, size_bytes, permissions, timestamp_nanos },
+    RegionDeallocated { space_id, region_id, timestamp_nanos },
+    AccessAttempted { space_id, region_id, access_type, allowed, timestamp_nanos },
+    SpaceDestroyed { space_id, timestamp_nanos },
+}
+```
+
+**What We DON'T Have (Intentionally)**:
+- ❌ Paging hardware or MMU integration (yet)
+- ❌ fork/exec semantics
+- ❌ Copy-on-write
+- ❌ mmap/munmap compatibility layers
+- ❌ Implicit memory inheritance
+- ❌ Shared global heap
+- ❌ POSIX address space concepts
+
+**Why No Fork/Exec?**
+
+Traditional Unix uses `fork()` to create processes by duplicating the entire address space. This creates:
+- Implicit copying of all memory (expensive, complex)
+- Ambiguous ownership of resources
+- Copy-on-write complexity
+- Unexpected side effects in multi-threaded programs
+
+PandaGen uses **explicit construction**:
+- Tasks specify exactly what they need via TaskDescriptor
+- Memory is allocated explicitly via allocate_region
+- No hidden copying or side effects
+- Clear ownership from the start
+
+**Why Address Spaces as Objects?**
+
+In POSIX, address spaces are attributes of processes. In PandaGen, they're first-class objects:
+- Can be created independently of tasks
+- Can be managed via capabilities
+- Have explicit lifecycle (create/destroy)
+- Can be audited and inspected
+- Prepare for future features (address space sharing for IPC buffers)
+
+**Hardware Integration Seam** (Future):
+
+Though not implemented yet, Phase 24 provides clear mapping to MMU:
+
+| Simulation Concept | Hardware Mapping |
+|--------------------|------------------|
+| AddressSpace | Page table (CR3 on x86) |
+| MemoryRegion | Page table entries for range |
+| MemoryPerms | MMU flags (R/W/X bits) |
+| MemoryBacking::Anonymous | Normal RAM pages |
+| MemoryBacking::Shared | Shared memory pages |
+| MemoryBacking::Device | Memory-mapped I/O |
+| access_region() check | Page fault handler validation |
+| activate_address_space() | Context switch + CR3 load |
+
+**Future Hardware Integration**:
+1. Map AddressSpace to page table root
+2. Map MemoryRegion to page table entries
+3. Map MemoryPerms to MMU protection bits
+4. Trigger page faults on illegal access
+5. Validate access via MemoryRegionCap in fault handler
+6. Keep simulation and hardware semantics identical
+
+**Integration with Previous Phases**:
+- **Phase 1-6**: Memory operations respect capability model
+- **Phase 7**: Address spaces tied to ExecutionId (one space per execution)
+- **Phase 8**: Policy can restrict memory allocation
+- **Phase 11**: Memory consumes MemoryUnits budget
+- **Phase 23**: Scheduler activates address space on context switch (planned)
+
+All safety properties maintained:
+- No capability leaks (address spaces destroyed with tasks)
+- No ambient authority (all access requires MemoryRegionCap)
+- Deterministic testing (simulation mode)
+- Observable behavior (audit log)
+
 ## System Layers
 
 ```

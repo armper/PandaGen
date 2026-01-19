@@ -10,6 +10,10 @@ This document describes the key interfaces and contracts in PandaGen.
 - [Storage Interface](#storage-interface)
 - [Service Lifecycle](#service-lifecycle)
 - [Hardware Abstraction](#hardware-abstraction)
+- [Memory Management](#memory-management-phase-24)
+- [Error Handling](#error-handling)
+- [Testing Contracts](#testing-contracts)
+- [Design Guidelines](#design-guidelines)
 
 ## Kernel API
 
@@ -764,6 +768,268 @@ let elapsed_ticks = t2 - t1;
 - Architecture-specific details hidden behind traits
 - Core logic remains architecture-independent
 - Can swap implementations (x86_64, ARM, RISC-V)
+
+## Memory Management (Phase 24)
+
+### Address Spaces
+
+Every task/component gets its own isolated address space:
+
+```rust
+// Address space created automatically on spawn
+let handle = kernel.spawn_task(descriptor)?;
+let exec_id = kernel.get_task_identity(handle.task_id)?;
+
+// Get explicit capability to manage the address space
+let space_cap = kernel.create_address_space(exec_id)?;
+```
+
+**Contract**:
+- One address space per ExecutionId
+- Address spaces are isolated by default
+- No implicit sharing between spaces
+- Address spaces destroyed when task terminates
+
+### Memory Regions
+
+Allocate memory regions within an address space:
+
+```rust
+use core_types::{MemoryPerms, MemoryBacking};
+
+// Allocate a 4KB read-write region
+let region_cap = kernel.allocate_region(
+    &space_cap,
+    4096,                           // size in bytes
+    MemoryPerms::read_write(),      // permissions
+    MemoryBacking::Anonymous,        // backing type
+    exec_id,                         // caller identity
+)?;
+```
+
+**Contract**:
+- Requires valid AddressSpaceCap
+- Size must be > 0
+- Regions within a space cannot overlap
+- Consumes MemoryUnits from resource budget
+- Returns MemoryRegionCap granting access
+
+### Memory Permissions
+
+```rust
+pub struct MemoryPerms {
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
+}
+
+impl MemoryPerms {
+    pub fn none() -> Self;           // No access
+    pub fn read_only() -> Self;      // Read only
+    pub fn read_write() -> Self;     // Read and write
+    pub fn read_execute() -> Self;   // Read and execute (code)
+    pub fn all() -> Self;            // All permissions
+}
+```
+
+**Display Format**: `RWX` notation (e.g., "R--", "RW-", "R-X")
+
+### Memory Backing Types
+
+```rust
+pub enum MemoryBacking {
+    Anonymous,  // Normal heap/stack memory
+    Shared,     // Explicitly shared between address spaces
+    Device,     // Memory-mapped I/O (future)
+}
+```
+
+**Contract**:
+- Anonymous: Private to address space
+- Shared: Requires explicit capability delegation to share
+- Device: Reserved for hardware integration (future)
+
+### Memory Access
+
+Check if an access is allowed:
+
+```rust
+use core_types::MemoryAccessType;
+
+// Read access
+kernel.access_region(&region_cap, MemoryAccessType::Read, exec_id)?;
+
+// Write access (may fail if region is read-only)
+kernel.access_region(&region_cap, MemoryAccessType::Write, exec_id)?;
+
+// Execute access (may fail if region is not executable)
+kernel.access_region(&region_cap, MemoryAccessType::Execute, exec_id)?;
+```
+
+**Contract**:
+- Requires valid MemoryRegionCap
+- Checks caller owns the capability
+- Validates permission matches region's MemoryPerms
+- Returns `MemoryError::PermissionDenied` if access not allowed
+
+### Memory Errors
+
+```rust
+pub enum MemoryError {
+    AddressSpaceNotFound(AddressSpaceId),
+    RegionNotFound(MemoryRegionId),
+    PermissionDenied { region_id, access_type, permissions },
+    InvalidRegionSize(u64),
+    RegionOverlap,
+    BudgetExhausted { requested: u64, available: u64 },
+    CrossSpaceAccess { region_id, owner_space, accessor_space },
+    NoCapability(MemoryRegionId),
+}
+```
+
+**Philosophy**:
+- Explicit errors with full context
+- Permission denied includes what was attempted
+- Budget exhaustion shows requested vs available
+- No capability is distinct from invalid capability
+
+### Memory Sharing Pattern
+
+Sharing memory requires explicit delegation of MemoryRegionCap:
+
+```rust
+// Task 1 allocates a shared region
+let space_cap1 = kernel.create_address_space(exec_id1)?;
+let region_cap1 = kernel.allocate_region(
+    &space_cap1,
+    4096,
+    MemoryPerms::read_write(),
+    MemoryBacking::Shared,  // Mark as shared
+    exec_id1,
+)?;
+
+// Task 1 can access it
+kernel.access_region(&region_cap1, MemoryAccessType::Read, exec_id1)?;
+
+// Task 2 CANNOT access without delegation
+// kernel.access_region(&region_cap1, MemoryAccessType::Read, exec_id2)?;
+// ^ This would fail with NoCapability error
+
+// To share, delegate the MemoryRegionCap to Task 2
+// (via capability delegation API)
+kernel.delegate_capability(region_cap1.cap_id, task1_id, task2_id)?;
+
+// Now Task 2 can access
+kernel.access_region(&region_cap1, MemoryAccessType::Read, exec_id2)?;
+```
+
+**Contract**:
+- No implicit sharing
+- Sharing requires two steps:
+  1. Mark region as Shared (intent)
+  2. Delegate MemoryRegionCap (grant authority)
+- Move semantics apply (Task 1 loses access after delegation)
+
+### Memory Budget Enforcement
+
+Memory allocation consumes MemoryUnits budget:
+
+```rust
+use resources::{MemoryUnits, ResourceBudget};
+
+// Set memory budget (in 4KB pages)
+let budget = ResourceBudget::unlimited()
+    .with_memory_units(MemoryUnits::new(10));  // 10 pages = 40KB
+
+if let Some(identity) = kernel.get_identity_mut(exec_id) {
+    identity.budget = Some(budget);
+}
+
+// Allocate regions until budget exhausted
+let region1 = kernel.allocate_region(&space_cap, 4096, perms, backing, exec_id)?;  // Uses 1 unit
+let region2 = kernel.allocate_region(&space_cap, 8192, perms, backing, exec_id)?;  // Uses 2 units
+// ... continue until 10 units consumed ...
+
+// This will fail with BudgetExhausted
+let region_fail = kernel.allocate_region(&space_cap, 4096, perms, backing, exec_id);
+assert!(matches!(region_fail.unwrap_err(), MemoryError::BudgetExhausted { .. }));
+```
+
+**Contract**:
+- Size rounded up to 4KB pages using div_ceil
+- Allocation fails immediately if budget exceeded
+- Budget is checked per-execution-identity
+- No partial allocations
+
+### Test-Visible Audit
+
+Memory operations are audited for testing:
+
+```rust
+let audit = kernel.address_space_audit();
+
+// Check that space was created
+assert!(audit.has_event(|e| matches!(
+    e,
+    AddressSpaceEvent::SpaceCreated { execution_id, .. }
+    if execution_id == exec_id
+)));
+
+// Check that region was allocated
+assert!(audit.has_event(|e| matches!(
+    e,
+    AddressSpaceEvent::RegionAllocated { size_bytes: 4096, .. }
+)));
+
+// Check access attempts
+assert!(audit.has_event(|e| matches!(
+    e,
+    AddressSpaceEvent::AccessAttempted { allowed: true, .. }
+)));
+```
+
+**Contract**:
+- All memory operations recorded in audit log
+- Timestamps use SimKernel time (deterministic)
+- Audit log is test-only (not for production)
+- Events include full context for verification
+
+### Future MMU Integration
+
+Phase 24 provides clean seams for hardware integration:
+
+**Address Space → Page Table**:
+- `AddressSpace` maps to CR3 on x86 (page table root)
+- Activation loads page table into MMU
+- Context switch preserves page table identity
+
+**Memory Region → Page Entries**:
+- `MemoryRegion` maps to contiguous page table entries
+- Size determines number of pages
+- Regions translated to virtual address ranges
+
+**Permissions → MMU Flags**:
+- `MemoryPerms::read` → PTE read bit
+- `MemoryPerms::write` → PTE write bit
+- `MemoryPerms::execute` → PTE execute bit (NX)
+
+**Access Validation → Page Faults**:
+- `access_region()` becomes page fault handler check
+- Validates MemoryRegionCap ownership
+- Verifies permissions match
+- Allows or blocks access based on capability
+
+**What Stays the Same**:
+- Capability model (MemoryRegionCap required)
+- Permission semantics (R/W/X enforcement)
+- Isolation guarantees (cross-space access denied)
+- Budget enforcement (allocation limits)
+
+**What Changes**:
+- Simulation checks → Hardware page faults
+- Logical regions → Physical page mappings
+- activate_address_space() → CR3 load instruction
+- access_region() call → Page fault handler
 
 ## Error Handling
 
