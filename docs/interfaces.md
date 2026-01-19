@@ -809,6 +809,293 @@ fn test_service_communication() {
 4. **Provide migration paths**
 5. **Consider testability**
 
+## Pipeline Interface
+
+### Typed Pipeline Composition
+
+PandaGen provides a typed pipeline system for composing operations safely.
+
+Unlike shell pipelines (`cmd1 | cmd2 | cmd3`), PandaGen pipelines are:
+- **Typed**: Schema-validated input/output chaining
+- **Capability-safe**: Explicit authority flow, no ambient privileges
+- **Failure-explicit**: Bounded retry policies, no infinite loops
+- **Deterministic**: Works with SimKernel for reproducible testing
+
+#### Core Types
+
+```rust
+pub struct PipelineSpec {
+    pub id: PipelineId,
+    pub name: String,
+    pub stages: Vec<StageSpec>,
+    pub initial_input_schema: PayloadSchemaId,
+    pub final_output_schema: PayloadSchemaId,
+}
+
+pub struct StageSpec {
+    pub id: StageId,
+    pub name: String,
+    pub handler: ServiceId,
+    pub action: String,
+    pub input_schema: PayloadSchemaId,
+    pub output_schema: PayloadSchemaId,
+    pub retry_policy: RetryPolicy,
+    pub required_capabilities: Vec<u64>,
+}
+
+pub enum StageResult {
+    Success { output: TypedPayload, capabilities: Vec<u64> },
+    Failure { error: String },
+    Retryable { error: String },
+}
+
+pub struct RetryPolicy {
+    pub max_retries: u32,            // 0 = no retries
+    pub initial_backoff_ms: u64,
+    pub backoff_multiplier: f64,     // For exponential backoff
+}
+```
+
+#### Pipeline Validation
+
+Pipelines validate schema chaining at construction:
+
+```rust
+// Schema chaining validation
+pipeline.validate()?;
+
+// Checks:
+// 1. At least one stage
+// 2. First stage input matches pipeline input
+// 3. Each stage output matches next stage input
+// 4. Last stage output matches pipeline output
+```
+
+**Contract**:
+- Validation happens before execution
+- Invalid pipelines return `PipelineError::SchemaMismatch`
+- Schema IDs are string-based with version tags
+
+#### Capability Flow
+
+Stages explicitly declare required capabilities:
+
+```rust
+let stage2 = StageSpec::new(...)
+    .with_capabilities(vec![cap_id_from_stage1]);
+```
+
+**Capability Rules**:
+1. Stage cannot execute without required capabilities
+2. Capabilities come from:
+   - Initial pipeline inputs, OR
+   - Output of previous stages
+3. Missing capabilities cause immediate failure (fail-fast)
+4. No capability forgery or ambient authority
+
+**Enforcement**:
+- Executor checks capability availability before stage execution
+- Missing capability returns `ExecutorError::MissingCapability`
+- Capability IDs tracked in execution trace
+
+#### Failure Propagation
+
+Every stage returns one of three outcomes:
+
+**Success**:
+```rust
+StageResult::Success {
+    output: TypedPayload,
+    capabilities: Vec<u64>,
+}
+```
+- Stage succeeded
+- Pipeline continues to next stage
+- Capabilities added to executor's pool
+
+**Permanent Failure**:
+```rust
+StageResult::Failure {
+    error: String,
+}
+```
+- Stage failed permanently (non-recoverable)
+- Pipeline stops immediately (fail-fast)
+- No subsequent stages execute
+- Trace records failure point
+
+**Retryable Failure**:
+```rust
+StageResult::Retryable {
+    error: String,
+}
+```
+- Stage failed transiently (may succeed on retry)
+- Retry according to stage's `RetryPolicy`
+- If max retries exceeded, converts to permanent failure
+- Backoff uses SimKernel time (deterministic)
+
+#### Retry Policies
+
+**No Retries** (default):
+```rust
+RetryPolicy::none()
+// max_retries = 0
+// Immediate failure on any error
+```
+
+**Fixed Retries**:
+```rust
+RetryPolicy::fixed_retries(3, 100)
+// max_retries = 3
+// initial_backoff_ms = 100
+// backoff_multiplier = 1.0 (constant backoff)
+```
+
+**Exponential Backoff**:
+```rust
+RetryPolicy::exponential_backoff(3, 100)
+// max_retries = 3
+// initial_backoff_ms = 100
+// backoff_multiplier = 2.0
+// Backoff: 100ms, 200ms, 400ms
+```
+
+**Retry Rules**:
+- `attempt = 0` is the first attempt (not a retry)
+- `attempt = 1` is the first retry
+- Max retries is inclusive (3 retries = 4 total attempts)
+- Backoff happens BEFORE retry, not after failure
+- Backoff uses `kernel.sleep(Duration)` (deterministic in tests)
+- After max retries, stage returns permanent failure
+
+**Backoff Calculation**:
+```rust
+backoff_duration(attempt) = initial_backoff_ms * (backoff_multiplier ^ attempt)
+```
+
+#### Execution Trace
+
+Pipeline execution records a minimal trace:
+
+```rust
+pub struct ExecutionTrace {
+    pub pipeline_id: PipelineId,
+    pub entries: Vec<StageTraceEntry>,
+    pub final_result: PipelineExecutionResult,
+}
+
+pub struct StageTraceEntry {
+    pub stage_id: StageId,
+    pub stage_name: String,
+    pub start_time_ms: u64,      // SimKernel time
+    pub end_time_ms: u64,
+    pub attempt: u32,            // 0 = first attempt, 1+ = retries
+    pub result: StageExecutionResult,
+    pub capabilities_in: Vec<u64>,
+    pub capabilities_out: Vec<u64>,
+}
+```
+
+**Trace Properties**:
+- One entry per execution attempt (including retries)
+- Timestamps are deterministic (SimKernel time)
+- Capability IDs recorded (not full capabilities)
+- Minimal data (not a full observability platform)
+- Test-visible for assertions
+
+**Contract**:
+- Trace is returned with pipeline result
+- Successful pipelines have entries for all stages
+- Failed pipelines have entries up to failure point
+- Retried stages have multiple entries (one per attempt)
+
+#### Example Usage
+
+```rust
+use pipeline::{PipelineSpec, StageSpec, RetryPolicy};
+use services_pipeline_executor::PipelineExecutor;
+
+// Define stages
+let stage1 = StageSpec::new(
+    "CreateBlob",
+    storage_service_id,
+    "create",
+    PayloadSchemaId::new("blob_params"),
+    PayloadSchemaId::new("blob_capability"),
+);
+
+let stage2 = StageSpec::new(
+    "TransformBlob",
+    transformer_service_id,
+    "transform",
+    PayloadSchemaId::new("blob_capability"),
+    PayloadSchemaId::new("transformed_blob"),
+)
+.with_capabilities(vec![blob_cap_id])
+.with_retry_policy(RetryPolicy::fixed_retries(2, 50));
+
+// Build pipeline
+let pipeline = PipelineSpec::new(
+    "blob_pipeline",
+    PayloadSchemaId::new("blob_params"),
+    PayloadSchemaId::new("transformed_blob"),
+)
+.add_stage(stage1)
+.add_stage(stage2);
+
+// Validate
+pipeline.validate()?;
+
+// Execute
+let mut executor = PipelineExecutor::new();
+executor.add_capabilities(initial_caps);
+
+let (output, trace) = executor.execute(
+    &mut kernel,
+    &pipeline,
+    input_payload,
+)?;
+
+// Verify
+assert_eq!(trace.final_result, PipelineExecutionResult::Success);
+assert_eq!(trace.entries.len(), 2); // No retries
+```
+
+#### Safety Properties
+
+Pipelines maintain these invariants:
+1. **Schema Safety**: Type mismatches detected at validation
+2. **Capability Safety**: No authority leaks through composition
+3. **Bounded Execution**: No infinite retries or loops
+4. **Fail-Fast**: First permanent failure stops pipeline
+5. **Deterministic Timing**: Backoff uses kernel time (testable)
+6. **Trace Completeness**: All executed stages recorded
+
+#### Testing Guidelines
+
+**Happy Path**:
+- Verify all stages execute
+- Check final output schema matches expected
+- Validate capability flow (trace shows correct cap IDs)
+
+**Failure Path**:
+- Inject failure in middle stage
+- Assert later stages don't execute
+- Verify trace stops at failure point
+
+**Retry Path**:
+- Configure retry policy
+- Inject transient failures
+- Verify retry attempts match policy
+- Check backoff timing in trace
+
+**Fault Injection**:
+- Use SimKernel fault injection (Phase 2)
+- Test message drop/delay/reorder
+- Verify pipelines remain safe under faults
+- Assert no capability leaks
+
 ## Summary
 
 PandaGen's interfaces are designed to be:
