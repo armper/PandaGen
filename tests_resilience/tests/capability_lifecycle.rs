@@ -6,7 +6,8 @@
 //! - Move-only semantics (no implicit cloning)
 //! - Audit trail verification
 
-use core_types::{Cap, CapabilityEvent, TaskId};
+use core_types::{Cap, CapabilityEvent, ServiceId, TaskId};
+use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{KernelApi, TaskDescriptor};
 use tests_resilience::{spawn_test_service, test_bootstrap};
 
@@ -285,11 +286,11 @@ fn test_no_capability_leak_on_message_drop() {
 
     // Create a channel and send a message (which will be dropped by fault injection)
     let channel = kernel.create_channel().unwrap();
-    let msg = ipc::MessageEnvelope::new(
-        core_types::ServiceId::new(),
+    let msg = MessageEnvelope::new(
+        ServiceId::new(),
         "test".to_string(),
-        ipc::SchemaVersion::new(1, 0),
-        ipc::MessagePayload::new(&"data").unwrap(),
+        SchemaVersion::new(1, 0),
+        MessagePayload::new(&"data").unwrap(),
     );
     let _ = kernel.send_message(channel, msg);
 
