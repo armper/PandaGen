@@ -69,6 +69,7 @@ struct TaskInfo {
     #[allow(dead_code)]
     descriptor: TaskDescriptor,
     /// Execution identity for this task
+    #[allow(dead_code)]
     execution_id: ExecutionId,
 }
 
@@ -211,7 +212,7 @@ impl SimulatedKernel {
                 terminated_at_nanos: self.current_time.as_nanos(),
             };
             self.exit_notifications.push(notification);
-            
+
             // Remove from task_to_identity mapping
             self.task_to_identity.remove(&task_id);
             // Note: we keep the identity metadata for audit purposes
@@ -256,7 +257,7 @@ impl SimulatedKernel {
                 terminated_at_nanos: self.current_time.as_nanos(),
             };
             self.exit_notifications.push(notification);
-            
+
             // Remove from task_to_identity mapping
             self.task_to_identity.remove(&task_id);
         }
@@ -494,7 +495,7 @@ impl SimulatedKernel {
         creator_id: Option<ExecutionId>,
     ) -> Result<(TaskHandle, ExecutionId), KernelError> {
         let task_id = TaskId::new();
-        
+
         let mut metadata = identity::IdentityMetadata::new(
             kind,
             trust_domain,
@@ -502,20 +503,20 @@ impl SimulatedKernel {
             self.current_time.as_nanos(),
         )
         .with_task_id(task_id);
-        
+
         if let Some(parent) = parent_id {
             metadata = metadata.with_parent(parent);
         }
         if let Some(creator) = creator_id {
             metadata = metadata.with_creator(creator);
         }
-        
+
         let execution_id = metadata.execution_id;
-        
+
         // Store identity
         self.identity_table.insert(execution_id, metadata);
         self.task_to_identity.insert(task_id, execution_id);
-        
+
         let task_info = TaskInfo {
             descriptor,
             execution_id,
@@ -534,7 +535,7 @@ impl Default for SimulatedKernel {
 impl KernelApi for SimulatedKernel {
     fn spawn_task(&mut self, descriptor: TaskDescriptor) -> Result<TaskHandle, KernelError> {
         let task_id = TaskId::new();
-        
+
         // Create identity metadata for this task
         // Default to Component/user for now; can be extended in the future
         let metadata = identity::IdentityMetadata::new(
@@ -544,13 +545,13 @@ impl KernelApi for SimulatedKernel {
             self.current_time.as_nanos(),
         )
         .with_task_id(task_id);
-        
+
         let execution_id = metadata.execution_id;
-        
+
         // Store identity
         self.identity_table.insert(execution_id, metadata);
         self.task_to_identity.insert(task_id, execution_id);
-        
+
         let task_info = TaskInfo {
             descriptor,
             execution_id,
@@ -936,18 +937,18 @@ mod tests {
     #[test]
     fn test_identity_tracking() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let descriptor = TaskDescriptor::new("test_task".to_string());
         let handle = kernel.spawn_task(descriptor).unwrap();
         let task_id = handle.task_id;
-        
+
         // Task should have an identity
         let exec_id = kernel.get_task_identity(task_id);
         assert!(exec_id.is_some());
-        
+
         let identity = kernel.get_identity(exec_id.unwrap());
         assert!(identity.is_some());
-        
+
         let identity = identity.unwrap();
         assert_eq!(identity.name, "test_task");
         assert_eq!(identity.task_id, Some(task_id));
@@ -956,17 +957,17 @@ mod tests {
     #[test]
     fn test_exit_notifications() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let descriptor = TaskDescriptor::new("test_task".to_string());
         let handle = kernel.spawn_task(descriptor).unwrap();
         let task_id = handle.task_id;
-        
+
         // No exit notifications initially
         assert_eq!(kernel.get_exit_notifications().len(), 0);
-        
+
         // Terminate task
         kernel.terminate_task(task_id);
-        
+
         // Should have one exit notification
         let notifications = kernel.get_exit_notifications();
         assert_eq!(notifications.len(), 1);
@@ -977,11 +978,11 @@ mod tests {
     #[test]
     fn test_exit_notification_with_reason() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let descriptor = TaskDescriptor::new("test_task".to_string());
         let handle = kernel.spawn_task(descriptor).unwrap();
         let task_id = handle.task_id;
-        
+
         // Terminate with failure reason
         kernel.terminate_task_with_reason(
             task_id,
@@ -989,7 +990,7 @@ mod tests {
                 error: "test error".to_string(),
             },
         );
-        
+
         let notifications = kernel.get_exit_notifications();
         assert_eq!(notifications.len(), 1);
         assert_eq!(
@@ -1003,7 +1004,7 @@ mod tests {
     #[test]
     fn test_spawn_with_identity() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Spawn parent task
         let parent_desc = TaskDescriptor::new("parent".to_string());
         let (_parent_handle, parent_exec_id) = kernel
@@ -1015,7 +1016,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         // Spawn child task
         let child_desc = TaskDescriptor::new("child".to_string());
         let (_child_handle, child_exec_id) = kernel
@@ -1027,7 +1028,7 @@ mod tests {
                 Some(parent_exec_id),
             )
             .unwrap();
-        
+
         // Verify parent-child relationship
         let child_identity = kernel.get_identity(child_exec_id).unwrap();
         assert!(child_identity.is_child_of(parent_exec_id));
@@ -1038,7 +1039,7 @@ mod tests {
     #[test]
     fn test_trust_domain_delegation_same_domain() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Create two tasks in the same trust domain
         let task1_desc = TaskDescriptor::new("task1".to_string());
         let (task1_handle, _) = kernel
@@ -1050,7 +1051,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         let task2_desc = TaskDescriptor::new("task2".to_string());
         let (task2_handle, _) = kernel
             .spawn_task_with_identity(
@@ -1061,28 +1062,25 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         // Grant capability to task1
         let cap: Cap<()> = Cap::new(42);
         kernel.grant_capability(task1_handle.task_id, cap).unwrap();
-        
+
         // Delegate to task2
         kernel
             .delegate_capability(42, task1_handle.task_id, task2_handle.task_id)
             .unwrap();
-        
+
         // Should succeed without cross-domain event
         let audit = kernel.audit_log();
-        assert!(!audit.has_event(|e| matches!(
-            e,
-            CapabilityEvent::CrossDomainDelegation { .. }
-        )));
+        assert!(!audit.has_event(|e| matches!(e, CapabilityEvent::CrossDomainDelegation { .. })));
     }
 
     #[test]
     fn test_trust_domain_delegation_cross_domain() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Create two tasks in different trust domains
         let task1_desc = TaskDescriptor::new("task1".to_string());
         let (task1_handle, _) = kernel
@@ -1094,7 +1092,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         let task2_desc = TaskDescriptor::new("task2".to_string());
         let (task2_handle, _) = kernel
             .spawn_task_with_identity(
@@ -1105,31 +1103,33 @@ mod tests {
                 None,
             )
             .unwrap();
-        
+
         // Grant capability to task1
         let cap: Cap<()> = Cap::new(42);
         kernel.grant_capability(task1_handle.task_id, cap).unwrap();
-        
+
         // Delegate to task2 (cross-domain)
         kernel
             .delegate_capability(42, task1_handle.task_id, task2_handle.task_id)
             .unwrap();
-        
+
         // Should record cross-domain delegation event
         let audit = kernel.audit_log();
-        assert!(audit.has_event(|e| matches!(
-            e,
-            CapabilityEvent::CrossDomainDelegation { .. }
-        )));
-        
+        assert!(audit.has_event(|e| matches!(e, CapabilityEvent::CrossDomainDelegation { .. })));
+
         // Verify the event details
         let events: Vec<&CapabilityEvent> = audit
             .get_events()
             .iter()
-            .filter(|audit_event| matches!(audit_event.event, CapabilityEvent::CrossDomainDelegation { .. }))
+            .filter(|audit_event| {
+                matches!(
+                    audit_event.event,
+                    CapabilityEvent::CrossDomainDelegation { .. }
+                )
+            })
             .map(|audit_event| &audit_event.event)
             .collect();
-        
+
         assert_eq!(events.len(), 1);
         match events[0] {
             CapabilityEvent::CrossDomainDelegation {

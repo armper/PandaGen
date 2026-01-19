@@ -375,18 +375,10 @@ mod tests {
     #[test]
     fn test_same_domain_check() {
         let now = 1000u64;
-        let id1 = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "service1",
-            now,
-        );
-        let id2 = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "service2",
-            now,
-        );
+        let id1 =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service1", now);
+        let id2 =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "service2", now);
         let id3 = IdentityMetadata::new(
             IdentityKind::Component,
             TrustDomain::user(),
@@ -404,21 +396,13 @@ mod tests {
         let now = 1000u64;
         let parent_id = ExecutionId::new();
 
-        let parent = IdentityMetadata::new(
-            IdentityKind::Service,
-            TrustDomain::core(),
-            "parent",
-            now,
-        )
-        .with_task_id(TaskId::new());
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
+                .with_task_id(TaskId::new());
 
-        let child = IdentityMetadata::new(
-            IdentityKind::Component,
-            TrustDomain::core(),
-            "child",
-            now,
-        )
-        .with_parent(parent.execution_id);
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id);
 
         assert!(child.is_child_of(parent.execution_id));
         assert!(!parent.is_child_of(child.execution_id));
