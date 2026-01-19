@@ -39,10 +39,7 @@ pub enum ExecutorError {
     HandlerNotFound(String),
 
     #[error("Schema validation failed: expected {expected}, got {actual}")]
-    SchemaValidation {
-        expected: String,
-        actual: String,
-    },
+    SchemaValidation { expected: String, actual: String },
 
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -70,8 +67,11 @@ impl PipelineExecutor {
     }
 
     /// Checks if a capability is available
-    fn has_capability(&self, cap_id: u64) -> bool {
-        self.available_capabilities.get(&cap_id).copied().unwrap_or(false)
+    pub fn has_capability(&self, cap_id: u64) -> bool {
+        self.available_capabilities
+            .get(&cap_id)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Executes a pipeline with the given input
@@ -121,12 +121,8 @@ impl PipelineExecutor {
             }
 
             // Execute stage with retry
-            let stage_result = self.execute_stage_with_retry(
-                kernel,
-                stage,
-                current_input.clone(),
-                &mut trace,
-            )?;
+            let stage_result =
+                self.execute_stage_with_retry(kernel, stage, current_input.clone(), &mut trace)?;
 
             match stage_result {
                 StageResult::Success {
@@ -186,13 +182,13 @@ impl PipelineExecutor {
 
         loop {
             let start_time = kernel.now();
-            let start_time_ms = (start_time.as_nanos() / 1_000_000) as u64;
+            let start_time_ms = start_time.as_nanos() / 1_000_000;
 
             // Execute stage (simplified - actual implementation would use IPC)
             let result = self.execute_stage_once(kernel, stage, input.clone())?;
 
             let end_time = kernel.now();
-            let end_time_ms = (end_time.as_nanos() / 1_000_000) as u64;
+            let end_time_ms = end_time.as_nanos() / 1_000_000;
 
             // Extract caps for trace
             let caps_out = match &result {
@@ -230,7 +226,10 @@ impl PipelineExecutor {
                     if attempt >= retry_policy.max_retries {
                         // Max retries exceeded - convert to permanent failure
                         return Ok(StageResult::Failure {
-                            error: format!("Max retries ({}) exceeded: {}", retry_policy.max_retries, error),
+                            error: format!(
+                                "Max retries ({}) exceeded: {}",
+                                retry_policy.max_retries, error
+                            ),
                         });
                     }
 

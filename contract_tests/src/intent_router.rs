@@ -210,8 +210,7 @@ mod tests {
             r#"{{"intent_type":"test","handler_service":"{}"}}"#,
             TEST_SERVICE_UUID
         );
-        let parsed: RegisterHandlerRequest =
-            serde_json::from_str(&json_without_priority).unwrap();
+        let parsed: RegisterHandlerRequest = serde_json::from_str(&json_without_priority).unwrap();
         assert_eq!(parsed.priority, 0); // Default value
 
         // Test that intent_type None is backward compatible

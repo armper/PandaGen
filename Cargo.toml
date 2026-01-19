@@ -11,11 +11,13 @@ members = [
     "services_process_manager",
     "services_logger",
     "services_storage",
+    "services_pipeline_executor",
     "intent_router",
     "pipeline",
     "cli_console",
     "tests_resilience",
-    "contract_tests", "services_pipeline_executor",
+    "tests_pipelines",
+    "contract_tests",
 ]
 
 [workspace.package]
