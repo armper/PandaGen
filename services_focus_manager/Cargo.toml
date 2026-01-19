@@ -1,0 +1,17 @@
+[package]
+name = "services_focus_manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types = { workspace = true }
+input_types = { workspace = true }
+ipc = { workspace = true }
+services_input = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
