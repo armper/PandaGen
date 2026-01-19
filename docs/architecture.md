@@ -3693,3 +3693,203 @@ This proves PandaGen can connect to real hardware without sacrificing:
 
 **Input now works the same way whether from simulation or hardware.**
 
+---
+
+## Phase 18: Output & View Surfaces
+
+### Philosophy: Views, Not Streams
+
+**Problem**: Traditional operating systems use byte streams (stdout/stderr) and terminal emulation for output. This creates:
+- Ambient authority (any code can print anywhere)
+- Lack of structure (bytes, not semantic content)
+- Hard-to-test behavior (output is a side effect)
+- Complex terminal emulation (ANSI escape codes, etc.)
+
+**Solution**: Structured view surfaces
+- Components publish **view frames** containing structured content
+- Views are **capability-gated** (publishing requires a handle)
+- Frames are **immutable** and **versioned** (monotonic revisions)
+- The workspace (or display host) **subscribes** to views and controls presentation
+- No global stdout/stderr/terminal concepts
+
+**Impact**:
+- **Testable**: View frames can be captured and asserted
+- **Deterministic**: Revisions provide ordering; timestamps enable replay
+- **Secure**: Capabilities prevent unauthorized output
+- **Observable**: All view updates are auditable
+- **Structured**: Content is semantic (text buffer, status line), not bytes
+
+### Architecture
+
+#### Core Components
+
+**1. view_types crate**
+- `ViewId`: Unique identifier for each view
+- `ViewKind`: TextBuffer, StatusLine, or Panel
+- `ViewFrame`: Immutable snapshot containing:
+  - View ID and kind
+  - Monotonic revision number
+  - Content (lines for TextBuffer, text for StatusLine)
+  - Optional cursor position
+  - Timestamp (simulation time)
+  - Metadata (title, component ID)
+- `ViewContent`: Enum for different content types
+
+**2. services_view_host crate**
+- `ViewHost`: Central view manager
+- `ViewHandleCap`: Capability to publish frames to a view
+- `ViewSubscriptionCap`: Capability to receive view updates
+- Operations:
+  - `create_view()`: Creates a view and returns handle
+  - `publish_frame()`: Publishes a frame (requires handle)
+  - `subscribe()`: Subscribes to a view (returns subscription)
+  - `get_latest()`: Retrieves latest frame for a view
+- Enforces:
+  - Capability-based access control
+  - Monotonic revision ordering
+  - View ownership
+
+**3. Workspace Integration**
+- Each component gets:
+  - Main view (TextBuffer)
+  - Status view (StatusLine)
+- Workspace:
+  - Creates views when launching components
+  - Subscribes to all component views
+  - Provides `render()` method to get focused component's views
+  - Provides `get_all_views()` for replay/debugging
+- Views are cleaned up when component terminates
+
+**4. Component Integration**
+- **Editor (services_editor_vi)**:
+  - `publish_views()`: Publishes buffer content and status
+  - Called after each input event or state change
+  - No stdout usage (never had any)
+- **CLI Console** (future):
+  - Would publish command output as TextBuffer
+  - Would publish command status as StatusLine
+
+### Design Decisions
+
+#### Why No stdout/stderr?
+
+**Traditional Approach**:
+```c
+printf("Hello, world\n");  // Ambient authority, unstructured
+```
+
+**PandaGen Approach**:
+```rust
+// Component publishes structured view
+let content = ViewContent::text_buffer(vec!["Hello, world".to_string()]);
+let frame = ViewFrame::new(view_id, ViewKind::TextBuffer, revision, content, timestamp);
+view_host.publish_frame(&handle, frame)?;
+
+// Workspace subscribes and renders
+let output = workspace.render();
+// output.main_view contains the frame
+```
+
+**Why This Is Better**:
+1. **Explicit authority**: Must have a ViewHandleCap to publish
+2. **Testable**: Frames can be captured and inspected
+3. **Structured**: Content is semantic, not bytes
+4. **Observable**: All publishes are auditable
+5. **Deterministic**: Revisions and timestamps enable replay
+
+#### Why Immutable Frames?
+
+Frames are immutable because:
+- **Simplicity**: No complex diff/patch logic required
+- **Testability**: Easy to snapshot and compare
+- **Determinism**: Clear ordering via revisions
+- **Safety**: No race conditions on shared state
+
+Updates work by publishing a new frame with a higher revision number. The view host stores only the latest.
+
+#### Why Monotonic Revisions?
+
+Revisions must strictly increase because:
+- **Prevents reordering**: Ensures updates appear in order
+- **Detects bugs**: Catching non-monotonic updates early
+- **Enables replay**: Revisions + timestamps allow reconstruction
+
+The view host **rejects** any frame with a revision ≤ the current revision.
+
+#### Why Workspace Controls Layout?
+
+The workspace (not components) decides:
+- Which view to display (based on focus)
+- How to arrange views (future: split views, tabs)
+- What to do on component exit
+
+This separation means:
+- Components don't need display logic
+- Workspace can change layout without breaking components
+- Testing components doesn't require a display
+
+### Comparison with Traditional Systems
+
+| Feature | Traditional OS | PandaGen |
+|---------|---------------|----------|
+| Output Model | stdout/stderr streams | Structured view frames |
+| Authority | Ambient (anyone can print) | Capability-based (requires handle) |
+| Structure | Bytes + escape codes | Semantic types (TextBuffer, StatusLine) |
+| Testability | Hard (side effects) | Easy (capture frames) |
+| Display | Component controls (via terminal) | Workspace controls (via subscriptions) |
+| Replay | Difficult (need TTY recording) | Built-in (revisions + timestamps) |
+
+### Testing Strategy
+
+**Unit Tests** (39 new tests):
+- `view_types`: 24 tests for serialization, revision, content
+- `services_view_host`: 15 tests for capability enforcement, monotonic revisions
+
+**Integration Tests** (8 new tests):
+- Workspace: 5 tests for view creation, rendering, cleanup
+- Editor: 2 tests for view publishing, revision incrementing
+
+**All tests are deterministic and run under SimKernel.**
+
+### Future Work
+
+**Not Yet Implemented**:
+- **Delta updates**: Currently full-frame only; deltas would reduce overhead
+- **View composition**: Nested views, split views, tabs
+- **Graphics views**: Bitmap surfaces (beyond text)
+- **Animations**: Smooth transitions, effects
+- **CLI console views**: Not updated yet (deferred)
+
+**Out of Scope**:
+- Terminal emulation (ANSI/VT codes)
+- Global stdout/stderr
+- TTY device drivers
+- Window managers or compositors
+
+### Benefits of This Design
+
+1. **Testability**: Can capture and assert on view frames in tests
+2. **Determinism**: Revisions + timestamps enable exact replay
+3. **Security**: Capabilities prevent unauthorized output
+4. **Observability**: All view updates are auditable
+5. **Modularity**: Components don't know about display logic
+6. **Evolution**: Can add new ViewKinds without breaking existing code
+
+### Summary
+
+Phase 18 provides:
+- **view_types**: Stable, versionable view schemas ✅
+- **services_view_host**: Capability-based view management ✅
+- **Workspace integration**: View creation, subscription, rendering ✅
+- **Editor integration**: Publishes buffer and status views ✅
+- **Test coverage**: 47 new tests, all passing ✅
+- **Documentation**: Architecture and interfaces updated ✅
+
+This proves PandaGen can provide structured output without:
+- Global stdout/stderr
+- Terminal emulation
+- Ambient authority
+- Complex escape codes
+
+**Output is now structured, testable, and capability-gated.**
+

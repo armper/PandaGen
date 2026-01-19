@@ -444,7 +444,7 @@ impl WorkspaceManager {
 
         // Create views for the component
         let task_id = TaskId::new();
-        
+
         // Main view (TextBuffer)
         let main_view = self
             .view_host
@@ -454,14 +454,18 @@ impl WorkspaceManager {
                 task_id,
                 ipc::ChannelId::new(),
             )
-            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to create main view: {}", e)))?;
+            .map_err(|e| {
+                WorkspaceError::InvalidCommand(format!("Failed to create main view: {}", e))
+            })?;
         component = component.with_main_view(main_view);
 
         // Subscribe workspace to main view
         let main_sub = self
             .view_host
             .subscribe(main_view.view_id, TaskId::new(), ipc::ChannelId::new())
-            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e)))?;
+            .map_err(|e| {
+                WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e))
+            })?;
         self.view_subscriptions.insert(main_view.view_id, main_sub);
 
         // Status view (StatusLine)
@@ -473,15 +477,20 @@ impl WorkspaceManager {
                 task_id,
                 ipc::ChannelId::new(),
             )
-            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to create status view: {}", e)))?;
+            .map_err(|e| {
+                WorkspaceError::InvalidCommand(format!("Failed to create status view: {}", e))
+            })?;
         component = component.with_status_view(status_view);
 
         // Subscribe workspace to status view
         let status_sub = self
             .view_host
             .subscribe(status_view.view_id, TaskId::new(), ipc::ChannelId::new())
-            .map_err(|e| WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e)))?;
-        self.view_subscriptions.insert(status_view.view_id, status_sub);
+            .map_err(|e| {
+                WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e))
+            })?;
+        self.view_subscriptions
+            .insert(status_view.view_id, status_sub);
 
         let component_id = component.id;
 

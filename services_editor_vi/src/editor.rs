@@ -84,11 +84,7 @@ impl Editor {
     }
 
     /// Set view handles for publishing
-    pub fn set_view_handles(
-        &mut self,
-        main_view: ViewHandleCap,
-        status_view: ViewHandleCap,
-    ) {
+    pub fn set_view_handles(&mut self, main_view: ViewHandleCap, status_view: ViewHandleCap) {
         self.main_view_handle = Some(main_view);
         self.status_view_handle = Some(status_view);
     }

@@ -300,8 +300,8 @@ mod tests {
         let view_id = ViewId::new();
         let content = ViewContent::empty_text_buffer();
         let cursor = CursorPosition::new(1, 2);
-        let frame = ViewFrame::new(view_id, ViewKind::TextBuffer, 1, content, 1000)
-            .with_cursor(cursor);
+        let frame =
+            ViewFrame::new(view_id, ViewKind::TextBuffer, 1, content, 1000).with_cursor(cursor);
 
         assert_eq!(frame.cursor, Some(cursor));
     }
@@ -310,8 +310,8 @@ mod tests {
     fn test_view_frame_with_title() {
         let view_id = ViewId::new();
         let content = ViewContent::empty_text_buffer();
-        let frame = ViewFrame::new(view_id, ViewKind::TextBuffer, 1, content, 1000)
-            .with_title("My View");
+        let frame =
+            ViewFrame::new(view_id, ViewKind::TextBuffer, 1, content, 1000).with_title("My View");
 
         assert_eq!(frame.title, Some("My View".to_string()));
     }
@@ -417,8 +417,7 @@ mod tests {
 
     #[test]
     fn test_content_get_line() {
-        let text_buffer =
-            ViewContent::text_buffer(vec!["line1".to_string(), "line2".to_string()]);
+        let text_buffer = ViewContent::text_buffer(vec!["line1".to_string(), "line2".to_string()]);
         let status_line = ViewContent::status_line("status");
 
         assert_eq!(text_buffer.get_line(0), Some("line1"));

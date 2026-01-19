@@ -388,7 +388,10 @@ fn test_component_has_views_on_launch() {
     let component_id = workspace.launch_component(config).unwrap();
 
     let component = workspace.get_component(component_id).unwrap();
-    assert!(component.main_view.is_some(), "Component should have main view");
+    assert!(
+        component.main_view.is_some(),
+        "Component should have main view"
+    );
     assert!(
         component.status_view.is_some(),
         "Component should have status view"
@@ -417,7 +420,10 @@ fn test_workspace_render_focused_component() {
     // Render workspace
     let output = workspace.render();
     assert_eq!(output.focused_component, Some(component_id));
-    assert!(output.main_view.is_some(), "Should have main view in render output");
+    assert!(
+        output.main_view.is_some(),
+        "Should have main view in render output"
+    );
     assert!(
         output.status_view.is_some(),
         "Should have status view in render output"

@@ -99,10 +99,7 @@ pub enum ViewHostError {
     RevisionNotMonotonic { expected: u64, actual: u64 },
 
     #[error("View ID mismatch: expected {expected}, got {actual}")]
-    ViewIdMismatch {
-        expected: ViewId,
-        actual: ViewId,
-    },
+    ViewIdMismatch { expected: ViewId, actual: ViewId },
 
     #[error("No frames published yet for view: {0}")]
     NoFrames(ViewId),
@@ -351,7 +348,12 @@ mod tests {
         let channel = create_test_channel();
 
         let handle = host
-            .create_view(ViewKind::TextBuffer, Some("Test".to_string()), task_id, channel)
+            .create_view(
+                ViewKind::TextBuffer,
+                Some("Test".to_string()),
+                task_id,
+                channel,
+            )
             .unwrap();
 
         assert_eq!(handle.task_id, task_id);
@@ -430,10 +432,7 @@ mod tests {
         let frame = ViewFrame::new(handle1.view_id, ViewKind::TextBuffer, 1, content, 1000);
 
         let result = host.publish_frame(&fake_handle, frame);
-        assert_eq!(
-            result,
-            Err(ViewHostError::Unauthorized(handle1.view_id))
-        );
+        assert_eq!(result, Err(ViewHostError::Unauthorized(handle1.view_id)));
     }
 
     #[test]
