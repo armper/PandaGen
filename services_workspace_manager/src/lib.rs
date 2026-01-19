@@ -756,7 +756,7 @@ impl WorkspaceManager {
     /// Renders the current workspace state
     ///
     /// Returns a snapshot of the focused component's views and status.
-    pub fn render(&self) -> WorkspaceRenderOutput {
+    pub fn render_snapshot(&self) -> WorkspaceRenderSnapshot {
         let focused_component_id = self.get_focused_component();
 
         let focused_component = focused_component_id.and_then(|id| self.get_component(id));
@@ -771,7 +771,7 @@ impl WorkspaceManager {
             .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
             .flatten();
 
-        WorkspaceRenderOutput {
+        WorkspaceRenderSnapshot {
             focused_component: focused_component_id,
             main_view: main_view_frame,
             status_view: status_view_frame,
@@ -814,9 +814,9 @@ impl WorkspaceManager {
     }
 }
 
-/// Output from rendering the workspace
+/// Snapshot of the workspace render state
 #[derive(Debug, Clone)]
-pub struct WorkspaceRenderOutput {
+pub struct WorkspaceRenderSnapshot {
     /// ID of focused component (if any)
     pub focused_component: Option<ComponentId>,
     /// Main view frame of focused component

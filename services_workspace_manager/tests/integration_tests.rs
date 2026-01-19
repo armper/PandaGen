@@ -418,7 +418,7 @@ fn test_workspace_render_focused_component() {
     let component_id = workspace.launch_component(config).unwrap();
 
     // Render workspace
-    let output = workspace.render();
+    let output = workspace.render_snapshot();
     assert_eq!(output.focused_component, Some(component_id));
     assert!(
         output.main_view.is_some(),
@@ -457,12 +457,12 @@ fn test_workspace_render_switches_with_focus() {
     let id2 = workspace.launch_component(config2).unwrap();
 
     // Second component should be focused
-    let output1 = workspace.render();
+    let output1 = workspace.render_snapshot();
     assert_eq!(output1.focused_component, Some(id2));
 
     // Switch focus to first
     workspace.focus_component(id1).unwrap();
-    let output2 = workspace.render();
+    let output2 = workspace.render_snapshot();
     assert_eq!(output2.focused_component, Some(id1));
 }
 
