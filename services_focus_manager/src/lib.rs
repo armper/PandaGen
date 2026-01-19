@@ -17,8 +17,8 @@
 //! - A global focus singleton
 
 use input_types::InputEvent;
-use services_input::InputSubscriptionCap;
 use serde::{Deserialize, Serialize};
+use services_input::InputSubscriptionCap;
 use std::collections::VecDeque;
 use thiserror::Error;
 
@@ -128,10 +128,7 @@ impl FocusManager {
     /// Pops the top of the focus stack. Focus transfers to the next item
     /// on the stack, if any.
     pub fn release_focus(&mut self) -> Result<InputSubscriptionCap, FocusError> {
-        let cap = self
-            .focus_stack
-            .pop_front()
-            .ok_or(FocusError::EmptyStack)?;
+        let cap = self.focus_stack.pop_front().ok_or(FocusError::EmptyStack)?;
 
         let timestamp = self.next_timestamp();
         self.audit_trail.push(FocusEvent::Released {
@@ -180,7 +177,10 @@ impl FocusManager {
     ///
     /// Returns Ok(Some(cap)) if there's a focused subscription,
     /// Ok(None) if no focus, Err if routing fails.
-    pub fn route_event(&self, _event: &InputEvent) -> Result<Option<InputSubscriptionCap>, FocusError> {
+    pub fn route_event(
+        &self,
+        _event: &InputEvent,
+    ) -> Result<Option<InputSubscriptionCap>, FocusError> {
         Ok(self.current_focus().copied())
     }
 
@@ -404,7 +404,9 @@ mod tests {
         assert_eq!(trail.len(), 1);
 
         match &trail[0] {
-            FocusEvent::Granted { subscription_id, .. } => {
+            FocusEvent::Granted {
+                subscription_id, ..
+            } => {
                 assert_eq!(*subscription_id, 1);
             }
             _ => panic!("Expected Granted event"),
@@ -452,7 +454,9 @@ mod tests {
         assert_eq!(trail.len(), 1);
 
         match &trail[0] {
-            FocusEvent::Released { subscription_id, .. } => {
+            FocusEvent::Released {
+                subscription_id, ..
+            } => {
                 assert_eq!(*subscription_id, 1);
             }
             _ => panic!("Expected Released event"),
@@ -470,7 +474,10 @@ mod tests {
         let deserialized: FocusEvent = serde_json::from_str(&json).unwrap();
 
         match deserialized {
-            FocusEvent::Granted { subscription_id, timestamp_ns } => {
+            FocusEvent::Granted {
+                subscription_id,
+                timestamp_ns,
+            } => {
                 assert_eq!(subscription_id, 42);
                 assert_eq!(timestamp_ns, 1000);
             }

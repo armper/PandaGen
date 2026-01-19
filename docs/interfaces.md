@@ -2810,3 +2810,371 @@ Complete enforcement lifecycle:
 ```
 
 All operations deterministic, all events auditable, all failures explicit.
+
+---
+
+## Input System Interface
+
+### Overview
+
+The input system provides explicit, capability-based access to input events.
+
+**Key Principles**:
+- Input is explicit, not ambient
+- Events are structured, not byte streams
+- Focus is controlled, not implicit
+- Everything is testable without hardware
+
+### Input Event Schema
+
+#### InputEvent
+
+```rust
+pub enum InputEvent {
+    Key(KeyEvent),
+    // Reserved for future: Pointer, Touch
+}
+```
+
+#### KeyEvent
+
+```rust
+pub struct KeyEvent {
+    pub code: KeyCode,        // Logical key
+    pub modifiers: Modifiers, // Ctrl, Alt, Shift, Meta
+    pub state: KeyState,      // Pressed, Released, Repeat
+    pub text: Option<String>, // For IME (future)
+}
+```
+
+**Examples**:
+```rust
+// Simple key press
+KeyEvent::pressed(KeyCode::A, Modifiers::none())
+
+// Ctrl+C
+KeyEvent::pressed(KeyCode::C, Modifiers::CTRL)
+
+// Shift+Enter
+KeyEvent::pressed(KeyCode::Enter, Modifiers::SHIFT)
+```
+
+#### KeyCode
+
+Logical key codes (not hardware scan codes):
+- Letters: `A`-`Z`
+- Numbers: `Num0`-`Num9`
+- Function: `F1`-`F12`
+- Special: `Enter`, `Backspace`, `Delete`, `Tab`, `Escape`
+- Arrows: `Up`, `Down`, `Left`, `Right`
+- Modifiers: `LeftCtrl`, `RightCtrl`, `LeftShift`, etc.
+- Punctuation: `Comma`, `Period`, `Slash`, etc.
+
+#### Modifiers
+
+Bitflags for modifier keys:
+```rust
+Modifiers::CTRL   // Control key
+Modifiers::ALT    // Alt key
+Modifiers::SHIFT  // Shift key
+Modifiers::META   // Meta/Super/Windows key
+
+// Combine with .with()
+Modifiers::CTRL.with(Modifiers::SHIFT)
+```
+
+#### KeyState
+
+```rust
+pub enum KeyState {
+    Pressed,   // Key was pressed down
+    Released,  // Key was released
+    Repeat,    // Key is auto-repeating
+}
+```
+
+### Input Service Interface
+
+#### Subscribing to Input
+
+```rust
+pub fn subscribe_keyboard(
+    &mut self,
+    task_id: TaskId,
+    channel: ChannelId,
+) -> Result<InputSubscriptionCap, InputServiceError>
+```
+
+**Contract**:
+- One subscription per task
+- Returns capability representing subscription
+- Events delivered via specified channel
+- Delivery consumes MessageCount budget
+
+**Example**:
+```rust
+let task_id = kernel.spawn_task(descriptor)?;
+let channel = kernel.create_channel()?;
+let cap = input_service.subscribe_keyboard(task_id, channel)?;
+```
+
+#### Revoking Subscription
+
+```rust
+pub fn revoke_subscription(
+    &mut self,
+    cap: &InputSubscriptionCap,
+) -> Result<(), InputServiceError>
+```
+
+**Contract**:
+- Deactivates subscription (doesn't remove)
+- No more events delivered
+- Subscription still exists but inactive
+
+#### Unsubscribing
+
+```rust
+pub fn unsubscribe(
+    &mut self,
+    cap: &InputSubscriptionCap,
+) -> Result<(), InputServiceError>
+```
+
+**Contract**:
+- Completely removes subscription
+- Releases resources
+- Task can subscribe again later
+
+### Focus Manager Interface
+
+#### Requesting Focus
+
+```rust
+pub fn request_focus(
+    &mut self,
+    cap: InputSubscriptionCap,
+) -> Result<(), FocusError>
+```
+
+**Contract**:
+- Pushes subscription onto focus stack
+- Top of stack has focus
+- Previous focus loses focus
+- Audit event recorded
+
+**Example**:
+```rust
+let cap = input_service.subscribe_keyboard(task_id, channel)?;
+focus_manager.request_focus(cap)?;
+```
+
+#### Releasing Focus
+
+```rust
+pub fn release_focus(&mut self) -> Result<InputSubscriptionCap, FocusError>
+```
+
+**Contract**:
+- Pops top of focus stack
+- Next subscription (if any) gains focus
+- Returns released capability
+- Audit event recorded
+
+#### Routing Events
+
+```rust
+pub fn route_event(
+    &self,
+    event: &InputEvent,
+) -> Result<Option<InputSubscriptionCap>, FocusError>
+```
+
+**Contract**:
+- Returns focused subscription, if any
+- Only focused subscription receives events
+- Unfocused subscriptions receive nothing
+
+**Example**:
+```rust
+let event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
+if let Some(cap) = focus_manager.route_event(&event)? {
+    // Deliver event to cap.channel
+}
+```
+
+### Interactive Component Pattern
+
+Complete flow for interactive component:
+
+```rust
+// 1. Create component
+let task_id = TaskId::new();
+let mut console = InteractiveConsole::new(task_id);
+
+// 2. Subscribe to input
+let channel = ChannelId::new();
+console.subscribe(&mut input_service, channel)?;
+
+// 3. Request focus
+console.request_focus(&mut focus_manager)?;
+
+// 4. Receive and process events
+loop {
+    // In real system, receive from channel
+    let event = /* receive from channel */;
+    
+    if let Some(command) = console.process_event(event)? {
+        // Execute command
+        println!("Command: {}", command);
+    }
+}
+```
+
+### Testing with SimKernel
+
+#### Injecting Events
+
+```rust
+use sim_kernel::test_utils::input_injection::InputEventQueue;
+
+let mut queue = InputEventQueue::new();
+
+// Inject events
+queue.inject_event(InputEvent::key(
+    KeyEvent::pressed(KeyCode::H, Modifiers::none())
+));
+queue.inject_event(InputEvent::key(
+    KeyEvent::pressed(KeyCode::I, Modifiers::none())
+));
+
+// Process events
+while let Some(event) = queue.next_event() {
+    console.process_event(event)?;
+}
+```
+
+#### Testing Focus Switching
+
+```rust
+let mut focus_manager = FocusManager::new();
+
+// Component 1 gets focus
+focus_manager.request_focus(cap1)?;
+assert!(focus_manager.has_focus(&cap1));
+
+// Component 2 takes focus
+focus_manager.request_focus(cap2)?;
+assert!(!focus_manager.has_focus(&cap1));
+assert!(focus_manager.has_focus(&cap2));
+
+// Events only go to cap2
+let target = focus_manager.route_event(&event)?;
+assert_eq!(target.unwrap().id, cap2.id);
+```
+
+### Policy Integration
+
+Focus requests can be policy-gated:
+
+```rust
+pub enum PolicyEvent {
+    // ... existing events
+    OnInputFocusRequest,  // New: Focus request
+}
+
+impl PolicyEngine for CustomPolicy {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnInputFocusRequest => {
+                // Check if cross-domain
+                if context.is_cross_domain() {
+                    PolicyDecision::deny("Cross-domain focus requires approval")
+                } else {
+                    PolicyDecision::allow()
+                }
+            }
+            _ => PolicyDecision::allow(),
+        }
+    }
+}
+```
+
+### Audit Trail
+
+All focus changes are recorded:
+
+```rust
+pub enum FocusEvent {
+    Granted { subscription_id: u64, timestamp_ns: u64 },
+    Transferred { from_subscription_id: u64, to_subscription_id: u64, timestamp_ns: u64 },
+    Released { subscription_id: u64, timestamp_ns: u64 },
+    Denied { subscription_id: u64, reason: String, timestamp_ns: u64 },
+}
+
+// Access audit trail
+let trail = focus_manager.audit_trail();
+for event in trail {
+    match event {
+        FocusEvent::Granted { subscription_id, .. } => {
+            println!("Focus granted to {}", subscription_id);
+        }
+        _ => {}
+    }
+}
+```
+
+### Comparison with Traditional Models
+
+| Aspect | Traditional (TTY/stdin) | PandaGen Input |
+|--------|------------------------|----------------|
+| **Authority** | Ambient (anyone can read) | Explicit (must subscribe) |
+| **Data format** | Byte stream | Structured events |
+| **Focus** | Implicit (race condition) | Explicit (stack-based) |
+| **Testing** | Requires PTY or mocking | Direct injection |
+| **Hardware** | Tightly coupled | Abstracted |
+| **Concurrency** | Locks, buffers | Message passing |
+
+### Example: Simple Interactive Session
+
+```rust
+// Setup
+let mut kernel = SimulatedKernel::new();
+let mut input_service = InputService::new();
+let mut focus_manager = FocusManager::new();
+
+let task_id = TaskId::new();
+let channel = ChannelId::new();
+
+// Subscribe and focus
+let cap = input_service.subscribe_keyboard(task_id, channel)?;
+focus_manager.request_focus(cap)?;
+
+// Simulate typing "ls" + Enter
+let mut console = InteractiveConsole::new(task_id);
+
+console.process_event(InputEvent::key(
+    KeyEvent::pressed(KeyCode::L, Modifiers::none())
+))?;
+console.process_event(InputEvent::key(
+    KeyEvent::pressed(KeyCode::S, Modifiers::none())
+))?;
+
+let command = console.process_event(InputEvent::key(
+    KeyEvent::pressed(KeyCode::Enter, Modifiers::none())
+))?;
+
+assert_eq!(command, Some("ls".to_string()));
+```
+
+### Summary
+
+The input system provides:
+- **Explicit subscriptions**: No ambient keyboard access
+- **Structured events**: Typed, serializable, versionable
+- **Focus control**: Stack-based, policy-gated
+- **Full testability**: No hardware required
+- **Budget enforcement**: Message delivery consumes resources
+- **Audit trail**: All operations logged
+
+This is the foundation for interactive components: CLI, editors, UI shells, debuggers.

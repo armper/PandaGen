@@ -148,16 +148,58 @@ impl fmt::Display for KeyState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyCode {
     // Letters
-    A, B, C, D, E, F, G, H, I, J, K, L, M,
-    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
 
     // Numbers
-    Num0, Num1, Num2, Num3, Num4,
-    Num5, Num6, Num7, Num8, Num9,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
 
     // Function keys
-    F1, F2, F3, F4, F5, F6,
-    F7, F8, F9, F10, F11, F12,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
 
     // Special keys
     Escape,
@@ -207,9 +249,16 @@ pub enum KeyCode {
     NumpadPlus,
     NumpadEnter,
     NumpadPeriod,
-    Numpad0, Numpad1, Numpad2,
-    Numpad3, Numpad4, Numpad5,
-    Numpad6, Numpad7, Numpad8, Numpad9,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
 
     // Other
     PrintScreen,
@@ -368,8 +417,7 @@ mod tests {
 
     #[test]
     fn test_key_event_with_text() {
-        let event = KeyEvent::pressed(KeyCode::A, Modifiers::none())
-            .with_text("a");
+        let event = KeyEvent::pressed(KeyCode::A, Modifiers::none()).with_text("a");
 
         assert_eq!(event.text, Some("a".to_string()));
     }
@@ -425,7 +473,10 @@ mod tests {
         assert_eq!(Modifiers::CTRL.to_string(), "Ctrl");
         assert_eq!(Modifiers::CTRL.with(Modifiers::ALT).to_string(), "Ctrl+Alt");
         assert_eq!(
-            Modifiers::CTRL.with(Modifiers::SHIFT).with(Modifiers::ALT).to_string(),
+            Modifiers::CTRL
+                .with(Modifiers::SHIFT)
+                .with(Modifiers::ALT)
+                .to_string(),
             "Ctrl+Alt+Shift"
         );
     }
@@ -483,11 +534,31 @@ mod tests {
     fn test_all_letter_keycodes() {
         // Verify all letter key codes are distinct
         let letters = vec![
-            KeyCode::A, KeyCode::B, KeyCode::C, KeyCode::D, KeyCode::E,
-            KeyCode::F, KeyCode::G, KeyCode::H, KeyCode::I, KeyCode::J,
-            KeyCode::K, KeyCode::L, KeyCode::M, KeyCode::N, KeyCode::O,
-            KeyCode::P, KeyCode::Q, KeyCode::R, KeyCode::S, KeyCode::T,
-            KeyCode::U, KeyCode::V, KeyCode::W, KeyCode::X, KeyCode::Y,
+            KeyCode::A,
+            KeyCode::B,
+            KeyCode::C,
+            KeyCode::D,
+            KeyCode::E,
+            KeyCode::F,
+            KeyCode::G,
+            KeyCode::H,
+            KeyCode::I,
+            KeyCode::J,
+            KeyCode::K,
+            KeyCode::L,
+            KeyCode::M,
+            KeyCode::N,
+            KeyCode::O,
+            KeyCode::P,
+            KeyCode::Q,
+            KeyCode::R,
+            KeyCode::S,
+            KeyCode::T,
+            KeyCode::U,
+            KeyCode::V,
+            KeyCode::W,
+            KeyCode::X,
+            KeyCode::Y,
             KeyCode::Z,
         ];
 
@@ -502,9 +573,16 @@ mod tests {
     #[test]
     fn test_all_number_keycodes() {
         let numbers = vec![
-            KeyCode::Num0, KeyCode::Num1, KeyCode::Num2, KeyCode::Num3,
-            KeyCode::Num4, KeyCode::Num5, KeyCode::Num6, KeyCode::Num7,
-            KeyCode::Num8, KeyCode::Num9,
+            KeyCode::Num0,
+            KeyCode::Num1,
+            KeyCode::Num2,
+            KeyCode::Num3,
+            KeyCode::Num4,
+            KeyCode::Num5,
+            KeyCode::Num6,
+            KeyCode::Num7,
+            KeyCode::Num8,
+            KeyCode::Num9,
         ];
 
         assert_eq!(numbers.len(), 10);
@@ -513,9 +591,18 @@ mod tests {
     #[test]
     fn test_all_function_keycodes() {
         let function_keys = vec![
-            KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4,
-            KeyCode::F5, KeyCode::F6, KeyCode::F7, KeyCode::F8,
-            KeyCode::F9, KeyCode::F10, KeyCode::F11, KeyCode::F12,
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
         ];
 
         assert_eq!(function_keys.len(), 12);

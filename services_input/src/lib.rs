@@ -130,7 +130,10 @@ impl InputService {
     /// Revokes a subscription
     ///
     /// After revocation, no more events will be delivered.
-    pub fn revoke_subscription(&mut self, cap: &InputSubscriptionCap) -> Result<(), InputServiceError> {
+    pub fn revoke_subscription(
+        &mut self,
+        cap: &InputSubscriptionCap,
+    ) -> Result<(), InputServiceError> {
         let subscription = self
             .subscriptions
             .get_mut(&cap.id)
@@ -206,10 +209,7 @@ impl InputService {
 
     /// Returns the number of active subscriptions
     pub fn active_subscription_count(&self) -> usize {
-        self.subscriptions
-            .values()
-            .filter(|s| s.active)
-            .count()
+        self.subscriptions.values().filter(|s| s.active).count()
     }
 
     /// Returns the total number of subscriptions (active + inactive)
