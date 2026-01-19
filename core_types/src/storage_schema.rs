@@ -46,6 +46,11 @@ impl From<&str> for ObjectSchemaId {
 ///
 /// Unlike IPC SchemaVersion (which has major.minor), this is a simple
 /// monotonic version number for storage objects.
+///
+/// **Note**: Schema versions start at 1 (not 0). This is a deliberate design
+/// choice to match common versioning conventions and avoid confusion with
+/// "unversioned" or "uninitialized" states. The migration system assumes
+/// versions are 1-indexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObjectSchemaVersion(u32);
 

@@ -134,11 +134,29 @@ impl Migrator for SequentialMigrator {
             });
         }
 
+        // Convert version numbers to array indices
+        // Note: Versions are 1-based (v1, v2, v3...) but array is 0-indexed
+        // So v1->v2 migration is at migrations[0], v2->v3 at migrations[1], etc.
         let from_idx = from_version.as_u32() as usize;
         let to_idx = to_version.as_u32() as usize;
 
+        // Sanity check for potential overflow (defensive programming)
+        // In practice, version numbers should never be this large
+        const MAX_REASONABLE_VERSION: u32 = 1_000_000;
+        if from_version.as_u32() > MAX_REASONABLE_VERSION
+            || to_version.as_u32() > MAX_REASONABLE_VERSION
+        {
+            return Err(MigrationError::UnsupportedMigration {
+                from: from_version,
+                to: to_version,
+            });
+        }
+
         // Check bounds
-        if from_idx == 0 || to_idx > self.migrations.len() + 1 {
+        // from_idx must be at least 1 (versions start at 1, not 0)
+        // to_idx can be at most migrations.len() + 1 (we can migrate up to the next version)
+        const MIN_VERSION_IDX: usize = 1; // Versions are 1-indexed
+        if from_idx < MIN_VERSION_IDX || to_idx > self.migrations.len() + 1 {
             return Err(MigrationError::UnsupportedMigration {
                 from: from_version,
                 to: to_version,
@@ -146,6 +164,7 @@ impl Migrator for SequentialMigrator {
         }
 
         // Apply migrations sequentially
+        // Invariant: from_idx >= 1 (checked above), so from_idx - 1 >= 0
         let mut current_data = data.to_vec();
         for i in (from_idx - 1)..(to_idx - 1) {
             if i >= self.migrations.len() {

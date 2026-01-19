@@ -202,10 +202,16 @@ mod tests {
 
     #[test]
     fn test_optional_parameters_backward_compatibility() {
+        // Use a stable test UUID for consistency
+        const TEST_SERVICE_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
         // Test that priority field with default is backward compatible
-        let json_without_priority =
-            r#"{"intent_type":"test","handler_service":"550e8400-e29b-41d4-a716-446655440000"}"#;
-        let parsed: RegisterHandlerRequest = serde_json::from_str(json_without_priority).unwrap();
+        let json_without_priority = format!(
+            r#"{{"intent_type":"test","handler_service":"{}"}}"#,
+            TEST_SERVICE_UUID
+        );
+        let parsed: RegisterHandlerRequest =
+            serde_json::from_str(&json_without_priority).unwrap();
         assert_eq!(parsed.priority, 0); // Default value
 
         // Test that intent_type None is backward compatible
