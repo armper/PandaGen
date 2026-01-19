@@ -17,6 +17,42 @@
 //! - Returns raw hardware events
 //! - Translation to PandaGen input types happens above this layer
 
+/// Hardware scancode representation
+///
+/// Encodes scancodes from PS/2 keyboards (Set 1).
+/// Extended keys (arrows, nav cluster) are prefixed with 0xE0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HalScancode {
+    /// Base scancode (no prefix)
+    Base(u8),
+    /// Extended scancode (0xE0 prefix)
+    E0(u8),
+}
+
+impl HalScancode {
+    /// Creates a base scancode
+    pub fn base(code: u8) -> Self {
+        Self::Base(code)
+    }
+
+    /// Creates an E0-prefixed scancode
+    pub fn e0(code: u8) -> Self {
+        Self::E0(code)
+    }
+
+    /// Returns true if this is an extended (E0) scancode
+    pub fn is_extended(&self) -> bool {
+        matches!(self, Self::E0(_))
+    }
+
+    /// Returns the scancode value (without prefix)
+    pub fn code(&self) -> u8 {
+        match self {
+            Self::Base(code) | Self::E0(code) => *code,
+        }
+    }
+}
+
 /// Hardware keyboard event
 ///
 /// This represents a raw keyboard event from hardware before translation
@@ -27,7 +63,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HalKeyEvent {
     /// Raw scan code from keyboard controller
-    pub scancode: u8,
+    pub scancode: HalScancode,
 
     /// Whether the key was pressed (true) or released (false)
     pub pressed: bool,
@@ -37,8 +73,17 @@ pub struct HalKeyEvent {
 }
 
 impl HalKeyEvent {
-    /// Creates a new keyboard event
+    /// Creates a new keyboard event with a base scancode
     pub fn new(scancode: u8, pressed: bool) -> Self {
+        Self {
+            scancode: HalScancode::Base(scancode),
+            pressed,
+            timestamp_ns: None,
+        }
+    }
+
+    /// Creates a new keyboard event with explicit scancode type
+    pub fn with_scancode(scancode: HalScancode, pressed: bool) -> Self {
         Self {
             scancode,
             pressed,
@@ -49,7 +94,7 @@ impl HalKeyEvent {
     /// Creates a keyboard event with timestamp
     pub fn with_timestamp(scancode: u8, pressed: bool, timestamp_ns: u64) -> Self {
         Self {
-            scancode,
+            scancode: HalScancode::Base(scancode),
             pressed,
             timestamp_ns: Some(timestamp_ns),
         }
@@ -106,7 +151,7 @@ mod tests {
     #[test]
     fn test_hal_key_event_creation() {
         let event = HalKeyEvent::new(0x1E, true);
-        assert_eq!(event.scancode, 0x1E);
+        assert_eq!(event.scancode, HalScancode::Base(0x1E));
         assert!(event.is_pressed());
         assert!(!event.is_released());
         assert_eq!(event.timestamp_ns, None);
@@ -115,7 +160,7 @@ mod tests {
     #[test]
     fn test_hal_key_event_with_timestamp() {
         let event = HalKeyEvent::with_timestamp(0x1E, false, 123456789);
-        assert_eq!(event.scancode, 0x1E);
+        assert_eq!(event.scancode, HalScancode::Base(0x1E));
         assert!(!event.is_pressed());
         assert!(event.is_released());
         assert_eq!(event.timestamp_ns, Some(123456789));
@@ -130,6 +175,30 @@ mod tests {
         assert!(!press.is_released());
         assert!(!release.is_pressed());
         assert!(release.is_released());
+    }
+
+    #[test]
+    fn test_hal_scancode_base() {
+        let sc = HalScancode::base(0x1E);
+        assert_eq!(sc, HalScancode::Base(0x1E));
+        assert!(!sc.is_extended());
+        assert_eq!(sc.code(), 0x1E);
+    }
+
+    #[test]
+    fn test_hal_scancode_e0() {
+        let sc = HalScancode::e0(0x48);
+        assert_eq!(sc, HalScancode::E0(0x48));
+        assert!(sc.is_extended());
+        assert_eq!(sc.code(), 0x48);
+    }
+
+    #[test]
+    fn test_hal_key_event_with_e0() {
+        let event = HalKeyEvent::with_scancode(HalScancode::e0(0x48), true);
+        assert_eq!(event.scancode, HalScancode::E0(0x48));
+        assert!(event.scancode.is_extended());
+        assert!(event.is_pressed());
     }
 
     /// Fake keyboard device for testing
