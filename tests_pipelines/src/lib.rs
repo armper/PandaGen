@@ -358,12 +358,11 @@ impl TestPipelineExecutor {
                     }
 
                     // Backoff
+                    attempt += 1;
                     let backoff = retry_policy.backoff_duration(attempt);
                     if backoff > 0 {
                         let _ = kernel.sleep(Duration::from_millis(backoff));
                     }
-
-                    attempt += 1;
                 }
             }
         }

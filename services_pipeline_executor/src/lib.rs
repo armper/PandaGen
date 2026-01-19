@@ -223,6 +223,10 @@ impl PipelineExecutor {
                 StageResult::Success { .. } => return Ok(result),
                 StageResult::Failure { .. } => return Ok(result),
                 StageResult::Retryable { error } => {
+                    // Check if we've exhausted retries
+                    // attempt 0 = first try, attempt 1 = first retry, etc.
+                    // With max_retries=3, we allow attempts 0,1,2,3 (4 total)
+                    // So we check: attempt >= max_retries means we've used all retries
                     if attempt >= retry_policy.max_retries {
                         // Max retries exceeded - convert to permanent failure
                         return Ok(StageResult::Failure {
@@ -234,12 +238,12 @@ impl PipelineExecutor {
                     }
 
                     // Wait before retry (using simulated kernel time)
+                    // Increment attempt first so backoff is calculated correctly
+                    attempt += 1;
                     let backoff = retry_policy.backoff_duration(attempt);
                     if backoff > 0 {
                         let _ = kernel.sleep(Duration::from_millis(backoff));
                     }
-
-                    attempt += 1;
                 }
             }
         }

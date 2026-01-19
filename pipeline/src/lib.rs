@@ -168,11 +168,14 @@ impl RetryPolicy {
     }
 
     /// Calculates backoff duration for a given retry attempt
+    ///
+    /// Note: attempt 0 is the first execution (not a retry), so backoff is 0.
+    /// Backoff starts from attempt 1 (first retry).
     pub fn backoff_duration(&self, attempt: u32) -> u64 {
         if attempt == 0 {
-            self.initial_backoff_ms
+            0 // First attempt has no backoff
         } else {
-            let multiplier = self.backoff_multiplier.powi(attempt as i32);
+            let multiplier = self.backoff_multiplier.powi((attempt - 1) as i32);
             (self.initial_backoff_ms as f64 * multiplier) as u64
         }
     }
@@ -452,16 +455,18 @@ mod tests {
     fn test_retry_policy_fixed() {
         let policy = RetryPolicy::fixed_retries(3, 100);
         assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.backoff_duration(0), 100);
-        assert_eq!(policy.backoff_duration(1), 100);
+        assert_eq!(policy.backoff_duration(0), 0); // First attempt, no backoff
+        assert_eq!(policy.backoff_duration(1), 100); // First retry
+        assert_eq!(policy.backoff_duration(2), 100); // Second retry
     }
 
     #[test]
     fn test_retry_policy_exponential() {
         let policy = RetryPolicy::exponential_backoff(3, 100);
-        assert_eq!(policy.backoff_duration(0), 100);
-        assert_eq!(policy.backoff_duration(1), 200);
-        assert_eq!(policy.backoff_duration(2), 400);
+        assert_eq!(policy.backoff_duration(0), 0); // First attempt, no backoff
+        assert_eq!(policy.backoff_duration(1), 100); // First retry: 100 * 2^0
+        assert_eq!(policy.backoff_duration(2), 200); // Second retry: 100 * 2^1
+        assert_eq!(policy.backoff_duration(3), 400); // Third retry: 100 * 2^2
     }
 
     #[test]
