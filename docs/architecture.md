@@ -1504,12 +1504,201 @@ fn test_trust_domain_policy_denies_sandbox_spawn_system() {
 **Future Work**:
 
 Phase 9+ may add:
-- Policy enforcement in pipeline executor
+- ~~Policy enforcement in pipeline executor~~ (✅ Completed in Phase 9)
 - Policy hot-reload (swap policies without restart)
 - Policy decision caching for performance
 - Policy composition DSL for complex rules
 - Per-service policy overrides
 - Policy-based resource quotas
+
+### Phase 9: Pipeline Policy Enforcement + Policy Explain UX (Current)
+
+**Phase 9**: Complete integration of policy framework with pipeline execution.
+
+The system now includes:
+- **Pipeline Policy Enforcement**: Pipelines check policy at start and stage boundaries
+- **Explainable Decisions**: PolicyDecisionReport provides detailed evaluation information
+- **Clear Error Messages**: Policy denials and requirements include actionable information
+- **Deterministic Enforcement**: All policy checks work under SimKernel with fault injection
+
+**Philosophy**:
+- **Mechanism not policy**: Pipeline executor provides enforcement hooks, policies decide rules
+- **Policy observes; it does not own**: Authority still comes from capabilities
+- **Explicit over implicit**: Policy decisions are visible and testable
+- **Preserve pre-Phase-9 behavior**: When policy is disabled (None), pipelines work exactly as before
+
+**Policy Enforcement in Pipelines**:
+
+Pipeline executor now checks policy at three points:
+
+1. **OnPipelineStart**: Before pipeline execution begins
+   ```rust
+   let executor = PipelineExecutor::new()
+       .with_identity(identity)
+       .with_policy_engine(Box::new(PipelineSafetyPolicy::new()));
+   
+   let result = executor.execute(&mut kernel, &pipeline, input, token);
+   // Policy checked before first stage runs
+   ```
+
+2. **OnPipelineStageStart**: Before each stage execution
+   ```rust
+   // Policy context includes:
+   // - execution identity
+   // - trust domain
+   // - pipeline ID
+   // - stage ID
+   // - required capabilities
+   // - timeout/retry metadata
+   ```
+
+3. **OnPipelineStageEnd**: After stage completion (audit only)
+   - Policy can observe stage results
+   - Decision recorded but not enforced
+
+**Enforcement Rules**:
+
+- **Deny** → Pipeline fails immediately with `ExecutorError::PolicyDenied`
+- **Require** → Pipeline fails with `ExecutorError::PolicyRequire` and actionable message
+- **Allow** → Pipeline continues execution
+
+**Explainable Policy Decisions**:
+
+```rust
+pub struct PolicyDecisionReport {
+    pub decision: PolicyDecision,
+    pub evaluated_policies: Vec<PolicyEvaluation>,
+    pub deny_reason: Option<String>,
+    pub required_actions: Vec<String>,
+}
+
+// Composed policies produce full reports
+let report = composed_policy.evaluate_with_report(event, &context);
+
+// Shows which policies were evaluated and what they decided
+for eval in &report.evaluated_policies {
+    println!("{}: {:?}", eval.policy_name, eval.decision);
+}
+```
+
+**Example Policy: PipelineSafetyPolicy**:
+
+```rust
+// Requires pipelines in user domain to have timeout
+impl PolicyEngine for PipelineSafetyPolicy {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnPipelineStart => {
+                if context.actor_identity.trust_domain == TrustDomain::user() {
+                    let has_timeout = context.metadata.iter().any(|(k, _)| k == "timeout_ms");
+                    if !has_timeout {
+                        return PolicyDecision::require(
+                            "Pipelines in user domain must specify a timeout"
+                        );
+                    }
+                }
+                PolicyDecision::Allow
+            }
+            _ => PolicyDecision::Allow,
+        }
+    }
+}
+```
+
+**Error Reporting**:
+
+Policy errors include all relevant context:
+
+```rust
+match result {
+    Err(ExecutorError::PolicyRequire { policy, event, action, pipeline_id }) => {
+        eprintln!("REQUIRES: {} (policy: {}, event: {})", action, policy, event);
+        // e.g., "REQUIRES: Pipelines in user domain must specify timeout (policy: PipelineSafetyPolicy, event: OnPipelineStart)"
+    }
+    Err(ExecutorError::PolicyDenied { policy, event, reason, pipeline_id }) => {
+        eprintln!("DENIED by {}: {} (event: {})", policy, reason, event);
+        // e.g., "DENIED by DenySandboxPipelinePolicy: Sandbox cannot run pipelines (event: OnPipelineStart)"
+    }
+    Ok((output, trace)) => {
+        // Success
+    }
+}
+```
+
+**Safety Properties**:
+
+Enforcement maintains all Phase 1-8 safety properties:
+- **Deterministic**: Same inputs → same policy decisions
+- **Side-effect free**: Policy evaluation is pure
+- **Capability-safe**: No authority leaks on denial (no partial operations)
+- **Cancellation-aware**: Policy only recorded for started stages
+- **Fault-tolerant**: Works correctly under message delay/reorder/drop
+
+**Testing**:
+
+Integration tests validate:
+
+1. **Require Timeout**: PipelineSafetyPolicy requires timeout for user domain
+   - Without timeout → PolicyRequire error
+   - With timeout → success
+
+2. **Deny at Pipeline Start**: Custom policy denies entire pipeline
+   - Sandbox domain → denied before any stages run
+
+3. **Deny at Stage Start**: Policy denies individual stages
+   - Stage boundary → PolicyDenied error
+   - No capability leaks
+
+4. **Cancellation + Policy**: Mid-pipeline cancellation
+   - Policy decisions only for started stages
+   - Explain output remains coherent
+
+**Design Rationale**:
+
+**Why enforce at pipeline executor, not kernel?**
+- Pipeline execution is orchestration, not kernel mechanism
+- Keeps kernel API primitive and focused
+- Policy is optional (pipelines work without it)
+- Easier to test and compose policies
+
+**Why Require in addition to Deny?**
+- Deny is final: "you can't do this"
+- Require is conditional: "you can do this IF you add X"
+- Enables better UX: actionable error messages
+- Example: "Add timeout to continue" vs "Denied: no reason given"
+
+**Why PolicyDecisionReport?**
+- Composed policies evaluate multiple engines
+- Users need to know WHY a decision was made
+- Testing needs to verify correct policy was applied
+- Debugging requires visibility into policy logic
+
+**Integration with Previous Phases**:
+
+Phase 9 builds on all previous phases:
+- **Phase 1**: Uses KernelApi, pipeline executor, IPC
+- **Phase 2**: Works under fault injection (deterministic policy checks)
+- **Phase 3**: Respects capability lifecycle (no leaks on denial)
+- **Phase 4**: Policy decisions are versioned/serializable
+- **Phase 5**: Integrates with typed pipelines and retry semantics
+- **Phase 6**: Policy-aware of cancellation and timeouts
+- **Phase 7**: Policy uses execution identity and trust domains for context
+- **Phase 8**: Extends policy engine framework to pipelines
+
+All safety properties preserved:
+- No capability leaks (Phase 3)
+- No schema violations (Phase 4)
+- No infinite loops (Phase 5 + Phase 6 timeouts)
+- Deterministic behavior (Phase 2 + deterministic policy evaluation)
+
+**Future Work**:
+
+Phase 10+ may add:
+- Policy for pipeline composition (multi-pipeline orchestration)
+- Resource quotas based on policy decisions
+- Policy-driven retry strategies
+- Cross-domain pipeline policies
+- Policy decision caching for performance optimization
 
 ### Performance
 

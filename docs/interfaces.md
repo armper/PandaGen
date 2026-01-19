@@ -1704,6 +1704,138 @@ pub struct PolicyAuditEvent {
 4. **Testability first**: All policy logic works under SimKernel
 5. **Pluggable**: Policies can be swapped, composed, or disabled
 
+### Pipeline Policy Enforcement
+
+**Phase 9**: Pipelines now integrate with the policy framework.
+
+**Enforcement Points**:
+
+1. **OnPipelineStart**: Evaluated before pipeline execution begins
+   - Context includes: execution identity, trust domain, pipeline ID, timeout, stage count
+   - Deny → pipeline fails immediately with explicit error
+   - Require → pipeline fails with actionable message (e.g., "must specify timeout")
+   - Allow → pipeline proceeds
+
+2. **OnPipelineStageStart**: Evaluated before each stage execution
+   - Context includes: execution identity, pipeline ID, stage ID, required capabilities, retry policy
+   - Deny → pipeline fails at stage boundary with explicit error
+   - Require → pipeline fails with actionable message
+   - Allow → stage proceeds
+
+3. **OnPipelineStageEnd**: Emitted after stage completion (audit only, not enforced)
+   - Policy can observe stage completion
+   - Decision is recorded but not acted upon
+
+**Policy Context for Pipelines**:
+
+```rust
+// Context includes relevant metadata
+let context = PolicyContext::for_pipeline(actor_identity, pipeline_id)
+    .with_metadata("timeout_ms", "5000")
+    .with_metadata("stage_count", "3");
+```
+
+**Error Reporting**:
+
+When policy denies or requires action:
+
+```rust
+pub enum ExecutorError {
+    PolicyDenied {
+        policy: String,      // "PipelineSafetyPolicy"
+        event: String,       // "OnPipelineStart"
+        reason: String,      // "Sandbox cannot run pipelines"
+        pipeline_id: Option<String>,
+    },
+    PolicyRequire {
+        policy: String,      // "PipelineSafetyPolicy"
+        event: String,       // "OnPipelineStart"
+        action: String,      // "Pipelines in user domain must specify timeout"
+        pipeline_id: Option<String>,
+    },
+    // ... other errors
+}
+```
+
+**Explainable Policy Decisions**:
+
+Policy engines can now produce detailed reports:
+
+```rust
+pub struct PolicyDecisionReport {
+    /// Final aggregated decision
+    pub decision: PolicyDecision,
+    /// Individual policy evaluations
+    pub evaluated_policies: Vec<PolicyEvaluation>,
+    /// Final deny reason (if decision is Deny)
+    pub deny_reason: Option<String>,
+    /// Required actions (if decision is Require)
+    pub required_actions: Vec<String>,
+}
+
+// Get detailed report from composed policy
+let report = composed_policy.evaluate_with_report(event, &context);
+for eval in &report.evaluated_policies {
+    println!("{}: {:?}", eval.policy_name, eval.decision);
+}
+```
+
+**Usage Example**:
+
+```rust
+use policy::PipelineSafetyPolicy;
+use identity::{IdentityMetadata, IdentityKind, TrustDomain};
+
+// Create executor with policy
+let identity = IdentityMetadata::new(
+    IdentityKind::Component,
+    TrustDomain::user(),
+    "my-pipeline",
+    kernel.now().as_nanos(),
+);
+
+let executor = PipelineExecutor::new()
+    .with_identity(identity)
+    .with_policy_engine(Box::new(PipelineSafetyPolicy::new()));
+
+// Execute pipeline - policy is checked automatically
+let result = executor.execute(&mut kernel, &pipeline, input, token);
+
+match result {
+    Err(ExecutorError::PolicyRequire { policy, action, .. }) => {
+        eprintln!("REQUIRES: {} (policy: {})", action, policy);
+        // User can fix the issue and retry
+    }
+    Err(ExecutorError::PolicyDenied { policy, reason, .. }) => {
+        eprintln!("DENIED by {}: {}", policy, reason);
+        // Operation blocked by policy
+    }
+    Ok((output, trace)) => {
+        // Pipeline executed successfully
+    }
+    Err(e) => {
+        // Other errors
+    }
+}
+```
+
+**Safety Properties**:
+
+- Policy checks are deterministic (same input → same output)
+- Side-effect free (pure functions)
+- Capability-safe (no partial leaks on denial)
+- Cancellation-aware (policy only recorded for started stages)
+- Preserve pre-Phase-9 behavior when policy is disabled (None)
+
+**Testing**:
+
+Integration tests validate:
+- Require timeout: PipelineSafetyPolicy requires timeout for user domain pipelines
+- Deny at pipeline start: Custom policies can deny pipeline execution
+- Deny at stage start: Policies can deny individual stages
+- Cancellation: Policy decisions remain coherent when pipeline is cancelled
+- Fault injection: Policy checks occur deterministically under message delays/reorders
+
 ## Summary
 
 PandaGen's interfaces are designed to be:
