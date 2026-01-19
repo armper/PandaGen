@@ -123,7 +123,7 @@ impl TextRenderer {
                     // Use character-based indexing to handle Unicode correctly
                     let col = cursor_pos.column;
                     let chars: Vec<char> = line.chars().collect();
-                    
+
                     if col <= chars.len() {
                         // Cursor within or at end of line
                         let before: String = chars.iter().take(col).collect();
