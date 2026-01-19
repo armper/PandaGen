@@ -84,6 +84,8 @@ pub struct SimulatedKernel {
     /// Current task context for receive operations (Phase 12)
     /// This is a workaround since KernelApi doesn't pass TaskId to receive_message
     current_receive_task: Option<TaskId>,
+    /// Preemptive scheduler (Phase 23)
+    scheduler: scheduler::Scheduler,
 }
 
 #[derive(Debug)]
@@ -141,6 +143,7 @@ impl SimulatedKernel {
             resource_audit: resource_audit::ResourceAuditLog::new(),
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
+            scheduler: scheduler::Scheduler::new(),
         }
     }
 
@@ -185,6 +188,14 @@ impl SimulatedKernel {
         self
     }
 
+    /// Sets the scheduler configuration for this kernel
+    ///
+    /// Phase 23: Configures the preemptive scheduler parameters.
+    pub fn with_scheduler_config(mut self, config: scheduler::SchedulerConfig) -> Self {
+        self.scheduler = scheduler::Scheduler::with_config(config);
+        self
+    }
+
     /// Returns a reference to the policy audit log
     ///
     /// Used in tests to verify policy decisions were made correctly.
@@ -197,6 +208,20 @@ impl SimulatedKernel {
     /// Phase 12: Used in tests to verify resource consumption and exhaustion.
     pub fn resource_audit(&self) -> &resource_audit::ResourceAuditLog {
         &self.resource_audit
+    }
+
+    /// Returns a reference to the scheduler audit log
+    ///
+    /// Phase 23: Used in tests to verify scheduling behavior.
+    pub fn scheduler_audit(&self) -> &[scheduler::ScheduleEvent] {
+        self.scheduler.audit_log()
+    }
+
+    /// Returns a reference to the scheduler
+    ///
+    /// Phase 23: Provides access to scheduler state for testing.
+    pub fn scheduler(&self) -> &scheduler::Scheduler {
+        &self.scheduler
     }
 
     /// Sets the current receive task context
@@ -394,6 +419,11 @@ impl SimulatedKernel {
                 resource_type: reason,
             },
         );
+        
+        // Phase 23: Find and cancel the task in scheduler
+        if let Some((&task_id, _)) = self.task_to_identity.iter().find(|(_, &exec_id)| exec_id == execution_id) {
+            self.scheduler.cancel_task(task_id);
+        }
     }
 
     /// Checks if an execution identity is cancelled
@@ -454,6 +484,9 @@ impl SimulatedKernel {
 
         // Process delayed messages
         self.process_delayed_messages();
+        
+        // Phase 23: Notify scheduler of tick advancement
+        self.scheduler.on_tick_advanced(ticks_to_advance);
     }
 
     /// Processes delayed messages that are ready to be delivered
@@ -493,6 +526,129 @@ impl SimulatedKernel {
             }
             self.advance_time(TIME_STEP);
         }
+    }
+
+    /// Runs the scheduler for a specified number of ticks
+    ///
+    /// Phase 23: Executes scheduled tasks with preemption based on tick counts.
+    /// This is a bounded stepping API for deterministic tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticks` - Number of ticks to execute
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of task scheduling rounds executed.
+    pub fn run_for_ticks(&mut self, ticks: u64) -> usize {
+        let mut scheduling_rounds = 0;
+        let mut ticks_consumed = 0;
+
+        while ticks_consumed < ticks && self.scheduler.has_runnable_tasks() {
+            // Dequeue next task
+            if let Some(task_id) = self.scheduler.dequeue_next() {
+                scheduling_rounds += 1;
+
+                // Run task until quantum expired or ticks exhausted
+                let quantum = self.scheduler.config.quantum_ticks;
+                let mut task_ticks = 0;
+
+                while task_ticks < quantum && ticks_consumed < ticks {
+                    // Check if task still exists and is runnable
+                    if self.scheduler.task_state(task_id) != Some(scheduler::TaskState::Runnable) {
+                        break;
+                    }
+
+                    // Execute one tick
+                    let ticks_before = self.timer.current_ticks();
+                    self.advance_time(Duration::from_nanos(self.nanos_per_tick));
+                    let ticks_advanced = self.timer.current_ticks() - ticks_before;
+
+                    ticks_consumed += ticks_advanced;
+                    task_ticks += ticks_advanced;
+
+                    // Try to consume CPU ticks (if task has identity)
+                    if let Some(execution_id) = self.get_task_identity(task_id) {
+                        if self.try_consume_cpu_ticks(execution_id, ticks_advanced).is_err() {
+                            // Task cancelled due to budget exhaustion
+                            break;
+                        }
+                    }
+                }
+
+                // Preempt if still runnable and quantum reached
+                if self.scheduler.task_state(task_id) == Some(scheduler::TaskState::Runnable)
+                    && task_ticks >= quantum
+                {
+                    self.scheduler.preempt_current();
+                }
+            } else {
+                break;
+            }
+        }
+
+        scheduling_rounds
+    }
+
+    /// Runs the scheduler for a specified number of steps
+    ///
+    /// Phase 23: Executes scheduled tasks for N scheduling decisions.
+    /// Each step selects and runs one task for its quantum or until preemption.
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - Number of scheduling steps to execute
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of steps actually executed.
+    pub fn run_for_steps(&mut self, steps: usize) -> usize {
+        let mut steps_executed = 0;
+
+        for _ in 0..steps {
+            if !self.scheduler.has_runnable_tasks() {
+                break;
+            }
+
+            // Dequeue next task
+            if let Some(task_id) = self.scheduler.dequeue_next() {
+                steps_executed += 1;
+
+                // Run task for its quantum
+                let quantum = self.scheduler.config.quantum_ticks;
+                for _ in 0..quantum {
+                    // Check if task still exists and is runnable
+                    if self.scheduler.task_state(task_id) != Some(scheduler::TaskState::Runnable) {
+                        break;
+                    }
+
+                    // Execute one tick
+                    let ticks_before = self.timer.current_ticks();
+                    self.advance_time(Duration::from_nanos(self.nanos_per_tick));
+                    let ticks_advanced = self.timer.current_ticks() - ticks_before;
+
+                    // Try to consume CPU ticks
+                    if let Some(execution_id) = self.get_task_identity(task_id) {
+                        if self.try_consume_cpu_ticks(execution_id, ticks_advanced).is_err() {
+                            // Task cancelled due to budget exhaustion
+                            break;
+                        }
+                    }
+
+                    // Check if task should be preempted
+                    if self.scheduler.should_preempt(task_id) {
+                        break;
+                    }
+                }
+
+                // Preempt if still runnable
+                if self.scheduler.task_state(task_id) == Some(scheduler::TaskState::Runnable) {
+                    self.scheduler.preempt_current();
+                }
+            }
+        }
+
+        steps_executed
     }
 
     /// Checks if the kernel is idle (no messages pending)
@@ -562,6 +718,9 @@ impl SimulatedKernel {
 
         // Invalidate all capabilities owned by this task
         self.invalidate_task_capabilities(task_id);
+        
+        // Phase 23: Notify scheduler that task has exited
+        self.scheduler.exit_task(task_id);
     }
 
     /// Invalidates all capabilities owned by a task
@@ -987,6 +1146,10 @@ impl SimulatedKernel {
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
+        
+        // Phase 23: Enqueue task in scheduler
+        self.scheduler.enqueue(task_id);
+        
         Ok((TaskHandle::new(task_id), execution_id))
     }
 }
@@ -1023,6 +1186,10 @@ impl KernelApi for SimulatedKernel {
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
+        
+        // Phase 23: Enqueue task in scheduler
+        self.scheduler.enqueue(task_id);
+        
         Ok(TaskHandle::new(task_id))
     }
 
@@ -1907,5 +2074,216 @@ mod tests {
         assert!(t3 > t2);
         assert_eq!(t2.duration_since(t1), Duration::from_millis(10));
         assert_eq!(t3.duration_since(t2), Duration::from_micros(500));
+    }
+
+    #[test]
+    fn test_scheduler_integration_task_enqueued() {
+        let mut kernel = SimulatedKernel::new();
+
+        let descriptor = TaskDescriptor::new("test_task".to_string());
+        let handle = kernel.spawn_task(descriptor).unwrap();
+
+        // Task should be enqueued in scheduler
+        assert_eq!(kernel.scheduler().runnable_count(), 1);
+        assert!(kernel.scheduler().has_runnable_tasks());
+
+        // Terminate task - should be removed from scheduler
+        kernel.terminate_task(handle.task_id);
+        assert!(!kernel.scheduler().has_runnable_tasks());
+    }
+
+    #[test]
+    fn test_scheduler_integration_two_tasks_interleave() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let config = scheduler::SchedulerConfig {
+            quantum_ticks: 5,
+            max_steps_per_tick: None,
+        };
+        let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
+
+        // Create two tasks with CPU budgets
+        let budget = ResourceBudget {
+            cpu_ticks: Some(CpuTicks::new(100)),
+            memory_units: None,
+            message_count: None,
+            storage_ops: None,
+            pipeline_stages: None,
+        };
+
+        let task1_desc = TaskDescriptor::new("task1".to_string());
+        let (task1_handle, _) = kernel
+            .spawn_task_with_identity(
+                task1_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::user(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Set budget for task1
+        if let Some(exec_id) = kernel.get_task_identity(task1_handle.task_id) {
+            if let Some(identity) = kernel.get_identity_mut(exec_id) {
+                identity.budget = Some(budget.clone());
+            }
+        }
+
+        let task2_desc = TaskDescriptor::new("task2".to_string());
+        let (task2_handle, _) = kernel
+            .spawn_task_with_identity(
+                task2_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::user(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Set budget for task2
+        if let Some(exec_id) = kernel.get_task_identity(task2_handle.task_id) {
+            if let Some(identity) = kernel.get_identity_mut(exec_id) {
+                identity.budget = Some(budget);
+            }
+        }
+
+        // Both tasks should be runnable
+        assert_eq!(kernel.scheduler().runnable_count(), 2);
+
+        // Run for some steps - tasks should interleave
+        let steps = kernel.run_for_steps(4);
+        assert_eq!(steps, 4);
+
+        // Check scheduler audit log for interleaving
+        let audit = kernel.scheduler_audit();
+        assert!(audit.len() >= 4); // At least 2 selections + 2 preemptions
+
+        // Verify both tasks were selected
+        let task1_selected = audit
+            .iter()
+            .any(|e| matches!(e, scheduler::ScheduleEvent::TaskSelected { task_id, .. } if *task_id == task1_handle.task_id));
+        let task2_selected = audit
+            .iter()
+            .any(|e| matches!(e, scheduler::ScheduleEvent::TaskSelected { task_id, .. } if *task_id == task2_handle.task_id));
+
+        assert!(task1_selected, "task1 should have been selected");
+        assert!(task2_selected, "task2 should have been selected");
+    }
+
+    #[test]
+    fn test_scheduler_integration_preemption_events() {
+        let config = scheduler::SchedulerConfig {
+            quantum_ticks: 3,
+            max_steps_per_tick: None,
+        };
+        let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
+
+        let descriptor = TaskDescriptor::new("test_task".to_string());
+        let handle = kernel.spawn_task(descriptor).unwrap();
+
+        // Run for a few ticks
+        kernel.run_for_ticks(10);
+
+        // Check that preemption events were recorded
+        let audit = kernel.scheduler_audit();
+        let preemption_count = audit
+            .iter()
+            .filter(|e| matches!(e, scheduler::ScheduleEvent::TaskPreempted { .. }))
+            .count();
+
+        // With quantum of 3 and 10 ticks, we should see at least 2 preemptions
+        assert!(preemption_count >= 2, "Expected at least 2 preemptions, got {}", preemption_count);
+
+        // Clean up
+        kernel.terminate_task(handle.task_id);
+    }
+
+    #[test]
+    fn test_scheduler_integration_budget_exhaustion() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let config = scheduler::SchedulerConfig {
+            quantum_ticks: 5,
+            max_steps_per_tick: None,
+        };
+        let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
+
+        // Create task with small CPU budget
+        let budget = ResourceBudget {
+            cpu_ticks: Some(CpuTicks::new(15)),
+            memory_units: None,
+            message_count: None,
+            storage_ops: None,
+            pipeline_stages: None,
+        };
+
+        let task_desc = TaskDescriptor::new("limited_task".to_string());
+        let (task_handle, exec_id) = kernel
+            .spawn_task_with_identity(
+                task_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::user(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Set budget
+        if let Some(identity) = kernel.get_identity_mut(exec_id) {
+            identity.budget = Some(budget);
+        }
+
+        // Run until budget exhaustion
+        kernel.run_for_ticks(20);
+
+        // Task should be cancelled in scheduler
+        assert_eq!(
+            kernel.scheduler().task_state(task_handle.task_id),
+            Some(scheduler::TaskState::Cancelled)
+        );
+
+        // Check scheduler audit for cancellation
+        let audit = kernel.scheduler_audit();
+        let cancelled = audit.iter().any(|e| {
+            matches!(
+                e,
+                scheduler::ScheduleEvent::TaskExited {
+                    task_id,
+                    reason: scheduler::ExitReason::ResourceExhaustion,
+                    ..
+                } if *task_id == task_handle.task_id
+            )
+        });
+        assert!(cancelled, "Task should have been cancelled due to budget exhaustion");
+    }
+
+    #[test]
+    fn test_scheduler_integration_deterministic() {
+        // Run same scenario twice - should get same results
+        let _task1_id = TaskId::new();
+        let _task2_id = TaskId::new();
+
+        let config = scheduler::SchedulerConfig {
+            quantum_ticks: 5,
+            max_steps_per_tick: None,
+        };
+
+        let mut kernel1 = SimulatedKernel::new().with_scheduler_config(config.clone());
+        let mut kernel2 = SimulatedKernel::new().with_scheduler_config(config);
+
+        // Spawn same tasks
+        let _ = kernel1.spawn_task(TaskDescriptor::new("task1".to_string()));
+        let _ = kernel1.spawn_task(TaskDescriptor::new("task2".to_string()));
+        let _ = kernel2.spawn_task(TaskDescriptor::new("task1".to_string()));
+        let _ = kernel2.spawn_task(TaskDescriptor::new("task2".to_string()));
+
+        // Run same number of steps
+        kernel1.run_for_steps(10);
+        kernel2.run_for_steps(10);
+
+        // Both should have same number of audit events
+        let audit1 = kernel1.scheduler_audit();
+        let audit2 = kernel2.scheduler_audit();
+        assert_eq!(audit1.len(), audit2.len(), "Should have same number of scheduling events");
     }
 }

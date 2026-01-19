@@ -152,7 +152,7 @@ impl RunQueue {
 ///
 /// Manages task scheduling with time-sliced preemption.
 pub struct Scheduler {
-    config: SchedulerConfig,
+    pub(crate) config: SchedulerConfig,
     run_queue: RunQueue,
     tasks: std::collections::HashMap<TaskId, TaskInfo>,
     current_task: Option<TaskId>,
