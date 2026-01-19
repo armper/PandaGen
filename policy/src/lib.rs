@@ -441,6 +441,123 @@ impl PolicyEngine for ComposedPolicy {
     }
 }
 
+/// Policy decision report with full explanation
+///
+/// Provides detailed information about policy evaluation including
+/// which policies were checked and what decisions they made.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDecisionReport {
+    /// Final aggregated decision
+    pub decision: PolicyDecision,
+    /// Individual policy evaluations
+    pub evaluated_policies: Vec<PolicyEvaluation>,
+    /// Final deny reason (if decision is Deny)
+    pub deny_reason: Option<String>,
+    /// Required actions (if decision is Require)
+    pub required_actions: Vec<String>,
+}
+
+/// Single policy evaluation record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyEvaluation {
+    /// Name of the policy engine
+    pub policy_name: String,
+    /// Decision made by this policy
+    pub decision: PolicyDecision,
+}
+
+impl PolicyDecisionReport {
+    /// Creates a new report with a single decision
+    pub fn new(policy_name: impl Into<String>, decision: PolicyDecision) -> Self {
+        let policy_name = policy_name.into();
+        let (deny_reason, required_actions) = match &decision {
+            PolicyDecision::Deny { reason } => (Some(reason.clone()), Vec::new()),
+            PolicyDecision::Require { action } => (None, vec![action.clone()]),
+            PolicyDecision::Allow => (None, Vec::new()),
+        };
+
+        Self {
+            decision: decision.clone(),
+            evaluated_policies: vec![PolicyEvaluation {
+                policy_name,
+                decision,
+            }],
+            deny_reason,
+            required_actions,
+        }
+    }
+
+    /// Creates a report from composed policy evaluation
+    pub fn from_composed(
+        evaluations: Vec<(String, PolicyDecision)>,
+        final_decision: PolicyDecision,
+    ) -> Self {
+        let mut deny_reason = None;
+        let mut required_actions = Vec::new();
+
+        for (_, decision) in &evaluations {
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    if deny_reason.is_none() {
+                        deny_reason = Some(reason.clone());
+                    }
+                }
+                PolicyDecision::Require { action } => {
+                    required_actions.push(action.clone());
+                }
+                PolicyDecision::Allow => {}
+            }
+        }
+
+        Self {
+            decision: final_decision,
+            evaluated_policies: evaluations
+                .into_iter()
+                .map(|(policy_name, decision)| PolicyEvaluation {
+                    policy_name,
+                    decision,
+                })
+                .collect(),
+            deny_reason,
+            required_actions,
+        }
+    }
+
+    /// Returns true if the final decision is Allow
+    pub fn is_allow(&self) -> bool {
+        self.decision.is_allow()
+    }
+
+    /// Returns true if the final decision is Deny
+    pub fn is_deny(&self) -> bool {
+        self.decision.is_deny()
+    }
+
+    /// Returns true if the final decision is Require
+    pub fn is_require(&self) -> bool {
+        self.decision.is_require()
+    }
+}
+
+impl ComposedPolicy {
+    /// Evaluates all policies and returns a detailed report
+    pub fn evaluate_with_report(
+        &self,
+        event: PolicyEvent,
+        context: &PolicyContext,
+    ) -> PolicyDecisionReport {
+        let mut evaluations = Vec::new();
+
+        for policy in &self.policies {
+            let decision = policy.evaluate(event.clone(), context);
+            evaluations.push((policy.name().to_string(), decision));
+        }
+
+        let final_decision = self.evaluate_all(event, context);
+        PolicyDecisionReport::from_composed(evaluations, final_decision)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +773,84 @@ mod tests {
 
         let decision = composed.evaluate(PolicyEvent::OnSpawn, &context);
         assert!(decision.is_allow());
+    }
+
+    #[test]
+    fn test_policy_decision_report_allow() {
+        let report = PolicyDecisionReport::new("TestPolicy", PolicyDecision::allow());
+        assert!(report.is_allow());
+        assert!(!report.is_deny());
+        assert!(!report.is_require());
+        assert_eq!(report.evaluated_policies.len(), 1);
+        assert_eq!(report.evaluated_policies[0].policy_name, "TestPolicy");
+        assert!(report.deny_reason.is_none());
+        assert!(report.required_actions.is_empty());
+    }
+
+    #[test]
+    fn test_policy_decision_report_deny() {
+        let report = PolicyDecisionReport::new("TestPolicy", PolicyDecision::deny("access denied"));
+        assert!(!report.is_allow());
+        assert!(report.is_deny());
+        assert!(!report.is_require());
+        assert_eq!(report.deny_reason, Some("access denied".to_string()));
+        assert!(report.required_actions.is_empty());
+    }
+
+    #[test]
+    fn test_policy_decision_report_require() {
+        let report =
+            PolicyDecisionReport::new("TestPolicy", PolicyDecision::require("add timeout"));
+        assert!(!report.is_allow());
+        assert!(!report.is_deny());
+        assert!(report.is_require());
+        assert!(report.deny_reason.is_none());
+        assert_eq!(report.required_actions, vec!["add timeout"]);
+    }
+
+    #[test]
+    fn test_composed_policy_report_with_deny() {
+        let mut composed = ComposedPolicy::new();
+        composed = composed.add_policy(Box::new(NoOpPolicy));
+        composed = composed.add_policy(Box::new(TrustDomainPolicy));
+
+        let context = PolicyContext::for_spawn(
+            IdentityMetadata::new(
+                IdentityKind::Component,
+                TrustDomain::sandbox(),
+                "sandboxed",
+                0,
+            ),
+            IdentityMetadata::new(IdentityKind::System, TrustDomain::core(), "system", 0),
+        );
+
+        let report = composed.evaluate_with_report(PolicyEvent::OnSpawn, &context);
+        assert!(report.is_deny());
+        assert_eq!(report.evaluated_policies.len(), 2);
+        assert_eq!(report.evaluated_policies[0].policy_name, "NoOpPolicy");
+        assert!(report.evaluated_policies[0].decision.is_allow());
+        assert_eq!(
+            report.evaluated_policies[1].policy_name,
+            "TrustDomainPolicy"
+        );
+        assert!(report.evaluated_policies[1].decision.is_deny());
+        assert!(report.deny_reason.is_some());
+    }
+
+    #[test]
+    fn test_composed_policy_report_with_require() {
+        let mut composed = ComposedPolicy::new();
+        composed = composed.add_policy(Box::new(TrustDomainPolicy));
+        composed = composed.add_policy(Box::new(PipelineSafetyPolicy::new()));
+
+        let context = PolicyContext::for_pipeline(
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::user(), "pipeline", 0),
+            PipelineId::new(),
+        );
+
+        let report = composed.evaluate_with_report(PolicyEvent::OnPipelineStart, &context);
+        assert!(report.is_require());
+        assert_eq!(report.evaluated_policies.len(), 2);
+        assert!(!report.required_actions.is_empty());
     }
 }
