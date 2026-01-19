@@ -35,6 +35,7 @@ use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+use resources::{MessageCount, ResourceBudget, ResourceError, ResourceExceeded};
 use std::collections::{HashMap, VecDeque};
 
 /// Simulated kernel state
@@ -538,6 +539,37 @@ impl SimulatedKernel {
         self.exit_notifications.clear();
     }
 
+    /// Checks budget before message send (enforcement point)
+    ///
+    /// Returns error if budget would be exceeded by sending message.
+    fn check_budget_for_message(&mut self, task_id: TaskId) -> Result<(), KernelError> {
+        // Get task identity and budget
+        if let Some(exec_id) = self.task_to_identity.get(&task_id).copied() {
+            if let Some(identity) = self.identity_table.get_mut(&exec_id) {
+                if let Some(budget) = &identity.budget {
+                    // Consume one message
+                    identity.usage.consume_message();
+
+                    // Check if exceeded
+                    if let Some(exceeded) = identity.usage.exceeds(budget) {
+                        return Err(KernelError::ResourceExhausted(format!(
+                            "Resource budget exceeded for task {}: {}",
+                            task_id, exceeded
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Updates identity metadata (mutable borrow)
+    ///
+    /// Used by enforcement points to update usage.
+    pub fn get_identity_mut(&mut self, exec_id: ExecutionId) -> Option<&mut IdentityMetadata> {
+        self.identity_table.get_mut(&exec_id)
+    }
+
     /// Spawns a task with explicit identity metadata
     ///
     /// This is for supervisors who need full control over child identity
@@ -561,6 +593,15 @@ impl SimulatedKernel {
 
         if let Some(parent) = parent_id {
             metadata = metadata.with_parent(parent);
+
+            // Phase 11: Validate budget inheritance
+            if let Some(parent_identity) = self.identity_table.get(&parent) {
+                if !metadata.budget_inherits_from(parent_identity) {
+                    return Err(KernelError::InsufficientAuthority(
+                        "Budget inheritance violation: child budget exceeds parent".to_string(),
+                    ));
+                }
+            }
         }
         if let Some(creator) = creator_id {
             metadata = metadata.with_creator(creator);
@@ -657,6 +698,11 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
+        // Phase 11: Check budget before sending
+        // Note: We need to get task_id from the message source if available
+        // For now, we'll check if sender context is available via current task tracking
+        // In a real implementation, send_message would take TaskId as parameter
+        
         // Check for crash-on-send fault
         if let Some(ref mut injector) = self.fault_injector {
             if injector.should_crash_on_send() {
