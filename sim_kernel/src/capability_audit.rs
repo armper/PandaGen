@@ -79,6 +79,7 @@ impl CapabilityAuditLog {
             .filter(|e| match &e.event {
                 CapabilityEvent::Granted { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::Delegated { cap_id: id, .. } => *id == cap_id,
+                CapabilityEvent::CrossDomainDelegation { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::Cloned { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::Dropped { cap_id: id, .. } => *id == cap_id,
                 CapabilityEvent::InvalidUseAttempt { cap_id: id, .. } => *id == cap_id,

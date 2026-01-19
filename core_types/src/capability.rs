@@ -190,6 +190,14 @@ pub enum CapabilityEvent {
         to_task: TaskId,
         cap_type: String,
     },
+    /// Capability was delegated across trust domain boundaries
+    CrossDomainDelegation {
+        cap_id: u64,
+        from_task: TaskId,
+        from_domain: String,
+        to_task: TaskId,
+        to_domain: String,
+    },
     /// Capability was cloned (duplication allowed)
     Cloned {
         cap_id: u64,
