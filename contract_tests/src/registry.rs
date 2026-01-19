@@ -2,18 +2,22 @@
 //!
 //! These tests define the stable contract for the Registry service.
 
-use crate::test_helpers::*;
 use core_types::ServiceId;
 use ipc::{ChannelId, SchemaVersion};
 use serde::{Deserialize, Serialize};
 
 // ===== Registry Contract Version =====
+#[allow(dead_code)]
 const REGISTRY_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
 // ===== Action Identifiers =====
+#[allow(dead_code)]
 const ACTION_REGISTER: &str = "registry.register";
+#[allow(dead_code)]
 const ACTION_LOOKUP: &str = "registry.lookup";
+#[allow(dead_code)]
 const ACTION_UNREGISTER: &str = "registry.unregister";
+#[allow(dead_code)]
 const ACTION_LIST: &str = "registry.list";
 
 // ===== Canonical Payload Structures =====
@@ -60,6 +64,7 @@ pub struct ServiceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::*;
 
     #[test]
     fn test_register_contract() {
@@ -90,12 +95,8 @@ mod tests {
         let service_id = ServiceId::new();
         let request = LookupRequest { service_id };
 
-        let envelope = create_test_envelope(
-            service_id,
-            ACTION_LOOKUP,
-            REGISTRY_SCHEMA_VERSION,
-            &request,
-        );
+        let envelope =
+            create_test_envelope(service_id, ACTION_LOOKUP, REGISTRY_SCHEMA_VERSION, &request);
 
         verify_envelope_contract(&envelope, ACTION_LOOKUP, REGISTRY_SCHEMA_VERSION);
         verify_major_version(&envelope, 1);

@@ -3,7 +3,7 @@
 //! This module provides the mechanism for migrating storage objects
 //! from one schema version to another.
 
-use core_types::{ObjectSchemaVersion, MigrationLineage};
+use core_types::{MigrationLineage, ObjectSchemaVersion};
 use std::fmt;
 
 /// Error that can occur during migration
@@ -17,9 +17,7 @@ pub enum MigrationError {
     /// Migration failed due to invalid data
     InvalidData(String),
     /// Migration requires a version that doesn't exist
-    MissingVersion {
-        required: ObjectSchemaVersion,
-    },
+    MissingVersion { required: ObjectSchemaVersion },
 }
 
 impl fmt::Display for MigrationError {
@@ -32,7 +30,11 @@ impl fmt::Display for MigrationError {
                 write!(f, "Migration failed: invalid data - {}", msg)
             }
             MigrationError::MissingVersion { required } => {
-                write!(f, "Migration requires version {} which is not available", required)
+                write!(
+                    f,
+                    "Migration requires version {} which is not available",
+                    required
+                )
             }
         }
     }
@@ -82,6 +84,7 @@ pub trait Migrator {
 pub struct SequentialMigrator {
     /// List of migration functions, indexed by "from" version
     /// migrations[0] is v1->v2, migrations[1] is v2->v3, etc.
+    #[allow(clippy::type_complexity)]
     migrations: Vec<Box<dyn Fn(&[u8]) -> Result<Vec<u8>, MigrationError>>>,
 }
 
@@ -196,20 +199,20 @@ mod tests {
 
     // Simple test migrations that transform JSON strings
     fn migrate_v1_to_v2(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s = std::str::from_utf8(data)
-            .map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s =
+            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v2", s).into_bytes())
     }
 
     fn migrate_v2_to_v3(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s = std::str::from_utf8(data)
-            .map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s =
+            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v3", s).into_bytes())
     }
 
     fn migrate_v3_to_v4(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s = std::str::from_utf8(data)
-            .map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s =
+            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v4", s).into_bytes())
     }
 
@@ -320,36 +323,30 @@ mod tests {
             .add_migration(migrate_v2_to_v3);
 
         // Same version is supported
-        assert!(migrator.supports_migration(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(1)
-        ));
+        assert!(
+            migrator.supports_migration(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(1))
+        );
 
         // Forward migrations are supported
-        assert!(migrator.supports_migration(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(2)
-        ));
-        assert!(migrator.supports_migration(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(3)
-        ));
-        assert!(migrator.supports_migration(
-            ObjectSchemaVersion::new(2),
-            ObjectSchemaVersion::new(3)
-        ));
+        assert!(
+            migrator.supports_migration(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(2))
+        );
+        assert!(
+            migrator.supports_migration(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(3))
+        );
+        assert!(
+            migrator.supports_migration(ObjectSchemaVersion::new(2), ObjectSchemaVersion::new(3))
+        );
 
         // Downgrades are not supported
-        assert!(!migrator.supports_migration(
-            ObjectSchemaVersion::new(2),
-            ObjectSchemaVersion::new(1)
-        ));
+        assert!(
+            !migrator.supports_migration(ObjectSchemaVersion::new(2), ObjectSchemaVersion::new(1))
+        );
 
         // Too new versions are not supported
-        assert!(!migrator.supports_migration(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(5)
-        ));
+        assert!(
+            !migrator.supports_migration(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(5))
+        );
     }
 
     #[test]

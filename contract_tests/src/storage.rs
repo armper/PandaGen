@@ -2,19 +2,23 @@
 //!
 //! These tests define the stable contract for the Storage service.
 
-use crate::test_helpers::*;
-use core_types::ServiceId;
 use ipc::SchemaVersion;
 use serde::{Deserialize, Serialize};
 
 // ===== Storage Contract Version =====
+#[allow(dead_code)]
 const STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
 // ===== Action Identifiers =====
+#[allow(dead_code)]
 const ACTION_CREATE_OBJECT: &str = "storage.create_object";
+#[allow(dead_code)]
 const ACTION_READ_OBJECT: &str = "storage.read_object";
+#[allow(dead_code)]
 const ACTION_WRITE_OBJECT: &str = "storage.write_object";
+#[allow(dead_code)]
 const ACTION_DELETE_OBJECT: &str = "storage.delete_object";
+#[allow(dead_code)]
 const ACTION_LIST_VERSIONS: &str = "storage.list_versions";
 
 // ===== Canonical Payload Structures =====
@@ -101,6 +105,8 @@ pub struct VersionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::*;
+    use core_types::ServiceId;
 
     #[test]
     fn test_create_object_contract() {

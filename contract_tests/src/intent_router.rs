@@ -2,18 +2,22 @@
 //!
 //! These tests define the stable contract for the IntentRouter service.
 
-use crate::test_helpers::*;
 use core_types::ServiceId;
 use ipc::SchemaVersion;
 use serde::{Deserialize, Serialize};
 
 // ===== IntentRouter Contract Version =====
+#[allow(dead_code)]
 const INTENT_ROUTER_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
 // ===== Action Identifiers =====
+#[allow(dead_code)]
 const ACTION_ROUTE_INTENT: &str = "intent_router.route_intent";
+#[allow(dead_code)]
 const ACTION_REGISTER_HANDLER: &str = "intent_router.register_handler";
+#[allow(dead_code)]
 const ACTION_UNREGISTER_HANDLER: &str = "intent_router.unregister_handler";
+#[allow(dead_code)]
 const ACTION_LIST_HANDLERS: &str = "intent_router.list_handlers";
 
 // ===== Canonical Payload Structures =====
@@ -72,6 +76,7 @@ pub struct HandlerInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::*;
 
     #[test]
     fn test_route_intent_contract() {
@@ -162,7 +167,11 @@ mod tests {
             &request,
         );
 
-        verify_envelope_contract(&envelope, ACTION_LIST_HANDLERS, INTENT_ROUTER_SCHEMA_VERSION);
+        verify_envelope_contract(
+            &envelope,
+            ACTION_LIST_HANDLERS,
+            INTENT_ROUTER_SCHEMA_VERSION,
+        );
         verify_major_version(&envelope, 1);
 
         let deserialized: ListHandlersRequest = envelope.payload.deserialize().unwrap();
@@ -194,7 +203,8 @@ mod tests {
     #[test]
     fn test_optional_parameters_backward_compatibility() {
         // Test that priority field with default is backward compatible
-        let json_without_priority = r#"{"intent_type":"test","handler_service":"550e8400-e29b-41d4-a716-446655440000"}"#;
+        let json_without_priority =
+            r#"{"intent_type":"test","handler_service":"550e8400-e29b-41d4-a716-446655440000"}"#;
         let parsed: RegisterHandlerRequest = serde_json::from_str(json_without_priority).unwrap();
         assert_eq!(parsed.priority, 0); // Default value
 

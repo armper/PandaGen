@@ -2,18 +2,22 @@
 //!
 //! These tests define the stable contract for the ProcessManager service.
 
-use crate::test_helpers::*;
 use core_types::ServiceId;
 use ipc::SchemaVersion;
 use serde::{Deserialize, Serialize};
 
 // ===== ProcessManager Contract Version =====
+#[allow(dead_code)]
 const PROCESS_MANAGER_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 
 // ===== Action Identifiers =====
+#[allow(dead_code)]
 const ACTION_SPAWN: &str = "process_manager.spawn";
+#[allow(dead_code)]
 const ACTION_TERMINATE: &str = "process_manager.terminate";
+#[allow(dead_code)]
 const ACTION_GET_STATUS: &str = "process_manager.get_status";
+#[allow(dead_code)]
 const ACTION_LIST_PROCESSES: &str = "process_manager.list_processes";
 
 // ===== Canonical Payload Structures =====
@@ -89,6 +93,7 @@ pub struct ProcessInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::*;
 
     #[test]
     fn test_spawn_contract() {

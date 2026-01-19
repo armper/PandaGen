@@ -22,10 +22,10 @@
 //! - **Schema Evolution**: Objects have schema identity and version
 //! - **Migration**: Deterministic, testable data transformations
 
+pub mod migration;
 pub mod object;
 pub mod transaction;
-pub mod migration;
 
+pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
 pub use transaction::{Transaction, TransactionError, TransactionState};
-pub use migration::{MigrationError, Migrator, SequentialMigrator, create_lineage};

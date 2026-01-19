@@ -177,10 +177,8 @@ mod tests {
 
     #[test]
     fn test_migration_lineage_creation() {
-        let lineage = MigrationLineage::new(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(2),
-        );
+        let lineage =
+            MigrationLineage::new(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(2));
 
         assert_eq!(lineage.from_version, ObjectSchemaVersion::new(1));
         assert_eq!(lineage.to_version, ObjectSchemaVersion::new(2));
@@ -189,11 +187,9 @@ mod tests {
 
     #[test]
     fn test_migration_lineage_with_timestamp() {
-        let lineage = MigrationLineage::new(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(2),
-        )
-        .with_timestamp(1234567890);
+        let lineage =
+            MigrationLineage::new(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(2))
+                .with_timestamp(1234567890);
 
         assert_eq!(lineage.migrated_at, Some(1234567890));
     }
@@ -202,10 +198,8 @@ mod tests {
     fn test_serialization() {
         let schema_id = ObjectSchemaId::new("test-schema");
         let version = ObjectSchemaVersion::new(5);
-        let lineage = MigrationLineage::new(
-            ObjectSchemaVersion::new(1),
-            ObjectSchemaVersion::new(5),
-        );
+        let lineage =
+            MigrationLineage::new(ObjectSchemaVersion::new(1), ObjectSchemaVersion::new(5));
 
         // Test that these types can be serialized/deserialized
         let schema_json = serde_json::to_string(&schema_id).unwrap();

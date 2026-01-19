@@ -17,10 +17,10 @@
 //! - Schema versions
 //! - Payload field contracts
 
+pub mod intent_router;
+pub mod process_manager;
 pub mod registry;
 pub mod storage;
-pub mod process_manager;
-pub mod intent_router;
 
 /// Common test helpers for contract validation
 pub mod test_helpers {
