@@ -26,12 +26,14 @@ pub mod fault_injection;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod test_utils;
+pub mod timer;
 
 use core_types::{
     Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata, CapabilityStatus, ServiceId,
     TaskId,
 };
 use fault_injection::FaultInjector;
+use hal::TimerDevice;
 use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
@@ -44,8 +46,12 @@ use std::collections::{HashMap, VecDeque};
 /// This maintains all the state needed to simulate a kernel.
 /// Unlike a real kernel, this state is directly accessible for testing.
 pub struct SimulatedKernel {
-    /// Current simulated time
+    /// Timer device for tick tracking
+    timer: crate::timer::SimTimerDevice,
+    /// Current simulated time (derived from timer ticks)
     current_time: Instant,
+    /// Nanoseconds per tick (for converting ticks to time)
+    nanos_per_tick: u64,
     /// Spawned tasks
     tasks: HashMap<TaskId, TaskInfo>,
     /// Message channels
@@ -103,8 +109,22 @@ struct DelayedMessage {
 impl SimulatedKernel {
     /// Creates a new simulated kernel
     pub fn new() -> Self {
+        Self::with_tick_resolution(Duration::from_micros(1))
+    }
+
+    /// Creates a new simulated kernel with a specific tick resolution
+    ///
+    /// This allows controlling the granularity of time in tests.
+    /// For example, Duration::from_micros(1) means each tick = 1 microsecond.
+    ///
+    /// # Arguments
+    ///
+    /// * `tick_duration` - The duration represented by a single tick
+    pub fn with_tick_resolution(tick_duration: Duration) -> Self {
         Self {
+            timer: crate::timer::SimTimerDevice::new(),
             current_time: Instant::from_nanos(0),
+            nanos_per_tick: tick_duration.as_nanos(),
             tasks: HashMap::new(),
             channels: HashMap::new(),
             services: HashMap::new(),
@@ -121,6 +141,29 @@ impl SimulatedKernel {
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
         }
+    }
+
+    /// Returns a reference to the timer device
+    ///
+    /// Useful for tests that need to directly manipulate time.
+    pub fn timer(&self) -> &crate::timer::SimTimerDevice {
+        &self.timer
+    }
+
+    /// Returns a mutable reference to the timer device
+    ///
+    /// Useful for tests that need to directly manipulate time.
+    pub fn timer_mut(&mut self) -> &mut crate::timer::SimTimerDevice {
+        &mut self.timer
+    }
+
+    /// Updates current_time based on timer ticks
+    ///
+    /// This is called internally after advancing the timer.
+    fn sync_time_from_timer(&mut self) {
+        let ticks = self.timer.poll_ticks();
+        let nanos = ticks * self.nanos_per_tick;
+        self.current_time = Instant::from_nanos(nanos);
     }
 
     /// Sets the fault injector for this kernel
@@ -174,6 +217,8 @@ impl SimulatedKernel {
     ///
     /// Phase 12: External enforcement point for CPU consumption.
     /// Returns Err if budget is exhausted or identity is cancelled.
+    ///
+    /// Phase 22: This can be used with timer ticks for time-based CPU accounting.
     pub fn try_consume_cpu_ticks(
         &mut self,
         execution_id: ExecutionId,
@@ -397,7 +442,16 @@ impl SimulatedKernel {
 
     /// Advances simulated time
     pub fn advance_time(&mut self, duration: Duration) {
-        self.current_time = self.current_time + duration;
+        // Calculate how many ticks this duration represents
+        let ticks_to_advance = duration.as_nanos() / self.nanos_per_tick;
+
+        // Advance the timer
+        self.timer.advance_ticks(ticks_to_advance);
+
+        // Update current_time from timer
+        self.sync_time_from_timer();
+
+        // Process delayed messages
         self.process_delayed_messages();
     }
 
@@ -1733,5 +1787,124 @@ mod tests {
         assert!(policy_audit.has_event(|e| {
             matches!(e.event, policy::PolicyEvent::OnSpawn) && e.decision.is_deny()
         }));
+    }
+
+    #[test]
+    fn test_timer_integration_with_cpu_budget() {
+        use resources::{CpuTicks, ResourceBudget};
+
+        let mut kernel = SimulatedKernel::new();
+
+        // Create an execution with a CPU tick budget
+        let budget = ResourceBudget {
+            cpu_ticks: Some(CpuTicks::new(1000)),
+            memory_units: None,
+            message_count: None,
+            storage_ops: None,
+            pipeline_stages: None,
+        };
+
+        let metadata = identity::IdentityMetadata::new(
+            identity::IdentityKind::Component,
+            identity::TrustDomain::user(),
+            "budget-test".to_string(),
+            kernel.now().as_nanos(),
+        )
+        .with_budget(budget);
+
+        let exec_id = kernel.create_identity(metadata.clone());
+
+        // Initial state: 0 ticks consumed
+        let identity = kernel.get_identity(exec_id).unwrap();
+        assert_eq!(identity.usage.cpu_ticks.0, 0);
+
+        // Advance timer by some amount
+        kernel.timer_mut().advance_ticks(100);
+        kernel.sync_time_from_timer();
+
+        // Consume CPU ticks based on timer advancement
+        let result = kernel.try_consume_cpu_ticks(exec_id, 100);
+        assert!(result.is_ok());
+
+        // Check that usage was tracked
+        let identity = kernel.get_identity(exec_id).unwrap();
+        assert_eq!(identity.usage.cpu_ticks.0, 100);
+
+        // Advance timer more
+        kernel.timer_mut().advance_ticks(500);
+        kernel.sync_time_from_timer();
+
+        // Consume more ticks
+        let result = kernel.try_consume_cpu_ticks(exec_id, 500);
+        assert!(result.is_ok());
+
+        let identity = kernel.get_identity(exec_id).unwrap();
+        assert_eq!(identity.usage.cpu_ticks.0, 600);
+
+        // Try to exceed budget
+        kernel.timer_mut().advance_ticks(500);
+        kernel.sync_time_from_timer();
+
+        let result = kernel.try_consume_cpu_ticks(exec_id, 500);
+        assert!(result.is_err());
+
+        // Verify the identity was cancelled due to exhaustion
+        let identity = kernel.get_identity(exec_id).unwrap();
+        assert_eq!(identity.usage.cpu_ticks.0, 600); // Still at 600, consumption failed
+
+        // Check resource audit log
+        let audit = kernel.resource_audit();
+        assert!(audit.has_event(|e| {
+            matches!(
+                e,
+                resource_audit::ResourceEvent::BudgetExhausted {
+                    execution_id: id,
+                    resource_type,
+                    ..
+                } if *id == exec_id && resource_type == "CpuTicks"
+            )
+        }));
+    }
+
+    #[test]
+    fn test_timer_deterministic_behavior() {
+        // Create two kernels and run identical sequences
+        let mut kernel1 = SimulatedKernel::new();
+        let mut kernel2 = SimulatedKernel::new();
+
+        // Advance both in the same way
+        for i in 1..=5 {
+            kernel1.advance_time(Duration::from_millis(i * 10));
+            kernel2.advance_time(Duration::from_millis(i * 10));
+        }
+
+        // Both should have the same time
+        assert_eq!(kernel1.now(), kernel2.now());
+        assert_eq!(
+            kernel1.timer().current_ticks(),
+            kernel2.timer().current_ticks()
+        );
+
+        // Time should be cumulative
+        assert_eq!(
+            kernel1.now().as_nanos(),
+            Duration::from_millis(10 + 20 + 30 + 40 + 50).as_nanos()
+        );
+    }
+
+    #[test]
+    fn test_timer_monotonic_with_advance_time() {
+        let mut kernel = SimulatedKernel::new();
+
+        let t1 = kernel.now();
+        kernel.advance_time(Duration::from_millis(10));
+        let t2 = kernel.now();
+        kernel.advance_time(Duration::from_micros(500));
+        let t3 = kernel.now();
+
+        assert!(t2 > t1);
+        assert!(t3 > t2);
+        assert_eq!(t2.duration_since(t1), Duration::from_millis(10));
+        assert_eq!(t3.duration_since(t2), Duration::from_micros(500));
     }
 }

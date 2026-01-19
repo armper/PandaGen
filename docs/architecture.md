@@ -94,6 +94,45 @@ kernel.terminate_task(task_id);
 - No historical baggage
 - Free to make optimal choices
 
+### 5. Time as a Service (Phase 22)
+
+**Problem**: Time is often treated as a global variable, leading to non-deterministic tests, hidden dependencies, and difficulty reasoning about time-based behavior.
+
+**Solution**:
+- Time flows through the kernel API, not globals
+- HAL provides hardware timer abstraction (`TimerDevice`)
+- SimKernel uses deterministic simulated time
+- All time is monotonic ticks, not wall-clock
+- No blocking, no sleeping inside HAL
+
+**Impact**:
+- Deterministic tests with controllable time
+- Time-based features (delays, retries, budgets) are testable
+- Clear separation between time measurement and scheduling
+- No hidden timing dependencies
+
+**Design**:
+```rust
+// HAL timer trait (hardware abstraction)
+trait TimerDevice {
+    fn poll_ticks(&mut self) -> u64; // Non-blocking, monotonic
+}
+
+// Simulated timer (for tests)
+let mut timer = SimTimerDevice::new();
+timer.advance_ticks(100); // Explicit, deterministic
+
+// Hardware timer (for real systems)
+let timer = PitTimer::new(RealPortIo::new());
+let ticks = timer.poll_ticks(); // Reads from 8254 PIT
+```
+
+**Philosophy**:
+- Time is measurement, not scheduling
+- Monotonic ticks only (no UTC, no timezones)
+- Non-blocking polling (no waits, no sleeps)
+- Determinism preserved for testing
+
 ## System Layers
 
 ```

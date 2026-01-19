@@ -12,9 +12,11 @@ use hal::{CpuHal, InterruptHal, MemoryHal};
 
 pub mod keyboard;
 pub mod port_io;
+pub mod timer;
 
 pub use keyboard::X86Ps2Keyboard;
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
+pub use timer::{FakeTimerDevice, PitTimer};
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;
