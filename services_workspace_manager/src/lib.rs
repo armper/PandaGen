@@ -443,7 +443,10 @@ impl WorkspaceManager {
         }
 
         // Create views for the component
-        let task_id = TaskId::new();
+        // Component task ID for view ownership
+        let component_task_id = TaskId::new();
+        // Workspace task ID for subscriptions (could be same but kept separate for clarity)
+        let workspace_task_id = TaskId::new();
 
         // Main view (TextBuffer)
         let main_view = self
@@ -451,7 +454,7 @@ impl WorkspaceManager {
             .create_view(
                 ViewKind::TextBuffer,
                 Some(config.name.clone()),
-                task_id,
+                component_task_id,
                 ipc::ChannelId::new(),
             )
             .map_err(|e| {
@@ -462,7 +465,7 @@ impl WorkspaceManager {
         // Subscribe workspace to main view
         let main_sub = self
             .view_host
-            .subscribe(main_view.view_id, TaskId::new(), ipc::ChannelId::new())
+            .subscribe(main_view.view_id, workspace_task_id, ipc::ChannelId::new())
             .map_err(|e| {
                 WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e))
             })?;
@@ -474,7 +477,7 @@ impl WorkspaceManager {
             .create_view(
                 ViewKind::StatusLine,
                 Some(format!("{} - status", config.name)),
-                task_id,
+                component_task_id,
                 ipc::ChannelId::new(),
             )
             .map_err(|e| {
@@ -485,7 +488,11 @@ impl WorkspaceManager {
         // Subscribe workspace to status view
         let status_sub = self
             .view_host
-            .subscribe(status_view.view_id, TaskId::new(), ipc::ChannelId::new())
+            .subscribe(
+                status_view.view_id,
+                workspace_task_id,
+                ipc::ChannelId::new(),
+            )
             .map_err(|e| {
                 WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e))
             })?;

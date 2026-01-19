@@ -153,7 +153,7 @@ impl ViewRecord {
         if let Some(latest) = &self.latest_frame {
             if new_revision <= latest.revision {
                 return Err(ViewHostError::RevisionNotMonotonic {
-                    expected: latest.revision,
+                    expected: latest.revision + 1,
                     actual: new_revision,
                 });
             }
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(
             result,
             Err(ViewHostError::RevisionNotMonotonic {
-                expected: 2,
+                expected: 3,
                 actual: 1
             })
         );
