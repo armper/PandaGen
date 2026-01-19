@@ -1,6 +1,8 @@
 //! Journaled storage backend with crash-consistent recovery.
 
-use crate::{ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId};
+use crate::{
+    ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId,
+};
 use identity::ExecutionId;
 use kernel_api::KernelError;
 use serde::{Deserialize, Serialize};
@@ -93,14 +95,11 @@ impl JournaledStorage {
                     version_id,
                     data,
                 } => {
-                    writes
-                        .entry(*tx_id)
-                        .or_default()
-                        .push(PendingWrite {
-                            object_id: *object_id,
-                            version_id: *version_id,
-                            data: data.clone(),
-                        });
+                    writes.entry(*tx_id).or_default().push(PendingWrite {
+                        object_id: *object_id,
+                        version_id: *version_id,
+                        data: data.clone(),
+                    });
                 }
                 JournalEntry::Commit { tx_id } => {
                     committed.insert(*tx_id);
@@ -173,7 +172,10 @@ impl TransactionalStorage for JournaledStorage {
             data: data.to_vec(),
         };
 
-        self.pending.entry(tx.id()).or_default().push(pending_write.clone());
+        self.pending
+            .entry(tx.id())
+            .or_default()
+            .push(pending_write.clone());
         self.journal.push(JournalEntry::Write {
             tx_id: tx.id(),
             object_id,

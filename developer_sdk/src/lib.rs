@@ -1,11 +1,11 @@
 //! Developer SDK: tracing, replay, and remote debugger host.
 
+use core_types::ServiceId;
+use ipc::ChannelId;
 use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{KernelApi, KernelError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use core_types::ServiceId;
-use ipc::ChannelId;
 
 const DEBUG_TRACE_ACTION: &str = "debug.trace";
 const DEBUG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
@@ -35,7 +35,9 @@ pub struct TraceRecorder {
 
 impl TraceRecorder {
     pub fn new() -> Self {
-        Self { log: TraceLog::default() }
+        Self {
+            log: TraceLog::default(),
+        }
     }
 
     pub fn record(&mut self, event: TraceEvent) {
@@ -116,13 +118,18 @@ pub struct IpcTraceSink<K: KernelApi> {
 
 impl<K: KernelApi> IpcTraceSink<K> {
     pub fn new(kernel: K, channel: ChannelId, destination: ServiceId) -> Self {
-        Self { kernel, channel, destination }
+        Self {
+            kernel,
+            channel,
+            destination,
+        }
     }
 }
 
 impl<K: KernelApi> TraceSink for IpcTraceSink<K> {
     fn send(&mut self, event: TraceEvent) -> Result<(), DebuggerError> {
-        let payload = MessagePayload::new(&event).map_err(|err| DebuggerError::Encode(err.to_string()))?;
+        let payload =
+            MessagePayload::new(&event).map_err(|err| DebuggerError::Encode(err.to_string()))?;
         let message = MessageEnvelope::new(
             self.destination,
             DEBUG_TRACE_ACTION.to_string(),
@@ -157,7 +164,10 @@ mod tests {
     }
 
     impl KernelApi for MockKernel {
-        fn spawn_task(&mut self, _descriptor: kernel_api::TaskDescriptor) -> Result<kernel_api::TaskHandle, KernelError> {
+        fn spawn_task(
+            &mut self,
+            _descriptor: kernel_api::TaskDescriptor,
+        ) -> Result<kernel_api::TaskHandle, KernelError> {
             Err(KernelError::SpawnFailed("not supported".to_string()))
         }
 
@@ -165,13 +175,21 @@ mod tests {
             Err(KernelError::ChannelError("not supported".to_string()))
         }
 
-        fn send_message(&mut self, _channel: ChannelId, message: MessageEnvelope) -> Result<(), KernelError> {
+        fn send_message(
+            &mut self,
+            _channel: ChannelId,
+            message: MessageEnvelope,
+        ) -> Result<(), KernelError> {
             let mut sent = self.sent.lock().expect("lock sent");
             sent.push(message);
             Ok(())
         }
 
-        fn receive_message(&mut self, _channel: ChannelId, _timeout: Option<kernel_api::Duration>) -> Result<MessageEnvelope, KernelError> {
+        fn receive_message(
+            &mut self,
+            _channel: ChannelId,
+            _timeout: Option<kernel_api::Duration>,
+        ) -> Result<MessageEnvelope, KernelError> {
             Err(KernelError::ReceiveFailed("not supported".to_string()))
         }
 
@@ -183,11 +201,19 @@ mod tests {
             Ok(())
         }
 
-        fn grant_capability(&mut self, _task: core_types::TaskId, _capability: core_types::Cap<()>) -> Result<(), KernelError> {
+        fn grant_capability(
+            &mut self,
+            _task: core_types::TaskId,
+            _capability: core_types::Cap<()>,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 
-        fn register_service(&mut self, _service_id: ServiceId, _channel: ChannelId) -> Result<(), KernelError> {
+        fn register_service(
+            &mut self,
+            _service_id: ServiceId,
+            _channel: ChannelId,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 

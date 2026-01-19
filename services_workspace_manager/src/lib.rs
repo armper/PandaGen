@@ -901,24 +901,16 @@ impl WorkspaceManager {
             } = component_snapshot;
 
             let timestamp = self.next_timestamp();
-            let mut identity = IdentityMetadata::new(
-                identity_kind,
-                trust_domain.clone(),
-                name.clone(),
-                timestamp,
-            )
-            .with_parent(self.workspace_identity.execution_id);
+            let mut identity =
+                IdentityMetadata::new(identity_kind, trust_domain.clone(), name.clone(), timestamp)
+                    .with_parent(self.workspace_identity.execution_id);
 
             if let Some(budget) = budget {
                 identity = identity.with_budget(budget);
             }
 
-            let mut component = ComponentInfo::new(
-                component_type,
-                identity,
-                focusable,
-                name.clone(),
-            );
+            let mut component =
+                ComponentInfo::new(component_type, identity, focusable, name.clone());
 
             component.id = component_id;
             component.state = state;
@@ -957,7 +949,10 @@ impl WorkspaceManager {
                 .view_host
                 .subscribe(main_view.view_id, workspace_task_id, ipc::ChannelId::new())
                 .map_err(|e| {
-                    WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e))
+                    WorkspaceError::InvalidCommand(format!(
+                        "Failed to subscribe to main view: {}",
+                        e
+                    ))
                 })?;
             self.view_subscriptions.insert(main_view.view_id, main_sub);
 
@@ -981,9 +976,16 @@ impl WorkspaceManager {
 
             let status_sub = self
                 .view_host
-                .subscribe(status_view.view_id, workspace_task_id, ipc::ChannelId::new())
+                .subscribe(
+                    status_view.view_id,
+                    workspace_task_id,
+                    ipc::ChannelId::new(),
+                )
                 .map_err(|e| {
-                    WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e))
+                    WorkspaceError::InvalidCommand(format!(
+                        "Failed to subscribe to status view: {}",
+                        e
+                    ))
                 })?;
             self.view_subscriptions
                 .insert(status_view.view_id, status_sub);
@@ -1103,7 +1105,7 @@ fn remap_frame(mut frame: ViewFrame, new_view_id: ViewId, component_id: Componen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use packages::{PackageComponentType, PackageFormatVersion, PackageManifest, ComponentSpec};
+    use packages::{ComponentSpec, PackageComponentType, PackageFormatVersion, PackageManifest};
 
     fn create_test_workspace() -> WorkspaceManager {
         let workspace_identity = IdentityMetadata::new(
@@ -1178,8 +1180,14 @@ mod tests {
         assert_eq!(ids.len(), 2);
 
         let first = workspace.get_component(ids[0]).unwrap();
-        assert_eq!(first.metadata.get("package.name"), Some(&"demo".to_string()));
-        assert_eq!(first.metadata.get("package.entry"), Some(&"services_editor_vi".to_string()));
+        assert_eq!(
+            first.metadata.get("package.name"),
+            Some(&"demo".to_string())
+        );
+        assert_eq!(
+            first.metadata.get("package.entry"),
+            Some(&"services_editor_vi".to_string())
+        );
     }
 
     #[test]

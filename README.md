@@ -145,6 +145,10 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
+### Bare-Metal Track
+
+- B1 bootable ISO pipeline is available. See `docs/qemu_boot.md`.
+
 ## 📖 Documentation
 
 - [Architecture Overview](docs/architecture.md) - System design and principles

@@ -47,7 +47,9 @@ pub struct WorkspaceAccessControl {
 
 impl WorkspaceAccessControl {
     pub fn new() -> Self {
-        Self { users: HashMap::new() }
+        Self {
+            users: HashMap::new(),
+        }
     }
 
     pub fn add_user(&mut self, name: impl Into<String>) -> UserId {
@@ -63,7 +65,10 @@ impl WorkspaceAccessControl {
     }
 
     pub fn grant_admin(&mut self, user_id: UserId) -> Result<(), AccessError> {
-        let record = self.users.get_mut(&user_id).ok_or(AccessError::UserNotFound(user_id))?;
+        let record = self
+            .users
+            .get_mut(&user_id)
+            .ok_or(AccessError::UserNotFound(user_id))?;
         record.role = Role::Admin;
         Ok(())
     }
@@ -74,21 +79,35 @@ impl WorkspaceAccessControl {
         to_user: UserId,
         scope: Scope,
     ) -> Result<(), AccessError> {
-        let admin = self.users.get(&from_admin).ok_or(AccessError::UserNotFound(from_admin))?;
+        let admin = self
+            .users
+            .get(&from_admin)
+            .ok_or(AccessError::UserNotFound(from_admin))?;
         if admin.role != Role::Admin {
-            return Err(AccessError::PermissionDenied("Only admins can delegate scopes".to_string()));
+            return Err(AccessError::PermissionDenied(
+                "Only admins can delegate scopes".to_string(),
+            ));
         }
-        let user = self.users.get_mut(&to_user).ok_or(AccessError::UserNotFound(to_user))?;
+        let user = self
+            .users
+            .get_mut(&to_user)
+            .ok_or(AccessError::UserNotFound(to_user))?;
         user.scopes.insert(scope);
         Ok(())
     }
 
     pub fn check_scope(&self, user_id: UserId, scope: &Scope) -> Result<(), AccessError> {
-        let user = self.users.get(&user_id).ok_or(AccessError::UserNotFound(user_id))?;
+        let user = self
+            .users
+            .get(&user_id)
+            .ok_or(AccessError::UserNotFound(user_id))?;
         if user.role == Role::Admin || user.scopes.contains(scope) {
             Ok(())
         } else {
-            Err(AccessError::PermissionDenied(format!("Missing scope: {}", scope.0)))
+            Err(AccessError::PermissionDenied(format!(
+                "Missing scope: {}",
+                scope.0
+            )))
         }
     }
 }

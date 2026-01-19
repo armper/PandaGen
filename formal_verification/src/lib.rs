@@ -130,7 +130,10 @@ mod tests {
         let report = run_verification(
             &[meta],
             &[1, 2, 3],
-            &[MemoryRegionModel { base: 0, len: 10 }, MemoryRegionModel { base: 20, len: 5 }],
+            &[
+                MemoryRegionModel { base: 0, len: 10 },
+                MemoryRegionModel { base: 20, len: 5 },
+            ],
         );
         assert!(report.passed());
     }

@@ -141,8 +141,8 @@ impl PackageLoader {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<PackageManifest, PackageError> {
-        let data = fs::read_to_string(path.as_ref())
-            .map_err(|err| PackageError::Io(err.to_string()))?;
+        let data =
+            fs::read_to_string(path.as_ref()).map_err(|err| PackageError::Io(err.to_string()))?;
         let manifest: PackageManifest =
             serde_json::from_str(&data).map_err(|err| PackageError::Parse(err.to_string()))?;
         manifest.validate()?;

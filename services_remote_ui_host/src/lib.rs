@@ -1,13 +1,13 @@
 //! Remote UI host for snapshot streaming.
 
-use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
-use kernel_api::{KernelApi, KernelError};
-use services_workspace_manager::WorkspaceRenderSnapshot;
-use serde::{Deserialize, Serialize};
-use std::io::Write;
-use thiserror::Error;
 use core_types::ServiceId;
 use ipc::ChannelId;
+use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
+use kernel_api::{KernelApi, KernelError};
+use serde::{Deserialize, Serialize};
+use services_workspace_manager::WorkspaceRenderSnapshot;
+use std::io::Write;
+use thiserror::Error;
 
 const REMOTE_UI_ACTION: &str = "ui.snapshot";
 const REMOTE_UI_SCHEMA: SchemaVersion = SchemaVersion::new(1, 0);
@@ -101,7 +101,8 @@ impl<K: KernelApi> IpcSnapshotSink<K> {
 
 impl<K: KernelApi> SnapshotSink for IpcSnapshotSink<K> {
     fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
-        let payload = MessagePayload::new(&frame).map_err(|err| RemoteUiError::Encode(err.to_string()))?;
+        let payload =
+            MessagePayload::new(&frame).map_err(|err| RemoteUiError::Encode(err.to_string()))?;
         let message = MessageEnvelope::new(
             self.destination,
             REMOTE_UI_ACTION.to_string(),
@@ -159,7 +160,10 @@ mod tests {
     }
 
     impl KernelApi for MockKernel {
-        fn spawn_task(&mut self, _descriptor: kernel_api::TaskDescriptor) -> Result<kernel_api::TaskHandle, KernelError> {
+        fn spawn_task(
+            &mut self,
+            _descriptor: kernel_api::TaskDescriptor,
+        ) -> Result<kernel_api::TaskHandle, KernelError> {
             Err(KernelError::SpawnFailed("not supported".to_string()))
         }
 
@@ -167,7 +171,11 @@ mod tests {
             Err(KernelError::ChannelError("not supported".to_string()))
         }
 
-        fn send_message(&mut self, channel: ChannelId, message: MessageEnvelope) -> Result<(), KernelError> {
+        fn send_message(
+            &mut self,
+            channel: ChannelId,
+            message: MessageEnvelope,
+        ) -> Result<(), KernelError> {
             let mut sent = self.sent.lock().expect("lock sent");
             sent.push((channel, message));
             Ok(())
@@ -189,11 +197,19 @@ mod tests {
             Ok(())
         }
 
-        fn grant_capability(&mut self, _task: core_types::TaskId, _capability: core_types::Cap<()>) -> Result<(), KernelError> {
+        fn grant_capability(
+            &mut self,
+            _task: core_types::TaskId,
+            _capability: core_types::Cap<()>,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 
-        fn register_service(&mut self, _service_id: ServiceId, _channel: ChannelId) -> Result<(), KernelError> {
+        fn register_service(
+            &mut self,
+            _service_id: ServiceId,
+            _channel: ChannelId,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 

@@ -61,7 +61,10 @@ impl SyncState {
     pub fn merge(&self, other: &SyncState) -> SyncState {
         let mut merged: HashMap<DeviceId, Vec<VersionedObject>> = HashMap::new();
         for log in self.logs.iter().chain(other.logs.iter()) {
-            merged.entry(log.device_id).or_default().extend(log.entries.clone());
+            merged
+                .entry(log.device_id)
+                .or_default()
+                .extend(log.entries.clone());
         }
 
         let logs = merged
@@ -87,7 +90,10 @@ impl SyncState {
     }
 
     pub fn all_entries(&self) -> Vec<VersionedObject> {
-        self.logs.iter().flat_map(|log| log.entries.clone()).collect()
+        self.logs
+            .iter()
+            .flat_map(|log| log.entries.clone())
+            .collect()
     }
 
     pub fn version_set(&self) -> HashSet<VersionId> {
