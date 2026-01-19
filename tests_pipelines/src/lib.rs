@@ -1013,7 +1013,6 @@ mod tests {
     fn test_policy_require_timeout_succeeds() {
         // Test A cont: Run with timeout => success
         let mut kernel = SimulatedKernel::new();
-        let mut executor = TestPipelineExecutor::new();
 
         use identity::{IdentityKind, IdentityMetadata, TrustDomain};
         use policy::PipelineSafetyPolicy;
@@ -1028,8 +1027,6 @@ mod tests {
         let mut policy_executor = PipelineExecutor::new()
             .with_identity(identity)
             .with_policy_engine(Box::new(PipelineSafetyPolicy::new()));
-
-        executor.register_handler("create_blob".to_string(), handle_create_blob);
 
         // Build pipeline WITH timeout (policy will allow it)
         let stage = StageSpec::new(
