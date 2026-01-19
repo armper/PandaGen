@@ -203,50 +203,13 @@ impl SimulatedKernel {
     /// This is called when a task exits or crashes. It invalidates all
     /// capabilities owned by the task to prevent use-after-free.
     pub fn terminate_task(&mut self, task_id: TaskId) {
-        // Get execution ID and create exit notification
-        if let Some(execution_id) = self.task_to_identity.get(&task_id).copied() {
-            let notification = ExitNotification {
-                execution_id,
-                task_id: Some(task_id),
-                reason: ExitReason::Normal, // Default to normal; caller can specify reason
-                terminated_at_nanos: self.current_time.as_nanos(),
-            };
-            self.exit_notifications.push(notification);
-
-            // Remove from task_to_identity mapping
-            self.task_to_identity.remove(&task_id);
-            // Note: we keep the identity metadata for audit purposes
-        }
-
-        // Remove task
-        self.tasks.remove(&task_id);
-
-        // Invalidate all capabilities owned by this task
-        let cap_ids: Vec<u64> = self
-            .capability_table
-            .iter()
-            .filter(|(_, meta)| meta.owner == task_id)
-            .map(|(id, _)| *id)
-            .collect();
-
-        for cap_id in cap_ids {
-            if let Some(meta) = self.capability_table.get_mut(&cap_id) {
-                meta.status = CapabilityStatus::Invalid;
-
-                // Record invalidation event
-                self.capability_audit.record_event(
-                    self.current_time,
-                    CapabilityEvent::Invalidated {
-                        cap_id,
-                        owner: task_id,
-                        cap_type: meta.cap_type.clone(),
-                    },
-                );
-            }
-        }
+        self.terminate_task_with_reason(task_id, ExitReason::Normal);
     }
 
     /// Terminates a task with a specific exit reason
+    ///
+    /// Creates an exit notification with the specified reason and cleans up
+    /// task resources including capabilities.
     pub fn terminate_task_with_reason(&mut self, task_id: TaskId, reason: ExitReason) {
         // Get execution ID and create exit notification
         if let Some(execution_id) = self.task_to_identity.get(&task_id).copied() {
@@ -260,12 +223,18 @@ impl SimulatedKernel {
 
             // Remove from task_to_identity mapping
             self.task_to_identity.remove(&task_id);
+            // Note: we keep the identity metadata for audit purposes
         }
 
         // Remove task
         self.tasks.remove(&task_id);
 
         // Invalidate all capabilities owned by this task
+        self.invalidate_task_capabilities(task_id);
+    }
+
+    /// Invalidates all capabilities owned by a task
+    fn invalidate_task_capabilities(&mut self, task_id: TaskId) {
         let cap_ids: Vec<u64> = self
             .capability_table
             .iter()
@@ -536,8 +505,9 @@ impl KernelApi for SimulatedKernel {
     fn spawn_task(&mut self, descriptor: TaskDescriptor) -> Result<TaskHandle, KernelError> {
         let task_id = TaskId::new();
 
-        // Create identity metadata for this task
-        // Default to Component/user for now; can be extended in the future
+        // Create execution identity for this task
+        // Defaults: IdentityKind::Component, TrustDomain::user()
+        // For full control over identity, use spawn_task_with_identity()
         let metadata = identity::IdentityMetadata::new(
             identity::IdentityKind::Component,
             identity::TrustDomain::user(),
@@ -548,7 +518,7 @@ impl KernelApi for SimulatedKernel {
 
         let execution_id = metadata.execution_id;
 
-        // Store identity
+        // Store identity in kernel tables
         self.identity_table.insert(execution_id, metadata);
         self.task_to_identity.insert(task_id, execution_id);
 
