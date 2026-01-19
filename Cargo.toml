@@ -16,6 +16,12 @@ members = [
     "secure_boot",
     "developer_sdk",
     "services_gui_host",
+    "remote_ipc",
+    "distributed_storage",
+    "workspace_access",
+    "services_app_store",
+    "formal_verification",
+    "package_registry",
     "services_pipeline_executor",
     "services_fs_view",
     "services_input",
@@ -67,6 +73,12 @@ services_network = { path = "services_network" }
 secure_boot = { path = "secure_boot" }
 developer_sdk = { path = "developer_sdk" }
 services_gui_host = { path = "services_gui_host" }
+remote_ipc = { path = "remote_ipc" }
+distributed_storage = { path = "distributed_storage" }
+workspace_access = { path = "workspace_access" }
+services_app_store = { path = "services_app_store" }
+formal_verification = { path = "formal_verification" }
+package_registry = { path = "package_registry" }
 services_pipeline_executor = { path = "services_pipeline_executor" }
 services_fs_view = { path = "services_fs_view" }
 fs_view = { path = "fs_view" }

@@ -2,37 +2,39 @@
 
 ## Project Philosophy (Apply to Every Task)
 - **No legacy compatibility by design**: avoid POSIX assumptions (`fork`, `exec`, file descriptors, path-centric APIs).
-- **Testability first**: prefer logic that runs under `cargo test`; kernel-facing work should be minimal and deterministic.
-- **Modular and explicit**: use clear, typed interfaces; construct capabilities and services directly instead of relying on ambient state.
-- **Mechanism over policy**: keep core primitives small; push policy decisions into services.
-- **Message passing over shared state**: prefer structured messages with explicit schemas and correlation IDs.
-- **Clean, modern, testable code**: keep implementations readable, small, and well-covered by fast, deterministic tests.
+- **Testability first**: logic should run under `cargo test`; keep kernel-facing work minimal and deterministic.
+- **Modular and explicit**: use capabilities, explicit construction, and typed messages—no ambient authority.
+- **Mechanism over policy**: primitives live in the kernel; services implement policy in user space.
+- **Human-readable system**: small crates, clear names, minimal `unsafe`, and documentation that explains *why*.
+- **Clean, modern, testable code**: readable implementations with fast, deterministic tests.
 
 ## Project Structure & Module Organization
-PandaGen is a Rust workspace. Crates live at the repo root (e.g., `core_types/`, `ipc/`, `kernel_api/`, `sim_kernel/`, `hal/`, `services_*`, `input_types/`, `view_types/`, `cli_console/`, `pandagend/`). Cross-cutting docs live in `docs/`, phase retrospectives in `PHASE*_SUMMARY.md`, and runnable examples in `examples/`. Integration-style suites are isolated in `tests_resilience/`, `tests_pipelines/`, and `contract_tests/`.
+PandaGen is a Rust workspace with crates at the repo root. Core building blocks live in `core_types/`, `ipc/`, `kernel_api/`, and `sim_kernel/`. Hardware abstractions are in `hal/` and `hal_x86_64/`. Services and hosts follow the `services_*` pattern (e.g., `services_storage/`, `services_network/`, `services_gui_host/`, `services_remote_ui_host/`). Higher-level systems include `packages/`, `package_registry/`, `remote_ipc/`, `distributed_storage/`, `workspace_access/`, and `formal_verification/`. Docs are in `docs/`, phase retrospectives in `PHASE*_SUMMARY.md`, examples in `examples/`, and integration-style tests in `contract_tests/`, `tests_resilience/`, and `tests_pipelines/`.
 
 ## Build, Test, and Development Commands
-- `cargo build` — build the full workspace.
-- `cargo test` — run the default test suite.
-- `cargo test --all` — run every crate’s tests, including integration suites.
-- `cargo fmt --check` — verify formatting (Rustfmt defaults).
-- `cargo clippy -- -D warnings` — lint with warnings treated as errors.
+- `cargo build` — build the workspace.
+- `cargo test` — run default tests.
+- `cargo test --all` — run all workspace tests.
+- `cargo test -p sim_kernel` — run a focused crate’s tests.
+- `cargo fmt --check` — formatting check.
+- `cargo clippy -- -D warnings` — lint with warnings as errors.
 
 ## Coding Style & Naming Conventions
-- Rust 2021 edition; use standard Rustfmt output (4-space indentation).
+- Rust 2021; Rustfmt defaults (4-space indentation).
 - Naming: `snake_case` for modules/functions, `CamelCase` for types/traits, `SCREAMING_SNAKE_CASE` for constants.
-- Prefer small, testable modules and explicit capability-driven APIs consistent with the project philosophy.
+- Prefer explicit capability-driven APIs and typed message schemas; avoid hidden global state or implicit privilege.
 
 ## Testing Guidelines
-- Use the built-in Rust test harness; keep tests deterministic and fast.
-- When possible, exercise services through the simulated kernel (`sim_kernel/`) instead of external dependencies.
-- Name tests descriptively (e.g., `test_pipeline_executes_steps`) and keep new coverage close to the crate being changed.
+- Use the Rust test harness; keep tests deterministic and fast.
+- Prefer `sim_kernel/` and in-process services over external dependencies.
+- Name tests descriptively (e.g., `test_scheduler_preempts_on_budget`).
+- Add tests alongside new logic and validate edge cases.
 
 ## Commit & Pull Request Guidelines
-- Commit subjects are short, imperative, and sentence case (e.g., “Add timer device trait”).
-- Use phase-scoped prefixes when relevant (e.g., “Phase 23: Integrate scheduler”).
-- PRs should include a clear description, test results, and doc updates when behavior changes. Link related issues if applicable.
+- Commits are short and imperative; common patterns include `Phase N: ...`, `feat: ...`, or `Add ...`.
+- PRs should include a clear description, tests run, and doc/phase-summary updates when behavior changes.
+- Include screenshots only for UI/UX changes.
 
 ## Documentation Expectations
-- Update `docs/` or the relevant `PHASE*_SUMMARY.md` when introducing new subsystems or design decisions.
-- Keep public APIs documented with rationale (“why”) in addition to “what”.
+- Update `docs/` and the relevant `PHASE*_SUMMARY.md` when adding subsystems or revising design.
+- Document public APIs with rationale (the “why”), not just behavior.
