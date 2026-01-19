@@ -19,6 +19,7 @@
 //! - Enforces retry policies with backoff
 
 use kernel_api::{Duration, KernelApi};
+use lifecycle::{CancellationToken, Deadline};
 use pipeline::{
     ExecutionTrace, PayloadSchemaId, PipelineError, PipelineExecutionResult, PipelineSpec,
     StageExecutionResult, StageResult, StageTraceEntry, TypedPayload,
@@ -79,6 +80,7 @@ impl PipelineExecutor {
     /// This is the main orchestration logic:
     /// 1. Validate pipeline
     /// 2. For each stage:
+    ///    - Check cancellation and timeout
     ///    - Check required capabilities
     ///    - Invoke handler (with retry)
     ///    - Update capability pool
@@ -89,9 +91,26 @@ impl PipelineExecutor {
         kernel: &mut K,
         spec: &PipelineSpec,
         initial_input: TypedPayload,
+        cancellation_token: CancellationToken,
     ) -> Result<(TypedPayload, ExecutionTrace), ExecutorError> {
         // Validate pipeline
         spec.validate()?;
+
+        // Check cancellation before starting
+        if cancellation_token.is_cancelled() {
+            let mut trace = ExecutionTrace::new(spec.id);
+            let reason = cancellation_token
+                .reason()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            trace.set_final_result(PipelineExecutionResult::Cancelled {
+                stage_name: "before_start".to_string(),
+                reason,
+            });
+            return Err(ExecutorError::KernelError(
+                "Pipeline cancelled before start".to_string(),
+            ));
+        }
 
         // Validate initial input schema
         if initial_input.schema_id != spec.initial_input_schema {
@@ -101,11 +120,46 @@ impl PipelineExecutor {
             });
         }
 
+        // Calculate pipeline deadline if timeout is specified
+        let pipeline_deadline = spec
+            .timeout_ms
+            .map(|ms| Deadline::at(kernel.now() + Duration::from_millis(ms)));
+
         let mut trace = ExecutionTrace::new(spec.id);
         let mut current_input = initial_input;
 
         // Execute each stage in sequence
         for stage in &spec.stages {
+            // Check cancellation before each stage
+            if cancellation_token.is_cancelled() {
+                let reason = cancellation_token
+                    .reason()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                trace.set_final_result(PipelineExecutionResult::Cancelled {
+                    stage_name: stage.name.clone(),
+                    reason: reason.clone(),
+                });
+                return Err(ExecutorError::KernelError(format!(
+                    "Pipeline cancelled at stage {}: {}",
+                    stage.name, reason
+                )));
+            }
+
+            // Check pipeline deadline
+            if let Some(deadline) = &pipeline_deadline {
+                if deadline.has_passed(kernel.now()) {
+                    trace.set_final_result(PipelineExecutionResult::Cancelled {
+                        stage_name: stage.name.clone(),
+                        reason: "pipeline timeout".to_string(),
+                    });
+                    return Err(ExecutorError::KernelError(format!(
+                        "Pipeline timed out at stage {}",
+                        stage.name
+                    )));
+                }
+            }
+
             // Check required capabilities
             for &cap_id in &stage.required_capabilities {
                 if !self.has_capability(cap_id) {
@@ -121,8 +175,13 @@ impl PipelineExecutor {
             }
 
             // Execute stage with retry
-            let stage_result =
-                self.execute_stage_with_retry(kernel, stage, current_input.clone(), &mut trace)?;
+            let stage_result = self.execute_stage_with_retry(
+                kernel,
+                stage,
+                current_input.clone(),
+                &mut trace,
+                &cancellation_token,
+            )?;
 
             match stage_result {
                 StageResult::Success {
@@ -154,6 +213,17 @@ impl PipelineExecutor {
                         error
                     )));
                 }
+                StageResult::Cancelled { reason } => {
+                    // Stage was cancelled
+                    trace.set_final_result(PipelineExecutionResult::Cancelled {
+                        stage_name: stage.name.clone(),
+                        reason: reason.clone(),
+                    });
+                    return Err(ExecutorError::KernelError(format!(
+                        "Stage cancelled: {}",
+                        reason
+                    )));
+                }
             }
         }
 
@@ -176,11 +246,35 @@ impl PipelineExecutor {
         stage: &pipeline::StageSpec,
         input: TypedPayload,
         trace: &mut ExecutionTrace,
+        cancellation_token: &CancellationToken,
     ) -> Result<StageResult, ExecutorError> {
         let retry_policy = &stage.retry_policy;
         let mut attempt = 0;
 
+        // Calculate stage deadline if timeout is specified
+        let stage_deadline = stage
+            .timeout_ms
+            .map(|ms| Deadline::at(kernel.now() + Duration::from_millis(ms)));
+
         loop {
+            // Check cancellation before each attempt
+            if cancellation_token.is_cancelled() {
+                let reason = cancellation_token
+                    .reason()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                return Ok(StageResult::Cancelled { reason });
+            }
+
+            // Check stage deadline
+            if let Some(deadline) = &stage_deadline {
+                if deadline.has_passed(kernel.now()) {
+                    return Ok(StageResult::Cancelled {
+                        reason: "stage timeout".to_string(),
+                    });
+                }
+            }
+
             let start_time = kernel.now();
             let start_time_ms = start_time.as_nanos() / 1_000_000;
 
@@ -205,6 +299,9 @@ impl PipelineExecutor {
                 StageResult::Retryable { error } => StageExecutionResult::Retrying {
                     error: error.clone(),
                 },
+                StageResult::Cancelled { reason } => StageExecutionResult::Cancelled {
+                    reason: reason.clone(),
+                },
             };
 
             trace.add_entry(StageTraceEntry {
@@ -222,6 +319,7 @@ impl PipelineExecutor {
             match result {
                 StageResult::Success { .. } => return Ok(result),
                 StageResult::Failure { .. } => return Ok(result),
+                StageResult::Cancelled { .. } => return Ok(result),
                 StageResult::Retryable { error } => {
                     // Check if we've exhausted retries
                     // attempt 0 = first try, attempt 1 = first retry, etc.
@@ -323,7 +421,8 @@ mod tests {
             vec![],
         );
 
-        let result = executor.execute(&mut mock_kernel, &spec, input);
+        let token = CancellationToken::none();
+        let result = executor.execute(&mut mock_kernel, &spec, input, token);
         assert!(result.is_err());
     }
 

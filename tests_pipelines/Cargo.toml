@@ -10,6 +10,7 @@ pipeline = { workspace = true }
 services_pipeline_executor = { workspace = true }
 core_types = { workspace = true }
 kernel_api = { workspace = true }
+lifecycle = { workspace = true }
 sim_kernel = { workspace = true }
 ipc = { workspace = true }
 services_storage = { workspace = true }
