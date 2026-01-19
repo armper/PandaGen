@@ -19,6 +19,7 @@
 
 pub mod capability;
 pub mod ids;
+pub mod memory;
 pub mod storage_schema;
 
 pub use capability::{
@@ -26,4 +27,8 @@ pub use capability::{
     CapabilityMetadata, CapabilityStatus, CapabilityTransfer,
 };
 pub use ids::{ServiceId, TaskId};
+pub use memory::{
+    AddressSpace, AddressSpaceCap, AddressSpaceId, MemoryAccessType, MemoryBacking, MemoryError,
+    MemoryPerms, MemoryRegion, MemoryRegionCap, MemoryRegionId,
+};
 pub use storage_schema::{MigrationLineage, ObjectSchemaId, ObjectSchemaVersion};

@@ -21,6 +21,7 @@
 //! This is not a "toy" or "mock" - it's a full implementation of the
 //! kernel API that happens to run in-process for testing.
 
+pub mod address_space;
 pub mod capability_audit;
 pub mod fault_injection;
 pub mod policy_audit;
@@ -30,8 +31,9 @@ pub mod test_utils;
 pub mod timer;
 
 use core_types::{
-    Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata, CapabilityStatus, ServiceId,
-    TaskId,
+    AddressSpaceCap, Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata,
+    CapabilityStatus, MemoryAccessType, MemoryError, MemoryPerms, MemoryRegion, MemoryRegionCap,
+    ServiceId, TaskId,
 };
 use fault_injection::FaultInjector;
 use hal::TimerDevice;
@@ -86,6 +88,8 @@ pub struct SimulatedKernel {
     current_receive_task: Option<TaskId>,
     /// Preemptive scheduler (Phase 23)
     scheduler: scheduler::Scheduler,
+    /// Address space manager (Phase 24)
+    address_space_manager: address_space::AddressSpaceManager,
 }
 
 #[derive(Debug)]
@@ -144,6 +148,7 @@ impl SimulatedKernel {
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
             scheduler: scheduler::Scheduler::new(),
+            address_space_manager: address_space::AddressSpaceManager::new(),
         }
     }
 
@@ -718,6 +723,11 @@ impl SimulatedKernel {
             };
             self.exit_notifications.push(notification);
 
+            // Phase 24: Destroy address space
+            let _ = self
+                .address_space_manager
+                .destroy_address_space(execution_id, self.current_time.as_nanos());
+
             // Remove from task_to_identity mapping
             self.task_to_identity.remove(&task_id);
             // Note: we keep the identity metadata for audit purposes
@@ -1160,7 +1170,142 @@ impl SimulatedKernel {
         // Phase 23: Enqueue task in scheduler
         self.scheduler.enqueue(task_id);
 
+        // Phase 24: Create address space for this task
+        // Result is intentionally discarded - address space creation cannot fail
+        // in current simulation implementation. The AddressSpaceCap is stored
+        // internally and can be retrieved via create_address_space() later.
+        let _ = self
+            .address_space_manager
+            .create_address_space(execution_id, self.current_time.as_nanos());
+
         Ok((TaskHandle::new(task_id), execution_id))
+    }
+
+    // ============================================================================
+    // Phase 24: Memory Management APIs
+    // ============================================================================
+
+    /// Creates a new address space for the given execution
+    ///
+    /// This grants the execution an AddressSpaceCap that allows it to allocate
+    /// memory regions within its private address space.
+    ///
+    /// ## Isolation Guarantee
+    ///
+    /// Each address space is isolated by default. Cross-space access requires
+    /// explicit delegation of MemoryRegionCap.
+    pub fn create_address_space(
+        &mut self,
+        execution_id: ExecutionId,
+    ) -> Result<AddressSpaceCap, MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        Ok(self
+            .address_space_manager
+            .create_address_space(execution_id, timestamp_nanos))
+    }
+
+    /// Allocates a memory region within an address space
+    ///
+    /// Requires a valid AddressSpaceCap.
+    /// Returns a MemoryRegionCap that grants access to the region.
+    ///
+    /// ## Budget Enforcement
+    ///
+    /// This consumes MemoryUnits from the execution's budget (if budget is set).
+    /// If the budget is exhausted, allocation fails.
+    pub fn allocate_region(
+        &mut self,
+        space_cap: &AddressSpaceCap,
+        size_bytes: u64,
+        permissions: MemoryPerms,
+        backing: core_types::MemoryBacking,
+        caller_execution_id: ExecutionId,
+    ) -> Result<MemoryRegionCap, MemoryError> {
+        // Check if size is valid
+        if size_bytes == 0 {
+            return Err(MemoryError::InvalidRegionSize(0));
+        }
+
+        // Check memory budget (if set)
+        if let Some(identity) = self.identity_table.get_mut(&caller_execution_id) {
+            if let Some(budget) = identity.budget {
+                if let Some(limit) = budget.memory_units {
+                    // Round up to nearest page (4096 bytes)
+                    let units_needed = resources::MemoryUnits::new(size_bytes.div_ceil(4096));
+                    let available = limit.saturating_sub(identity.usage.memory_units);
+
+                    if units_needed > available {
+                        return Err(MemoryError::BudgetExhausted {
+                            requested: units_needed.0,
+                            available: available.0,
+                        });
+                    }
+
+                    // Consume budget
+                    identity.usage.memory_units =
+                        identity.usage.memory_units.saturating_add(units_needed);
+                }
+            }
+        }
+
+        let region = MemoryRegion::new(size_bytes, permissions, backing);
+        let timestamp_nanos = self.current_time.as_nanos();
+
+        self.address_space_manager.allocate_region(
+            space_cap,
+            region,
+            caller_execution_id,
+            timestamp_nanos,
+        )
+    }
+
+    /// Checks if an access to a region is allowed
+    ///
+    /// Requires a valid MemoryRegionCap.
+    /// Checks that the access type matches the region's permissions.
+    ///
+    /// ## Access Control
+    ///
+    /// - Read: Requires Read permission
+    /// - Write: Requires Write permission
+    /// - Execute: Requires Execute permission
+    pub fn access_region(
+        &mut self,
+        region_cap: &MemoryRegionCap,
+        access_type: MemoryAccessType,
+        caller_execution_id: ExecutionId,
+    ) -> Result<(), MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        self.address_space_manager.access_region(
+            region_cap,
+            access_type,
+            caller_execution_id,
+            timestamp_nanos,
+        )
+    }
+
+    /// Activates an address space (context switch)
+    ///
+    /// This is called by the scheduler when switching tasks.
+    /// Records an AddressSpaceActivated audit event.
+    pub fn activate_address_space(&mut self, execution_id: ExecutionId) -> Result<(), MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        self.address_space_manager
+            .activate_space(execution_id, timestamp_nanos)
+    }
+
+    /// Returns the address space audit log (test-only)
+    pub fn address_space_audit(&self) -> &address_space::AddressSpaceAuditLog {
+        self.address_space_manager.audit_log()
+    }
+
+    /// Returns the address space for an execution (test-only)
+    pub fn get_address_space(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Option<&core_types::AddressSpace> {
+        self.address_space_manager
+            .get_space_for_execution(execution_id)
     }
 }
 
@@ -1199,6 +1344,12 @@ impl KernelApi for SimulatedKernel {
 
         // Phase 23: Enqueue task in scheduler
         self.scheduler.enqueue(task_id);
+
+        // Phase 24: Create address space for this task
+        // Result intentionally discarded (see spawn_task_with_identity for details)
+        let _ = self
+            .address_space_manager
+            .create_address_space(execution_id, self.current_time.as_nanos());
 
         Ok(TaskHandle::new(task_id))
     }
@@ -2306,5 +2457,253 @@ mod tests {
             audit2.len(),
             "Should have same number of scheduling events"
         );
+    }
+
+    // ============================================================================
+    // Phase 24: Memory Management Integration Tests
+    // ============================================================================
+
+    #[test]
+    fn test_memory_address_space_created_per_task() {
+        let mut kernel = SimulatedKernel::new();
+
+        // Spawn a task
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("test-task".to_string()))
+            .unwrap();
+        let exec_id = kernel.get_task_identity(handle.task_id).unwrap();
+
+        // Verify address space was created
+        let space = kernel.get_address_space(exec_id);
+        assert!(space.is_some(), "Address space should be created for task");
+
+        // Verify audit event
+        let audit = kernel.address_space_audit();
+        assert!(
+            audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::SpaceCreated { .. }))
+        );
+    }
+
+    #[test]
+    fn test_memory_region_allocation() {
+        let mut kernel = SimulatedKernel::new();
+
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("test-task".to_string()))
+            .unwrap();
+        let exec_id = kernel.get_task_identity(handle.task_id).unwrap();
+
+        // Create address space cap
+        let space_cap = kernel.create_address_space(exec_id).unwrap();
+
+        // Allocate a region
+        let region_cap = kernel
+            .allocate_region(
+                &space_cap,
+                4096,
+                MemoryPerms::read_write(),
+                core_types::MemoryBacking::Anonymous,
+                exec_id,
+            )
+            .unwrap();
+
+        // Verify region is in address space
+        let space = kernel.get_address_space(exec_id).unwrap();
+        assert_eq!(space.region_count(), 1);
+        assert!(space.find_region(region_cap.region_id).is_some());
+    }
+
+    #[test]
+    fn test_memory_region_permission_enforcement() {
+        let mut kernel = SimulatedKernel::new();
+
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("test-task".to_string()))
+            .unwrap();
+        let exec_id = kernel.get_task_identity(handle.task_id).unwrap();
+
+        let space_cap = kernel.create_address_space(exec_id).unwrap();
+
+        // Allocate read-only region
+        let region_cap = kernel
+            .allocate_region(
+                &space_cap,
+                4096,
+                MemoryPerms::read_only(),
+                core_types::MemoryBacking::Anonymous,
+                exec_id,
+            )
+            .unwrap();
+
+        // Read should be allowed
+        assert!(kernel
+            .access_region(&region_cap, MemoryAccessType::Read, exec_id)
+            .is_ok());
+
+        // Write should be denied
+        let result = kernel.access_region(&region_cap, MemoryAccessType::Write, exec_id);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            MemoryError::PermissionDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn test_memory_cross_task_isolation() {
+        let mut kernel = SimulatedKernel::new();
+
+        // Spawn two tasks
+        let handle1 = kernel
+            .spawn_task(TaskDescriptor::new("task1".to_string()))
+            .unwrap();
+        let handle2 = kernel
+            .spawn_task(TaskDescriptor::new("task2".to_string()))
+            .unwrap();
+
+        let exec_id1 = kernel.get_task_identity(handle1.task_id).unwrap();
+        let exec_id2 = kernel.get_task_identity(handle2.task_id).unwrap();
+
+        // Task 1 creates an address space and allocates a region
+        let space_cap1 = kernel.create_address_space(exec_id1).unwrap();
+        let region_cap1 = kernel
+            .allocate_region(
+                &space_cap1,
+                4096,
+                MemoryPerms::read_write(),
+                core_types::MemoryBacking::Anonymous,
+                exec_id1,
+            )
+            .unwrap();
+
+        // Task 1 can access its own region
+        assert!(kernel
+            .access_region(&region_cap1, MemoryAccessType::Read, exec_id1)
+            .is_ok());
+
+        // Task 2 CANNOT access task 1's region (no capability)
+        let result = kernel.access_region(&region_cap1, MemoryAccessType::Read, exec_id2);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MemoryError::NoCapability(_)));
+    }
+
+    #[test]
+    fn test_memory_budget_exhaustion() {
+        use resources::{MemoryUnits, ResourceBudget};
+
+        let mut kernel = SimulatedKernel::new();
+
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("test-task".to_string()))
+            .unwrap();
+        let exec_id = kernel.get_task_identity(handle.task_id).unwrap();
+
+        // Set a small memory budget (1 page = 4096 bytes = 1 unit)
+        let budget = ResourceBudget::unlimited().with_memory_units(MemoryUnits::new(2)); // Only 2 units available
+
+        if let Some(identity) = kernel.get_identity_mut(exec_id) {
+            identity.budget = Some(budget);
+        }
+
+        let space_cap = kernel.create_address_space(exec_id).unwrap();
+
+        // Allocate 1 page (should succeed - uses 1 unit)
+        let result1 = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_write(),
+            core_types::MemoryBacking::Anonymous,
+            exec_id,
+        );
+        assert!(result1.is_ok());
+
+        // Allocate another page (should succeed - uses 1 more unit, total 2)
+        let result2 = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_write(),
+            core_types::MemoryBacking::Anonymous,
+            exec_id,
+        );
+        assert!(result2.is_ok());
+
+        // Try to allocate one more (should fail - budget exhausted)
+        let result3 = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_write(),
+            core_types::MemoryBacking::Anonymous,
+            exec_id,
+        );
+        assert!(result3.is_err());
+        assert!(matches!(
+            result3.unwrap_err(),
+            MemoryError::BudgetExhausted { .. }
+        ));
+    }
+
+    #[test]
+    fn test_memory_address_space_cleanup_on_task_termination() {
+        let mut kernel = SimulatedKernel::new();
+
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("test-task".to_string()))
+            .unwrap();
+        let exec_id = kernel.get_task_identity(handle.task_id).unwrap();
+
+        // Verify address space exists
+        assert!(kernel.get_address_space(exec_id).is_some());
+
+        // Terminate task
+        kernel.terminate_task(handle.task_id);
+
+        // Verify address space was destroyed
+        assert!(kernel.get_address_space(exec_id).is_none());
+
+        // Verify audit event
+        let audit = kernel.address_space_audit();
+        assert!(audit
+            .has_event(|e| matches!(e, address_space::AddressSpaceEvent::SpaceDestroyed { .. })));
+    }
+
+    #[test]
+    fn test_memory_region_sharing_via_delegation() {
+        // This test demonstrates the CORRECT way to share memory: explicit delegation
+        let mut kernel = SimulatedKernel::new();
+
+        let handle1 = kernel
+            .spawn_task(TaskDescriptor::new("task1".to_string()))
+            .unwrap();
+        let handle2 = kernel
+            .spawn_task(TaskDescriptor::new("task2".to_string()))
+            .unwrap();
+
+        let exec_id1 = kernel.get_task_identity(handle1.task_id).unwrap();
+        let exec_id2 = kernel.get_task_identity(handle2.task_id).unwrap();
+
+        // Task 1 gets explicit AddressSpaceCap to allocate regions
+        // Note: Address space was already created automatically on spawn,
+        // this just gets a capability to manage it
+        let space_cap1 = kernel.create_address_space(exec_id1).unwrap();
+        let region_cap1 = kernel
+            .allocate_region(
+                &space_cap1,
+                4096,
+                MemoryPerms::read_write(),
+                core_types::MemoryBacking::Shared,
+                exec_id1,
+            )
+            .unwrap();
+
+        // Task 2 cannot access it initially
+        assert!(kernel
+            .access_region(&region_cap1, MemoryAccessType::Read, exec_id2)
+            .is_err());
+
+        // To share, Task 1 would delegate the MemoryRegionCap to Task 2 via:
+        // kernel.delegate_capability(region_cap1.cap_id, task1_id, task2_id)?;
+        //
+        // Capability delegation is implemented in Phase 3 but not yet integrated
+        // with MemoryRegionCap. For now, we verify isolation is maintained.
     }
 }
