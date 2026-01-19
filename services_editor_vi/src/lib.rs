@@ -32,7 +32,7 @@ pub mod render;
 pub mod state;
 
 pub use commands::CommandParser;
-pub use editor::{Editor, EditorError};
+pub use editor::{Editor, EditorAction, EditorError};
 pub use io::{DocumentHandle, OpenOptions};
 pub use render::EditorView;
 pub use state::{Cursor, EditorMode, EditorState, Position};
