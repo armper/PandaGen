@@ -24,6 +24,7 @@
 pub mod capability_audit;
 pub mod fault_injection;
 pub mod policy_audit;
+pub mod resource_audit;
 pub mod test_utils;
 
 use core_types::{
@@ -35,6 +36,7 @@ use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+use resources::CpuTicks;
 use std::collections::{HashMap, VecDeque};
 
 /// Simulated kernel state
@@ -68,6 +70,13 @@ pub struct SimulatedKernel {
     policy_engine: Option<Box<dyn PolicyEngine>>,
     /// Policy decision audit log (test-only)
     policy_audit: policy_audit::PolicyAuditLog,
+    /// Resource consumption audit log (test-only, Phase 12)
+    resource_audit: resource_audit::ResourceAuditLog,
+    /// Cancelled execution IDs (Phase 12)
+    cancelled_identities: HashMap<ExecutionId, String>,
+    /// Current task context for receive operations (Phase 12)
+    /// This is a workaround since KernelApi doesn't pass TaskId to receive_message
+    current_receive_task: Option<TaskId>,
 }
 
 #[derive(Debug)]
@@ -108,6 +117,9 @@ impl SimulatedKernel {
             exit_notifications: Vec::new(),
             policy_engine: None,
             policy_audit: policy_audit::PolicyAuditLog::new(),
+            resource_audit: resource_audit::ResourceAuditLog::new(),
+            cancelled_identities: HashMap::new(),
+            current_receive_task: None,
         }
     }
 
@@ -134,6 +146,218 @@ impl SimulatedKernel {
     /// Used in tests to verify policy decisions were made correctly.
     pub fn policy_audit(&self) -> &policy_audit::PolicyAuditLog {
         &self.policy_audit
+    }
+
+    /// Returns a reference to the resource audit log
+    ///
+    /// Phase 12: Used in tests to verify resource consumption and exhaustion.
+    pub fn resource_audit(&self) -> &resource_audit::ResourceAuditLog {
+        &self.resource_audit
+    }
+
+    /// Sets the current receive task context
+    ///
+    /// Phase 12: Workaround for KernelApi not passing TaskId to receive_message.
+    /// Call this before receive_message to enable budget enforcement for receives.
+    pub fn set_receive_context(&mut self, task_id: TaskId) {
+        self.current_receive_task = Some(task_id);
+    }
+
+    /// Clears the current receive task context
+    ///
+    /// Phase 12: Call this after receive_message to clean up context.
+    pub fn clear_receive_context(&mut self) {
+        self.current_receive_task = None;
+    }
+
+    /// Attempts to consume CPU ticks for an execution identity
+    ///
+    /// Phase 12: External enforcement point for CPU consumption.
+    /// Returns Err if budget is exhausted or identity is cancelled.
+    pub fn try_consume_cpu_ticks(
+        &mut self,
+        execution_id: ExecutionId,
+        amount: u64,
+    ) -> Result<(), KernelError> {
+        // Check if identity is cancelled
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "CpuTicks (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: "cpu_consumption".to_string(),
+            });
+        }
+
+        // Get identity metadata
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()), // No identity - backward compat
+        };
+
+        // Check if identity has a budget
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()), // No budget - unlimited
+        };
+
+        // Check current usage
+        let current_usage = identity.usage.cpu_ticks.0;
+
+        // Check if we would exceed the limit
+        if let Some(limit) = budget.cpu_ticks {
+            if current_usage + amount > limit.0 {
+                // Budget exhausted - cancel identity and fail
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "CpuTicks".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + amount,
+                        operation: "cpu_consumption".to_string(),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "CpuTicks".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "CpuTicks".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: "cpu_consumption".to_string(),
+                });
+            }
+        }
+
+        // Consume the CPU ticks
+        let before = current_usage;
+        identity
+            .usage
+            .consume_cpu_ticks(CpuTicks::new(amount));
+        let after = identity.usage.cpu_ticks.0;
+
+        // Record audit event
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::CpuConsumed {
+                execution_id,
+                amount,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Attempts to consume a pipeline stage for an execution identity
+    ///
+    /// Phase 12: External enforcement point for pipeline stage consumption.
+    /// Returns Err if budget is exhausted or identity is cancelled.
+    pub fn try_consume_pipeline_stage(
+        &mut self,
+        execution_id: ExecutionId,
+        stage_name: String,
+    ) -> Result<(), KernelError> {
+        // Check if identity is cancelled
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "PipelineStages (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("pipeline_stage:{}", stage_name),
+            });
+        }
+
+        // Get identity metadata
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()), // No identity - backward compat
+        };
+
+        // Check if identity has a budget
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()), // No budget - unlimited
+        };
+
+        // Check current usage
+        let current_usage = identity.usage.pipeline_stages.0;
+
+        // Check if we would exceed the limit
+        if let Some(limit) = budget.pipeline_stages {
+            if current_usage >= limit.0 {
+                // Budget exhausted - cancel identity and fail
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "PipelineStages".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("pipeline_stage:{}", stage_name),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "PipelineStages".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "PipelineStages".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("pipeline_stage:{}", stage_name),
+                });
+            }
+        }
+
+        // Consume the pipeline stage
+        let before = current_usage;
+        identity.usage.consume_pipeline_stage();
+        let after = identity.usage.pipeline_stages.0;
+
+        // Record audit event
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::PipelineStageConsumed {
+                execution_id,
+                stage_name,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Cancels an execution identity due to resource exhaustion
+    ///
+    /// Phase 12: Marks the identity as cancelled. Further operations for this
+    /// identity will be rejected.
+    fn cancel_identity(&mut self, execution_id: ExecutionId, reason: String) {
+        self.cancelled_identities
+            .insert(execution_id, reason.clone());
+
+        // Record in resource audit
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::CancelledDueToExhaustion {
+                execution_id,
+                resource_type: reason,
+            },
+        );
+    }
+
+    /// Checks if an execution identity is cancelled
+    ///
+    /// Phase 12: Returns true if the identity has been cancelled due to
+    /// resource exhaustion or other reasons.
+    fn is_identity_cancelled(&self, execution_id: ExecutionId) -> bool {
+        self.cancelled_identities.contains_key(&execution_id)
     }
 
     /// Evaluates policy for an event and context
@@ -545,6 +769,96 @@ impl SimulatedKernel {
         self.identity_table.get_mut(&exec_id)
     }
 
+    /// Phase 12: Attempts to consume a resource unit
+    ///
+    /// Checks budget, consumes resource, and records audit events.
+    /// Returns Err if budget is exhausted or identity is cancelled.
+    fn try_consume_message(
+        &mut self,
+        task_id: TaskId,
+        operation: resource_audit::MessageOperation,
+    ) -> Result<(), KernelError> {
+        // Get execution ID for this task
+        let execution_id = match self.task_to_identity.get(&task_id) {
+            Some(id) => *id,
+            None => {
+                // No identity associated - allow operation (backward compat)
+                return Ok(());
+            }
+        };
+
+        // Check if identity is cancelled
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "MessageCount (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("{:?}", operation),
+            });
+        }
+
+        // Get identity metadata
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()), // No identity - backward compat
+        };
+
+        // Check if identity has a budget
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()), // No budget - unlimited
+        };
+
+        // Check current usage
+        let current_usage = identity.usage.message_count.0;
+
+        // Check if we would exceed the limit
+        if let Some(limit) = budget.message_count {
+            if current_usage >= limit.0 {
+                // Budget exhausted - cancel identity and fail
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "MessageCount".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("{:?}", operation),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "MessageCount".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "MessageCount".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("{:?}", operation),
+                });
+            }
+        }
+
+        // Consume the message
+        let before = current_usage;
+        identity.usage.consume_message();
+        let after = identity.usage.message_count.0;
+
+        // Record audit event
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::MessageConsumed {
+                execution_id,
+                operation,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Spawns a task with explicit identity metadata
     ///
     /// This is for supervisors who need full control over child identity
@@ -673,13 +987,11 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
-        // TODO(Phase 11 - Future Work): Budget enforcement for message send
-        // To fully implement:
-        // 1. Add TaskId parameter to send_message in KernelApi trait
-        // 2. Check MessageCount budget for sender task
-        // 3. Consume one message unit on success
-        // 4. Return ResourceExhausted error if budget exceeded
-        // For now, message sending is unlimited (backwards compatible)
+        // Phase 12: Try to enforce message budget if source task is known
+        if let Some(source_task) = message.source {
+            self.try_consume_message(source_task, resource_audit::MessageOperation::Send)?;
+        }
+        // else: No source - backward compat, skip enforcement
 
         // Check for crash-on-send fault
         if let Some(ref mut injector) = self.fault_injector {
@@ -724,6 +1036,12 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         _timeout: Option<Duration>,
     ) -> Result<MessageEnvelope, KernelError> {
+        // Phase 12: Try to enforce message budget if receive context is set
+        if let Some(task_id) = self.current_receive_task {
+            self.try_consume_message(task_id, resource_audit::MessageOperation::Receive)?;
+        }
+        // else: No context - backward compat, skip enforcement
+
         // Check for crash-on-recv fault
         if let Some(ref mut injector) = self.fault_injector {
             if injector.should_crash_on_recv() {

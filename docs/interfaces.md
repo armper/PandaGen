@@ -2502,3 +2502,311 @@ All safety properties preserved:
 - No leaks: Budgets released on termination
 - No escalation: Child ≤ parent enforced
 - Explainable: Clear error messages with context
+
+---
+
+## Phase 12: Resource Enforcement Interface
+
+### Enforcement Points
+
+Phase 12 adds actual budget enforcement at execution boundaries.
+
+#### Message Operations
+
+**send_message** (MessageCount enforcement):
+```rust
+fn send_message(&mut self, channel: ChannelId, message: MessageEnvelope) 
+    -> Result<(), KernelError>
+```
+
+Enforcement:
+- Checks `message.source` TaskId (if present)
+- Looks up ExecutionId for source task
+- Checks MessageCount budget
+- Consumes 1 MessageCount unit **before** sending
+- Returns `ResourceBudgetExhausted` if limit reached
+- Cancels identity on exhaustion
+
+**receive_message** (MessageCount enforcement):
+```rust
+// Workaround for API limitation (no TaskId parameter)
+kernel.set_receive_context(task_id);
+let result = kernel.receive_message(channel, timeout)?;
+kernel.clear_receive_context();
+```
+
+Enforcement:
+- Uses `current_receive_task` context (if set)
+- Looks up ExecutionId for receiver task
+- Checks MessageCount budget
+- Consumes 1 MessageCount unit **before** receiving
+- Returns `ResourceBudgetExhausted` if limit reached
+
+#### CPU Operations
+
+**try_consume_cpu_ticks** (external enforcement):
+```rust
+pub fn try_consume_cpu_ticks(
+    &mut self,
+    execution_id: ExecutionId,
+    amount: u64,
+) -> Result<(), KernelError>
+```
+
+Enforcement:
+- Checks if identity is cancelled
+- Checks CpuTicks budget
+- Consumes `amount` CpuTicks units
+- Returns `ResourceBudgetExhausted` if would exceed limit
+- Cancels identity on exhaustion
+
+Usage:
+- Called by pipeline executors
+- Called by stage handlers
+- Called for simulated work
+- Deterministic consumption
+
+#### Pipeline Stages
+
+**try_consume_pipeline_stage** (external enforcement):
+```rust
+pub fn try_consume_pipeline_stage(
+    &mut self,
+    execution_id: ExecutionId,
+    stage_name: String,
+) -> Result<(), KernelError>
+```
+
+Enforcement:
+- Checks if identity is cancelled
+- Checks PipelineStages budget
+- Consumes 1 PipelineStages unit
+- Returns `ResourceBudgetExhausted` if limit reached
+- Records stage name in audit
+- Cancels identity on exhaustion
+
+### Error Types
+
+#### ResourceBudgetExhausted
+
+```rust
+KernelError::ResourceBudgetExhausted {
+    resource_type: String,  // "MessageCount", "CpuTicks", etc.
+    limit: u64,             // Budget limit
+    usage: u64,             // Current usage at failure
+    identity: String,       // ExecutionId that exhausted
+    operation: String,      // Operation that failed
+}
+```
+
+When to return:
+- Budget limit reached
+- Would exceed limit with this operation
+- Identity already cancelled (resource_type contains "cancelled")
+
+Error message format:
+```
+Resource budget exhausted: MessageCount limit=100, usage=100, 
+identity=exec:a1b2c3d4..., operation=send_message
+```
+
+### Resource Audit Log
+
+Phase 12 adds `ResourceAuditLog` for test visibility.
+
+#### Accessing the Audit Log
+
+```rust
+// Get audit log reference
+let audit = kernel.resource_audit();
+
+// Count specific events
+let message_count = audit.count_events(|e| matches!(
+    e,
+    ResourceEvent::MessageConsumed { .. }
+));
+
+// Check for exhaustion
+assert!(audit.has_event(|e| matches!(
+    e,
+    ResourceEvent::BudgetExhausted { .. }
+)));
+
+// Query by execution ID
+let entries = audit.entries_for_execution(execution_id);
+```
+
+#### Audit Events
+
+**MessageConsumed**:
+```rust
+ResourceEvent::MessageConsumed {
+    execution_id: ExecutionId,
+    operation: MessageOperation::Send,  // or Receive
+    before: u64,     // Usage before
+    after: u64,      // Usage after
+}
+```
+
+**CpuConsumed**:
+```rust
+ResourceEvent::CpuConsumed {
+    execution_id: ExecutionId,
+    amount: u64,     // Ticks consumed
+    before: u64,     // Usage before
+    after: u64,      // Usage after
+}
+```
+
+**PipelineStageConsumed**:
+```rust
+ResourceEvent::PipelineStageConsumed {
+    execution_id: ExecutionId,
+    stage_name: String,  // Stage identifier
+    before: u64,         // Usage before
+    after: u64,          // Usage after
+}
+```
+
+**BudgetExhausted**:
+```rust
+ResourceEvent::BudgetExhausted {
+    execution_id: ExecutionId,
+    resource_type: String,     // Which resource
+    limit: u64,                // Budget limit
+    attempted_usage: u64,      // What we tried to use
+    operation: String,         // What operation failed
+}
+```
+
+**CancelledDueToExhaustion**:
+```rust
+ResourceEvent::CancelledDueToExhaustion {
+    execution_id: ExecutionId,
+    resource_type: String,  // Which resource caused cancellation
+}
+```
+
+### Cancellation Integration
+
+Budget exhaustion triggers identity cancellation:
+
+```rust
+// After exhaustion, identity is cancelled
+if kernel.is_identity_cancelled(execution_id) {
+    // All further operations fail immediately
+}
+```
+
+Cancelled identity behavior:
+- All resource operations return `ResourceBudgetExhausted` with "cancelled" in type
+- No further consumption recorded
+- Deterministic (same exhaustion point every time)
+- Audit log records cancellation event
+
+### Testing Interface
+
+For tests that need resource enforcement:
+
+```rust
+use resources::{ResourceBudget, MessageCount, CpuTicks, PipelineStages};
+use sim_kernel::resource_audit;
+
+#[test]
+fn test_message_exhaustion() {
+    let mut kernel = SimulatedKernel::new();
+    
+    // Create task with limited budget
+    let budget = ResourceBudget::unlimited()
+        .with_message_count(MessageCount::new(10));
+    
+    let descriptor = TaskDescriptor::new("limited".to_string());
+    let (handle, exec_id) = kernel.spawn_task_with_identity(
+        descriptor,
+        IdentityKind::Component,
+        TrustDomain::user(),
+        None,
+        None,
+    )?;
+    
+    // Attach budget
+    if let Some(identity) = kernel.get_identity_mut(exec_id) {
+        *identity = identity.clone().with_budget(budget);
+    }
+    
+    // Consume until exhausted
+    let channel = kernel.create_channel()?;
+    for i in 0..10 {
+        let msg = create_message(handle.task_id);
+        kernel.send_message(channel, msg)?;  // OK
+    }
+    
+    // Next send fails
+    let msg = create_message(handle.task_id);
+    let result = kernel.send_message(channel, msg);
+    assert!(matches!(result, Err(KernelError::ResourceBudgetExhausted { .. })));
+    
+    // Verify audit
+    let audit = kernel.resource_audit();
+    assert_eq!(audit.count_events(|e| matches!(
+        e, resource_audit::ResourceEvent::BudgetExhausted { .. }
+    )), 1);
+}
+```
+
+### Design Guidelines
+
+**For Enforcement Users (Tests)**:
+1. Create identities with explicit budgets
+2. Attach budgets via `get_identity_mut`
+3. Consume resources through normal operations
+4. Assert on `ResourceBudgetExhausted` errors
+5. Verify audit log for deterministic consumption
+
+**For External Consumers (Pipelines)**:
+1. Use `try_consume_cpu_ticks` for simulated work
+2. Use `try_consume_pipeline_stage` for stage entry
+3. Handle exhaustion by aborting pipeline
+4. Record exhaustion in execution trace
+5. Don't retry after exhaustion (cancelled identity)
+
+**For Kernel Implementers**:
+1. Check budget **before** operation takes effect
+2. Consume **exactly** the documented amount
+3. Record audit events for test visibility
+4. Cancel identity on exhaustion
+5. Return detailed error with context
+
+### Backwards Compatibility
+
+Phase 12 maintains backwards compatibility:
+
+- Identities without budgets: unlimited (no enforcement)
+- Messages without source: no enforcement on send
+- Receives without context: no enforcement on receive
+- Old tests: continue to work (no budgets = no limits)
+
+Enforcement is **opt-in** via explicit budget attachment.
+
+### Integration Summary
+
+Complete enforcement lifecycle:
+
+```
+1. Create identity with budget
+   └─> ResourceBudget attached to IdentityMetadata
+
+2. Operation consumes resource
+   └─> Check budget → Consume → Record audit
+   
+3. Budget exhausted
+   └─> Fail operation → Cancel identity → Record exhaustion
+   
+4. Further operations
+   └─> Fail immediately (cancelled)
+   
+5. Verify in tests
+   └─> Check audit log → Assert on errors
+```
+
+All operations deterministic, all events auditable, all failures explicit.

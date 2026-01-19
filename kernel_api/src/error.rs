@@ -41,7 +41,27 @@ pub enum KernelError {
     #[error("Invalid capability: {0}")]
     InvalidCapability(String),
 
-    /// Resource exhausted
+    /// Resource exhausted (legacy - use ResourceBudgetExhausted for detailed errors)
     #[error("Resource exhausted: {0}")]
     ResourceExhausted(String),
+
+    /// Resource budget exceeded (pre-exhaustion warning)
+    #[error("Resource budget exceeded: {resource_type} limit={limit}, usage={usage}, identity={identity}, operation={operation}")]
+    ResourceBudgetExceeded {
+        resource_type: String,
+        limit: u64,
+        usage: u64,
+        identity: String,
+        operation: String,
+    },
+
+    /// Resource budget exhausted (hard limit reached)
+    #[error("Resource budget exhausted: {resource_type} limit={limit}, usage={usage}, identity={identity}, operation={operation}")]
+    ResourceBudgetExhausted {
+        resource_type: String,
+        limit: u64,
+        usage: u64,
+        identity: String,
+        operation: String,
+    },
 }

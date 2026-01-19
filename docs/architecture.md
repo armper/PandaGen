@@ -2384,3 +2384,331 @@ Phase 11 provides:
 - **Explainable errors**: Clear resource type, limit, usage
 
 This completes the authority model: capabilities (what) + budgets (how much) = controlled execution.
+
+---
+
+## Phase 12: Deterministic Resource Enforcement & Exhaustion Semantics
+
+**Status**: Phase 12 (Current)
+
+**Goal**: Turn resource budgets from models into enforced constraints with deterministic failure semantics.
+
+### Philosophy: Budgets Must Bite
+
+Phase 11 provided budget *models* and attachment to identities. Phase 12 makes limits **real**.
+
+Core principles:
+- **No throttling**: Never slow down on approaching limit
+- **No fairness**: Not a scheduler, just enforcement
+- **No retries**: Exhaustion fails immediately
+- **Deterministic failure**: Same operations → same outcome
+- **Explicit errors**: Know exactly what exhausted and why
+- **Testability first**: All enforcement runs under SimKernel
+
+### What We Don't Do
+
+Phase 12 explicitly avoids:
+- ❌ Scheduling or preemption
+- ❌ Async runtimes or event loops
+- ❌ Throttling or "slow down" behavior  
+- ❌ POSIX-style soft/hard limits (ulimits)
+- ❌ Best-effort survival (e.g., "try again later")
+- ❌ Silent drops or degradation
+
+If behavior feels like mercy or retry, it's wrong. This phase is about **limits**, not grace.
+
+### Enforcement Points
+
+Resources are consumed at real execution boundaries:
+
+#### Message Operations
+```rust
+// Send: consumes MessageCount before sending
+kernel.send_message(channel, message)?;
+// If budget exhausted: Err(ResourceBudgetExhausted)
+// Message source TaskId determines which identity
+
+// Receive: consumes MessageCount before receiving
+kernel.set_receive_context(task_id); // Phase 12 workaround
+kernel.receive_message(channel, timeout)?;
+// If budget exhausted: Err(ResourceBudgetExhausted)
+```
+
+Each send/receive consumes exactly **one** MessageCount unit.
+
+#### CPU Operations
+```rust
+// External components (e.g., pipeline executor) consume CPU
+kernel.try_consume_cpu_ticks(execution_id, amount)?;
+// If budget exhausted: Err(ResourceBudgetExhausted)
+```
+
+Used for simulated execution steps, handler invocations, or stage processing.
+
+#### Pipeline Stages
+```rust
+// Consume PipelineStages on stage entry
+kernel.try_consume_pipeline_stage(execution_id, stage_name)?;
+// If budget exhausted: Err(ResourceBudgetExhausted)
+```
+
+Each stage entry consumes exactly **one** PipelineStages unit.
+
+### Exhaustion Semantics
+
+When a budget limit is reached:
+
+1. **Immediate Failure**: Operation aborts before taking effect
+2. **No Partial Effects**: Transaction-like semantics
+3. **Identity Cancellation**: Exhausted identity is marked cancelled
+4. **Future Operations Rejected**: All subsequent operations fail instantly
+
+```rust
+// First exhaustion
+let result = kernel.send_message(channel, msg);
+assert!(matches!(result, Err(KernelError::ResourceBudgetExhausted { .. })));
+
+// Subsequent operations fail immediately (cancelled)
+let result2 = kernel.send_message(channel, msg2);
+assert!(matches!(result2, Err(KernelError::ResourceBudgetExhausted { 
+    resource_type, .. 
+}) if resource_type.contains("cancelled")));
+```
+
+### Error Types
+
+#### ResourceBudgetExhausted
+```rust
+KernelError::ResourceBudgetExhausted {
+    resource_type: "MessageCount".to_string(),
+    limit: 10,
+    usage: 10,
+    identity: "exec:a1b2c3...".to_string(),
+    operation: "send_message".to_string(),
+}
+```
+
+Includes:
+- **resource_type**: Which resource (MessageCount, CpuTicks, etc.)
+- **limit**: Budget limit that was exceeded
+- **usage**: Current consumption at failure
+- **identity**: Which ExecutionId exhausted
+- **operation**: What operation failed
+
+#### ResourceBudgetExceeded
+Legacy variant for warnings (not currently used for hard enforcement).
+
+### Cancellation Integration
+
+Budget exhaustion **triggers cancellation**:
+
+```rust
+// Exhaustion cancels identity
+assert!(kernel.is_identity_cancelled(execution_id));
+
+// Cancelled identities consume no further resources
+let result = kernel.try_consume_cpu_ticks(execution_id, 1);
+assert!(result.is_err()); // "cancelled" in error message
+```
+
+Properties:
+- Cancellation prevents further consumption
+- No double-counting (consume once, fail once)
+- Deterministic (same inputs → same cancellation point)
+- Auditable (cancellation recorded in resource audit log)
+
+### Audit & Observability
+
+Phase 12 adds **ResourceAuditLog** (test-visible only):
+
+```rust
+// Check resource consumption
+let audit = kernel.resource_audit();
+
+// Count consumption events
+audit.count_events(|e| matches!(e, ResourceEvent::MessageConsumed { .. }));
+
+// Check exhaustion events
+audit.has_event(|e| matches!(e, ResourceEvent::BudgetExhausted { .. }));
+
+// Check cancellation
+audit.has_event(|e| matches!(e, ResourceEvent::CancelledDueToExhaustion { .. }));
+
+// Query by identity
+let entries = audit.entries_for_execution(execution_id);
+```
+
+Audit events:
+- **MessageConsumed**: Send/receive with before/after usage
+- **CpuConsumed**: CPU consumption with amount
+- **StorageOpConsumed**: Storage operation (future)
+- **PipelineStageConsumed**: Stage entry
+- **BudgetExhausted**: Limit reached, operation failed
+- **CancelledDueToExhaustion**: Identity cancelled due to exhaustion
+
+Audit properties:
+- Does **not** affect correctness
+- Deterministic (same order every run)
+- Queryable in tests
+- Test-only (not in production runtime)
+
+### Fault Injection Interaction
+
+Resource enforcement works correctly under fault injection:
+
+**Delayed Messages**: Budget consumed at send time, not delivery time
+```rust
+// Send with delay fault - budget consumed immediately
+kernel.send_message(channel, msg)?; // MessageCount consumed here
+// Message delivered later (after delay)
+// No additional consumption on delivery
+```
+
+**Message Drops**: Budget consumed even if dropped
+```rust
+// Send with drop fault
+kernel.send_message(channel, msg)?; // MessageCount consumed
+// Fault injector drops message
+// Budget still consumed (operation succeeded from sender's view)
+```
+
+**Retries**: Each retry consumes resources
+```rust
+// Pipeline retry with 3 attempts
+// Attempt 0: consume PipelineStages, CpuTicks
+// Retry 1: consume CpuTicks again
+// Retry 2: consume CpuTicks again
+// Each attempt counts separately
+```
+
+Properties:
+- Consumption is deterministic regardless of faults
+- No double-counting under any fault
+- Delay doesn't change consumption behavior
+- Drop/reorder doesn't affect budget
+
+### Testing Strategy
+
+**Test Coverage** (tests_resilience/resource_enforcement.rs):
+
+1. **Message Exhaustion**:
+   - Send until exhausted
+   - Receive until exhausted
+   - Exact boundary conditions
+
+2. **CPU Exhaustion**:
+   - Consume ticks until exhausted
+   - Verify exact tick counting
+   - No double-consumption
+
+3. **Pipeline Stage Exhaustion**:
+   - Consume stages until exhausted
+   - Verify per-stage tracking
+   - Cancellation integration
+
+4. **Cancellation Interaction**:
+   - No consumption after cancellation
+   - Cancellation error on retry
+   - Audit log verification
+
+5. **Fault Injection**:
+   - Delayed messages consume deterministically
+   - Dropped messages still consume
+   - No timing-dependent behavior
+
+**Properties Verified**:
+- Deterministic: Same operations → same exhaustion point
+- No double-counting: Resource consumed exactly once per operation
+- No consumption after cancellation: Cancelled = dead
+- Audit completeness: All events recorded
+- Fault independence: Faults don't change consumption semantics
+
+### Design Rationale
+
+**Why fail immediately, not warn?**
+- Predictable: Know exactly when failure occurs
+- Testable: Deterministic outcomes
+- Clear: No ambiguity between warning and error
+- Safe: Prevents partial work
+
+**Why cancel on exhaustion?**
+- Prevents zombie execution (exhausted but still running)
+- Clear lifecycle boundary (exhausted = terminated)
+- Simplifies reasoning (dead is dead)
+- Prevents resource leaks
+
+**Why consume at call site, not completion?**
+- Deterministic: Timing doesn't affect consumption
+- Simple: No async tracking needed
+- Fair: All operations cost the same
+- Testable: Know consumption without waiting
+
+**Why no recovery mechanism?**
+- Forces explicit budget management
+- Prevents accidental overuse
+- Clear failure modes (fix budget or fail)
+- Testability (no flaky recovery)
+
+**Why separate exhaustion from cancellation?**
+- Different causes: budget vs. external signal
+- Different semantics: predictable vs. asynchronous
+- Clear audit trail: why did it stop?
+- Testable: verify exhaustion vs. cancellation separately
+
+### Limitations & Future Work
+
+**Not Implemented in Phase 12**:
+
+1. **Storage Operations**: 
+   - Complex integration with transaction semantics
+   - Needs coordination with services_storage
+   - Deferred to future phase
+
+2. **Full Pipeline Integration**:
+   - Pipeline executor has hooks but not fully integrated
+   - Stage consumption needs pipeline refactoring
+   - CPU per stage needs execution model changes
+
+3. **KernelApi Redesign**:
+   - send_message/receive_message don't pass TaskId
+   - Workarounds used (message source, receive context)
+   - Future: Add TaskId parameter to API
+
+4. **Memory Accounting**:
+   - MemoryUnits defined but not enforced
+   - Needs allocator integration
+   - Complex with Rust ownership
+
+5. **Preemptive Enforcement**:
+   - No preemption on budget exhaustion
+   - No fair share scheduling
+   - Still deterministic, single-threaded model
+
+### Integration with Prior Phases
+
+Phase 12 builds on:
+
+- **Phase 3**: Capabilities track *what*, budgets track *how much*
+- **Phase 6**: Exhaustion may trigger cancellation (lifecycle integration)
+- **Phase 10**: Policy can derive restricted budgets (subset enforcement)
+- **Phase 11**: Budgets attached to identities, inheritance validated
+
+Complete authority model:
+```
+Authority = Capabilities (what you can do)
+          + Budgets (how much you can do)
+          + Policy (constraints on both)
+          + Enforcement (make it real)
+```
+
+### Summary
+
+Phase 12 provides:
+- **Deterministic enforcement**: Budgets are hard limits, not suggestions
+- **Explicit exhaustion**: Clear errors with context
+- **Cancellation integration**: Exhausted = cancelled
+- **Audit trail**: All consumption/exhaustion recorded
+- **Fault-independent**: Works correctly under delay/drop/reorder
+- **Test-driven**: All enforcement testable in SimKernel
+
+This completes resource enforcement: budgets that **bite**.
