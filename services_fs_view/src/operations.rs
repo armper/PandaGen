@@ -90,12 +90,20 @@ pub trait FileSystemOperations {
 }
 
 // Helper functions for testing path resolution
+//
+// Note: These helpers duplicate some logic from the service implementation,
+// but this is intentional. They provide a simplified, standalone version
+// for testing path resolution logic in isolation without requiring the
+// full service setup.
 #[cfg(test)]
 mod test_helpers {
     use super::*;
     use fs_view::PathResolver;
 
     /// Resolves a path within a directory tree (test helper)
+    ///
+    /// This is a simplified version used for unit testing path resolution
+    /// without requiring a full FileSystemViewService instance.
     pub fn resolve_parent<'a>(
         root: &'a DirectoryView,
         path: &str,

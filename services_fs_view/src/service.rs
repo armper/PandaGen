@@ -139,7 +139,10 @@ impl FileSystemOperations for FileSystemViewService {
             let dir = self.directories.get(&entry.object_id);
             (None, dir.map(|d| d.count()))
         } else {
-            (Some(0), None) // Placeholder size
+            // Note: Size is None for non-directory objects since we don't store
+            // actual blob data in this view service. A real implementation would
+            // query the storage service for actual object sizes.
+            (None, None)
         };
 
         Ok(StatInfo {
