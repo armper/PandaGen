@@ -18,12 +18,14 @@
 //! - Records execution trace for tests
 //! - Enforces retry policies with backoff
 
+use identity::IdentityMetadata;
 use kernel_api::{Duration, KernelApi};
 use lifecycle::{CancellationToken, Deadline};
 use pipeline::{
     ExecutionTrace, PayloadSchemaId, PipelineError, PipelineExecutionResult, PipelineSpec,
     StageExecutionResult, StageResult, StageTraceEntry, TypedPayload,
 };
+use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -44,12 +46,32 @@ pub enum ExecutorError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Policy denied {event} by {policy}: {reason}")]
+    PolicyDenied {
+        policy: String,
+        event: String,
+        reason: String,
+        pipeline_id: Option<String>,
+    },
+
+    #[error("Policy requires action for {event} by {policy}: {action}")]
+    PolicyRequire {
+        policy: String,
+        event: String,
+        action: String,
+        pipeline_id: Option<String>,
+    },
 }
 
 /// Pipeline executor orchestrates pipeline execution
 pub struct PipelineExecutor {
     /// Available capability pool (cap_id -> exists)
     available_capabilities: HashMap<u64, bool>,
+    /// Optional policy engine for enforcement
+    policy_engine: Option<Box<dyn PolicyEngine>>,
+    /// Execution identity (for policy context)
+    identity: Option<IdentityMetadata>,
 }
 
 impl PipelineExecutor {
@@ -57,7 +79,21 @@ impl PipelineExecutor {
     pub fn new() -> Self {
         Self {
             available_capabilities: HashMap::new(),
+            policy_engine: None,
+            identity: None,
         }
+    }
+
+    /// Sets the policy engine for this executor
+    pub fn with_policy_engine(mut self, engine: Box<dyn PolicyEngine>) -> Self {
+        self.policy_engine = Some(engine);
+        self
+    }
+
+    /// Sets the execution identity for policy context
+    pub fn with_identity(mut self, identity: IdentityMetadata) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// Adds initial capabilities to the pool
@@ -79,13 +115,16 @@ impl PipelineExecutor {
     ///
     /// This is the main orchestration logic:
     /// 1. Validate pipeline
-    /// 2. For each stage:
+    /// 2. Check policy for pipeline start
+    /// 3. For each stage:
     ///    - Check cancellation and timeout
+    ///    - Check policy for stage start
     ///    - Check required capabilities
     ///    - Invoke handler (with retry)
     ///    - Update capability pool
     ///    - Record trace
-    /// 3. Return final result + trace
+    ///    - Emit policy event for stage end
+    /// 4. Return final result + trace
     pub fn execute<K: KernelApi>(
         &mut self,
         kernel: &mut K,
@@ -118,6 +157,34 @@ impl PipelineExecutor {
                 expected: spec.initial_input_schema.as_str().to_string(),
                 actual: initial_input.schema_id.as_str().to_string(),
             });
+        }
+
+        // Check policy for pipeline start
+        if let Some(policy) = &self.policy_engine {
+            let context = self.build_pipeline_context(spec, kernel);
+            let decision = policy.evaluate(PolicyEvent::OnPipelineStart, &context);
+
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    return Err(ExecutorError::PolicyDenied {
+                        policy: policy.name().to_string(),
+                        event: "OnPipelineStart".to_string(),
+                        reason,
+                        pipeline_id: Some(format!("{:?}", spec.id)),
+                    });
+                }
+                PolicyDecision::Require { action } => {
+                    return Err(ExecutorError::PolicyRequire {
+                        policy: policy.name().to_string(),
+                        event: "OnPipelineStart".to_string(),
+                        action,
+                        pipeline_id: Some(format!("{:?}", spec.id)),
+                    });
+                }
+                PolicyDecision::Allow => {
+                    // Continue
+                }
+            }
         }
 
         // Calculate pipeline deadline if timeout is specified
@@ -160,6 +227,42 @@ impl PipelineExecutor {
                 }
             }
 
+            // Check policy for stage start
+            if let Some(policy) = &self.policy_engine {
+                let context = self.build_stage_context(spec, stage, kernel);
+                let decision = policy.evaluate(PolicyEvent::OnPipelineStageStart, &context);
+
+                match decision {
+                    PolicyDecision::Deny { reason } => {
+                        trace.set_final_result(PipelineExecutionResult::Failed {
+                            stage_name: stage.name.clone(),
+                            error: format!("Policy denied: {}", reason),
+                        });
+                        return Err(ExecutorError::PolicyDenied {
+                            policy: policy.name().to_string(),
+                            event: "OnPipelineStageStart".to_string(),
+                            reason,
+                            pipeline_id: Some(format!("{:?}", spec.id)),
+                        });
+                    }
+                    PolicyDecision::Require { action } => {
+                        trace.set_final_result(PipelineExecutionResult::Failed {
+                            stage_name: stage.name.clone(),
+                            error: format!("Policy requires: {}", action),
+                        });
+                        return Err(ExecutorError::PolicyRequire {
+                            policy: policy.name().to_string(),
+                            event: "OnPipelineStageStart".to_string(),
+                            action,
+                            pipeline_id: Some(format!("{:?}", spec.id)),
+                        });
+                    }
+                    PolicyDecision::Allow => {
+                        // Continue
+                    }
+                }
+            }
+
             // Check required capabilities
             for &cap_id in &stage.required_capabilities {
                 if !self.has_capability(cap_id) {
@@ -182,6 +285,13 @@ impl PipelineExecutor {
                 &mut trace,
                 &cancellation_token,
             )?;
+
+            // Emit policy event for stage end (audit only)
+            if let Some(policy) = &self.policy_engine {
+                let context = self.build_stage_context(spec, stage, kernel);
+                let _ = policy.evaluate(PolicyEvent::OnPipelineStageEnd, &context);
+                // We don't act on this decision - it's audit only
+            }
 
             match stage_result {
                 StageResult::Success {
@@ -372,6 +482,66 @@ impl PipelineExecutor {
             ),
             capabilities: vec![],
         })
+    }
+
+    /// Builds policy context for pipeline-level events
+    fn build_pipeline_context<K: KernelApi>(
+        &self,
+        spec: &PipelineSpec,
+        kernel: &K,
+    ) -> PolicyContext {
+        let actor_identity = self.identity.clone().unwrap_or_else(|| {
+            use identity::{IdentityKind, TrustDomain};
+            IdentityMetadata::new(
+                IdentityKind::Service,
+                TrustDomain::core(),
+                "pipeline-executor",
+                kernel.now().as_nanos(),
+            )
+        });
+
+        let mut context = PolicyContext::for_pipeline(actor_identity, spec.id);
+
+        // Add metadata
+        if let Some(timeout_ms) = spec.timeout_ms {
+            context = context.with_metadata("timeout_ms", timeout_ms.to_string());
+        }
+        context = context.with_metadata("stage_count", spec.stages.len().to_string());
+
+        context
+    }
+
+    /// Builds policy context for stage-level events
+    fn build_stage_context<K: KernelApi>(
+        &self,
+        spec: &PipelineSpec,
+        stage: &pipeline::StageSpec,
+        kernel: &K,
+    ) -> PolicyContext {
+        let actor_identity = self.identity.clone().unwrap_or_else(|| {
+            use identity::{IdentityKind, TrustDomain};
+            IdentityMetadata::new(
+                IdentityKind::Service,
+                TrustDomain::core(),
+                "pipeline-executor",
+                kernel.now().as_nanos(),
+            )
+        });
+
+        let mut context = PolicyContext::for_pipeline(actor_identity, spec.id);
+        context.stage_id = Some(stage.id);
+
+        // Add stage metadata
+        if let Some(timeout_ms) = stage.timeout_ms {
+            context = context.with_metadata("stage_timeout_ms", timeout_ms.to_string());
+        }
+        context = context.with_metadata("retry_max", stage.retry_policy.max_retries.to_string());
+        context = context.with_metadata(
+            "required_capabilities",
+            format!("{:?}", stage.required_capabilities),
+        );
+
+        context
     }
 }
 

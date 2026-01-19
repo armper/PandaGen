@@ -14,5 +14,7 @@ lifecycle = { workspace = true }
 sim_kernel = { workspace = true }
 ipc = { workspace = true }
 services_storage = { workspace = true }
+policy = { workspace = true }
+identity = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
