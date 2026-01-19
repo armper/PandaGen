@@ -16,6 +16,7 @@ members = [
     "pipeline",
     "lifecycle",
     "identity",
+    "policy",
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
@@ -47,6 +48,7 @@ intent_router = { path = "intent_router" }
 pipeline = { path = "pipeline" }
 lifecycle = { path = "lifecycle" }
 identity = { path = "identity" }
+policy = { path = "policy" }
 
 # Demo crates
 cli_console = { path = "cli_console" }

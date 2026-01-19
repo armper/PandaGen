@@ -1,18 +1,14 @@
 [package]
-name = "services_pipeline_executor"
+name = "policy"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-pipeline = { workspace = true }
 core_types = { workspace = true }
-kernel_api = { workspace = true }
-lifecycle = { workspace = true }
-ipc = { workspace = true }
-policy = { workspace = true }
 identity = { workspace = true }
+pipeline = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }

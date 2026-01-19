@@ -23,6 +23,7 @@
 
 pub mod capability_audit;
 pub mod fault_injection;
+pub mod policy_audit;
 pub mod test_utils;
 
 use core_types::{
@@ -33,6 +34,7 @@ use fault_injection::FaultInjector;
 use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
+use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use std::collections::{HashMap, VecDeque};
 
 /// Simulated kernel state
@@ -62,6 +64,10 @@ pub struct SimulatedKernel {
     task_to_identity: HashMap<TaskId, ExecutionId>,
     /// Exit notifications (for supervision)
     exit_notifications: Vec<ExitNotification>,
+    /// Optional policy engine for enforcement
+    policy_engine: Option<Box<dyn PolicyEngine>>,
+    /// Policy decision audit log (test-only)
+    policy_audit: policy_audit::PolicyAuditLog,
 }
 
 #[derive(Debug)]
@@ -100,6 +106,8 @@ impl SimulatedKernel {
             identity_table: HashMap::new(),
             task_to_identity: HashMap::new(),
             exit_notifications: Vec::new(),
+            policy_engine: None,
+            policy_audit: policy_audit::PolicyAuditLog::new(),
         }
     }
 
@@ -110,6 +118,52 @@ impl SimulatedKernel {
     pub fn with_fault_injector(mut self, injector: FaultInjector) -> Self {
         self.fault_injector = Some(injector);
         self
+    }
+
+    /// Sets the policy engine for this kernel
+    ///
+    /// This enables policy enforcement at enforcement points.
+    /// If no policy engine is set, all operations are allowed.
+    pub fn with_policy_engine(mut self, engine: Box<dyn PolicyEngine>) -> Self {
+        self.policy_engine = Some(engine);
+        self
+    }
+
+    /// Returns a reference to the policy audit log
+    ///
+    /// Used in tests to verify policy decisions were made correctly.
+    pub fn policy_audit(&self) -> &policy_audit::PolicyAuditLog {
+        &self.policy_audit
+    }
+
+    /// Evaluates policy for an event and context
+    ///
+    /// Returns Allow if no policy engine is configured.
+    /// Records the decision in the policy audit log.
+    fn evaluate_policy(&mut self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        if let Some(engine) = &self.policy_engine {
+            let decision = engine.evaluate(event.clone(), context);
+
+            // Record decision in audit log
+            let context_summary = format!(
+                "actor={}, target={:?}, cap={:?}",
+                context.actor_identity.name,
+                context.target_identity.as_ref().map(|i| i.name.as_str()),
+                context.capability_id
+            );
+
+            self.policy_audit.record_decision(
+                self.current_time,
+                event,
+                engine.name().to_string(),
+                decision.clone(),
+                context_summary,
+            );
+
+            decision
+        } else {
+            PolicyDecision::Allow
+        }
     }
 
     /// Sets the fault plan for this kernel
@@ -340,29 +394,61 @@ impl SimulatedKernel {
             return Err(KernelError::SendFailed("Target task not found".to_string()));
         }
 
-        // Check trust boundaries
-        if let (Some(from_exec_id), Some(to_exec_id)) = (
+        // Check trust boundaries and policy enforcement
+        let (from_identity, to_identity) = if let (Some(from_exec_id), Some(to_exec_id)) = (
             self.task_to_identity.get(&from_task),
             self.task_to_identity.get(&to_task),
         ) {
-            if let (Some(from_identity), Some(to_identity)) = (
-                self.identity_table.get(from_exec_id),
-                self.identity_table.get(to_exec_id),
+            if let (Some(from_id), Some(to_id)) = (
+                self.identity_table.get(from_exec_id).cloned(),
+                self.identity_table.get(to_exec_id).cloned(),
             ) {
-                // If crossing trust domain boundary, log it
-                if !from_identity.same_domain(to_identity) {
-                    // Record cross-domain delegation in audit log
-                    self.capability_audit.record_event(
-                        self.current_time,
-                        CapabilityEvent::CrossDomainDelegation {
-                            cap_id,
-                            from_task,
-                            from_domain: from_identity.trust_domain.name().to_string(),
-                            to_task,
-                            to_domain: to_identity.trust_domain.name().to_string(),
-                        },
-                    );
+                (Some(from_id), Some(to_id))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Policy enforcement point: OnCapabilityDelegate
+        if let (Some(ref from_id), Some(ref to_id)) = (from_identity, to_identity) {
+            let context =
+                PolicyContext::for_capability_delegation(from_id.clone(), to_id.clone(), cap_id);
+
+            let decision = self.evaluate_policy(PolicyEvent::OnCapabilityDelegate, &context);
+
+            match decision {
+                PolicyDecision::Allow => {
+                    // Continue with delegation
                 }
+                PolicyDecision::Deny { reason } => {
+                    return Err(KernelError::InsufficientAuthority(format!(
+                        "Policy denied capability delegation: {}",
+                        reason
+                    )));
+                }
+                PolicyDecision::Require { action } => {
+                    return Err(KernelError::InsufficientAuthority(format!(
+                        "Policy requires action before delegation: {}",
+                        action
+                    )));
+                }
+            }
+
+            // If crossing trust domain boundary, log it
+            if !from_id.same_domain(to_id) {
+                // Record cross-domain delegation in audit log
+                self.capability_audit.record_event(
+                    self.current_time,
+                    CapabilityEvent::CrossDomainDelegation {
+                        cap_id,
+                        from_task,
+                        from_domain: from_id.trust_domain.name().to_string(),
+                        to_task,
+                        to_domain: to_id.trust_domain.name().to_string(),
+                    },
+                );
             }
         }
 
@@ -478,6 +564,33 @@ impl SimulatedKernel {
         }
         if let Some(creator) = creator_id {
             metadata = metadata.with_creator(creator);
+        }
+
+        // Policy enforcement point: OnSpawn
+        if let Some(creator_exec_id) = creator_id {
+            if let Some(creator_identity) = self.identity_table.get(&creator_exec_id) {
+                let context = PolicyContext::for_spawn(creator_identity.clone(), metadata.clone());
+
+                let decision = self.evaluate_policy(PolicyEvent::OnSpawn, &context);
+
+                match decision {
+                    PolicyDecision::Allow => {
+                        // Continue with spawn
+                    }
+                    PolicyDecision::Deny { reason } => {
+                        return Err(KernelError::InsufficientAuthority(format!(
+                            "Policy denied spawn: {}",
+                            reason
+                        )));
+                    }
+                    PolicyDecision::Require { action } => {
+                        return Err(KernelError::InsufficientAuthority(format!(
+                            "Policy requires action before spawn: {}",
+                            action
+                        )));
+                    }
+                }
+            }
         }
 
         let execution_id = metadata.execution_id;
@@ -1112,5 +1225,173 @@ mod tests {
             }
             _ => panic!("Expected CrossDomainDelegation event"),
         }
+    }
+
+    #[test]
+    fn test_policy_spawn_denied_by_trust_domain_policy() {
+        use policy::TrustDomainPolicy;
+
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(TrustDomainPolicy));
+
+        // Create a sandboxed task
+        let sandbox_desc = TaskDescriptor::new("sandbox".to_string());
+        let (_sandbox_handle, sandbox_exec_id) = kernel
+            .spawn_task_with_identity(
+                sandbox_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::sandbox(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Attempt to spawn a System service from sandbox (should be denied)
+        let system_desc = TaskDescriptor::new("system-service".to_string());
+        let result = kernel.spawn_task_with_identity(
+            system_desc,
+            identity::IdentityKind::System,
+            identity::TrustDomain::core(),
+            None,
+            Some(sandbox_exec_id),
+        );
+
+        // Should be denied
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, KernelError::InsufficientAuthority(_)));
+
+        // Check policy audit log
+        let policy_audit = kernel.policy_audit();
+        assert!(policy_audit.has_event(|e| {
+            matches!(e.event, policy::PolicyEvent::OnSpawn) && e.decision.is_deny()
+        }));
+    }
+
+    #[test]
+    fn test_policy_capability_delegation_requires_approval() {
+        use policy::TrustDomainPolicy;
+
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(TrustDomainPolicy));
+
+        // Create tasks in different trust domains
+        let core_desc = TaskDescriptor::new("core-service".to_string());
+        let (core_handle, _) = kernel
+            .spawn_task_with_identity(
+                core_desc,
+                identity::IdentityKind::Service,
+                identity::TrustDomain::core(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let user_desc = TaskDescriptor::new("user-component".to_string());
+        let (user_handle, _) = kernel
+            .spawn_task_with_identity(
+                user_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::user(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Grant capability to core service
+        let cap: Cap<()> = Cap::new(99);
+        kernel.grant_capability(core_handle.task_id, cap).unwrap();
+
+        // Attempt cross-domain delegation (should require approval)
+        let result = kernel.delegate_capability(99, core_handle.task_id, user_handle.task_id);
+
+        // Should be denied with "Require" decision
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, KernelError::InsufficientAuthority(_)));
+
+        // Check policy audit log
+        let policy_audit = kernel.policy_audit();
+        assert!(policy_audit.has_event(|e| {
+            matches!(e.event, policy::PolicyEvent::OnCapabilityDelegate) && e.decision.is_require()
+        }));
+    }
+
+    #[test]
+    fn test_policy_disabled_allows_all() {
+        use policy::NoOpPolicy;
+
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(NoOpPolicy));
+
+        // Create a sandboxed task
+        let sandbox_desc = TaskDescriptor::new("sandbox".to_string());
+        let (_, sandbox_exec_id) = kernel
+            .spawn_task_with_identity(
+                sandbox_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::sandbox(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Attempt to spawn a System service from sandbox (should be allowed with NoOpPolicy)
+        let system_desc = TaskDescriptor::new("system-service".to_string());
+        let result = kernel.spawn_task_with_identity(
+            system_desc,
+            identity::IdentityKind::System,
+            identity::TrustDomain::core(),
+            None,
+            Some(sandbox_exec_id),
+        );
+
+        // Should succeed with NoOpPolicy
+        assert!(result.is_ok());
+
+        // Check policy audit log - should show Allow decisions
+        let policy_audit = kernel.policy_audit();
+        assert!(policy_audit.has_event(|e| {
+            matches!(e.event, policy::PolicyEvent::OnSpawn) && e.decision.is_allow()
+        }));
+    }
+
+    #[test]
+    fn test_policy_composition_deny_wins() {
+        use policy::{ComposedPolicy, NoOpPolicy, TrustDomainPolicy};
+
+        let composed = ComposedPolicy::new()
+            .add_policy(Box::new(NoOpPolicy))
+            .add_policy(Box::new(TrustDomainPolicy));
+
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(composed));
+
+        // Create a sandboxed task
+        let sandbox_desc = TaskDescriptor::new("sandbox".to_string());
+        let (_, sandbox_exec_id) = kernel
+            .spawn_task_with_identity(
+                sandbox_desc,
+                identity::IdentityKind::Component,
+                identity::TrustDomain::sandbox(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Attempt to spawn a System service from sandbox
+        let system_desc = TaskDescriptor::new("system-service".to_string());
+        let result = kernel.spawn_task_with_identity(
+            system_desc,
+            identity::IdentityKind::System,
+            identity::TrustDomain::core(),
+            None,
+            Some(sandbox_exec_id),
+        );
+
+        // Should be denied because TrustDomainPolicy denies it (first deny wins)
+        assert!(result.is_err());
+
+        // Check policy audit log
+        let policy_audit = kernel.policy_audit();
+        assert!(policy_audit.has_event(|e| {
+            matches!(e.event, policy::PolicyEvent::OnSpawn) && e.decision.is_deny()
+        }));
     }
 }

@@ -1357,6 +1357,353 @@ impl Supervisor {
 3. Document why cross-domain delegation is needed
 4. Future: explicit delegation policies per trust domain pair
 
+## Policy Engine Interface
+
+### Policy Engine Trait
+
+Policy engines evaluate system operations and return decisions.
+
+```rust
+pub trait PolicyEngine: Send + Sync {
+    /// Evaluates a policy for the given event and context
+    ///
+    /// Must be deterministic: same inputs always produce same outputs.
+    /// Must be side-effect free: does not modify system state.
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision;
+
+    /// Returns the name of this policy engine (for logging/audit)
+    fn name(&self) -> &str;
+}
+```
+
+**Contract**:
+- Deterministic evaluation (same input → same output)
+- Side-effect free (pure function)
+- Thread-safe (Send + Sync)
+- Returns explicit decision (Allow, Deny, or Require)
+
+### Policy Decision Types
+
+```rust
+pub enum PolicyDecision {
+    /// Operation is allowed to proceed
+    Allow,
+    /// Operation is denied with a specific reason
+    Deny { reason: String },
+    /// Operation requires additional action before proceeding
+    Require { action: String },
+}
+```
+
+**Semantics**:
+- **Allow**: Operation may proceed without restrictions
+- **Deny**: Operation is blocked; enforcement point returns error
+- **Require**: Operation needs modification or approval before proceeding
+
+### Policy Context
+
+```rust
+pub struct PolicyContext {
+    /// Execution identity performing the operation
+    pub actor_identity: IdentityMetadata,
+    /// Target identity (if applicable)
+    pub target_identity: Option<IdentityMetadata>,
+    /// Capability involved (if any)
+    pub capability_id: Option<u64>,
+    /// Pipeline ID (if applicable)
+    pub pipeline_id: Option<PipelineId>,
+    /// Stage ID (if applicable)
+    pub stage_id: Option<StageId>,
+    /// Additional context-specific data
+    pub metadata: Vec<(String, String)>,
+}
+```
+
+**Usage Examples**:
+
+```rust
+// Context for spawn operation
+let context = PolicyContext::for_spawn(
+    creator_identity,
+    new_task_identity,
+);
+
+// Context for capability delegation
+let context = PolicyContext::for_capability_delegation(
+    from_identity,
+    to_identity,
+    cap_id,
+);
+
+// Context for pipeline execution with metadata
+let context = PolicyContext::for_pipeline(
+    executor_identity,
+    pipeline_id,
+)
+.with_metadata("timeout_ms", "5000")
+.with_metadata("stage_count", "3");
+```
+
+### Policy Events
+
+```rust
+pub enum PolicyEvent {
+    /// Task/service spawn
+    OnSpawn,
+    /// Task/service termination
+    OnTerminate,
+    /// Capability delegation between tasks
+    OnCapabilityDelegate,
+    /// Pipeline execution start
+    OnPipelineStart,
+    /// Pipeline stage start
+    OnPipelineStageStart,
+    /// Pipeline stage end
+    OnPipelineStageEnd,
+}
+```
+
+**When Each Event Triggers**:
+- **OnSpawn**: Before creating new task/service execution
+- **OnTerminate**: Before terminating a task (future use)
+- **OnCapabilityDelegate**: Before transferring capability ownership
+- **OnPipelineStart**: Before starting pipeline execution
+- **OnPipelineStageStart**: Before executing each pipeline stage
+- **OnPipelineStageEnd**: After each pipeline stage completes
+
+### Enforcement Points
+
+Policy enforcement is **optional** and **explicit**.
+
+**1. Task Spawn (SimKernel)**:
+
+```rust
+// Policy is checked during spawn_task_with_identity
+pub fn spawn_task_with_identity(
+    &mut self,
+    descriptor: TaskDescriptor,
+    kind: IdentityKind,
+    trust_domain: TrustDomain,
+    parent_id: Option<ExecutionId>,
+    creator_id: Option<ExecutionId>,
+) -> Result<(TaskHandle, ExecutionId), KernelError>;
+```
+
+**Enforcement Behavior**:
+- If no policy engine: operation proceeds
+- If policy returns Allow: operation proceeds
+- If policy returns Deny: returns `KernelError::InsufficientAuthority`
+- If policy returns Require: returns `KernelError::InsufficientAuthority`
+
+**2. Capability Delegation (SimKernel)**:
+
+```rust
+// Policy is checked during delegate_capability
+pub fn delegate_capability(
+    &mut self,
+    cap_id: u64,
+    from_task: TaskId,
+    to_task: TaskId,
+) -> Result<(), KernelError>;
+```
+
+**Enforcement Behavior**:
+- Same as spawn: Deny/Require → error, Allow → proceed
+- Also checks trust domain boundaries (logged in capability audit)
+
+**3. Pipeline Execution (Future - services_pipeline_executor)**:
+
+```rust
+// Policy would be checked during pipeline execution start
+pub fn execute(
+    &mut self,
+    kernel: &mut impl KernelApi,
+    pipeline: &PipelineSpec,
+    input: TypedPayload,
+) -> Result<(TypedPayload, ExecutionTrace), ExecutorError>;
+```
+
+**Setting Policy Engine**:
+
+```rust
+// Create kernel with policy
+let kernel = SimulatedKernel::new()
+    .with_policy_engine(Box::new(TrustDomainPolicy));
+
+// Or without policy (all operations allowed)
+let kernel = SimulatedKernel::new();  // No policy = Allow all
+```
+
+### Reference Policy Implementations
+
+**NoOpPolicy** (always allows):
+```rust
+pub struct NoOpPolicy;
+
+impl PolicyEngine for NoOpPolicy {
+    fn evaluate(&self, _event: PolicyEvent, _context: &PolicyContext) -> PolicyDecision {
+        PolicyDecision::Allow
+    }
+    
+    fn name(&self) -> &str {
+        "NoOpPolicy"
+    }
+}
+```
+
+**TrustDomainPolicy** (sandbox restrictions):
+```rust
+pub struct TrustDomainPolicy;
+
+impl PolicyEngine for TrustDomainPolicy {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnSpawn => {
+                // Sandbox cannot spawn System services
+                if context.actor_identity.trust_domain == TrustDomain::sandbox()
+                    && context.target_identity.kind == IdentityKind::System {
+                    return PolicyDecision::deny("Sandbox cannot spawn System services");
+                }
+                PolicyDecision::Allow
+            }
+            PolicyEvent::OnCapabilityDelegate => {
+                // Cross-domain delegation requires approval
+                if context.is_cross_domain() {
+                    return PolicyDecision::require("Cross-domain delegation needs approval");
+                }
+                PolicyDecision::Allow
+            }
+            _ => PolicyDecision::Allow,
+        }
+    }
+    
+    fn name(&self) -> &str {
+        "TrustDomainPolicy"
+    }
+}
+```
+
+**PipelineSafetyPolicy** (timeout requirements):
+```rust
+pub struct PipelineSafetyPolicy {
+    pub max_stages_unsupervised: usize,
+}
+
+impl PolicyEngine for PipelineSafetyPolicy {
+    fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+        match event {
+            PolicyEvent::OnPipelineStart => {
+                // User pipelines must have timeout
+                if context.actor_identity.trust_domain == TrustDomain::user() {
+                    if !context.metadata.iter().any(|(k, _)| k == "timeout_ms") {
+                        return PolicyDecision::require("Pipelines in user domain must specify timeout");
+                    }
+                }
+                
+                // Check stage count
+                if let Some((_, count_str)) = context.metadata.iter().find(|(k, _)| k == "stage_count") {
+                    if let Ok(count) = count_str.parse::<usize>() {
+                        if count > self.max_stages_unsupervised {
+                            return PolicyDecision::require(
+                                format!("Pipelines with {} stages require supervision", count)
+                            );
+                        }
+                    }
+                }
+                
+                PolicyDecision::Allow
+            }
+            _ => PolicyDecision::Allow,
+        }
+    }
+    
+    fn name(&self) -> &str {
+        "PipelineSafetyPolicy"
+    }
+}
+```
+
+### Policy Composition
+
+Multiple policies can be composed with precedence rules:
+
+```rust
+pub struct ComposedPolicy {
+    policies: Vec<Box<dyn PolicyEngine>>,
+}
+
+impl ComposedPolicy {
+    pub fn new() -> Self;
+    pub fn add_policy(self, policy: Box<dyn PolicyEngine>) -> Self;
+}
+```
+
+**Composition Rules**:
+1. Policies are evaluated in order
+2. First **Deny** wins (short-circuit)
+3. All **Require** decisions are collected
+4. **Allow** only if no Deny and no Require
+
+**Example**:
+```rust
+let composed = ComposedPolicy::new()
+    .add_policy(Box::new(NoOpPolicy))           // Always Allow
+    .add_policy(Box::new(TrustDomainPolicy));   // May Deny or Require
+
+let kernel = SimulatedKernel::new()
+    .with_policy_engine(Box::new(composed));
+```
+
+### Policy Audit
+
+Policy decisions are logged for testing and debugging:
+
+```rust
+// Access policy audit log
+let audit = kernel.policy_audit();
+
+// Query decisions
+let deny_events = audit.find_events(|e| e.decision.is_deny());
+let require_events = audit.find_events(|e| e.decision.is_require());
+
+// Check for specific event
+assert!(audit.has_event(|e| {
+    matches!(e.event, PolicyEvent::OnSpawn) && e.decision.is_deny()
+}));
+```
+
+**Audit Event Structure**:
+```rust
+pub struct PolicyAuditEvent {
+    pub timestamp: Instant,              // Simulated time
+    pub event: PolicyEvent,              // What operation was evaluated
+    pub policy_name: String,             // Which policy made the decision
+    pub decision: PolicyDecision,        // What was decided
+    pub context_summary: String,         // Summary of context
+}
+```
+
+### Design Philosophy
+
+**What Policy Is**:
+- Governance mechanism for system operations
+- Explicit, testable, and pluggable
+- Advisory with enforcement at specific points
+- Context provider (uses identity, not grants authority)
+
+**What Policy Is NOT**:
+- Global permissions system (not POSIX)
+- Authentication or cryptography
+- Hard-coded rules engine
+- Replacement for capabilities (policy is additive)
+
+**Key Principles**:
+1. **Mechanism not policy**: Kernel provides primitives
+2. **Policy observes; it does not own**: Authority comes from capabilities
+3. **Explicit over implicit**: All decisions are visible
+4. **Testability first**: All policy logic works under SimKernel
+5. **Pluggable**: Policies can be swapped, composed, or disabled
+
 ## Summary
 
 PandaGen's interfaces are designed to be:
