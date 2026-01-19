@@ -4497,3 +4497,396 @@ This interface enables components to provide output without:
 
 **Output is now structured, testable, and capability-gated.**
 
+---
+
+## Text Renderer Host
+
+The **text renderer host** consumes views and renders them for human observation.
+
+### Philosophy
+
+- **Rendering is a host concern**, not a component concern
+- **Components never print** - they publish views
+- **Views are rendered, not streamed** - immutable frames
+- **Renderer is dumb and replaceable** - no business logic
+- **Renderer is NOT a terminal** - no ANSI, no cursor addressing
+
+### TextRenderer Interface
+
+Located in `text_renderer_host` crate.
+
+```rust
+pub struct TextRenderer {
+    last_main_revision: Option<u64>,
+    last_status_revision: Option<u64>,
+}
+
+impl TextRenderer {
+    /// Creates a new text renderer
+    pub fn new() -> Self;
+
+    /// Checks if a redraw is needed based on revision changes
+    pub fn needs_redraw(
+        &self, 
+        main_frame: Option<&ViewFrame>, 
+        status_frame: Option<&ViewFrame>
+    ) -> bool;
+
+    /// Renders a workspace snapshot to text output
+    ///
+    /// Returns the rendered text as a String.
+    /// Performs a full screen redraw if revision has changed.
+    pub fn render_snapshot(
+        &mut self,
+        main_view: Option<&ViewFrame>,
+        status_view: Option<&ViewFrame>,
+    ) -> String;
+}
+```
+
+### WorkspaceRenderSnapshot
+
+Renamed from `WorkspaceRenderOutput` for clarity.
+
+```rust
+pub struct WorkspaceRenderSnapshot {
+    /// ID of focused component (if any)
+    pub focused_component: Option<ComponentId>,
+    /// Main view frame of focused component
+    pub main_view: Option<ViewFrame>,
+    /// Status view frame of focused component
+    pub status_view: Option<ViewFrame>,
+    /// Total number of components
+    pub component_count: usize,
+    /// Number of running components
+    pub running_count: usize,
+}
+```
+
+**Contract**:
+- Snapshot represents state at a single point in time
+- Contains only focused component's views (not all components)
+- Views are optional (component may not have views)
+- Immutable (represents a moment, not ongoing state)
+
+### Rendering Workflow
+
+**Step-by-step**:
+
+1. **Component processes input**:
+```rust
+editor.process_input(event)?;
+```
+
+2. **Component publishes views**:
+```rust
+editor.publish_views(&mut view_host, timestamp)?;
+```
+
+3. **Workspace creates snapshot**:
+```rust
+let snapshot = workspace.render_snapshot();
+```
+
+4. **Check if redraw needed**:
+```rust
+if renderer.needs_redraw(snapshot.main_view.as_ref(), snapshot.status_view.as_ref()) {
+    // Revision changed, redraw needed
+}
+```
+
+5. **Render views**:
+```rust
+let output = renderer.render_snapshot(
+    snapshot.main_view.as_ref(), 
+    snapshot.status_view.as_ref()
+);
+```
+
+6. **Host prints output**:
+```rust
+print!("{}", output);  // Only allowed because this is a HOST
+```
+
+### TextBuffer Rendering
+
+**Input**: ViewContent::TextBuffer with lines and optional cursor
+
+**Output**: Plain text with cursor marker (`|`)
+
+**Cursor Handling**:
+
+```rust
+// Cursor within line
+Input:  lines = ["Hello"], cursor = (0, 2)
+Output: "He|llo\n"
+
+// Cursor at line end
+Input:  lines = ["Hi"], cursor = (0, 2)
+Output: "Hi|\n"
+
+// Cursor beyond line
+Input:  lines = ["Hi"], cursor = (0, 5)
+Output: "Hi   |\n"
+
+// Cursor beyond buffer
+Input:  lines = ["Line 1"], cursor = (3, 0)
+Output: "Line 1\n\n\n|\n"
+
+// No cursor
+Input:  lines = ["Hello", "World"], cursor = None
+Output: "Hello\nWorld\n"
+```
+
+**Line Rendering**:
+- Each line rendered with newline
+- No truncation (full line always shown)
+- No wrapping (long lines render as-is)
+- No scrolling (all lines shown)
+
+### StatusLine Rendering
+
+**Input**: ViewContent::StatusLine with text
+
+**Output**: Single line with separator
+
+**Format**:
+```
+<buffer content>
+
+────────────────────────────────────────────────────────────────────────────────
+<status text>
+```
+
+**Separator**:
+- 80 characters of `─` (U+2500)
+- Fixed width
+- Visually separates buffer from status
+
+### Deterministic Rendering
+
+**Guarantee**: Same input → Same output (always)
+
+**Example Test**:
+```rust
+#[test]
+fn test_render_is_deterministic() {
+    let mut renderer1 = TextRenderer::new();
+    let mut renderer2 = TextRenderer::new();
+    
+    let frame = create_text_buffer_frame(
+        vec!["Hello".to_string()], 
+        Some(CursorPosition::new(0, 2)), 
+        1
+    );
+    
+    let output1 = renderer1.render_snapshot(Some(&frame), None);
+    let output2 = renderer2.render_snapshot(Some(&frame), None);
+    
+    assert_eq!(output1, output2);
+    assert!(output1.contains("He|llo"));
+}
+```
+
+**No Hidden State**:
+- Only tracks last revision (for redraw detection)
+- No terminal state
+- No random behavior
+- No time-dependent behavior
+
+### Revision Tracking
+
+**Purpose**: Avoid unnecessary redraws
+
+**Mechanism**:
+```rust
+pub fn needs_redraw(&self, main: Option<&ViewFrame>, status: Option<&ViewFrame>) -> bool {
+    let main_changed = main.map(|f| f.revision) != self.last_main_revision;
+    let status_changed = status.map(|f| f.revision) != self.last_status_revision;
+    main_changed || status_changed
+}
+```
+
+**Benefits**:
+- Only redraw when content actually changed
+- Reduces unnecessary output
+- Host can batch updates
+
+**Example**:
+```rust
+// First render
+let snapshot1 = workspace.render_snapshot();
+renderer.render_snapshot(snapshot1.main_view.as_ref(), snapshot1.status_view.as_ref());
+// Updates last_main_revision to 5, last_status_revision to 10
+
+// No change
+let snapshot2 = workspace.render_snapshot();
+assert!(!renderer.needs_redraw(snapshot2.main_view.as_ref(), snapshot2.status_view.as_ref()));
+// Returns false because revisions haven't changed
+
+// After editor processes input
+editor.process_input(event)?;
+editor.publish_views(&mut view_host, timestamp)?;
+let snapshot3 = workspace.render_snapshot();
+assert!(renderer.needs_redraw(snapshot3.main_view.as_ref(), snapshot3.status_view.as_ref()));
+// Returns true because revision changed to 6
+```
+
+### Host vs Component Boundary
+
+**Key Distinction**:
+
+```
+┌────────────────────────────────────┐
+│     PandaGen OS Components         │  ← NO PRINTING ALLOWED
+│  (Editor, CLI, Pipeline, etc.)     │     (Business Logic)
+│                                    │
+│  Components publish ViewFrames     │
+│  to ViewHost (structured data)     │
+└─────────────────┬──────────────────┘
+                  │
+         ViewFrames (data)
+                  │
+         ┌────────▼──────────┐
+         │   Workspace       │  ← NO PRINTING ALLOWED
+         │  (Orchestration)  │     (Layout & Focus)
+         │                   │
+         │  Creates snapshot │
+         └────────┬──────────┘
+                  │
+    WorkspaceRenderSnapshot (data)
+                  │
+         ┌────────▼──────────┐
+         │  TextRenderer     │  ← NO PRINTING ALLOWED
+         │     (Host)        │     (Presentation Logic)
+         │                   │
+         │  Renders to text  │
+         └────────┬──────────┘
+                  │
+          String (presentation)
+                  │
+         ┌────────▼──────────┐
+         │   Demo Binary     │  ← PRINTING ALLOWED HERE
+         │     (Host)        │     (Presentation Layer)
+         │                   │
+         │   print!("{}")    │
+         └───────────────────┘
+```
+
+**Why This Matters**:
+1. **Components are testable** without I/O (capture ViewFrames)
+2. **Renderer is testable** without I/O (compare strings)
+3. **Only host performs I/O** (clearly separated concern)
+4. **Renderer is replaceable** (GUI, Web, Remote, etc.)
+
+### Testing Contract
+
+**Unit Tests** (in text_renderer_host):
+```rust
+#[test]
+fn test_render_text_buffer_with_cursor() {
+    let mut renderer = TextRenderer::new();
+    let lines = vec!["Hello".to_string()];
+    let cursor = CursorPosition::new(0, 2);
+    let frame = create_text_buffer_frame(lines, Some(cursor), 1);
+    
+    let output = renderer.render_snapshot(Some(&frame), None);
+    
+    assert!(output.contains("He|llo"));
+}
+```
+
+**Integration Test** (demo binary):
+```rust
+// In main()
+let mut editor = Editor::new();
+editor.set_view_handles(main_view_handle, status_view_handle);
+
+for event in test_inputs {
+    editor.process_input(event)?;
+    editor.publish_views(&mut view_host, timestamp)?;
+    
+    let snapshot = workspace.render_snapshot();
+    let output = renderer.render_snapshot(
+        snapshot.main_view.as_ref(), 
+        snapshot.status_view.as_ref()
+    );
+    
+    print!("{}", output);  // Host can print
+}
+```
+
+**No Mocking**:
+- No need to mock terminal
+- No need to mock I/O
+- Just compare strings
+- Runs under `cargo test`
+
+### Budget & Cancellation
+
+**Budget Awareness** (future):
+- Renderer consumes MessageCount when receiving updates
+- Stops rendering when budget exhausted
+- Last rendered frame remains visible
+
+**Cancellation** (future):
+- Renderer respects CancellationToken
+- Stops cleanly on cancellation
+- No partial frames
+
+**Current Status**: Framework exists, enforcement deferred.
+
+### Error Handling
+
+**Renderer Never Fails**:
+- No I/O errors (just returns String)
+- No allocation errors (assumes sufficient memory)
+- No parse errors (ViewFrames are structured)
+
+**Host May Fail**:
+```rust
+let output = renderer.render_snapshot(main, status);
+print!("{}", output);  // This may fail (stdout closed, etc.)
+// But that's a host concern, not a renderer concern
+```
+
+### Future Extensions
+
+**Advanced Rendering**:
+- Viewport scrolling (show subset of buffer)
+- Line wrapping (soft wrap at width)
+- Syntax highlighting (color metadata in ViewContent)
+- Multiple buffers (split views, tabs)
+
+**Other Renderer Types**:
+- GuiRenderer (native GUI)
+- WebRenderer (HTML/CSS/JS)
+- RemoteRenderer (network protocol)
+- RecordingRenderer (capture for testing)
+
+**Optimization**:
+- Delta updates (only changed lines)
+- Incremental rendering (partial redraws)
+- Double buffering (smooth updates)
+
+All deferred to keep scope minimal.
+
+### Summary
+
+The text renderer host provides:
+- **TextRenderer**: Stateless rendering of ViewFrames ✅
+- **WorkspaceRenderSnapshot**: Snapshot of focused views ✅
+- **Deterministic output**: Same input → same output ✅
+- **Revision tracking**: Only redraw when needed ✅
+- **Clear boundary**: Host prints, components don't ✅
+- **Full testability**: Compare strings, no mocking ✅
+
+This interface enables human-visible output without:
+- Terminal emulation
+- ANSI escape codes
+- Component printing authority
+- Global stdout/stderr
+
+**Rendering is now a host concern, not a component concern.**
+
+

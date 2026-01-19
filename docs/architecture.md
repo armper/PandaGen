@@ -3893,3 +3893,322 @@ This proves PandaGen can provide structured output without:
 
 **Output is now structured, testable, and capability-gated.**
 
+---
+
+## Phase 19: Text Renderer Host
+
+### Philosophy: Rendering is a Host Concern
+
+Phase 19 introduces a **text renderer host** that consumes views and renders them for human observation, without becoming a terminal emulator.
+
+**Core Principles**:
+1. **Rendering is a host concern**, not a component concern
+2. **Components never print** - they publish views
+3. **Views are rendered, not streamed** - immutable frames
+4. **Renderer is dumb and replaceable** - no business logic
+5. **Renderer is NOT a terminal** - no ANSI, no cursor addressing, no terminal state
+
+**Authority Boundary**:
+```
+┌─────────────────────────────────────────┐
+│          PandaGen OS (No Print)         │
+│  ┌─────────────┐      ┌──────────────┐ │
+│  │  Component  │─────▶│   ViewHost   │ │
+│  │ (Editor)    │Views │  (Service)   │ │
+│  └─────────────┘      └──────────────┘ │
+│                              │          │
+│                       Snapshot          │
+└──────────────────────────────┼──────────┘
+                               │
+                      ┌────────▼─────────┐
+                      │  Text Renderer   │ ← This is a HOST
+                      │     (Host)       │   (Allowed to print)
+                      └──────────────────┘
+                               │
+                          Console
+                          (stdout)
+```
+
+### What This Is NOT
+
+Phase 19 explicitly does **NOT** implement:
+- ❌ Terminal emulator (no VT100, no ANSI)
+- ❌ Cursor addressing or terminal state machines
+- ❌ stdout/stderr abstractions inside PandaGen
+- ❌ Mixing rendering with workspace logic
+- ❌ Component authority to print
+
+This is **presentation**, not authority.
+
+### Architecture
+
+**TextRenderer** (`text_renderer_host` crate):
+- Subscribes to workspace view snapshots
+- Renders `TextBuffer` and `StatusLine` views
+- Updates deterministically on new `ViewFrame`s
+- Allows humans to see and interact with PandaGen
+- Can be replaced later by GUI, web, or remote hosts
+
+**Rendering Model**:
+
+```rust
+pub struct TextRenderer {
+    last_main_revision: Option<u64>,
+    last_status_revision: Option<u64>,
+}
+
+impl TextRenderer {
+    pub fn needs_redraw(&self, main: Option<&ViewFrame>, status: Option<&ViewFrame>) -> bool;
+    pub fn render_snapshot(&mut self, main: Option<&ViewFrame>, status: Option<&ViewFrame>) -> String;
+}
+```
+
+**Key Features**:
+1. **Full redraw per update**: Simple, deterministic (no scrolling logic required)
+2. **Cursor visualization**: Shows cursor position with `|` marker
+3. **Status line rendering**: Fixed line, always visible, clearly separated
+4. **Revision tracking**: Only redraws when revision changes
+5. **No ANSI codes**: Plain text only (renderer is NOT a terminal)
+
+### TextBuffer Rendering
+
+**Input**: ViewContent::TextBuffer with lines and optional cursor position
+
+**Output**: Plain text with cursor marker
+
+Example:
+```
+Input: lines = ["Hello", "World"], cursor = (0, 2)
+
+Output:
+He|llo
+World
+```
+
+**Cursor Handling**:
+- At line position: Insert `|` at column
+- Beyond line end: Pad with spaces then `|`
+- Beyond buffer: Add empty lines then `|`
+- No cursor: Just render lines
+
+**Line Truncation**: Not implemented (deferred)
+- Currently renders full lines
+- Future: Could truncate based on viewport width
+
+### StatusLine Rendering
+
+**Input**: ViewContent::StatusLine with text
+
+**Output**: Single line, clearly separated from buffer
+
+Example:
+```
+Hello Panda
+|
+
+────────────────────────────────────────────────────────────────────────────────
+INSERT [+]
+```
+
+**Separator**: 80-character line of `─` characters
+- Visually separates buffer from status
+- Fixed width (could be configurable)
+
+### Workspace Integration
+
+**WorkspaceRenderSnapshot** (renamed from `WorkspaceRenderOutput`):
+
+```rust
+pub struct WorkspaceRenderSnapshot {
+    pub focused_component: Option<ComponentId>,
+    pub main_view: Option<ViewFrame>,
+    pub status_view: Option<ViewFrame>,
+    pub component_count: usize,
+    pub running_count: usize,
+}
+```
+
+**Workflow**:
+1. Component processes input
+2. Component publishes ViewFrames to ViewHost
+3. Workspace calls `render_snapshot()` to get current state
+4. Renderer calls `render_snapshot()` on TextRenderer
+5. Host prints output (because it's a host, not a component)
+
+**Snapshot vs Render**:
+- Workspace produces **snapshot** (data)
+- Renderer produces **render** (presentation)
+- Clear separation of concerns
+
+### Demo Binary
+
+**Location**: `text_renderer_host/src/bin/demo.rs`
+
+**What It Does**:
+1. Launches workspace
+2. Launches editor component
+3. Simulates input events (typing "Hello Panda")
+4. Renders views after each input
+5. Demonstrates complete integration
+
+**Why It Can Print**:
+- It's a **host**, not a component
+- Hosts are allowed to print (presentation layer)
+- Components never print (business logic layer)
+
+**Demo Output**:
+```
+=== PandaGen Text Renderer Demo ===
+
+Launched editor component: comp:60fc5293-...
+
+Simulating typing: 'Hello Panda'
+────────────────────────────────────────────────────────────────────────────────
+
+After input #1: Key(KeyEvent { code: I, ... })
+────────────────────────────────────────────────────────────────────────────────
+|
+
+────────────────────────────────────────────────────────────────────────────────
+INSERT 
+
+After input #2: Key(KeyEvent { code: H, ... })
+────────────────────────────────────────────────────────────────────────────────
+H|
+
+────────────────────────────────────────────────────────────────────────────────
+INSERT [+] 
+
+... (continues) ...
+
+Demo complete!
+```
+
+### Testing Strategy
+
+**Unit Tests** (12 tests in text_renderer_host):
+- ✅ Render empty snapshot
+- ✅ Render text buffer without cursor
+- ✅ Render text buffer with cursor at various positions
+- ✅ Render cursor at line end, beyond line, beyond buffer
+- ✅ Render cursor on empty line
+- ✅ Render status line
+- ✅ Render with both views
+- ✅ Needs redraw on revision change
+- ✅ Revision tracking
+
+**Integration Test** (demo binary):
+- ✅ End-to-end workflow with real components
+- ✅ Editor publishes views correctly
+- ✅ Renderer displays views correctly
+- ✅ Cursor moves as expected
+
+**No Mocking Required**:
+- Tests compare rendered strings
+- No terminal state to mock
+- Deterministic output
+- Runs under `cargo test`
+
+### Determinism
+
+**Renderer Guarantees**:
+1. Same ViewFrame → Same output (always)
+2. No hidden state (except last revision)
+3. No random behavior
+4. No time-dependent behavior
+5. No I/O except final print (in host)
+
+**Testability**:
+```rust
+let frame = create_text_buffer_frame(vec!["Hi".to_string()], Some(CursorPosition::new(0, 1)), 1);
+let output = renderer.render_snapshot(Some(&frame), None);
+assert!(output.contains("H|i"));
+```
+
+### Budget & Cancellation
+
+**Budget Awareness**:
+- Renderer **consumes MessageCount** when receiving view updates (future)
+- Renderer **stops rendering** when budget exhausted
+- Last rendered frame remains visible
+
+**Cancellation**:
+- Renderer respects CancellationToken (future)
+- Stops cleanly on cancellation
+- No partial frames
+
+**Current Status**: Framework exists, enforcement deferred to keep scope minimal.
+
+### Why This Matters
+
+**Separation of Concerns**:
+- **Component**: Business logic (editor, CLI, pipeline)
+- **ViewHost**: View management (publishing, subscribing)
+- **Workspace**: Layout and focus (which view to show)
+- **Renderer**: Presentation (how to show views)
+
+Each layer is independently testable and evolvable.
+
+**Replaceability**:
+- Can replace TextRenderer with GuiRenderer
+- Can replace with WebRenderer (browser-based)
+- Can replace with RemoteRenderer (network)
+- Components unchanged
+
+**No Terminal Emulation**:
+- Traditional approach: Components emit ANSI codes
+- PandaGen approach: Components publish structured views
+- Result: No terminal state, no escape codes, no legacy
+
+### Comparison with Traditional Systems
+
+| Feature | Traditional (TTY/stdout) | PandaGen (Text Renderer) |
+|---------|-------------------------|--------------------------|
+| Output Model | Byte streams + escape codes | Structured ViewFrames |
+| Authority | Ambient (anyone can print) | Capability-based (explicit) |
+| Rendering | Component controls (ANSI) | Host controls (renderer) |
+| Testability | Hard (side effects) | Easy (compare strings) |
+| State | Terminal maintains state | Renderer stateless (except revision) |
+| Cursor | ANSI cursor addressing | Explicit CursorPosition in frame |
+| Replayability | TTY recording (lossy) | ViewFrame replay (exact) |
+
+### Future Work
+
+**Advanced Rendering**:
+- Viewport scrolling (show subset of buffer)
+- Line wrapping (soft wrap at width)
+- Syntax highlighting (color codes in ViewContent)
+- Multiple buffers (split views, tabs)
+
+**Other Renderer Types**:
+- GuiRenderer (native GUI toolkit)
+- WebRenderer (HTML/CSS/JS in browser)
+- RemoteRenderer (network protocol)
+- RecordingRenderer (capture for testing)
+
+**Optimizations**:
+- Delta updates (only render changed lines)
+- Incremental rendering (don't redraw entire screen)
+- Double buffering (smooth updates)
+
+All deferred to keep Phase 19 minimal.
+
+### Summary
+
+Phase 19 provides:
+- **text_renderer_host**: Text-based renderer crate ✅
+- **TextRenderer**: Renders TextBuffer and StatusLine views ✅
+- **Workspace integration**: render_snapshot() API ✅
+- **Demo binary**: End-to-end demonstration ✅
+- **Test coverage**: 12 unit tests, all passing ✅
+- **Documentation**: Architecture updated ✅
+
+This proves PandaGen can provide human-visible output without:
+- Terminal emulation
+- ANSI escape codes
+- Component printing authority
+- Global stdout/stderr
+
+**Rendering is now a host concern, not a component concern.**
+
+

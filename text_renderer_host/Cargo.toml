@@ -1,0 +1,23 @@
+[package]
+name = "text_renderer_host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+view_types = { workspace = true }
+services_workspace_manager = { workspace = true }
+services_view_host = { workspace = true }
+services_editor_vi = { workspace = true }
+services_input = { workspace = true }
+services_input_hal_bridge = { workspace = true }
+services_focus_manager = { workspace = true }
+input_types = { workspace = true }
+identity = { workspace = true }
+lifecycle = { workspace = true }
+policy = { workspace = true }
+resources = { workspace = true }
+hal = { workspace = true }
+
+[dev-dependencies]
