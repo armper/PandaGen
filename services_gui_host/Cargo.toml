@@ -1,0 +1,11 @@
+[package]
+name = "services_gui_host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+view_types = { workspace = true }
+serde = { workspace = true }
+

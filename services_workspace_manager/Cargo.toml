@@ -13,6 +13,7 @@ kernel_api = { workspace = true }
 lifecycle = { workspace = true }
 policy = { workspace = true }
 resources = { workspace = true }
+packages = { workspace = true }
 services_focus_manager = { workspace = true }
 input_types = { workspace = true }
 services_input = { workspace = true }

@@ -27,6 +27,7 @@ pub mod fault_injection;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod scheduler;
+pub mod smp;
 pub mod test_utils;
 pub mod timer;
 
@@ -88,6 +89,8 @@ pub struct SimulatedKernel {
     current_receive_task: Option<TaskId>,
     /// Preemptive scheduler (Phase 23)
     scheduler: scheduler::Scheduler,
+    /// SMP runtime (Phase 30)
+    smp: Option<smp::SmpRuntime>,
     /// Address space manager (Phase 24)
     address_space_manager: address_space::AddressSpaceManager,
 }
@@ -148,6 +151,7 @@ impl SimulatedKernel {
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
             scheduler: scheduler::Scheduler::new(),
+            smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
         }
     }
@@ -166,6 +170,25 @@ impl SimulatedKernel {
         &mut self.timer
     }
 
+    /// Enables SMP runtime with the given core count.
+    pub fn enable_smp(&mut self, core_count: usize) {
+        let config = smp::SmpConfig {
+            core_count,
+            ..Default::default()
+        };
+        self.smp = Some(smp::SmpRuntime::new(config));
+    }
+
+    /// Returns the SMP runtime if enabled.
+    pub fn smp(&self) -> Option<&smp::SmpRuntime> {
+        self.smp.as_ref()
+    }
+
+    /// Returns a mutable SMP runtime if enabled.
+    pub fn smp_mut(&mut self) -> Option<&mut smp::SmpRuntime> {
+        self.smp.as_mut()
+    }
+
     /// Updates current_time based on timer ticks
     ///
     /// This is called internally after advancing the timer.
@@ -173,6 +196,7 @@ impl SimulatedKernel {
         let ticks = self.timer.poll_ticks();
         let nanos = ticks * self.nanos_per_tick;
         self.current_time = Instant::from_nanos(nanos);
+        self.expire_capability_leases();
     }
 
     /// Sets the fault injector for this kernel
@@ -778,9 +802,23 @@ impl SimulatedKernel {
         match self.capability_table.get(&cap_id) {
             None => Err(CapabilityInvalidReason::NeverGranted),
             Some(meta) => {
+                // Check lease expiration
+                if let Some(expires_at) = meta.lease_expires_at_nanos {
+                    if expires_at <= self.current_time.as_nanos() {
+                        return Err(CapabilityInvalidReason::LeaseExpired);
+                    }
+                }
+
+                if meta.revoked {
+                    return Err(CapabilityInvalidReason::Revoked);
+                }
+
                 // Check if capability is invalid
                 if meta.status != CapabilityStatus::Valid {
-                    return Err(CapabilityInvalidReason::TransferredAway);
+                    if meta.status == CapabilityStatus::Transferred {
+                        return Err(CapabilityInvalidReason::TransferredAway);
+                    }
+                    return Err(CapabilityInvalidReason::OwnerDead);
                 }
 
                 // Check if owner is still alive
@@ -805,6 +843,7 @@ impl SimulatedKernel {
         grantee: TaskId,
         cap_type: String,
         grantor: Option<TaskId>,
+        lease_expires_at_nanos: Option<u64>,
     ) {
         let metadata = CapabilityMetadata {
             cap_id,
@@ -812,6 +851,8 @@ impl SimulatedKernel {
             cap_type: cap_type.clone(),
             status: CapabilityStatus::Valid,
             grantor,
+            revoked: false,
+            lease_expires_at_nanos,
         };
 
         self.capability_table.insert(cap_id, metadata);
@@ -825,6 +866,93 @@ impl SimulatedKernel {
                 cap_type,
             },
         );
+    }
+
+    /// Revokes a capability from its owner.
+    pub fn revoke_capability(
+        &mut self,
+        cap_id: u64,
+        owner: TaskId,
+        reason: String,
+    ) -> Result<(), KernelError> {
+        self.validate_capability(cap_id, owner)
+            .map_err(|reason| {
+                KernelError::InvalidCapability(format!("Cannot revoke: {:?}", reason))
+            })?;
+
+        if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+            meta.status = CapabilityStatus::Invalid;
+            meta.revoked = true;
+
+            self.capability_audit.record_event(
+                self.current_time,
+                CapabilityEvent::Revoked {
+                    cap_id,
+                    owner,
+                    cap_type: meta.cap_type.clone(),
+                    reason,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Grants a capability with a time-bound lease.
+    pub fn grant_capability_with_lease(
+        &mut self,
+        task: TaskId,
+        capability: Cap<()>,
+        lease: Duration,
+    ) -> Result<(), KernelError> {
+        if !self.tasks.contains_key(&task) {
+            return Err(KernelError::SendFailed("Target task not found".to_string()));
+        }
+
+        let expires_at = self.current_time.as_nanos().saturating_add(lease.as_nanos());
+
+        self.record_capability_grant(
+            capability.id(),
+            task,
+            "Generic".to_string(),
+            None,
+            Some(expires_at),
+        );
+
+        Ok(())
+    }
+
+    fn expire_capability_leases(&mut self) {
+        let now = self.current_time.as_nanos();
+        let expired: Vec<u64> = self
+            .capability_table
+            .iter()
+            .filter_map(|(cap_id, meta)| {
+                if meta.status == CapabilityStatus::Valid {
+                    if let Some(expires_at) = meta.lease_expires_at_nanos {
+                        if expires_at <= now {
+                            return Some(*cap_id);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for cap_id in expired {
+            if let Some(meta) = self.capability_table.get_mut(&cap_id) {
+                meta.status = CapabilityStatus::Invalid;
+                self.capability_audit.record_event(
+                    self.current_time,
+                    CapabilityEvent::LeaseExpired {
+                        cap_id,
+                        owner: meta.owner,
+                        cap_type: meta.cap_type.clone(),
+                        expired_at_nanos: now,
+                    },
+                );
+            }
+        }
     }
 
     /// Delegates a capability from one task to another (move semantics)
@@ -1081,6 +1209,148 @@ impl SimulatedKernel {
         self.resource_audit.record_event(
             self.current_time,
             resource_audit::ResourceEvent::MessageConsumed {
+                execution_id,
+                operation,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Phase 28: Attempts to consume a packet (network budget).
+    ///
+    /// Checks budget, consumes resource, and records audit events.
+    pub fn try_consume_packet(
+        &mut self,
+        execution_id: ExecutionId,
+        operation: resource_audit::PacketOperation,
+    ) -> Result<(), KernelError> {
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "PacketCount (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("{:?}", operation),
+            });
+        }
+
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let current_usage = identity.usage.packet_count.0;
+
+        if let Some(limit) = budget.packet_count {
+            if current_usage >= limit.0 {
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "PacketCount".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("{:?}", operation),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "PacketCount".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "PacketCount".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("{:?}", operation),
+                });
+            }
+        }
+
+        let before = current_usage;
+        identity.usage.consume_packet();
+        let after = identity.usage.packet_count.0;
+
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::PacketConsumed {
+                execution_id,
+                operation,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Phase 29: Attempts to consume a storage operation.
+    pub fn try_consume_storage_op(
+        &mut self,
+        execution_id: ExecutionId,
+        operation: resource_audit::StorageOperation,
+    ) -> Result<(), KernelError> {
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "StorageOps (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("{:?}", operation),
+            });
+        }
+
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let current_usage = identity.usage.storage_ops.0;
+
+        if let Some(limit) = budget.storage_ops {
+            if current_usage >= limit.0 {
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "StorageOps".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("{:?}", operation),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "StorageOps".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "StorageOps".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("{:?}", operation),
+                });
+            }
+        }
+
+        let before = current_usage;
+        identity.usage.consume_storage_op();
+        let after = identity.usage.storage_ops.0;
+
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::StorageOpConsumed {
                 execution_id,
                 operation,
                 before,
@@ -1467,7 +1737,7 @@ impl KernelApi for SimulatedKernel {
 
         // Record the capability grant in the authority table
         // For now, we use a generic type name since Cap<()> is type-erased
-        self.record_capability_grant(capability.id(), task, "Generic".to_string(), None);
+        self.record_capability_grant(capability.id(), task, "Generic".to_string(), None, None);
 
         Ok(())
     }
@@ -1695,6 +1965,53 @@ mod tests {
         // Check audit log
         let audit = kernel.audit_log();
         assert!(audit.has_event(|e| matches!(e, CapabilityEvent::Dropped { .. })));
+    }
+
+    #[test]
+    fn test_capability_lease_expiration() {
+        let mut kernel = SimulatedKernel::new();
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("lease-task".to_string()))
+            .unwrap()
+            .task_id;
+        let cap: Cap<()> = Cap::new(77);
+
+        kernel
+            .grant_capability_with_lease(task, cap.clone(), Duration::from_millis(10))
+            .unwrap();
+
+        assert!(kernel.is_capability_valid(cap.id(), task));
+
+        kernel.advance_time(Duration::from_millis(11));
+        assert!(!kernel.is_capability_valid(cap.id(), task));
+
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| {
+            matches!(e, CapabilityEvent::LeaseExpired { cap_id, .. } if *cap_id == 77)
+        }));
+    }
+
+    #[test]
+    fn test_capability_revocation() {
+        let mut kernel = SimulatedKernel::new();
+        let task = kernel
+            .spawn_task(TaskDescriptor::new("revoke-task".to_string()))
+            .unwrap()
+            .task_id;
+        let cap: Cap<()> = Cap::new(88);
+
+        kernel.grant_capability(task, cap.clone()).unwrap();
+        assert!(kernel.is_capability_valid(cap.id(), task));
+
+        kernel
+            .revoke_capability(cap.id(), task, "test revoke".to_string())
+            .unwrap();
+        assert!(!kernel.is_capability_valid(cap.id(), task));
+
+        let audit = kernel.audit_log();
+        assert!(audit.has_event(|e| {
+            matches!(e, CapabilityEvent::Revoked { cap_id, .. } if *cap_id == 88)
+        }));
     }
 
     #[test]
@@ -2129,6 +2446,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(1000)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };
@@ -2196,6 +2514,38 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_ops_budget_exhaustion() {
+        use resources::{ResourceBudget, StorageOps};
+
+        let mut kernel = SimulatedKernel::new();
+
+        let budget = ResourceBudget {
+            cpu_ticks: None,
+            memory_units: None,
+            message_count: None,
+            packet_count: None,
+            storage_ops: Some(StorageOps::new(1)),
+            pipeline_stages: None,
+        };
+
+        let metadata = identity::IdentityMetadata::new(
+            identity::IdentityKind::Component,
+            identity::TrustDomain::user(),
+            "storage-budget".to_string(),
+            kernel.now().as_nanos(),
+        )
+        .with_budget(budget);
+
+        let exec_id = kernel.create_identity(metadata.clone());
+
+        let result = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Write);
+        assert!(result.is_ok());
+
+        let result2 = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Commit);
+        assert!(result2.is_err());
+    }
+
+    #[test]
     fn test_timer_deterministic_behavior() {
         // Create two kernels and run identical sequences
         let mut kernel1 = SimulatedKernel::new();
@@ -2219,6 +2569,19 @@ mod tests {
             kernel1.now().as_nanos(),
             Duration::from_millis(10 + 20 + 30 + 40 + 50).as_nanos()
         );
+    }
+
+    #[test]
+    fn test_smp_enable_and_per_core_time() {
+        let mut kernel = SimulatedKernel::new();
+        kernel.enable_smp(2);
+
+        let smp = kernel.smp_mut().unwrap();
+        smp.advance_core_time(smp::CoreId(0), 5);
+        smp.advance_core_time(smp::CoreId(1), 8);
+
+        assert_eq!(smp.time.ticks(smp::CoreId(0)), 5);
+        assert_eq!(smp.time.ticks(smp::CoreId(1)), 8);
     }
 
     #[test]
@@ -2268,6 +2631,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(100)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };
@@ -2378,6 +2742,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(15)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };

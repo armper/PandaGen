@@ -1,0 +1,13 @@
+[package]
+name = "services_app_store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+package_registry = { workspace = true }
+resources = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+

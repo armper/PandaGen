@@ -158,6 +158,54 @@ impl fmt::Display for MessageCount {
     }
 }
 
+/// Packet count
+///
+/// Tracks number of network packets sent/received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PacketCount(pub u64);
+
+impl PacketCount {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn zero() -> Self {
+        Self(0)
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn checked_add(&self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    pub fn checked_sub(&self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
+    pub fn saturating_add(&self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    pub fn saturating_sub(&self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+}
+
+impl fmt::Display for PacketCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} packets", self.0)
+    }
+}
+
+impl Default for PacketCount {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 /// Storage operations count
 ///
 /// Tracks number of storage read/write operations.
@@ -251,6 +299,7 @@ pub struct ResourceBudget {
     pub cpu_ticks: Option<CpuTicks>,
     pub memory_units: Option<MemoryUnits>,
     pub message_count: Option<MessageCount>,
+    pub packet_count: Option<PacketCount>,
     pub storage_ops: Option<StorageOps>,
     pub pipeline_stages: Option<PipelineStages>,
 }
@@ -262,6 +311,7 @@ impl ResourceBudget {
             cpu_ticks: None,
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         }
@@ -273,6 +323,7 @@ impl ResourceBudget {
             cpu_ticks: Some(CpuTicks::zero()),
             memory_units: Some(MemoryUnits::zero()),
             message_count: Some(MessageCount::zero()),
+            packet_count: Some(PacketCount::zero()),
             storage_ops: Some(StorageOps::zero()),
             pipeline_stages: Some(PipelineStages::zero()),
         }
@@ -293,6 +344,12 @@ impl ResourceBudget {
     /// Builder: sets message count limit
     pub fn with_message_count(mut self, limit: MessageCount) -> Self {
         self.message_count = Some(limit);
+        self
+    }
+
+    /// Builder: sets packet count limit
+    pub fn with_packet_count(mut self, limit: PacketCount) -> Self {
+        self.packet_count = Some(limit);
         self
     }
 
@@ -338,6 +395,14 @@ impl ResourceBudget {
             }
         }
 
+        if let Some(self_pkt) = self.packet_count {
+            match other.packet_count {
+                Some(other_pkt) if self_pkt <= other_pkt => {}
+                None => {}
+                _ => return false,
+            }
+        }
+
         if let Some(self_storage) = self.storage_ops {
             match other.storage_ops {
                 Some(other_storage) if self_storage <= other_storage => {}
@@ -378,6 +443,12 @@ impl ResourceBudget {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             },
+            packet_count: match (self.packet_count, other.packet_count) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            },
             storage_ops: match (self.storage_ops, other.storage_ops) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (Some(a), None) => Some(a),
@@ -413,6 +484,9 @@ impl fmt::Display for ResourceBudget {
         if let Some(msg) = self.message_count {
             parts.push(format!("msg={}", msg.0));
         }
+        if let Some(pkt) = self.packet_count {
+            parts.push(format!("pkt={}", pkt.0));
+        }
         if let Some(storage) = self.storage_ops {
             parts.push(format!("storage={}", storage.0));
         }
@@ -436,6 +510,7 @@ pub struct ResourceUsage {
     pub cpu_ticks: CpuTicks,
     pub memory_units: MemoryUnits,
     pub message_count: MessageCount,
+    pub packet_count: PacketCount,
     pub storage_ops: StorageOps,
     pub pipeline_stages: PipelineStages,
 }
@@ -447,6 +522,7 @@ impl ResourceUsage {
             cpu_ticks: CpuTicks::zero(),
             memory_units: MemoryUnits::zero(),
             message_count: MessageCount::zero(),
+            packet_count: PacketCount::zero(),
             storage_ops: StorageOps::zero(),
             pipeline_stages: PipelineStages::zero(),
         }
@@ -465,6 +541,11 @@ impl ResourceUsage {
     /// Consumes a message
     pub fn consume_message(&mut self) {
         self.message_count = self.message_count.saturating_add(MessageCount::new(1));
+    }
+
+    /// Consumes a packet
+    pub fn consume_packet(&mut self) {
+        self.packet_count = self.packet_count.saturating_add(PacketCount::new(1));
     }
 
     /// Consumes storage operation
@@ -508,6 +589,15 @@ impl ResourceUsage {
             }
         }
 
+        if let Some(limit) = budget.packet_count {
+            if self.packet_count > limit {
+                return Some(ResourceExceeded::PacketCount {
+                    limit,
+                    usage: self.packet_count,
+                });
+            }
+        }
+
         if let Some(limit) = budget.storage_ops {
             if self.storage_ops > limit {
                 return Some(ResourceExceeded::StorageOps {
@@ -541,6 +631,9 @@ impl ResourceUsage {
             message_count: budget
                 .message_count
                 .map(|limit| limit.saturating_sub(self.message_count)),
+            packet_count: budget
+                .packet_count
+                .map(|limit| limit.saturating_sub(self.packet_count)),
             storage_ops: budget
                 .storage_ops
                 .map(|limit| limit.saturating_sub(self.storage_ops)),
@@ -561,10 +654,11 @@ impl fmt::Display for ResourceUsage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ResourceUsage[cpu={}, mem={}, msg={}, storage={}, stages={}]",
+            "ResourceUsage[cpu={}, mem={}, msg={}, pkt={}, storage={}, stages={}]",
             self.cpu_ticks.0,
             self.memory_units.0,
             self.message_count.0,
+            self.packet_count.0,
             self.storage_ops.0,
             self.pipeline_stages.0
         )
@@ -587,6 +681,10 @@ pub enum ResourceExceeded {
     MessageCount {
         limit: MessageCount,
         usage: MessageCount,
+    },
+    PacketCount {
+        limit: PacketCount,
+        usage: PacketCount,
     },
     StorageOps {
         limit: StorageOps,
@@ -622,6 +720,13 @@ impl fmt::Display for ResourceExceeded {
                     limit.0, usage.0
                 )
             }
+            Self::PacketCount { limit, usage } => {
+                write!(
+                    f,
+                    "Packet count exceeded: limit={}, usage={}",
+                    limit.0, usage.0
+                )
+            }
             Self::StorageOps { limit, usage } => {
                 write!(
                     f,
@@ -648,6 +753,7 @@ pub struct ResourceDelta {
     pub cpu_ticks: CpuTicks,
     pub memory_units: MemoryUnits,
     pub message_count: MessageCount,
+    pub packet_count: PacketCount,
     pub storage_ops: StorageOps,
     pub pipeline_stages: PipelineStages,
 }
@@ -659,6 +765,7 @@ impl ResourceDelta {
             cpu_ticks: CpuTicks::zero(),
             memory_units: MemoryUnits::zero(),
             message_count: MessageCount::zero(),
+            packet_count: PacketCount::zero(),
             storage_ops: StorageOps::zero(),
             pipeline_stages: PipelineStages::zero(),
         }
@@ -670,6 +777,7 @@ impl ResourceDelta {
             cpu_ticks: after.cpu_ticks.saturating_sub(before.cpu_ticks),
             memory_units: after.memory_units.saturating_sub(before.memory_units),
             message_count: after.message_count.saturating_sub(before.message_count),
+            packet_count: after.packet_count.saturating_sub(before.packet_count),
             storage_ops: after.storage_ops.saturating_sub(before.storage_ops),
             pipeline_stages: after.pipeline_stages.saturating_sub(before.pipeline_stages),
         }
@@ -686,10 +794,11 @@ impl fmt::Display for ResourceDelta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ResourceDelta[cpu=+{}, mem=+{}, msg=+{}, storage=+{}, stages=+{}]",
+            "ResourceDelta[cpu=+{}, mem=+{}, msg=+{}, pkt=+{}, storage=+{}, stages=+{}]",
             self.cpu_ticks.0,
             self.memory_units.0,
             self.message_count.0,
+            self.packet_count.0,
             self.storage_ops.0,
             self.pipeline_stages.0
         )
@@ -819,6 +928,7 @@ mod tests {
         let usage = ResourceUsage::zero();
         assert!(usage.cpu_ticks.is_zero());
         assert!(usage.message_count.is_zero());
+        assert!(usage.packet_count.is_zero());
     }
 
     #[test]
@@ -827,9 +937,11 @@ mod tests {
         usage.consume_cpu_ticks(CpuTicks::new(10));
         usage.consume_message();
         usage.consume_message();
+        usage.consume_packet();
 
         assert_eq!(usage.cpu_ticks, CpuTicks::new(10));
         assert_eq!(usage.message_count, MessageCount::new(2));
+        assert_eq!(usage.packet_count, PacketCount::new(1));
     }
 
     #[test]
@@ -875,6 +987,26 @@ mod tests {
                 assert_eq!(u, MessageCount::new(11));
             }
             _ => panic!("Expected MessageCount exceeded"),
+        }
+    }
+
+    #[test]
+    fn test_resource_usage_exceeds_packets() {
+        let mut usage = ResourceUsage::zero();
+        for _ in 0..5 {
+            usage.consume_packet();
+        }
+
+        let budget = ResourceBudget::unlimited().with_packet_count(PacketCount::new(3));
+
+        let exceeded = usage.exceeds(&budget);
+        assert!(exceeded.is_some());
+        match exceeded.unwrap() {
+            ResourceExceeded::PacketCount { limit, usage: u } => {
+                assert_eq!(limit, PacketCount::new(3));
+                assert_eq!(u, PacketCount::new(5));
+            }
+            _ => panic!("Expected PacketCount exceeded"),
         }
     }
 

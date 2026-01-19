@@ -1,0 +1,13 @@
+[package]
+name = "package_registry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"
+

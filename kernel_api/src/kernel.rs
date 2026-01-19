@@ -3,6 +3,7 @@
 use crate::{Duration, Instant, KernelError};
 use core_types::{Cap, ServiceId, TaskId};
 use ipc::{ChannelId, MessageEnvelope};
+use serde::{Deserialize, Serialize};
 
 /// Descriptor for creating a new task
 ///
@@ -12,7 +13,7 @@ use ipc::{ChannelId, MessageEnvelope};
 /// - Resource limits (future)
 ///
 /// This is construction, not duplication.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDescriptor {
     /// Human-readable name for debugging
     pub name: String,
@@ -41,7 +42,7 @@ impl TaskDescriptor {
 /// This is returned when a task is created. Unlike Unix PIDs,
 /// this is a capability - having the handle grants authority to interact
 /// with the task.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskHandle {
     /// The task's unique identifier
     pub task_id: TaskId,

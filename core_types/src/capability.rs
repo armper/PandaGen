@@ -223,6 +223,20 @@ pub enum CapabilityEvent {
         owner: TaskId,
         cap_type: String,
     },
+    /// Capability explicitly revoked
+    Revoked {
+        cap_id: u64,
+        owner: TaskId,
+        cap_type: String,
+        reason: String,
+    },
+    /// Capability lease expired
+    LeaseExpired {
+        cap_id: u64,
+        owner: TaskId,
+        cap_type: String,
+        expired_at_nanos: u64,
+    },
 }
 
 /// Reasons why a capability use attempt failed
@@ -238,6 +252,8 @@ pub enum CapabilityInvalidReason {
     TypeMismatch,
     /// Capability has been explicitly revoked
     Revoked,
+    /// Capability lease expired
+    LeaseExpired,
 }
 
 /// Capability status in the lifecycle
@@ -267,6 +283,12 @@ pub struct CapabilityMetadata {
     pub status: CapabilityStatus,
     /// Original grantor (None for kernel-created caps)
     pub grantor: Option<TaskId>,
+    /// Explicit revocation flag
+    #[serde(default)]
+    pub revoked: bool,
+    /// Lease expiration timestamp (None for no lease)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_nanos: Option<u64>,
 }
 
 #[cfg(test)]
@@ -435,6 +457,8 @@ mod tests {
             cap_type: "FileRead".to_string(),
             status: CapabilityStatus::Valid,
             grantor: None,
+            revoked: false,
+            lease_expires_at_nanos: None,
         };
 
         assert_eq!(metadata.cap_id, 42);

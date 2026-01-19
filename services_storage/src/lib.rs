@@ -24,8 +24,14 @@
 
 pub mod migration;
 pub mod object;
+pub mod journaled_storage;
 pub mod transaction;
 
 pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
+pub use journaled_storage::{
+    JournaledStorage, StorageBudget, StorageOperation, StorageService, StorageServiceError,
+};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
-pub use transaction::{Transaction, TransactionError, TransactionState};
+pub use transaction::{
+    Transaction, TransactionError, TransactionId, TransactionState, TransactionalStorage,
+};
