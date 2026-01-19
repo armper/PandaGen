@@ -38,8 +38,8 @@ pub enum KernelError {
     InsufficientAuthority,
 
     /// Invalid capability
-    #[error("Invalid capability")]
-    InvalidCapability,
+    #[error("Invalid capability: {0}")]
+    InvalidCapability(String),
 
     /// Resource exhausted
     #[error("Resource exhausted: {0}")]
