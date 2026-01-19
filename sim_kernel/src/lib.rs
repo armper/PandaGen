@@ -21,6 +21,7 @@
 //! This is not a "toy" or "mock" - it's a full implementation of the
 //! kernel API that happens to run in-process for testing.
 
+pub mod address_space;
 pub mod capability_audit;
 pub mod fault_injection;
 pub mod policy_audit;
@@ -30,8 +31,9 @@ pub mod test_utils;
 pub mod timer;
 
 use core_types::{
-    Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata, CapabilityStatus, ServiceId,
-    TaskId,
+    AddressSpaceCap, Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata,
+    CapabilityStatus, MemoryAccessType, MemoryError, MemoryPerms, MemoryRegion, MemoryRegionCap,
+    ServiceId, TaskId,
 };
 use fault_injection::FaultInjector;
 use hal::TimerDevice;
@@ -86,6 +88,8 @@ pub struct SimulatedKernel {
     current_receive_task: Option<TaskId>,
     /// Preemptive scheduler (Phase 23)
     scheduler: scheduler::Scheduler,
+    /// Address space manager (Phase 24)
+    address_space_manager: address_space::AddressSpaceManager,
 }
 
 #[derive(Debug)]
@@ -144,6 +148,7 @@ impl SimulatedKernel {
             cancelled_identities: HashMap::new(),
             current_receive_task: None,
             scheduler: scheduler::Scheduler::new(),
+            address_space_manager: address_space::AddressSpaceManager::new(),
         }
     }
 
@@ -718,6 +723,12 @@ impl SimulatedKernel {
             };
             self.exit_notifications.push(notification);
 
+            // Phase 24: Destroy address space
+            let _ = self.address_space_manager.destroy_address_space(
+                execution_id,
+                self.current_time.as_nanos(),
+            );
+
             // Remove from task_to_identity mapping
             self.task_to_identity.remove(&task_id);
             // Note: we keep the identity metadata for audit purposes
@@ -1160,7 +1171,139 @@ impl SimulatedKernel {
         // Phase 23: Enqueue task in scheduler
         self.scheduler.enqueue(task_id);
 
+        // Phase 24: Create address space for this task
+        let _ = self.address_space_manager.create_address_space(
+            execution_id,
+            self.current_time.as_nanos(),
+        );
+
         Ok((TaskHandle::new(task_id), execution_id))
+    }
+
+    // ============================================================================
+    // Phase 24: Memory Management APIs
+    // ============================================================================
+
+    /// Creates a new address space for the given execution
+    ///
+    /// This grants the execution an AddressSpaceCap that allows it to allocate
+    /// memory regions within its private address space.
+    ///
+    /// ## Isolation Guarantee
+    ///
+    /// Each address space is isolated by default. Cross-space access requires
+    /// explicit delegation of MemoryRegionCap.
+    pub fn create_address_space(
+        &mut self,
+        execution_id: ExecutionId,
+    ) -> Result<AddressSpaceCap, MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        Ok(self
+            .address_space_manager
+            .create_address_space(execution_id, timestamp_nanos))
+    }
+
+    /// Allocates a memory region within an address space
+    ///
+    /// Requires a valid AddressSpaceCap.
+    /// Returns a MemoryRegionCap that grants access to the region.
+    ///
+    /// ## Budget Enforcement
+    ///
+    /// This consumes MemoryUnits from the execution's budget (if budget is set).
+    /// If the budget is exhausted, allocation fails.
+    pub fn allocate_region(
+        &mut self,
+        space_cap: &AddressSpaceCap,
+        size_bytes: u64,
+        permissions: MemoryPerms,
+        backing: core_types::MemoryBacking,
+        caller_execution_id: ExecutionId,
+    ) -> Result<MemoryRegionCap, MemoryError> {
+        // Check if size is valid
+        if size_bytes == 0 {
+            return Err(MemoryError::InvalidRegionSize(0));
+        }
+
+        // Check memory budget (if set)
+        if let Some(identity) = self.identity_table.get_mut(&caller_execution_id) {
+            if let Some(budget) = identity.budget {
+                if let Some(limit) = budget.memory_units {
+                    let units_needed = resources::MemoryUnits::new(size_bytes / 4096 + 1); // Convert to units
+                    let available = limit.saturating_sub(identity.usage.memory_units);
+
+                    if units_needed > available {
+                        return Err(MemoryError::BudgetExhausted {
+                            requested: units_needed.0,
+                            available: available.0,
+                        });
+                    }
+
+                    // Consume budget
+                    identity.usage.memory_units =
+                        identity.usage.memory_units.saturating_add(units_needed);
+                }
+            }
+        }
+
+        let region = MemoryRegion::new(size_bytes, permissions, backing);
+        let timestamp_nanos = self.current_time.as_nanos();
+
+        self.address_space_manager.allocate_region(
+            space_cap,
+            region,
+            caller_execution_id,
+            timestamp_nanos,
+        )
+    }
+
+    /// Checks if an access to a region is allowed
+    ///
+    /// Requires a valid MemoryRegionCap.
+    /// Checks that the access type matches the region's permissions.
+    ///
+    /// ## Access Control
+    ///
+    /// - Read: Requires Read permission
+    /// - Write: Requires Write permission
+    /// - Execute: Requires Execute permission
+    pub fn access_region(
+        &mut self,
+        region_cap: &MemoryRegionCap,
+        access_type: MemoryAccessType,
+        caller_execution_id: ExecutionId,
+    ) -> Result<(), MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        self.address_space_manager.access_region(
+            region_cap,
+            access_type,
+            caller_execution_id,
+            timestamp_nanos,
+        )
+    }
+
+    /// Activates an address space (context switch)
+    ///
+    /// This is called by the scheduler when switching tasks.
+    /// Records an AddressSpaceActivated audit event.
+    pub fn activate_address_space(&mut self, execution_id: ExecutionId) -> Result<(), MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        self.address_space_manager
+            .activate_space(execution_id, timestamp_nanos)
+    }
+
+    /// Returns the address space audit log (test-only)
+    pub fn address_space_audit(&self) -> &address_space::AddressSpaceAuditLog {
+        self.address_space_manager.audit_log()
+    }
+
+    /// Returns the address space for an execution (test-only)
+    pub fn get_address_space(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Option<&core_types::AddressSpace> {
+        self.address_space_manager
+            .get_space_for_execution(execution_id)
     }
 }
 
