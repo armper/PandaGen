@@ -11,6 +11,7 @@ members = [
     "services_process_manager",
     "services_logger",
     "services_storage",
+    "services_network",
     "services_pipeline_executor",
     "services_fs_view",
     "services_input",
@@ -19,8 +20,10 @@ members = [
     "services_editor_vi",
     "services_workspace_manager",
     "services_view_host",
+    "services_remote_ui_host",
     "text_renderer_host",
     "fs_view",
+    "packages",
     "intent_router",
     "pipeline",
     "lifecycle",
@@ -55,6 +58,7 @@ services_registry = { path = "services_registry" }
 services_process_manager = { path = "services_process_manager" }
 services_logger = { path = "services_logger" }
 services_storage = { path = "services_storage" }
+services_network = { path = "services_network" }
 services_pipeline_executor = { path = "services_pipeline_executor" }
 services_fs_view = { path = "services_fs_view" }
 fs_view = { path = "fs_view" }
@@ -64,6 +68,7 @@ lifecycle = { path = "lifecycle" }
 identity = { path = "identity" }
 policy = { path = "policy" }
 resources = { path = "resources" }
+packages = { path = "packages" }
 
 # Input system crates
 input_types = { path = "input_types" }
@@ -76,6 +81,7 @@ services_workspace_manager = { path = "services_workspace_manager" }
 # View system crates
 view_types = { path = "view_types" }
 services_view_host = { path = "services_view_host" }
+services_remote_ui_host = { path = "services_remote_ui_host" }
 text_renderer_host = { path = "text_renderer_host" }
 
 # Demo crates
@@ -86,3 +92,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 thiserror = "1.0"
+tempfile = "3"

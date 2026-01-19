@@ -25,6 +25,7 @@ use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
+use packages::{ComponentLoader, PackageComponentType, PackageManifest};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
@@ -520,6 +521,51 @@ impl WorkspaceManager {
         Ok(component_id)
     }
 
+    /// Launches all components described in a package manifest.
+    ///
+    /// Returns the list of created component IDs in manifest order.
+    pub fn launch_package(
+        &mut self,
+        manifest: &PackageManifest,
+    ) -> Result<Vec<ComponentId>, WorkspaceError> {
+        let launch_plan = ComponentLoader::build_launch_plan(manifest).map_err(|err| {
+            WorkspaceError::InvalidCommand(format!("Package manifest error: {}", err))
+        })?;
+
+        let mut created = Vec::with_capacity(launch_plan.len());
+        for spec in launch_plan {
+            let component_type = match spec.component_type {
+                PackageComponentType::Editor => ComponentType::Editor,
+                PackageComponentType::Cli => ComponentType::Cli,
+                PackageComponentType::PipelineExecutor => ComponentType::PipelineExecutor,
+                PackageComponentType::Custom => ComponentType::Custom,
+            };
+
+            let mut config = LaunchConfig::new(
+                component_type,
+                spec.name,
+                IdentityKind::Component,
+                TrustDomain::user(),
+            )
+            .with_focusable(spec.focusable)
+            .with_metadata("package.name", manifest.name.clone())
+            .with_metadata("package.version", manifest.version.clone())
+            .with_metadata("package.entry", spec.entry);
+
+            if let Some(budget) = spec.budget {
+                config = config.with_budget(budget);
+            }
+
+            for (key, value) in spec.metadata {
+                config = config.with_metadata(key, value);
+            }
+
+            created.push(self.launch_component(config)?);
+        }
+
+        Ok(created)
+    }
+
     /// Grants focus to a component
     pub fn focus_component(&mut self, component_id: ComponentId) -> Result<(), WorkspaceError> {
         let component = self
@@ -780,6 +826,183 @@ impl WorkspaceManager {
         }
     }
 
+    /// Captures a persistent snapshot of the workspace session.
+    pub fn save_session(&self) -> WorkspaceSessionSnapshot {
+        let focused_component = self.get_focused_component();
+
+        let mut components: Vec<WorkspaceComponentSnapshot> = self
+            .components
+            .values()
+            .map(|component| {
+                let main_view = component
+                    .main_view
+                    .as_ref()
+                    .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+                    .flatten();
+                let status_view = component
+                    .status_view
+                    .as_ref()
+                    .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+                    .flatten();
+
+                WorkspaceComponentSnapshot {
+                    component_id: component.id,
+                    component_type: component.component_type,
+                    name: component.name.clone(),
+                    focusable: component.focusable,
+                    identity_kind: component.identity.kind,
+                    trust_domain: component.identity.trust_domain.clone(),
+                    budget: component.identity.budget,
+                    metadata: component.metadata.clone(),
+                    state: component.state,
+                    exit_reason: component.exit_reason.clone(),
+                    main_view,
+                    status_view,
+                }
+            })
+            .collect();
+
+        components.sort_by_key(|snapshot| snapshot.component_id.as_uuid());
+
+        WorkspaceSessionSnapshot {
+            format_version: WorkspaceSessionFormat::new(1, 0),
+            next_timestamp: self.next_timestamp,
+            focused_component,
+            components,
+        }
+    }
+
+    /// Restores workspace state from a snapshot.
+    pub fn restore_session(
+        &mut self,
+        snapshot: WorkspaceSessionSnapshot,
+    ) -> Result<(), WorkspaceError> {
+        self.components.clear();
+        self.focus_manager = FocusManager::new();
+        self.view_host = ViewHost::new();
+        self.view_subscriptions.clear();
+        self.audit_trail.clear();
+        self.next_timestamp = snapshot.next_timestamp;
+
+        for component_snapshot in snapshot.components {
+            let WorkspaceComponentSnapshot {
+                component_id,
+                component_type,
+                name,
+                focusable,
+                identity_kind,
+                trust_domain,
+                budget,
+                metadata,
+                state,
+                exit_reason,
+                main_view: main_frame,
+                status_view: status_frame,
+            } = component_snapshot;
+
+            let timestamp = self.next_timestamp();
+            let mut identity = IdentityMetadata::new(
+                identity_kind,
+                trust_domain.clone(),
+                name.clone(),
+                timestamp,
+            )
+            .with_parent(self.workspace_identity.execution_id);
+
+            if let Some(budget) = budget {
+                identity = identity.with_budget(budget);
+            }
+
+            let mut component = ComponentInfo::new(
+                component_type,
+                identity,
+                focusable,
+                name.clone(),
+            );
+
+            component.id = component_id;
+            component.state = state;
+            component.exit_reason = exit_reason;
+
+            for (k, v) in metadata {
+                component = component.with_metadata(k, v);
+            }
+
+            if component.focusable {
+                let subscription = InputSubscriptionCap::new(
+                    self.next_timestamp(),
+                    TaskId::new(),
+                    ipc::ChannelId::new(),
+                );
+                component = component.with_subscription(subscription);
+            }
+
+            let component_task_id = TaskId::new();
+            let workspace_task_id = TaskId::new();
+
+            let main_view = self
+                .view_host
+                .create_view(
+                    ViewKind::TextBuffer,
+                    Some(name.clone()),
+                    component_task_id,
+                    ipc::ChannelId::new(),
+                )
+                .map_err(|e| {
+                    WorkspaceError::InvalidCommand(format!("Failed to create main view: {}", e))
+                })?;
+            component = component.with_main_view(main_view);
+
+            let main_sub = self
+                .view_host
+                .subscribe(main_view.view_id, workspace_task_id, ipc::ChannelId::new())
+                .map_err(|e| {
+                    WorkspaceError::InvalidCommand(format!("Failed to subscribe to main view: {}", e))
+                })?;
+            self.view_subscriptions.insert(main_view.view_id, main_sub);
+
+            if let Some(frame) = main_frame {
+                let remapped = remap_frame(frame, main_view.view_id, component.id);
+                let _ = self.view_host.publish_frame(&main_view, remapped);
+            }
+
+            let status_view = self
+                .view_host
+                .create_view(
+                    ViewKind::StatusLine,
+                    Some(format!("{} - status", name)),
+                    component_task_id,
+                    ipc::ChannelId::new(),
+                )
+                .map_err(|e| {
+                    WorkspaceError::InvalidCommand(format!("Failed to create status view: {}", e))
+                })?;
+            component = component.with_status_view(status_view);
+
+            let status_sub = self
+                .view_host
+                .subscribe(status_view.view_id, workspace_task_id, ipc::ChannelId::new())
+                .map_err(|e| {
+                    WorkspaceError::InvalidCommand(format!("Failed to subscribe to status view: {}", e))
+                })?;
+            self.view_subscriptions
+                .insert(status_view.view_id, status_sub);
+
+            if let Some(frame) = status_frame {
+                let remapped = remap_frame(frame, status_view.view_id, component.id);
+                let _ = self.view_host.publish_frame(&status_view, remapped);
+            }
+
+            self.components.insert(component.id, component);
+        }
+
+        if let Some(focused) = snapshot.focused_component {
+            let _ = self.focus_component(focused);
+        }
+
+        Ok(())
+    }
+
     /// Gets all view frames for all components
     ///
     /// Returns a map of component ID to (main_view, status_view) frames.
@@ -815,7 +1038,7 @@ impl WorkspaceManager {
 }
 
 /// Snapshot of the workspace render state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceRenderSnapshot {
     /// ID of focused component (if any)
     pub focused_component: Option<ComponentId>,
@@ -829,9 +1052,58 @@ pub struct WorkspaceRenderSnapshot {
     pub running_count: usize,
 }
 
+/// Workspace session snapshot format version.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSessionFormat {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl WorkspaceSessionFormat {
+    pub const fn new(major: u32, minor: u32) -> Self {
+        Self { major, minor }
+    }
+}
+
+/// Snapshot of a single component within a workspace session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceComponentSnapshot {
+    pub component_id: ComponentId,
+    pub component_type: ComponentType,
+    pub name: String,
+    pub focusable: bool,
+    pub identity_kind: IdentityKind,
+    pub trust_domain: TrustDomain,
+    pub budget: Option<ResourceBudget>,
+    pub metadata: HashMap<String, String>,
+    pub state: ComponentState,
+    pub exit_reason: Option<ExitReason>,
+    pub main_view: Option<ViewFrame>,
+    pub status_view: Option<ViewFrame>,
+}
+
+/// Persistent snapshot of the workspace component graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSessionSnapshot {
+    pub format_version: WorkspaceSessionFormat,
+    pub next_timestamp: u64,
+    pub focused_component: Option<ComponentId>,
+    pub components: Vec<WorkspaceComponentSnapshot>,
+}
+
+fn remap_frame(mut frame: ViewFrame, new_view_id: ViewId, component_id: ComponentId) -> ViewFrame {
+    frame.view_id = new_view_id;
+    if frame.revision == 0 {
+        frame.revision = 1;
+    }
+    frame.component_id = Some(component_id.to_string());
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use packages::{PackageComponentType, PackageFormatVersion, PackageManifest, ComponentSpec};
 
     fn create_test_workspace() -> WorkspaceManager {
         let workspace_identity = IdentityMetadata::new(
@@ -870,6 +1142,98 @@ mod tests {
         assert_eq!(component.component_type, ComponentType::Editor);
         assert_eq!(component.state, ComponentState::Running);
         assert!(component.focusable);
+    }
+
+    #[test]
+    fn test_launch_package_components() {
+        let mut workspace = create_test_workspace();
+
+        let manifest = PackageManifest {
+            format_version: PackageFormatVersion::new(1, 0),
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            components: vec![
+                ComponentSpec {
+                    id: "editor".to_string(),
+                    name: "Editor".to_string(),
+                    component_type: PackageComponentType::Editor,
+                    entry: "services_editor_vi".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+                ComponentSpec {
+                    id: "cli".to_string(),
+                    name: "CLI".to_string(),
+                    component_type: PackageComponentType::Cli,
+                    entry: "cli_console".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+            ],
+        };
+
+        let ids = workspace.launch_package(&manifest).unwrap();
+        assert_eq!(ids.len(), 2);
+
+        let first = workspace.get_component(ids[0]).unwrap();
+        assert_eq!(first.metadata.get("package.name"), Some(&"demo".to_string()));
+        assert_eq!(first.metadata.get("package.entry"), Some(&"services_editor_vi".to_string()));
+    }
+
+    #[test]
+    fn test_save_restore_session() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Editor,
+            "session-editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let component_id = workspace.launch_component(config).unwrap();
+
+        let component = workspace.get_component(component_id).unwrap();
+        let main_handle = component.main_view.unwrap();
+        let status_handle = component.status_view.unwrap();
+
+        let main_frame = ViewFrame::new(
+            main_handle.view_id,
+            ViewKind::TextBuffer,
+            1,
+            view_types::ViewContent::text_buffer(vec!["hello".to_string()]),
+            10,
+        );
+        workspace
+            .view_host_mut()
+            .publish_frame(&main_handle, main_frame)
+            .unwrap();
+
+        let status_frame = ViewFrame::new(
+            status_handle.view_id,
+            ViewKind::StatusLine,
+            1,
+            view_types::ViewContent::status_line("ready"),
+            11,
+        );
+        workspace
+            .view_host_mut()
+            .publish_frame(&status_handle, status_frame)
+            .unwrap();
+
+        let snapshot = workspace.save_session();
+
+        let mut restored = create_test_workspace();
+        restored.restore_session(snapshot).unwrap();
+
+        assert_eq!(restored.list_components().len(), 1);
+        let restored_component = restored.get_component(component_id).unwrap();
+        assert_eq!(restored_component.name, "session-editor");
+
+        let render = restored.render_snapshot();
+        assert!(render.main_view.is_some());
+        assert!(render.status_view.is_some());
     }
 
     #[test]

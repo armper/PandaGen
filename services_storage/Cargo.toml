@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 core_types.workspace = true
+identity.workspace = true
 kernel_api.workspace = true
 ipc.workspace = true
 uuid.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+sim_kernel.workspace = true

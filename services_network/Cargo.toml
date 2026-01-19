@@ -1,0 +1,17 @@
+[package]
+name = "services_network"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+identity = { workspace = true }
+kernel_api = { workspace = true }
+resources = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+sim_kernel = { workspace = true }
+
+[dev-dependencies]

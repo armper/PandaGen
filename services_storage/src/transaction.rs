@@ -1,7 +1,29 @@
 //! Transaction support for storage operations
 
 use crate::{ObjectId, VersionId};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
+
+/// Unique identifier for a transaction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TransactionId(Uuid);
+
+impl TransactionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for TransactionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Errors that can occur during transactions
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -53,6 +75,8 @@ pub enum TransactionState {
 /// assert_eq!(tx.state(), TransactionState::Committed);
 /// ```
 pub struct Transaction {
+    /// Transaction identifier
+    id: TransactionId,
     /// Transaction state
     state: TransactionState,
     /// Objects modified in this transaction
@@ -63,9 +87,15 @@ impl Transaction {
     /// Creates a new transaction
     pub fn new() -> Self {
         Self {
+            id: TransactionId::new(),
             state: TransactionState::Active,
             modified: Vec::new(),
         }
+    }
+
+    /// Returns the transaction ID
+    pub fn id(&self) -> TransactionId {
+        self.id
     }
 
     /// Returns the current state
@@ -145,12 +175,14 @@ pub trait TransactionalStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_transaction_creation() {
         let tx = Transaction::new();
         assert_eq!(tx.state(), TransactionState::Active);
         assert_eq!(tx.modified_objects().len(), 0);
+        assert_ne!(tx.id().as_uuid(), Uuid::nil());
     }
 
     #[test]

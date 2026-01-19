@@ -26,8 +26,14 @@
 
 pub mod error;
 pub mod kernel;
+pub mod syscalls;
 pub mod time;
 
 pub use error::KernelError;
 pub use kernel::{KernelApi, TaskDescriptor, TaskHandle};
+pub use syscalls::{
+    LoopbackTransport, SyscallClient, SyscallCodec, SyscallError, SyscallErrorKind,
+    SyscallRequest, SyscallRequestPayload, SyscallResponse, SyscallResponsePayload,
+    SyscallServer, SyscallTransport,
+};
 pub use time::{Duration, Instant};

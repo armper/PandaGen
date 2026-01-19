@@ -25,6 +25,14 @@ pub enum ResourceEvent {
         after: u64,
     },
 
+    /// Packet consumption (send or receive)
+    PacketConsumed {
+        execution_id: ExecutionId,
+        operation: PacketOperation,
+        before: u64,
+        after: u64,
+    },
+
     /// CPU ticks consumed
     CpuConsumed {
         execution_id: ExecutionId,
@@ -72,9 +80,17 @@ pub enum MessageOperation {
     Receive,
 }
 
+/// Type of packet operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PacketOperation {
+    Send,
+    Receive,
+}
+
 /// Type of storage operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageOperation {
+    Read,
     Write,
     Commit,
 }
@@ -148,6 +164,9 @@ impl ResourceAuditLog {
                 ResourceEvent::MessageConsumed {
                     execution_id: eid, ..
                 }
+                | ResourceEvent::PacketConsumed {
+                    execution_id: eid, ..
+                }
                 | ResourceEvent::CpuConsumed {
                     execution_id: eid, ..
                 }
@@ -208,6 +227,26 @@ mod tests {
 
         assert_eq!(log.len(), 1);
         assert!(log.has_event(|e| matches!(e, ResourceEvent::MessageConsumed { .. })));
+    }
+
+    #[test]
+    fn test_record_packet_consumed() {
+        let mut log = ResourceAuditLog::new();
+        let exec_id = ExecutionId::new();
+        let timestamp = Instant::from_nanos(1000);
+
+        log.record_event(
+            timestamp,
+            ResourceEvent::PacketConsumed {
+                execution_id: exec_id,
+                operation: PacketOperation::Send,
+                before: 0,
+                after: 1,
+            },
+        );
+
+        assert_eq!(log.len(), 1);
+        assert!(log.has_event(|e| matches!(e, ResourceEvent::PacketConsumed { .. })));
     }
 
     #[test]

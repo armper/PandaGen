@@ -1091,6 +1091,148 @@ impl SimulatedKernel {
         Ok(())
     }
 
+    /// Phase 28: Attempts to consume a packet (network budget).
+    ///
+    /// Checks budget, consumes resource, and records audit events.
+    pub fn try_consume_packet(
+        &mut self,
+        execution_id: ExecutionId,
+        operation: resource_audit::PacketOperation,
+    ) -> Result<(), KernelError> {
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "PacketCount (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("{:?}", operation),
+            });
+        }
+
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let current_usage = identity.usage.packet_count.0;
+
+        if let Some(limit) = budget.packet_count {
+            if current_usage >= limit.0 {
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "PacketCount".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("{:?}", operation),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "PacketCount".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "PacketCount".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("{:?}", operation),
+                });
+            }
+        }
+
+        let before = current_usage;
+        identity.usage.consume_packet();
+        let after = identity.usage.packet_count.0;
+
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::PacketConsumed {
+                execution_id,
+                operation,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Phase 29: Attempts to consume a storage operation.
+    pub fn try_consume_storage_op(
+        &mut self,
+        execution_id: ExecutionId,
+        operation: resource_audit::StorageOperation,
+    ) -> Result<(), KernelError> {
+        if self.is_identity_cancelled(execution_id) {
+            return Err(KernelError::ResourceBudgetExhausted {
+                resource_type: "StorageOps (cancelled)".to_string(),
+                limit: 0,
+                usage: 0,
+                identity: format!("{}", execution_id),
+                operation: format!("{:?}", operation),
+            });
+        }
+
+        let identity = match self.identity_table.get_mut(&execution_id) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let budget = match &identity.budget {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        let current_usage = identity.usage.storage_ops.0;
+
+        if let Some(limit) = budget.storage_ops {
+            if current_usage >= limit.0 {
+                self.resource_audit.record_event(
+                    self.current_time,
+                    resource_audit::ResourceEvent::BudgetExhausted {
+                        execution_id,
+                        resource_type: "StorageOps".to_string(),
+                        limit: limit.0,
+                        attempted_usage: current_usage + 1,
+                        operation: format!("{:?}", operation),
+                    },
+                );
+
+                self.cancel_identity(execution_id, "StorageOps".to_string());
+
+                return Err(KernelError::ResourceBudgetExhausted {
+                    resource_type: "StorageOps".to_string(),
+                    limit: limit.0,
+                    usage: current_usage,
+                    identity: format!("{}", execution_id),
+                    operation: format!("{:?}", operation),
+                });
+            }
+        }
+
+        let before = current_usage;
+        identity.usage.consume_storage_op();
+        let after = identity.usage.storage_ops.0;
+
+        self.resource_audit.record_event(
+            self.current_time,
+            resource_audit::ResourceEvent::StorageOpConsumed {
+                execution_id,
+                operation,
+                before,
+                after,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Spawns a task with explicit identity metadata
     ///
     /// This is for supervisors who need full control over child identity
@@ -2129,6 +2271,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(1000)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };
@@ -2193,6 +2336,38 @@ mod tests {
                 } if *id == exec_id && resource_type == "CpuTicks"
             )
         }));
+    }
+
+    #[test]
+    fn test_storage_ops_budget_exhaustion() {
+        use resources::{ResourceBudget, StorageOps};
+
+        let mut kernel = SimulatedKernel::new();
+
+        let budget = ResourceBudget {
+            cpu_ticks: None,
+            memory_units: None,
+            message_count: None,
+            packet_count: None,
+            storage_ops: Some(StorageOps::new(1)),
+            pipeline_stages: None,
+        };
+
+        let metadata = identity::IdentityMetadata::new(
+            identity::IdentityKind::Component,
+            identity::TrustDomain::user(),
+            "storage-budget".to_string(),
+            kernel.now().as_nanos(),
+        )
+        .with_budget(budget);
+
+        let exec_id = kernel.create_identity(metadata.clone());
+
+        let result = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Write);
+        assert!(result.is_ok());
+
+        let result2 = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Commit);
+        assert!(result2.is_err());
     }
 
     #[test]
@@ -2268,6 +2443,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(100)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };
@@ -2378,6 +2554,7 @@ mod tests {
             cpu_ticks: Some(CpuTicks::new(15)),
             memory_units: None,
             message_count: None,
+            packet_count: None,
             storage_ops: None,
             pipeline_stages: None,
         };
