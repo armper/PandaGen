@@ -444,13 +444,13 @@ impl SimulatedKernel {
     pub fn advance_time(&mut self, duration: Duration) {
         // Calculate how many ticks this duration represents
         let ticks_to_advance = duration.as_nanos() / self.nanos_per_tick;
-        
+
         // Advance the timer
         self.timer.advance_ticks(ticks_to_advance);
-        
+
         // Update current_time from timer
         self.sync_time_from_timer();
-        
+
         // Process delayed messages
         self.process_delayed_messages();
     }
@@ -1880,7 +1880,10 @@ mod tests {
 
         // Both should have the same time
         assert_eq!(kernel1.now(), kernel2.now());
-        assert_eq!(kernel1.timer().current_ticks(), kernel2.timer().current_ticks());
+        assert_eq!(
+            kernel1.timer().current_ticks(),
+            kernel2.timer().current_ticks()
+        );
 
         // Time should be cumulative
         assert_eq!(

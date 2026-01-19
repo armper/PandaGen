@@ -116,10 +116,10 @@ mod tests {
     fn test_timer_cumulative() {
         let mut timer = TestTimer::new();
         assert_eq!(timer.poll_ticks(), 0);
-        
+
         timer.advance(100);
         assert_eq!(timer.poll_ticks(), 100);
-        
+
         timer.advance(200);
         assert_eq!(timer.poll_ticks(), 300);
     }

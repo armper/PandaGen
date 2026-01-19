@@ -714,6 +714,52 @@ pub trait InterruptHal {
 }
 ```
 
+### Timer HAL (Phase 22)
+
+```rust
+pub trait TimerDevice {
+    fn poll_ticks(&mut self) -> u64;
+}
+```
+
+**Contract**:
+- Returns cumulative monotonic tick count since boot
+- Never blocks (always returns immediately)
+- Ticks never decrease (monotonic guarantee)
+- Tick frequency is implementation-specific
+- No assumptions about wall-clock time
+
+**Implementations**:
+- `SimTimerDevice` - Deterministic simulated timer for testing
+- `FakeTimerDevice` - Scripted timer for unit tests
+- `PitTimer<P: PortIo>` - 8254 Programmable Interval Timer (~1 kHz)
+
+**Example Usage**:
+```rust
+// Simulated timer (tests)
+let mut timer = SimTimerDevice::new();
+timer.advance_ticks(100); // Explicit, deterministic
+assert_eq!(timer.poll_ticks(), 100);
+
+// Hardware timer (real system)
+let mut timer = PitTimer::new(RealPortIo::new());
+let t1 = timer.poll_ticks();
+// ... do work ...
+let t2 = timer.poll_ticks();
+let elapsed_ticks = t2 - t1;
+```
+
+**Philosophy**:
+- Time is a service, not a global variable
+- Measurement only, not scheduling
+- No sleeping, no blocking, no waiting
+- Determinism preserved for testing
+
+**Not Included**:
+- Wall-clock time (UTC, timezones, dates)
+- Preemptive scheduling (future phase)
+- Automatic timer polling (future phase)
+
 **Contract**:
 - Architecture-specific details hidden behind traits
 - Core logic remains architecture-independent

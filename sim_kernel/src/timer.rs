@@ -72,10 +72,7 @@ impl SimTimerDevice {
     ///
     /// Panics if advancing would overflow u64 (extremely unlikely).
     pub fn advance_ticks(&mut self, delta: u64) {
-        self.ticks = self
-            .ticks
-            .checked_add(delta)
-            .expect("Timer tick overflow");
+        self.ticks = self.ticks.checked_add(delta).expect("Timer tick overflow");
     }
 
     /// Sets the timer to a specific tick count
