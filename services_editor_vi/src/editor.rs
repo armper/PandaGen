@@ -6,7 +6,9 @@ use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
 use input_types::{InputEvent, KeyCode, KeyEvent};
 use services_storage::VersionId;
+use services_view_host::{ViewHandleCap, ViewHost};
 use thiserror::Error;
+use view_types::{CursorPosition, ViewContent, ViewFrame};
 
 /// Editor error
 #[derive(Debug, Error)]
@@ -22,6 +24,9 @@ pub enum EditorError {
 
     #[error("Invalid state: {0}")]
     InvalidState(String),
+
+    #[error("View error: {0}")]
+    ViewError(String),
 }
 
 /// Editor result
@@ -43,6 +48,12 @@ pub struct Editor {
     state: EditorState,
     document: Option<DocumentHandle>,
     view: EditorView,
+    /// View handles for publishing (optional)
+    main_view_handle: Option<ViewHandleCap>,
+    status_view_handle: Option<ViewHandleCap>,
+    /// Current revision for view frames
+    main_view_revision: u64,
+    status_view_revision: u64,
 }
 
 impl Editor {
@@ -52,6 +63,10 @@ impl Editor {
             state: EditorState::new(),
             document: None,
             view: EditorView::default(),
+            main_view_handle: None,
+            status_view_handle: None,
+            main_view_revision: 1,
+            status_view_revision: 1,
         }
     }
 
@@ -61,7 +76,21 @@ impl Editor {
             state: EditorState::new(),
             document: None,
             view: EditorView::new(viewport_lines),
+            main_view_handle: None,
+            status_view_handle: None,
+            main_view_revision: 1,
+            status_view_revision: 1,
         }
+    }
+
+    /// Set view handles for publishing
+    pub fn set_view_handles(
+        &mut self,
+        main_view: ViewHandleCap,
+        status_view: ViewHandleCap,
+    ) {
+        self.main_view_handle = Some(main_view);
+        self.status_view_handle = Some(status_view);
     }
 
     /// Get current editor state
@@ -349,6 +378,76 @@ impl Editor {
     pub fn get_content(&self) -> String {
         self.state.buffer().as_string()
     }
+
+    /// Publishes the current editor state to views
+    ///
+    /// Call this after processing input or state changes to update the views.
+    pub fn publish_views(
+        &mut self,
+        view_host: &mut ViewHost,
+        timestamp_ns: u64,
+    ) -> Result<(), EditorError> {
+        // Publish main view (buffer content)
+        if let Some(handle) = &self.main_view_handle {
+            let buffer = self.state.buffer();
+            let lines: Vec<String> = (0..buffer.line_count())
+                .filter_map(|i| buffer.line(i).map(|s| s.to_string()))
+                .collect();
+
+            let content = ViewContent::text_buffer(lines);
+            let cursor_pos = self.state.cursor().position();
+            let cursor = CursorPosition::new(cursor_pos.row, cursor_pos.col);
+
+            let frame = ViewFrame::new(
+                handle.view_id,
+                view_types::ViewKind::TextBuffer,
+                self.main_view_revision,
+                content,
+                timestamp_ns,
+            )
+            .with_cursor(cursor);
+
+            view_host
+                .publish_frame(handle, frame)
+                .map_err(|e| EditorError::ViewError(e.to_string()))?;
+
+            self.main_view_revision += 1;
+        }
+
+        // Publish status view
+        if let Some(handle) = &self.status_view_handle {
+            let status_text = self.view.render_status(&self.state);
+            let content = ViewContent::status_line(status_text);
+
+            let frame = ViewFrame::new(
+                handle.view_id,
+                view_types::ViewKind::StatusLine,
+                self.status_view_revision,
+                content,
+                timestamp_ns,
+            );
+
+            view_host
+                .publish_frame(handle, frame)
+                .map_err(|e| EditorError::ViewError(e.to_string()))?;
+
+            self.status_view_revision += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Convenience method to process input and publish views
+    pub fn process_input_and_publish(
+        &mut self,
+        event: InputEvent,
+        view_host: &mut ViewHost,
+        timestamp_ns: u64,
+    ) -> EditorResult<EditorAction> {
+        let action = self.process_input(event)?;
+        self.publish_views(view_host, timestamp_ns)?;
+        Ok(action)
+    }
 }
 
 impl Default for Editor {
@@ -598,5 +697,93 @@ mod tests {
 
         assert!(matches!(result, EditorAction::Saved(_)));
         assert!(!editor.state().is_dirty());
+    }
+
+    #[test]
+    fn test_editor_publish_views() {
+        use core_types::TaskId;
+        use services_view_host::{ViewHost, ViewHostError};
+        use view_types::ViewKind;
+
+        let mut editor = Editor::new();
+        let mut view_host = ViewHost::new();
+
+        // Create views for the editor
+        let task_id = TaskId::new();
+        let main_view = view_host
+            .create_view(
+                ViewKind::TextBuffer,
+                Some("test-editor".to_string()),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .unwrap();
+        let status_view = view_host
+            .create_view(
+                ViewKind::StatusLine,
+                Some("test-editor-status".to_string()),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .unwrap();
+
+        editor.set_view_handles(main_view, status_view);
+
+        // Enter insert mode and type
+        editor.process_input(press_key(KeyCode::I)).unwrap();
+        editor.process_input(press_key(KeyCode::H)).unwrap();
+        editor.process_input(press_key(KeyCode::I)).unwrap();
+
+        // Publish views
+        editor.publish_views(&mut view_host, 1000).unwrap();
+
+        // Verify main view was published
+        let main_frame = view_host.get_latest(main_view.view_id).unwrap();
+        assert!(main_frame.is_some());
+        let frame = main_frame.unwrap();
+        assert_eq!(frame.revision, 1);
+
+        // Verify status view was published
+        let status_frame = view_host.get_latest(status_view.view_id).unwrap();
+        assert!(status_frame.is_some());
+    }
+
+    #[test]
+    fn test_editor_view_revision_increments() {
+        use core_types::TaskId;
+        use services_view_host::ViewHost;
+        use view_types::ViewKind;
+
+        let mut editor = Editor::new();
+        let mut view_host = ViewHost::new();
+
+        let task_id = TaskId::new();
+        let main_view = view_host
+            .create_view(
+                ViewKind::TextBuffer,
+                Some("test".to_string()),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .unwrap();
+        let status_view = view_host
+            .create_view(
+                ViewKind::StatusLine,
+                Some("test-status".to_string()),
+                task_id,
+                ipc::ChannelId::new(),
+            )
+            .unwrap();
+
+        editor.set_view_handles(main_view, status_view);
+
+        // Publish multiple times
+        editor.publish_views(&mut view_host, 1000).unwrap();
+        editor.publish_views(&mut view_host, 2000).unwrap();
+        editor.publish_views(&mut view_host, 3000).unwrap();
+
+        // Verify revision increments
+        let frame = view_host.get_latest(main_view.view_id).unwrap().unwrap();
+        assert_eq!(frame.revision, 3);
     }
 }

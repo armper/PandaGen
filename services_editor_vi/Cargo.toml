@@ -14,6 +14,8 @@ services_focus_manager = { workspace = true }
 services_storage = { workspace = true }
 services_fs_view = { workspace = true }
 fs_view = { workspace = true }
+view_types = { workspace = true }
+services_view_host = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
