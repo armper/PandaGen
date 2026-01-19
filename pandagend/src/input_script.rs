@@ -103,12 +103,11 @@ impl InputScript {
         // Handle wait command
         if line.starts_with("wait ") {
             let duration_str = line.strip_prefix("wait ").unwrap().trim();
-            let millis = Self::parse_duration(duration_str).map_err(|e| {
-                InputScriptError::ParseError {
+            let millis =
+                Self::parse_duration(duration_str).map_err(|e| InputScriptError::ParseError {
                     line: line_num,
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             return Ok(vec![ScriptedInput::Wait(millis)]);
         }
 
@@ -417,10 +416,7 @@ mod tests {
     #[test]
     fn test_invalid_modifier() {
         let result = InputScript::from_text("Invalid+a");
-        assert!(matches!(
-            result,
-            Err(InputScriptError::InvalidModifier(_))
-        ));
+        assert!(matches!(result, Err(InputScriptError::InvalidModifier(_))));
     }
 
     #[test]

@@ -214,7 +214,9 @@ impl HostRuntime {
                         }
 
                         // Convert to InputEvent
-                        if let Some(event) = InputScript::to_input_event(&ScriptedInput::Key(code, modifiers)) {
+                        if let Some(event) =
+                            InputScript::to_input_event(&ScriptedInput::Key(code, modifiers))
+                        {
                             self.handle_input_event(event)?;
                         }
                     }
@@ -349,7 +351,7 @@ impl HostRuntime {
     }
 
     /// Executes a host command
-    fn execute_command(&mut self, command_text: &str) -> Result<(), HostRuntimeError> {
+    pub fn execute_command(&mut self, command_text: &str) -> Result<(), HostRuntimeError> {
         let command = HostCommandParser::parse(command_text)
             .map_err(|e| HostRuntimeError::CommandError(e.to_string()))?;
 
@@ -408,10 +410,9 @@ impl HostRuntime {
             .renderer
             .needs_redraw(snapshot.main_view.as_ref(), snapshot.status_view.as_ref())
         {
-            let output = self.renderer.render_snapshot(
-                snapshot.main_view.as_ref(),
-                snapshot.status_view.as_ref(),
-            );
+            let output = self
+                .renderer
+                .render_snapshot(snapshot.main_view.as_ref(), snapshot.status_view.as_ref());
 
             // Host can print (it's a host, not a component)
             print!("{}", output);

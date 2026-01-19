@@ -160,11 +160,7 @@ impl HostCommandParser {
         let s = s.trim();
 
         // Strip "comp:" prefix if present
-        let uuid_str = if s.starts_with("comp:") {
-            &s[5..]
-        } else {
-            s
-        };
+        let uuid_str = s.strip_prefix("comp:").unwrap_or(s);
 
         // Parse UUID
         let uuid = uuid::Uuid::parse_str(uuid_str)
@@ -352,10 +348,7 @@ mod tests {
         );
         assert_eq!(HostCommandParser::parse("LIST").unwrap(), HostCommand::List);
         assert_eq!(HostCommandParser::parse("NEXT").unwrap(), HostCommand::Next);
-        assert_eq!(
-            HostCommandParser::parse("QUIT").unwrap(),
-            HostCommand::Quit
-        );
+        assert_eq!(HostCommandParser::parse("QUIT").unwrap(), HostCommand::Quit);
     }
 
     #[test]
