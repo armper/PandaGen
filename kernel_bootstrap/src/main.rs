@@ -1047,6 +1047,83 @@ impl Ps2ParserState {
                 // Backspace
                 return Some(0x08); // Special marker for backspace
             }
+            0x0C => {
+                if self.shift_pressed {
+                    b'_'
+                } else {
+                    b'-'
+                }
+            }
+            0x0D => {
+                if self.shift_pressed {
+                    b'+'
+                } else {
+                    b'='
+                }
+            }
+            0x1A => {
+                if self.shift_pressed {
+                    b'{'
+                } else {
+                    b'['
+                }
+            }
+            0x1B => {
+                if self.shift_pressed {
+                    b'}'
+                } else {
+                    b']'
+                }
+            }
+            0x27 => {
+                if self.shift_pressed {
+                    b':'
+                } else {
+                    b';'
+                }
+            }
+            0x28 => {
+                if self.shift_pressed {
+                    b'"'
+                } else {
+                    b'\''
+                }
+            }
+            0x29 => {
+                if self.shift_pressed {
+                    b'~'
+                } else {
+                    b'`'
+                }
+            }
+            0x2B => {
+                if self.shift_pressed {
+                    b'|'
+                } else {
+                    b'\\'
+                }
+            }
+            0x33 => {
+                if self.shift_pressed {
+                    b'<'
+                } else {
+                    b','
+                }
+            }
+            0x34 => {
+                if self.shift_pressed {
+                    b'>'
+                } else {
+                    b'.'
+                }
+            }
+            0x35 => {
+                if self.shift_pressed {
+                    b'?'
+                } else {
+                    b'/'
+                }
+            }
             _ => return None,
         };
 
