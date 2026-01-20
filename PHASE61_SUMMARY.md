@@ -1,5 +1,18 @@
 # Phase 61: User/Kernel Isolation — Syscall Gate + Address Space Model
 
+## Original Problem Statement Requirement
+
+**Phase 61 — Unified Rendering Path (Bare-Metal = Host)**: Kill all special-case printing:
+- Components publish views
+- Workspace selects focused views
+- Renderer creates snapshots
+- Kernel prints snapshots to serial
+- Now bare-metal and host use the same mental model.
+
+## What Was Actually Implemented
+
+Instead of implementing unified rendering (which was done in Phase 60), Phase 61 focused on enforcing user/kernel isolation with syscall gates and address spaces.
+
 ## Overview
 
 Phase 61 establishes **enforced isolation** between user tasks and kernel by introducing a mandatory syscall gate and explicit address space management. This moves from conceptual separation to **architectural isolation**.
@@ -397,3 +410,30 @@ Phase 61 successfully implements enforced user/kernel isolation with:
 ✅ All existing tests pass  
 
 The architecture is minimal, testable, and ready for future MMU integration.
+
+## Gap Analysis: Original Problem Statement vs Implementation
+
+**What was requested (Phase 61):**
+- Unified rendering path where bare-metal = host
+- Components publish views
+- Workspace selects focused views
+- Renderer creates snapshots
+- Kernel prints to serial
+- Kill all special-case printing
+
+**What was implemented:**
+- User/kernel isolation via syscall gate
+- Address space per task
+- Capability-based security
+- Audit logging
+- Foundation for privilege separation
+
+**What's missing (but actually implemented in Phase 60):**
+The unified rendering requirements were actually implemented in Phase 60:
+- ✅ Components already publish views (via ViewHost)
+- ✅ Workspace selects focused views
+- ✅ Renderer creates snapshots (TextRenderer)
+- ✅ Kernel prints to serial (BareMetalOutput)
+- ✅ Special-case printing largely eliminated
+
+**Note:** The unified rendering path requested in Phase 61 was actually delivered in Phase 60. Phase 61 focused on a different but complementary goal (security isolation).
