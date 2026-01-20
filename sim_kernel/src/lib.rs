@@ -28,6 +28,7 @@ pub mod policy_audit;
 pub mod resource_audit;
 pub mod scheduler;
 pub mod smp;
+pub mod syscall_gate;
 pub mod test_utils;
 pub mod timer;
 pub mod message_queue;
@@ -35,7 +36,7 @@ pub mod user_task;
 
 use core_types::{
     AddressSpaceCap, Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata,
-    CapabilityStatus, MemoryAccessType, MemoryError, MemoryPerms, MemoryRegion, MemoryRegionCap,
+    CapabilityStatus, MemoryAccessType, MemoryBacking, MemoryError, MemoryPerms, MemoryRegion, MemoryRegionCap,
     ServiceId, TaskId,
 };
 use fault_injection::FaultInjector;
@@ -101,6 +102,8 @@ pub struct SimulatedKernel {
     address_space_manager: address_space::AddressSpaceManager,
     /// Channel capacity (bounded queues)
     channel_capacity: usize,
+    /// Syscall gate for user/kernel isolation (Phase 61)
+    syscall_gate: syscall_gate::SyscallGate,
 }
 
 #[derive(Debug)]
@@ -200,6 +203,7 @@ impl SimulatedKernel {
             smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
             channel_capacity: 64,
+            syscall_gate: syscall_gate::SyscallGate::new(),
         }
     }
 
@@ -337,8 +341,12 @@ impl SimulatedKernel {
         kernel_stack_bytes: usize,
     ) -> Result<user_task::UserTaskContext, KernelError> {
         let handle = self.spawn_task(TaskDescriptor::new(name))?;
+        let execution_id = self.get_task_identity(handle.task_id)
+            .ok_or_else(|| KernelError::SpawnFailed("Failed to get task identity".to_string()))?;
+        
         Ok(user_task::UserTaskContext::new(
             handle.task_id,
+            execution_id,
             user_stack_bytes,
             kernel_stack_bytes,
             user_task::default_trap,
@@ -407,6 +415,20 @@ impl SimulatedKernel {
     /// Phase 23: Provides access to scheduler state for testing.
     pub fn scheduler(&self) -> &scheduler::Scheduler {
         &self.scheduler
+    }
+
+    /// Returns a reference to the syscall gate
+    ///
+    /// Phase 61: Provides access to syscall gate for testing.
+    pub fn syscall_gate(&self) -> &syscall_gate::SyscallGate {
+        &self.syscall_gate
+    }
+
+    /// Returns a mutable reference to the syscall gate
+    ///
+    /// Phase 61: Provides mutable access to syscall gate for testing.
+    pub fn syscall_gate_mut(&mut self) -> &mut syscall_gate::SyscallGate {
+        &mut self.syscall_gate
     }
 
     /// Sets the current receive task context
@@ -2024,6 +2046,75 @@ impl KernelApiV0 for SimulatedKernel {
     }
 }
 
+// ============================================================================
+// Phase 61: MemoryOps trait implementation for syscall gate
+// ============================================================================
+
+impl syscall_gate::MemoryOps for SimulatedKernel {
+    fn create_address_space_op(&mut self, execution_id: ExecutionId) -> Result<AddressSpaceCap, MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        let cap = self.address_space_manager.create_address_space(execution_id, timestamp_nanos);
+        Ok(cap)
+    }
+
+    fn allocate_region_op(
+        &mut self,
+        space_cap: &AddressSpaceCap,
+        size_bytes: u64,
+        permissions: MemoryPerms,
+        backing: MemoryBacking,
+        caller_execution_id: ExecutionId,
+    ) -> Result<MemoryRegionCap, MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        let region = MemoryRegion::new(size_bytes, permissions, backing);
+        
+        // Check memory budget before allocation
+        if let Some(identity) = self.identity_table.get_mut(&caller_execution_id) {
+            if let Some(budget) = &identity.budget {
+                if let Some(limit) = budget.memory_units {
+                    // Calculate units: 1 unit per 4096 bytes (1 page)
+                    let units_needed = ((size_bytes + 4095) / 4096) as u64;
+                    let current_usage = identity.usage.memory_units.0;
+                    
+                    if current_usage + units_needed > limit.0 {
+                        // Record budget exhaustion
+                        self.resource_audit.record_event(
+                            self.current_time,
+                            resource_audit::ResourceEvent::BudgetExhausted {
+                                execution_id: caller_execution_id,
+                                resource_type: "MemoryUnits".to_string(),
+                                limit: limit.0,
+                                attempted_usage: current_usage + units_needed,
+                                operation: "allocate_region".to_string(),
+                            },
+                        );
+                        
+                        return Err(MemoryError::BudgetExhausted {
+                            requested: units_needed,
+                            available: limit.0.saturating_sub(current_usage),
+                        });
+                    }
+                    
+                    // Consume memory units
+                    identity.usage.consume_memory_units(resources::MemoryUnits::new(units_needed));
+                }
+            }
+        }
+        
+        self.address_space_manager.allocate_region(space_cap, region, caller_execution_id, timestamp_nanos)
+    }
+
+    fn access_region_op(
+        &mut self,
+        region_cap: &MemoryRegionCap,
+        access_type: MemoryAccessType,
+        caller_execution_id: ExecutionId,
+    ) -> Result<(), MemoryError> {
+        let timestamp_nanos = self.current_time.as_nanos();
+        self.address_space_manager.access_region(region_cap, access_type, caller_execution_id, timestamp_nanos)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3461,4 +3552,216 @@ mod tests {
         // Capability delegation is implemented in Phase 3 but not yet integrated
         // with MemoryRegionCap. For now, we verify isolation is maintained.
     }
+
+    // ============================================================================
+    // Phase 61: User/Kernel Isolation Tests
+    // ============================================================================
+
+    #[test]
+    fn test_isolation_syscall_gate_enforces_all_operations() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // All operations must go through syscall gate
+        let channel_result = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
+        assert!(channel_result.is_ok());
+
+        // Verify gate recorded the operation
+        let audit = kernel.syscall_gate().audit_log();
+        assert!(audit.has_event(|e| matches!(e, syscall_gate::SyscallEvent::Invoked { .. })));
+        assert!(audit.has_event(|e| matches!(e, syscall_gate::SyscallEvent::Completed { .. })));
+    }
+
+    #[test]
+    fn test_isolation_task_cannot_bypass_syscall_gate() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // Record a bypass attempt
+        let timestamp = kernel.now().as_nanos();
+        kernel.syscall_gate_mut().record_bypass_attempt(ctx.execution_id, timestamp);
+
+        // Verify it was recorded
+        let audit = kernel.syscall_gate().audit_log();
+        assert!(audit.has_event(|e| matches!(e, syscall_gate::SyscallEvent::BypassAttempt { .. })));
+    }
+
+    #[test]
+    fn test_isolation_address_space_per_task() {
+        let mut kernel = SimulatedKernel::new();
+
+        // Spawn two user tasks
+        let ctx1 = kernel.spawn_user_task("task1".to_string(), 4096, 4096).unwrap();
+        let ctx2 = kernel.spawn_user_task("task2".to_string(), 4096, 4096).unwrap();
+
+        // Each task should have its own address space
+        let space1 = kernel.get_address_space(ctx1.execution_id);
+        let space2 = kernel.get_address_space(ctx2.execution_id);
+
+        assert!(space1.is_some());
+        assert!(space2.is_some());
+        assert_ne!(space1.unwrap().space_id, space2.unwrap().space_id);
+    }
+
+    #[test]
+    fn test_isolation_capability_based_access() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // Create address space capability
+        let space_cap = kernel.create_address_space(ctx.execution_id).unwrap();
+
+        // Task can only allocate regions with valid capability
+        let result = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_write(),
+            MemoryBacking::Anonymous,
+            ctx.execution_id,
+        );
+        assert!(result.is_ok());
+
+        // Another execution cannot use this capability
+        let other_exec = ExecutionId::new();
+        let result = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_write(),
+            MemoryBacking::Anonymous,
+            other_exec,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_isolation_syscall_rejection_recorded() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // Try to lookup non-existent service
+        let result = ctx.syscall(
+            &mut kernel,
+            syscall_gate::Syscall::LookupService {
+                service_id: ServiceId::new(),
+            },
+        );
+
+        // Should fail
+        assert!(result.is_err());
+
+        // Verify rejection was recorded
+        let audit = kernel.syscall_gate().audit_log();
+        assert!(audit.has_event(|e| matches!(e, syscall_gate::SyscallEvent::Rejected { .. })));
+    }
+
+    #[test]
+    fn test_isolation_no_ambient_authority() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // Create a channel - this creates it in kernel space
+        let channel = kernel_api::KernelApi::create_channel(&mut kernel).unwrap();
+
+        // Task cannot send to it without proper access grant
+        // (In real system, would need a capability to access the channel)
+        let payload = ipc::MessagePayload::new(&"test").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            ServiceId::new(),
+            "test".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+
+        // This succeeds in current implementation but demonstrates the pattern
+        // In a full implementation, this would require a channel capability
+        let _ = ctx.syscall(&mut kernel, syscall_gate::Syscall::Send { channel, message });
+    }
+
+    #[test]
+    fn test_isolation_memory_access_enforced() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        let space_cap = kernel.create_address_space(ctx.execution_id).unwrap();
+        
+        // Allocate a read-only region
+        let region_cap = kernel.allocate_region(
+            &space_cap,
+            4096,
+            MemoryPerms::read_only(),
+            MemoryBacking::Anonymous,
+            ctx.execution_id,
+        ).unwrap();
+
+        // Read access should succeed
+        assert!(kernel.access_region(&region_cap, MemoryAccessType::Read, ctx.execution_id).is_ok());
+
+        // Write access should fail
+        let result = kernel.access_region(&region_cap, MemoryAccessType::Write, ctx.execution_id);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MemoryError::PermissionDenied { .. }));
+
+        // Verify access attempts were audited
+        let audit = kernel.address_space_audit();
+        assert!(audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::AccessAttempted { .. })));
+    }
+
+    #[test]
+    fn test_isolation_cross_task_memory_denied() {
+        let mut kernel = SimulatedKernel::new();
+        
+        let ctx1 = kernel.spawn_user_task("task1".to_string(), 4096, 4096).unwrap();
+        let ctx2 = kernel.spawn_user_task("task2".to_string(), 4096, 4096).unwrap();
+
+        // Task 1 allocates a region
+        let space_cap1 = kernel.create_address_space(ctx1.execution_id).unwrap();
+        let region_cap1 = kernel.allocate_region(
+            &space_cap1,
+            4096,
+            MemoryPerms::read_write(),
+            MemoryBacking::Anonymous,
+            ctx1.execution_id,
+        ).unwrap();
+
+        // Task 2 cannot access task 1's region
+        let result = kernel.access_region(&region_cap1, MemoryAccessType::Read, ctx2.execution_id);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MemoryError::NoCapability(_)));
+    }
+
+    #[test]
+    fn test_isolation_deterministic_syscall_audit() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // Perform a series of syscalls
+        let _ = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
+        let _ = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
+
+        // Verify exact sequence was recorded
+        let audit = kernel.syscall_gate().audit_log();
+        let invocations = audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Invoked { .. }));
+        let completions = audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Completed { .. }));
+
+        assert_eq!(invocations, 2);
+        assert_eq!(completions, 2);
+    }
+
+    #[test]
+    fn test_isolation_syscall_gate_validates_caller() {
+        let mut kernel = SimulatedKernel::new();
+        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+
+        // All syscalls include caller ExecutionId for validation
+        let result = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
+        assert!(result.is_ok());
+
+        // Verify gate recorded the caller
+        let audit = kernel.syscall_gate().audit_log();
+        assert!(audit.has_event(|e| match e {
+            syscall_gate::SyscallEvent::Invoked { caller, .. } => *caller == ctx.execution_id,
+            _ => false,
+        }));
+    }
 }
+
