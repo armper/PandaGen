@@ -45,6 +45,8 @@ pub struct BlockStorage<D: BlockDevice> {
     superblock: Superblock,
     /// Map object versions to their block locations
     allocations: HashMap<(ObjectId, VersionId), AllocationEntry>,
+    /// Track the latest version for each object
+    latest_versions: HashMap<ObjectId, VersionId>,
     /// Free blocks
     free_blocks: HashSet<u64>,
     /// Pending writes for active transactions
@@ -121,6 +123,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             device,
             superblock,
             allocations: HashMap::new(),
+            latest_versions: HashMap::new(),
             free_blocks,
             pending: HashMap::new(),
         })
@@ -150,6 +153,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             device,
             superblock,
             allocations: HashMap::new(),
+            latest_versions: HashMap::new(),
             free_blocks,
             pending: HashMap::new(),
         })
@@ -205,6 +209,36 @@ impl<D: BlockDevice> BlockStorage<D> {
         
         Ok(data)
     }
+    
+    /// Read object data by object ID and version ID
+    pub fn read_object_data(
+        &mut self,
+        object_id: ObjectId,
+        version_id: VersionId,
+    ) -> Result<Vec<u8>, BlockStorageError> {
+        // Check pending writes first
+        for pending_list in self.pending.values() {
+            if let Some(entry) = pending_list
+                .iter()
+                .rev()
+                .find(|p| p.object_id == object_id && p.version_id == version_id)
+            {
+                return Ok(entry.data.clone());
+            }
+        }
+        
+        // Look up in allocations
+        let entry = self
+            .allocations
+            .get(&(object_id, version_id))
+            .ok_or(BlockStorageError::ObjectNotFound)?;
+        
+        // Calculate blocks needed
+        let blocks_needed = ((entry.size_bytes as usize + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64;
+        let blocks: Vec<u64> = (entry.block_idx..entry.block_idx + blocks_needed).collect();
+        
+        self.read_data(&blocks, entry.size_bytes)
+    }
 }
 
 impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
@@ -224,15 +258,11 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
             }
         }
         
-        // Find any version in allocations (simplified - in production would track latest)
-        let version = self
-            .allocations
-            .iter()
-            .find(|((oid, _), _)| *oid == object_id)
-            .map(|((_, vid), _)| *vid)
-            .ok_or_else(|| TransactionError::ObjectNotFound(object_id.to_string()))?;
-        
-        Ok(version)
+        // Return the latest version from allocations
+        self.latest_versions
+            .get(&object_id)
+            .copied()
+            .ok_or_else(|| TransactionError::ObjectNotFound(object_id.to_string()))
     }
     
     fn write(
@@ -285,10 +315,13 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
                         size_bytes,
                     },
                 );
+                
+                // Update latest version tracking
+                self.latest_versions.insert(write.object_id, write.version_id);
             }
         }
         
-        tx.commit();
+        tx.commit()?;
         Ok(())
     }
     
