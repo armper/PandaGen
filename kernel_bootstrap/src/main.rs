@@ -83,9 +83,9 @@ impl IdtEntry {
         self.offset_low = (addr & 0xFFFF) as u16;
         self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
         self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
-        self.selector = 0x08; // Kernel code segment
+        self.selector = KERNEL_CODE_SEGMENT;
         self.ist = 0;
-        self.flags = 0x8E; // Present, DPL=0, interrupt gate
+        self.flags = IDT_PRESENT_INTERRUPT_GATE;
         self.reserved = 0;
     }
 }
@@ -103,30 +103,50 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::new(); 256];
 #[cfg(not(test))]
 static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// x86_64 GDT segment selectors (assumes standard bootloader setup)
+#[cfg(not(test))]
+const KERNEL_CODE_SEGMENT: u16 = 0x08;
+#[cfg(not(test))]
+const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
+
 #[cfg(not(test))]
 global_asm!(
     r#"
 .section .text
 .global irq_timer_entry
 irq_timer_entry:
+    # Save all general-purpose registers
     push rax
     push rcx
     push rdx
+    push rbx
+    push rbp
     push rsi
     push rdi
     push r8
     push r9
     push r10
     push r11
+    push r12
+    push r13
+    push r14
+    push r15
     
     call timer_irq_handler
     
+    # Restore all registers in reverse order
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     pop r11
     pop r10
     pop r9
     pop r8
     pop rdi
     pop rsi
+    pop rbp
+    pop rbx
     pop rdx
     pop rcx
     pop rax
@@ -259,6 +279,8 @@ fn sys_yield() {
     // No-op for now
 }
 
+// NOTE: This is an intentionally simple busy-wait implementation for the boot proof.
+// In a real kernel, this should yield to other tasks or use hlt to wait for interrupts.
 #[cfg(not(test))]
 fn sys_sleep(ticks: u64) {
     let start = get_tick_count();
