@@ -40,4 +40,5 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -no-reboot
 
 - Limine menu appears.
 - Selecting the entry boots the stub kernel.
-- The kernel halts in a loop (no output yet).
+- A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
+- Typing `help` prints available commands.
