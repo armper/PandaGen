@@ -98,7 +98,10 @@ impl HostRuntime {
     /// Creates a new host runtime
     pub fn new(config: HostRuntimeConfig) -> Result<Self, HostRuntimeError> {
         // Create kernel with no-op policy (host doesn't enforce, workspace does)
-        let kernel = SimulatedKernel::new().with_policy_engine(Box::new(NoOpPolicy));
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(NoOpPolicy));
+        kernel
+            .bootstrap_core_services()
+            .map_err(|e| HostRuntimeError::CommandError(e.to_string()))?;
 
         // Create workspace identity
         let workspace_identity = IdentityMetadata::new(

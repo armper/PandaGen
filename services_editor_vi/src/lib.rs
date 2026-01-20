@@ -33,6 +33,6 @@ pub mod state;
 
 pub use commands::CommandParser;
 pub use editor::{Editor, EditorAction, EditorError};
-pub use io::{DocumentHandle, OpenOptions};
+pub use io::{DocumentHandle, EditorIo, OpenOptions, OpenResult, SaveResult, StorageEditorIo};
 pub use render::EditorView;
 pub use state::{Cursor, EditorMode, EditorState, Position};

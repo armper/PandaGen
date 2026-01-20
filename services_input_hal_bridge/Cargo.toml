@@ -16,3 +16,6 @@ policy = { workspace = true }
 ipc = { workspace = true }
 kernel_api = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+sim_kernel = { workspace = true }

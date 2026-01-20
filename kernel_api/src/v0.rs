@@ -4,7 +4,7 @@
 //! relies on typed IDs and explicit capability transfer. It is designed to
 //! bootstrap user-task scaffolding and service IPC without ambient authority.
 
-use crate::KernelError;
+use crate::{Duration, KernelError};
 use core_types::{Cap, TaskId};
 use ipc::ChannelId;
 
@@ -29,6 +29,12 @@ pub trait KernelApiV0 {
 
     /// Receives a typed message envelope (non-blocking semantics are defined by the kernel).
     fn recv(&mut self, channel: ChannelId) -> Result<ipc::MessageEnvelope, KernelError>;
+
+    /// Yields execution to the scheduler.
+    fn yield_now(&mut self) -> Result<(), KernelError>;
+
+    /// Sleeps for a duration (kernel-defined semantics).
+    fn sleep(&mut self, duration: Duration) -> Result<(), KernelError>;
 
     /// Grants a capability to another task.
     fn grant(&mut self, task: TaskId, capability: Cap<()>) -> Result<(), KernelError>;

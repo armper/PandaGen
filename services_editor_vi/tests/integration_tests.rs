@@ -3,7 +3,8 @@
 //! These tests validate complete editing workflows using simulated keyboard input.
 
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
-use services_editor_vi::{Editor, EditorAction};
+use services_editor_vi::{Editor, EditorAction, OpenOptions, StorageEditorIo};
+use services_storage::{JournaledStorage, ObjectId, TransactionalStorage};
 
 fn press_key(code: KeyCode) -> InputEvent {
     InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
@@ -136,6 +137,46 @@ fn test_navigation_with_hjkl() {
     // Navigate down (j)
     editor.process_input(press_key(KeyCode::J)).unwrap();
     assert_eq!(editor.state().cursor().position().row, 1);
+}
+
+#[test]
+fn test_editor_open_and_save_with_storage_io() {
+    let mut storage = JournaledStorage::new();
+    let object_id = ObjectId::new();
+
+    let mut tx = storage.begin_transaction().unwrap();
+    let initial_version = storage
+        .write(&mut tx, object_id, b"hello")
+        .unwrap();
+    storage.commit(&mut tx).unwrap();
+
+    let io = StorageEditorIo::new(storage);
+    let mut editor = Editor::new();
+    editor.set_io(Box::new(io));
+
+    editor
+        .open_with(OpenOptions::new().with_object(object_id))
+        .unwrap();
+    assert_eq!(editor.get_content(), "hello");
+    assert_eq!(
+        editor.document().unwrap().version_id,
+        initial_version
+    );
+
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+    assert!(matches!(result, EditorAction::Saved(_)));
+    assert_ne!(
+        editor.document().unwrap().version_id,
+        initial_version
+    );
 }
 
 #[test]

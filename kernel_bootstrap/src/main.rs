@@ -702,7 +702,7 @@ impl Kernel {
         let command_task = CommandService::new(command_channel);
         let console_task = ConsoleService::new(command_channel, response_channel);
 
-        let _ = kernel.spawn_task(TaskDomain::Kernel, TaskKind::Command(command_task));
+        let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Command(command_task));
         let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Console(console_task));
 
         kernel
@@ -730,7 +730,7 @@ impl Kernel {
         let command_task = CommandService::new(command_channel);
         let console_task = ConsoleService::new(command_channel, response_channel);
 
-        let _ = kernel.spawn_task(TaskDomain::Kernel, TaskKind::Command(command_task));
+        let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Command(command_task));
         let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Console(console_task));
 
         kernel

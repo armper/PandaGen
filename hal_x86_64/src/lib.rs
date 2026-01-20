@@ -11,13 +11,17 @@ use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};
 
 pub mod idt;
+pub mod interrupts;
 pub mod keyboard;
 pub mod port_io;
+pub mod tick;
 pub mod timer;
 
 pub use idt::{Idt, IdtError};
+pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
+pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
 
 /// x86_64 CPU implementation (skeleton)
@@ -79,7 +83,7 @@ impl MemoryHal for X86_64Memory {
 /// x86_64 interrupt handling implementation (skeleton)
 pub struct X86_64Interrupts {
     enabled: bool,
-    idt: Idt,
+    dispatcher: interrupts::InterruptDispatcher,
 }
 
 impl X86_64Interrupts {
@@ -87,23 +91,37 @@ impl X86_64Interrupts {
     pub fn new() -> Self {
         Self {
             enabled: false,
-            idt: Idt::new(),
+            dispatcher: interrupts::InterruptDispatcher::new(),
         }
     }
 
     /// Installs the IDT (skeleton).
     pub fn install_idt(&mut self) {
-        self.idt.install();
+        self.dispatcher.install_idt();
     }
 
     /// Registers a handler with error reporting.
-    pub fn register_handler_safe(&mut self, vector: u8, handler: fn()) -> Result<(), IdtError> {
-        self.idt.register_handler(vector, handler)
+    pub fn register_irq_handler(
+        &mut self,
+        irq: interrupts::IrqLine,
+        handler: fn(),
+    ) -> Result<(), hal::interrupts::InterruptError> {
+        self.dispatcher.register_irq_handler(irq, handler)
     }
 
     /// Returns whether the IDT is installed.
     pub fn idt_installed(&self) -> bool {
-        self.idt.is_installed()
+        self.dispatcher.idt_installed()
+    }
+
+    /// Dispatches a specific IRQ line.
+    pub fn dispatch_irq(&mut self, irq: interrupts::IrqLine) -> Result<(), interrupts::IrqError> {
+        self.dispatcher.dispatch_irq(irq)
+    }
+
+    /// Updates which controller is used for acknowledgments.
+    pub fn set_ack_strategy(&mut self, strategy: interrupts::AckStrategy) {
+        self.dispatcher.set_ack_strategy(strategy);
     }
 }
 
@@ -129,7 +147,9 @@ impl InterruptHal for X86_64Interrupts {
     }
 
     fn register_handler(&mut self, _vector: u8, _handler: fn()) {
-        let _ = self.idt.register_handler(_vector, _handler);
+        let _ = self
+            .dispatcher
+            .register_irq_handler(interrupts::IrqLine::Vector(_vector), _handler);
     }
 }
 
@@ -165,8 +185,13 @@ mod tests {
 
         fn handler_stub() {}
 
-        interrupts.register_handler_safe(32, handler_stub).unwrap();
-        let result = interrupts.register_handler_safe(32, handler_stub);
-        assert_eq!(result, Err(IdtError::AlreadyRegistered(32)));
+        interrupts
+            .register_irq_handler(interrupts::IrqLine::Vector(32), handler_stub)
+            .unwrap();
+        let result = interrupts.register_irq_handler(interrupts::IrqLine::Vector(32), handler_stub);
+        assert_eq!(
+            result,
+            Err(hal::interrupts::InterruptError::AlreadyRegistered(32))
+        );
     }
 }

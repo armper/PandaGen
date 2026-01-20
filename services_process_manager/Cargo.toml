@@ -11,3 +11,8 @@ kernel_api.workspace = true
 ipc.workspace = true
 uuid.workspace = true
 serde.workspace = true
+identity.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+sim_kernel.workspace = true

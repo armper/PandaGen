@@ -12,6 +12,8 @@
 
 pub mod descriptor;
 pub mod lifecycle;
+pub mod manager;
 
 pub use descriptor::{RestartPolicy, ServiceDescriptor};
 pub use lifecycle::{LifecycleState, ServiceHandle};
+pub use manager::{ExitNotificationSource, ProcessManager, ProcessManagerError};

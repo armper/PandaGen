@@ -511,4 +511,28 @@ mod tests {
         assert_eq!(result, PollResult::EventDelivered);
         assert_eq!(sink.delivered, 1);
     }
+
+    #[test]
+    fn test_bridge_kernel_sink_delivers_message() {
+        let exec_id = ExecutionId::new();
+        let task_id = TaskId::new();
+        let mut kernel = sim_kernel::SimulatedKernel::new();
+        let channel = kernel_api::KernelApiV0::create_channel(&mut kernel).unwrap();
+
+        let mut input_service = InputService::new();
+        let subscription = input_service
+            .subscribe_keyboard(task_id, channel)
+            .unwrap();
+
+        let events = vec![HalKeyEvent::new(0x1E, true)];
+        let keyboard = Box::new(FakeKeyboard::new(events));
+        let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
+
+        let mut sink = KernelInputSink::new(&mut kernel, None);
+        let result = bridge.poll_with_sink(&input_service, &mut sink).unwrap();
+        assert_eq!(result, PollResult::EventDelivered);
+
+        let envelope = kernel_api::KernelApi::receive_message(&mut kernel, channel, None).unwrap();
+        assert_eq!(envelope.action, services_input::INPUT_EVENT_ACTION);
+    }
 }

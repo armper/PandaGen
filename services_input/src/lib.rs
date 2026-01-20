@@ -71,12 +71,9 @@ pub const INPUT_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
 /// Action identifier for input event messages.
 pub const INPUT_EVENT_ACTION: &str = "input.event";
 
-/// Stable service ID for the input service.
-const INPUT_SERVICE_ID: u128 = 0x91a7_2f0e_c9c3_4d8a_8e76_0e8c_9f0a_2d4bu128;
-
 /// Returns the stable service ID for the input service.
 pub fn input_service_id() -> ServiceId {
-    ServiceId::from_u128(INPUT_SERVICE_ID)
+    core_types::input_service_id()
 }
 
 /// Builds an input event message envelope.

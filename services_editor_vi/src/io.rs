@@ -1,6 +1,8 @@
 //! Document I/O operations
 
-use services_storage::{ObjectId, VersionId};
+use fs_view::DirectoryView;
+use services_fs_view::{FileSystemOperations, FileSystemViewService};
+use services_storage::{JournaledStorage, ObjectId, TransactionError, TransactionalStorage, VersionId};
 use thiserror::Error;
 
 /// Document I/O error
@@ -96,6 +98,132 @@ pub struct SaveResult {
     pub link_updated: bool,
     /// Status message
     pub message: String,
+}
+
+/// Open result containing document content and handle.
+#[derive(Debug, Clone)]
+pub struct OpenResult {
+    pub content: String,
+    pub handle: DocumentHandle,
+}
+
+/// Editor I/O abstraction.
+pub trait EditorIo {
+    fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError>;
+    fn save(&mut self, handle: &DocumentHandle, content: &str) -> Result<SaveResult, IoError>;
+}
+
+/// Storage-backed editor I/O using JournaledStorage and optional fs_view.
+pub struct StorageEditorIo {
+    storage: JournaledStorage,
+    fs_view: Option<FileSystemViewService>,
+    root: Option<DirectoryView>,
+}
+
+impl StorageEditorIo {
+    pub fn new(storage: JournaledStorage) -> Self {
+        Self {
+            storage,
+            fs_view: None,
+            root: None,
+        }
+    }
+
+    pub fn with_fs_view(
+        storage: JournaledStorage,
+        fs_view: FileSystemViewService,
+        root: DirectoryView,
+    ) -> Self {
+        Self {
+            storage,
+            fs_view: Some(fs_view),
+            root: Some(root),
+        }
+    }
+
+    pub fn storage(&self) -> &JournaledStorage {
+        &self.storage
+    }
+
+    fn map_tx_error(err: TransactionError) -> IoError {
+        match err {
+            TransactionError::ObjectNotFound(_) => IoError::NotFound,
+            other => IoError::StorageError(other.to_string()),
+        }
+    }
+}
+
+impl EditorIo for StorageEditorIo {
+    fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError> {
+        let object_id = if let Some(object_id) = options.object_id {
+            object_id
+        } else if let Some(path) = options.path.clone() {
+            let fs = self
+                .fs_view
+                .as_ref()
+                .ok_or_else(|| IoError::PermissionDenied("No fs_view available".to_string()))?;
+            let root = self
+                .root
+                .as_ref()
+                .ok_or_else(|| IoError::PermissionDenied("No root directory".to_string()))?;
+            match fs.open(root, &path) {
+                Ok(id) => id,
+                Err(services_fs_view::OperationError::NotFound(_)) => return Err(IoError::NotFound),
+                Err(services_fs_view::OperationError::AccessDenied(reason)) => {
+                    return Err(IoError::PermissionDenied(reason))
+                }
+                Err(err) => return Err(IoError::StorageError(err.to_string())),
+            }
+        } else {
+            return Err(IoError::NotFound);
+        };
+
+        let mut tx = self
+            .storage
+            .begin_transaction()
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+
+        let version_id = self
+            .storage
+            .read(&tx, object_id)
+            .map_err(Self::map_tx_error)?;
+        let data = self
+            .storage
+            .read_data(&tx, object_id)
+            .map_err(Self::map_tx_error)?;
+        let _ = self.storage.rollback(&mut tx);
+
+        let content = String::from_utf8(data).map_err(|_| IoError::InvalidUtf8)?;
+        let handle = DocumentHandle::new(
+            object_id,
+            version_id,
+            options.path.clone(),
+            self.fs_view.is_some(),
+        );
+
+        Ok(OpenResult { content, handle })
+    }
+
+    fn save(&mut self, handle: &DocumentHandle, content: &str) -> Result<SaveResult, IoError> {
+        let mut tx = self
+            .storage
+            .begin_transaction()
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+
+        let new_version_id = self
+            .storage
+            .write(&mut tx, handle.object_id, content.as_bytes())
+            .map_err(Self::map_tx_error)?;
+        self.storage
+            .commit(&mut tx)
+            .map_err(Self::map_tx_error)?;
+
+        Ok(SaveResult::new(
+            new_version_id,
+            false,
+            "Saved successfully",
+        ))
+    }
 }
 
 impl SaveResult {

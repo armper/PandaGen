@@ -20,6 +20,7 @@
 pub mod capability;
 pub mod ids;
 pub mod memory;
+pub mod service_ids;
 pub mod storage_schema;
 
 pub use capability::{
@@ -27,6 +28,9 @@ pub use capability::{
     CapabilityMetadata, CapabilityStatus, CapabilityTransfer,
 };
 pub use ids::{ServiceId, TaskId};
+pub use service_ids::{
+    command_service_id, console_service_id, input_service_id, timer_service_id,
+};
 pub use memory::{
     AddressSpace, AddressSpaceCap, AddressSpaceId, MemoryAccessType, MemoryBacking, MemoryError,
     MemoryPerms, MemoryRegion, MemoryRegionCap, MemoryRegionId,

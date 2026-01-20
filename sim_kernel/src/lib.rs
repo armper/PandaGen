@@ -30,6 +30,8 @@ pub mod scheduler;
 pub mod smp;
 pub mod test_utils;
 pub mod timer;
+pub mod message_queue;
+pub mod user_task;
 
 use core_types::{
     AddressSpaceCap, Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata,
@@ -39,11 +41,11 @@ use core_types::{
 use fault_injection::FaultInjector;
 use hal::TimerDevice;
 use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
-use ipc::{ChannelId, MessageEnvelope};
+use ipc::{ChannelId, Compatibility, MessageEnvelope, SchemaMismatchError, VersionPolicy};
 use kernel_api::{Duration, Instant, KernelApi, KernelApiV0, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::CpuTicks;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 /// Simulated kernel state
 ///
@@ -60,8 +62,12 @@ pub struct SimulatedKernel {
     tasks: HashMap<TaskId, TaskInfo>,
     /// Message channels
     channels: HashMap<ChannelId, Channel>,
+    /// Channel access control (optional)
+    channel_access: HashMap<ChannelId, ChannelAccess>,
     /// Service registry
     services: HashMap<ServiceId, ChannelId>,
+    /// Service schema policies (for version validation)
+    service_policies: HashMap<ServiceId, VersionPolicy>,
     /// Fault injector (optional, for testing)
     fault_injector: Option<FaultInjector>,
     /// Pending delayed messages
@@ -93,6 +99,8 @@ pub struct SimulatedKernel {
     smp: Option<smp::SmpRuntime>,
     /// Address space manager (Phase 24)
     address_space_manager: address_space::AddressSpaceManager,
+    /// Channel capacity (bounded queues)
+    channel_capacity: usize,
 }
 
 #[derive(Debug)]
@@ -105,8 +113,44 @@ struct TaskInfo {
 }
 
 struct Channel {
-    /// Messages waiting to be received
-    messages: VecDeque<MessageEnvelope>,
+    /// Bounded message queue
+    queue: message_queue::MessageQueue,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ChannelAccess {
+    senders: HashSet<TaskId>,
+    receivers: HashSet<TaskId>,
+}
+
+impl ChannelAccess {
+    fn allows_send(&self, task_id: TaskId) -> bool {
+        self.senders.contains(&task_id)
+    }
+
+    fn allows_receive(&self, task_id: TaskId) -> bool {
+        self.receivers.contains(&task_id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.senders.is_empty() && self.receivers.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelAccessMode {
+    Send,
+    Receive,
+    Both,
+}
+
+/// Core service bootstrap handles.
+#[derive(Debug, Clone)]
+pub struct CoreServiceHandles {
+    pub console: (ServiceId, ChannelId),
+    pub command: (ServiceId, ChannelId),
+    pub input: (ServiceId, ChannelId),
+    pub timer: (ServiceId, ChannelId),
 }
 
 #[derive(Debug)]
@@ -137,7 +181,9 @@ impl SimulatedKernel {
             nanos_per_tick: tick_duration.as_nanos(),
             tasks: HashMap::new(),
             channels: HashMap::new(),
+            channel_access: HashMap::new(),
             services: HashMap::new(),
+            service_policies: HashMap::new(),
             fault_injector: None,
             delayed_messages: Vec::new(),
             capability_table: HashMap::new(),
@@ -153,7 +199,101 @@ impl SimulatedKernel {
             scheduler: scheduler::Scheduler::new(),
             smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
+            channel_capacity: 64,
         }
+    }
+
+    /// Sets the default channel capacity for newly created channels.
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity.max(1);
+        self
+    }
+
+    /// Registers a service with an explicit schema version policy.
+    pub fn register_service_with_schema(
+        &mut self,
+        service_id: ServiceId,
+        channel: ChannelId,
+        policy: VersionPolicy,
+    ) -> Result<(), KernelError> {
+        self.register_service(service_id, channel)?;
+        self.service_policies.insert(service_id, policy);
+        Ok(())
+    }
+
+    /// Sets or updates a service schema policy.
+    pub fn set_service_schema_policy(&mut self, service_id: ServiceId, policy: VersionPolicy) {
+        self.service_policies.insert(service_id, policy);
+    }
+
+    /// Grants channel access to a task.
+    pub fn grant_channel_access(
+        &mut self,
+        channel: ChannelId,
+        task_id: TaskId,
+        mode: ChannelAccessMode,
+    ) -> Result<(), KernelError> {
+        let entry = self
+            .channel_access
+            .entry(channel)
+            .or_insert_with(ChannelAccess::default);
+
+        match mode {
+            ChannelAccessMode::Send => {
+                entry.senders.insert(task_id);
+            }
+            ChannelAccessMode::Receive => {
+                entry.receivers.insert(task_id);
+            }
+            ChannelAccessMode::Both => {
+                entry.senders.insert(task_id);
+                entry.receivers.insert(task_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Revokes channel access from a task.
+    pub fn revoke_channel_access(
+        &mut self,
+        channel: ChannelId,
+        task_id: TaskId,
+    ) -> Result<(), KernelError> {
+        if let Some(entry) = self.channel_access.get_mut(&channel) {
+            entry.senders.remove(&task_id);
+            entry.receivers.remove(&task_id);
+            if entry.is_empty() {
+                self.channel_access.remove(&channel);
+            }
+        }
+        Ok(())
+    }
+
+    /// Bootstraps core services inside the kernel registry.
+    pub fn bootstrap_core_services(&mut self) -> Result<CoreServiceHandles, KernelError> {
+        let console_id = core_types::console_service_id();
+        let command_id = core_types::command_service_id();
+        let input_id = core_types::input_service_id();
+        let timer_id = core_types::timer_service_id();
+
+        let console_channel = kernel_api::KernelApi::create_channel(self)?;
+        let command_channel = kernel_api::KernelApi::create_channel(self)?;
+        let input_channel = kernel_api::KernelApi::create_channel(self)?;
+        let timer_channel = kernel_api::KernelApi::create_channel(self)?;
+
+        let policy = VersionPolicy::current(1, 0);
+        self.register_service_with_schema(console_id, console_channel, policy)?;
+        self.register_service_with_schema(command_id, command_channel, policy)?;
+        self.register_service_with_schema(input_id, input_channel, policy)?;
+        self.register_service_with_schema(timer_id, timer_channel, policy)?;
+
+        Ok(CoreServiceHandles {
+            console: (console_id, console_channel),
+            command: (command_id, command_channel),
+            input: (input_id, input_channel),
+            timer: (timer_id, timer_channel),
+        })
     }
 
     /// Returns a reference to the timer device
@@ -187,6 +327,22 @@ impl SimulatedKernel {
     /// Returns a mutable SMP runtime if enabled.
     pub fn smp_mut(&mut self) -> Option<&mut smp::SmpRuntime> {
         self.smp.as_mut()
+    }
+
+    /// Spawns a user task with a minimal user task context.
+    pub fn spawn_user_task(
+        &mut self,
+        name: String,
+        user_stack_bytes: usize,
+        kernel_stack_bytes: usize,
+    ) -> Result<user_task::UserTaskContext, KernelError> {
+        let handle = self.spawn_task(TaskDescriptor::new(name))?;
+        Ok(user_task::UserTaskContext::new(
+            handle.task_id,
+            user_stack_bytes,
+            kernel_stack_bytes,
+            user_task::default_trap,
+        ))
     }
 
     /// Updates current_time based on timer ticks
@@ -525,24 +681,25 @@ impl SimulatedKernel {
     /// Processes delayed messages that are ready to be delivered
     fn process_delayed_messages(&mut self) {
         let current_time = self.current_time;
-        let mut ready_messages = Vec::new();
+        let mut remaining = Vec::new();
 
-        // Find messages ready to be delivered
-        self.delayed_messages.retain(|delayed| {
-            if delayed.deliver_at <= current_time {
-                ready_messages.push((delayed.channel, delayed.message.clone()));
-                false
-            } else {
-                true
+        for delayed in self.delayed_messages.drain(..) {
+            if delayed.deliver_at > current_time {
+                remaining.push(delayed);
+                continue;
             }
-        });
 
-        // Deliver ready messages
-        for (channel, message) in ready_messages {
-            if let Some(ch) = self.channels.get_mut(&channel) {
-                ch.messages.push_back(message);
+            if let Some(ch) = self.channels.get_mut(&delayed.channel) {
+                if ch.queue.remaining_capacity() == 0 {
+                    // Queue full; keep message delayed for later delivery.
+                    remaining.push(delayed);
+                } else {
+                    let _ = ch.queue.push(delayed.message);
+                }
             }
         }
+
+        self.delayed_messages = remaining;
     }
 
     /// Runs until no more messages are pending
@@ -692,7 +849,10 @@ impl SimulatedKernel {
 
     /// Checks if the kernel is idle (no messages pending)
     pub fn is_idle(&self) -> bool {
-        self.channels.values().all(|ch| ch.messages.is_empty()) && self.delayed_messages.is_empty()
+        self.channels
+            .values()
+            .all(|ch| ch.queue.is_empty())
+            && self.delayed_messages.is_empty()
     }
 
     /// Returns the number of spawned tasks
@@ -714,7 +874,7 @@ impl SimulatedKernel {
     pub fn pending_message_count(&self) -> usize {
         self.channels
             .values()
-            .map(|ch| ch.messages.len())
+            .map(|ch| ch.queue.len())
             .sum::<usize>()
             + self.delayed_messages.len()
     }
@@ -1629,7 +1789,7 @@ impl KernelApi for SimulatedKernel {
     fn create_channel(&mut self) -> Result<ChannelId, KernelError> {
         let channel_id = ChannelId::new();
         let channel = Channel {
-            messages: VecDeque::new(),
+            queue: message_queue::MessageQueue::with_capacity(self.channel_capacity),
         };
         self.channels.insert(channel_id, channel);
         Ok(channel_id)
@@ -1640,6 +1800,39 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
+        if let Some(source_task) = message.source {
+            if let Some(access) = self.channel_access.get(&channel) {
+                if !access.allows_send(source_task) {
+                    return Err(KernelError::SendFailed(format!(
+                        "Channel send denied for task {}",
+                        source_task
+                    )));
+                }
+            }
+        }
+
+        if let Some(policy) = self.service_policies.get(&message.destination) {
+            match policy.check_compatibility(&message.schema_version) {
+                Compatibility::Compatible => {}
+                Compatibility::UpgradeRequired => {
+                    let error = SchemaMismatchError::upgrade_required(
+                        message.destination,
+                        policy.min_version(),
+                        message.schema_version,
+                    );
+                    return Err(KernelError::SendFailed(error.to_string()));
+                }
+                Compatibility::Unsupported => {
+                    let error = SchemaMismatchError::unsupported(
+                        message.destination,
+                        (policy.min_version(), policy.current_version()),
+                        message.schema_version,
+                    );
+                    return Err(KernelError::SendFailed(error.to_string()));
+                }
+            }
+        }
+
         // Phase 12: Try to enforce message budget if source task is known
         if let Some(source_task) = message.source {
             self.try_consume_message(source_task, resource_audit::MessageOperation::Send)?;
@@ -1674,11 +1867,14 @@ impl KernelApi for SimulatedKernel {
             .channels
             .get_mut(&channel)
             .ok_or_else(|| KernelError::ChannelError("Channel not found".to_string()))?;
-        channel_obj.messages.push_back(message);
+        channel_obj
+            .queue
+            .push(message)
+            .map_err(|_| KernelError::SendFailed("Channel queue full".to_string()))?;
 
         // Apply reordering faults if present
         if let Some(ref injector) = self.fault_injector {
-            injector.apply_reordering(&mut channel_obj.messages);
+            injector.apply_reordering(channel_obj.queue.messages_mut());
         }
 
         Ok(())
@@ -1689,6 +1885,17 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         _timeout: Option<Duration>,
     ) -> Result<MessageEnvelope, KernelError> {
+        if let Some(task_id) = self.current_receive_task {
+            if let Some(access) = self.channel_access.get(&channel) {
+                if !access.allows_receive(task_id) {
+                    return Err(KernelError::ReceiveFailed(format!(
+                        "Channel receive denied for task {}",
+                        task_id
+                    )));
+                }
+            }
+        }
+
         // Phase 12: Try to enforce message budget if receive context is set
         if let Some(task_id) = self.current_receive_task {
             self.try_consume_message(task_id, resource_audit::MessageOperation::Receive)?;
@@ -1709,10 +1916,7 @@ impl KernelApi for SimulatedKernel {
             .get_mut(&channel)
             .ok_or_else(|| KernelError::ChannelError("Channel not found".to_string()))?;
 
-        let message = channel_obj
-            .messages
-            .pop_front()
-            .ok_or(KernelError::Timeout)?;
+        let message = channel_obj.queue.pop().ok_or(KernelError::Timeout)?;
 
         // Record message processed for fault injection tracking
         if let Some(ref mut injector) = self.fault_injector {
@@ -1796,6 +2000,15 @@ impl KernelApiV0 for SimulatedKernel {
         KernelApi::receive_message(self, channel, None)
     }
 
+    fn yield_now(&mut self) -> Result<(), KernelError> {
+        self.scheduler.preempt_current();
+        Ok(())
+    }
+
+    fn sleep(&mut self, duration: Duration) -> Result<(), KernelError> {
+        KernelApi::sleep(self, duration)
+    }
+
     fn grant(&mut self, task: TaskId, capability: Cap<()>) -> Result<(), KernelError> {
         KernelApi::grant_capability(self, task, capability)
     }
@@ -1849,6 +2062,123 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_queue_capacity_enforced() {
+        let mut kernel = SimulatedKernel::new().with_channel_capacity(1);
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
+        let service_id = ServiceId::new();
+
+        let payload = ipc::MessagePayload::new(&"first").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            service_id,
+            "first".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+
+        kernel.send_message(channel, message).unwrap();
+
+        let payload = ipc::MessagePayload::new(&"second").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            service_id,
+            "second".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+
+        let result = kernel.send_message(channel, message);
+        assert!(matches!(result, Err(KernelError::SendFailed(_))));
+    }
+
+    #[test]
+    fn test_channel_access_send_denied() {
+        let mut kernel = SimulatedKernel::new();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
+        let task_id = kernel
+            .spawn_task(TaskDescriptor::new("sender".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Create an access entry that does not include send permission.
+        kernel
+            .grant_channel_access(channel, task_id, ChannelAccessMode::Receive)
+            .unwrap();
+
+        let payload = ipc::MessagePayload::new(&"msg").unwrap();
+        let mut message = ipc::MessageEnvelope::new(
+            ServiceId::new(),
+            "msg".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+        message.source = Some(task_id);
+
+        let result = kernel.send_message(channel, message);
+        assert!(matches!(result, Err(KernelError::SendFailed(_))));
+    }
+
+    #[test]
+    fn test_channel_access_receive_denied() {
+        let mut kernel = SimulatedKernel::new();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
+        let task_id = kernel
+            .spawn_task(TaskDescriptor::new("receiver".to_string()))
+            .unwrap()
+            .task_id;
+
+        // Only grant send permission, not receive.
+        kernel
+            .grant_channel_access(channel, task_id, ChannelAccessMode::Send)
+            .unwrap();
+
+        let payload = ipc::MessagePayload::new(&"msg").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            ServiceId::new(),
+            "msg".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+
+        kernel.send_message(channel, message).unwrap();
+
+        kernel.set_receive_context(task_id);
+        let result = kernel.receive_message(channel, None);
+        kernel.clear_receive_context();
+
+        assert!(matches!(result, Err(KernelError::ReceiveFailed(_))));
+    }
+
+    #[test]
+    fn test_service_schema_validation() {
+        let mut kernel = SimulatedKernel::new();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
+        let service_id = ServiceId::new();
+
+        let policy = ipc::VersionPolicy::current(2, 0).with_min_major(2);
+        kernel
+            .register_service_with_schema(service_id, channel, policy)
+            .unwrap();
+
+        let payload = ipc::MessagePayload::new(&"old").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            service_id,
+            "old".to_string(),
+            ipc::SchemaVersion::new(1, 0),
+            payload,
+        );
+        let result = kernel.send_message(channel, message);
+        assert!(matches!(result, Err(KernelError::SendFailed(_))));
+
+        let payload = ipc::MessagePayload::new(&"new").unwrap();
+        let message = ipc::MessageEnvelope::new(
+            service_id,
+            "new".to_string(),
+            ipc::SchemaVersion::new(2, 0),
+            payload,
+        );
+        kernel.send_message(channel, message).unwrap();
+    }
+
+    #[test]
     fn test_time_advancement() {
         let mut kernel = SimulatedKernel::new();
         let initial = kernel.now();
@@ -1861,7 +2191,7 @@ mod tests {
     fn test_sleep() {
         let mut kernel = SimulatedKernel::new();
         let initial = kernel.now();
-        kernel.sleep(Duration::from_millis(100)).unwrap();
+        kernel_api::KernelApi::sleep(&mut kernel, Duration::from_millis(100)).unwrap();
         let after = kernel.now();
         assert_eq!(after.duration_since(initial), Duration::from_millis(100));
     }
@@ -1877,6 +2207,17 @@ mod tests {
 
         let looked_up = kernel.lookup_service(service_id).unwrap();
         assert_eq!(looked_up, channel);
+    }
+
+    #[test]
+    fn test_bootstrap_core_services() {
+        let mut kernel = SimulatedKernel::new();
+        let handles = kernel.bootstrap_core_services().unwrap();
+        assert_eq!(kernel.service_count(), 4);
+        assert_eq!(
+            kernel.lookup_service(handles.input.0).unwrap(),
+            handles.input.1
+        );
     }
 
     #[test]

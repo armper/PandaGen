@@ -1,7 +1,7 @@
 //! Main editor implementation
 
 use crate::commands::{Command, CommandError, CommandParser};
-use crate::io::{DocumentHandle, IoError};
+use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
 use input_types::{InputEvent, KeyCode, KeyEvent};
@@ -47,6 +47,7 @@ pub enum EditorAction {
 pub struct Editor {
     state: EditorState,
     document: Option<DocumentHandle>,
+    io: Option<Box<dyn EditorIo>>,
     view: EditorView,
     /// View handles for publishing (optional)
     main_view_handle: Option<ViewHandleCap>,
@@ -62,6 +63,7 @@ impl Editor {
         Self {
             state: EditorState::new(),
             document: None,
+            io: None,
             view: EditorView::default(),
             main_view_handle: None,
             status_view_handle: None,
@@ -75,6 +77,7 @@ impl Editor {
         Self {
             state: EditorState::new(),
             document: None,
+            io: None,
             view: EditorView::new(viewport_lines),
             main_view_handle: None,
             status_view_handle: None,
@@ -87,6 +90,11 @@ impl Editor {
     pub fn set_view_handles(&mut self, main_view: ViewHandleCap, status_view: ViewHandleCap) {
         self.main_view_handle = Some(main_view);
         self.status_view_handle = Some(status_view);
+    }
+
+    /// Sets the editor I/O handler (storage/fs_view).
+    pub fn set_io(&mut self, io: Box<dyn EditorIo>) {
+        self.io = Some(io);
     }
 
     /// Get current editor state
@@ -102,6 +110,17 @@ impl Editor {
     /// Get current document handle
     pub fn document(&self) -> Option<&DocumentHandle> {
         self.document.as_ref()
+    }
+
+    /// Opens a document via the configured I/O handler.
+    pub fn open_with(&mut self, options: OpenOptions) -> EditorResult<()> {
+        let io = self
+            .io
+            .as_mut()
+            .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
+        let result = io.open(options)?;
+        self.load_document(result.content, result.handle);
+        Ok(())
     }
 
     /// Open a new empty document
@@ -269,11 +288,7 @@ impl Editor {
 
         match command {
             Command::Write => {
-                // Simulated save for now
-                let new_version = VersionId::new();
-                self.state.set_dirty(false);
-                self.state
-                    .set_status_message(format!("Saved version {}", new_version));
+                let new_version = self.save_document()?;
                 Ok(EditorAction::Saved(new_version))
             }
 
@@ -290,13 +305,32 @@ impl Editor {
             Command::ForceQuit => Ok(EditorAction::Quit),
 
             Command::WriteQuit => {
-                // Simulated save
-                let new_version = VersionId::new();
-                self.state.set_dirty(false);
-                self.state
-                    .set_status_message(format!("Saved version {}", new_version));
+                let _ = self.save_document()?;
                 Ok(EditorAction::Quit)
             }
+        }
+    }
+
+    fn save_document(&mut self) -> EditorResult<VersionId> {
+        if let (Some(io), Some(handle)) = (self.io.as_mut(), self.document.clone()) {
+            let content = self.state.buffer().as_string();
+            let result = io.save(&handle, &content)?;
+            let new_handle = DocumentHandle::new(
+                handle.object_id,
+                result.new_version_id,
+                handle.path_label.clone(),
+                handle.can_update_link,
+            );
+            self.document = Some(new_handle);
+            self.state.set_dirty(false);
+            self.state.set_status_message(result.message);
+            Ok(result.new_version_id)
+        } else {
+            let new_version = VersionId::new();
+            self.state.set_dirty(false);
+            self.state
+                .set_status_message(format!("Saved version {}", new_version));
+            Ok(new_version)
         }
     }
 
@@ -698,7 +732,7 @@ mod tests {
     #[test]
     fn test_editor_publish_views() {
         use core_types::TaskId;
-        use services_view_host::{ViewHost, ViewHostError};
+        use services_view_host::ViewHost;
         use view_types::ViewKind;
 
         let mut editor = Editor::new();

@@ -34,6 +34,7 @@ pub enum InterruptError {
 ///
 /// This provides a minimal guardrail against double-registration and
 /// allows systems to inspect installed handlers without touching the IDT.
+#[derive(Debug, Clone)]
 pub struct InterruptRegistry {
     handlers: std::collections::HashMap<u8, fn()>,
 }
@@ -71,6 +72,11 @@ impl InterruptRegistry {
     pub fn handler(&self, vector: u8) -> Option<fn()> {
         self.handlers.get(&vector).copied()
     }
+
+    /// Unregisters a handler for a vector, returning it if present.
+    pub fn unregister(&mut self, vector: u8) -> Option<fn()> {
+        self.handlers.remove(&vector)
+    }
 }
 
 impl Default for InterruptRegistry {
@@ -98,5 +104,15 @@ mod tests {
         registry.register(33, handler_stub).unwrap();
         let result = registry.register(33, handler_stub);
         assert_eq!(result, Err(InterruptError::AlreadyRegistered(33)));
+    }
+
+    #[test]
+    fn test_interrupt_registry_unregister() {
+        let mut registry = InterruptRegistry::new();
+        registry.register(40, handler_stub).unwrap();
+        assert!(registry.handler(40).is_some());
+        let removed = registry.unregister(40);
+        assert!(removed.is_some());
+        assert!(registry.handler(40).is_none());
     }
 }

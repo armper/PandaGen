@@ -154,6 +154,16 @@ impl<P: super::port_io::PortIo> PitTimer<P> {
         }
     }
 
+    /// Returns configured interrupt frequency (test helper).
+    pub fn configured_hz(&self) -> Option<u32> {
+        self.configured_hz
+    }
+
+    /// Returns whether interrupts are enabled.
+    pub fn interrupts_enabled(&self) -> bool {
+        self.interrupts_enabled
+    }
+
     /// Initializes the PIT hardware
     ///
     /// Sets up Channel 0 in mode 3 (square wave) with our reload value.
