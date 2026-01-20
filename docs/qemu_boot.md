@@ -40,6 +40,7 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display none 
 
 - Limine menu appears.
 - Selecting the entry boots the stub kernel.
+- Boot diagnostics are printed (HHDM offset, kernel addresses, memory map summary).
 - A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
 - Typing happens in the terminal window (QEMU runs without a graphical display).
-- Typing `help` prints available commands.
+- Typing `help` prints available commands (`help`, `halt`, `boot`, `mem`, `alloc`, `heap`, `heap-alloc`).

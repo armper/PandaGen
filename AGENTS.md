@@ -37,4 +37,5 @@ PandaGen is a Rust workspace with crates at the repo root. Core building blocks 
 
 ## Documentation Expectations
 - Update `docs/` and the relevant `PHASE*_SUMMARY.md` when adding subsystems or revising design.
+- **LLM instruction**: for every feature or epic, create a *new* phase retrospective file named `PHASEXX_SUMMARY.md` (use the next unused number), and summarize the change set, rationale, and tests there. Do not reuse or append to older phase files for new work.
 - Document public APIs with rationale (the “why”), not just behavior.
