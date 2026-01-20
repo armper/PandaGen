@@ -68,7 +68,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-serial")
         .arg("stdio")
         .arg("-display")
-        .arg("none")
+        .arg("cocoa")
         .arg("-no-reboot"))
 }
 
