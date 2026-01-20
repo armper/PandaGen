@@ -76,7 +76,7 @@ impl SyncState {
     }
 
     pub fn compact(&self) -> HashMap<ObjectId, VersionedObject> {
-        let mut latest = HashMap::new();
+        let mut latest: HashMap<ObjectId, VersionedObject> = HashMap::new();
         for entry in self.all_entries() {
             let replace = match latest.get(&entry.object_id) {
                 Some(current) => entry.timestamp_ns >= current.timestamp_ns,
