@@ -13,7 +13,7 @@ use kernel_api::{KernelApi, KernelError};
 /// This remains for backwards compatibility with existing code.
 /// New code should use syscall_gate::Syscall directly.
 #[derive(Debug, Clone)]
-#[deprecated(since = "0.61.0", note = "Use syscall_gate::Syscall instead")]
+#[deprecated(note = "Use syscall_gate::Syscall instead")]
 pub enum UserSyscall {
     Send { channel: ipc::ChannelId, message: ipc::MessageEnvelope },
     Recv { channel: ipc::ChannelId },
@@ -23,7 +23,7 @@ pub enum UserSyscall {
 
 /// Syscall result for user tasks (Phase 61: replaced with syscall_gate::SyscallResult).
 #[derive(Debug, Clone)]
-#[deprecated(since = "0.61.0", note = "Use syscall_gate::SyscallResult instead")]
+#[deprecated(note = "Use syscall_gate::SyscallResult instead")]
 pub enum UserSyscallResult {
     Ok,
     Message(ipc::MessageEnvelope),
@@ -71,11 +71,17 @@ pub fn default_trap(
             }
             result
         }
-        _ => {
+        other => {
             // Other syscalls not yet implemented in default_trap
-            kernel.syscall_gate_mut().record_rejected(caller, "Unknown".to_string(), "Not supported".to_string(), timestamp_nanos);
+            let syscall_name = format!("{:?}", other);
+            kernel.syscall_gate_mut().record_rejected(
+                caller, 
+                syscall_name.clone(), 
+                "Not supported in default_trap".to_string(), 
+                timestamp_nanos
+            );
             Err(KernelError::InsufficientAuthority(
-                "Syscall not supported in default_trap".to_string()
+                format!("Syscall {} not supported in default_trap", syscall_name)
             ))
         }
     }

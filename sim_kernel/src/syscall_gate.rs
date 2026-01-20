@@ -283,8 +283,8 @@ impl SyscallGate {
                     .map(|_| SyscallResult::Ok)
             }
             _ => {
-                // Non-memory syscalls - return error
-                return Err(MemoryError::AddressSpaceNotFound(AddressSpaceId::new()));
+                // Non-memory syscalls should not be routed through execute_with_memory
+                return Err(MemoryError::RegionNotFound(core_types::MemoryRegionId::new()));
             }
         };
 
