@@ -24,7 +24,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask iso");
     println!("  cargo xtask qemu");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
-    Err(io::Error::new(ErrorKind::Other, "unknown xtask command").into())
+    Err(io::Error::other("unknown xtask command").into())
 }
 
 fn repo_root() -> PathBuf {
@@ -366,6 +366,20 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     command.stderr(Stdio::inherit());
 
     let program = command.get_program().to_string_lossy().to_string();
+    
+    // Format the full command with arguments for error messages
+    let mut full_command = program.clone();
+    for arg in command.get_args() {
+        full_command.push(' ');
+        let arg_str = arg.to_string_lossy();
+        // Quote arguments that contain spaces
+        if arg_str.contains(' ') {
+            full_command.push_str(&format!("\"{}\"", arg_str));
+        } else {
+            full_command.push_str(&arg_str);
+        }
+    }
+    
     let status = match command.status() {
         Ok(status) => status,
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -380,9 +394,8 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::new(
-            ErrorKind::Other,
-            format!("command failed with status {status}"),
+        Err(io::Error::other(
+            format!("command `{full_command}` failed with status {status}"),
         )
         .into())
     }
