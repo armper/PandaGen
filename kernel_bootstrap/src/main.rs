@@ -50,11 +50,7 @@ pub extern "C" fn rust_main() -> ! {
     let _ = writeln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
     let (allocator, heap) = init_memory(&mut serial, &boot);
-    let kernel = unsafe {
-        let ptr = KERNEL_STORAGE.as_mut_ptr();
-        ptr.write(Kernel::new(boot, allocator, heap));
-        &mut *ptr
-    };
+    let kernel = unsafe { Kernel::init_in_place(&mut KERNEL_STORAGE, boot, allocator, heap) };
     let _ = writeln!(serial, "Type 'help' for commands.");
     let _ = write!(serial, "> ");
 
@@ -667,6 +663,51 @@ struct Kernel {
 }
 
 impl Kernel {
+    /// Initializes a kernel directly in the provided storage.
+    ///
+    /// This avoids large stack allocations during early boot.
+    unsafe fn init_in_place(
+        storage: &mut MaybeUninit<Kernel>,
+        boot: BootInfo,
+        allocator: Option<FrameAllocator>,
+        heap: Option<BumpHeap>,
+    ) -> &mut Kernel {
+        let ptr = storage.as_mut_ptr();
+
+        core::ptr::addr_of_mut!((*ptr).boot).write(boot);
+        core::ptr::addr_of_mut!((*ptr).allocator).write(allocator);
+        core::ptr::addr_of_mut!((*ptr).heap).write(heap);
+        core::ptr::addr_of_mut!((*ptr).channel_count).write(0);
+        core::ptr::addr_of_mut!((*ptr).next_message_id).write(1);
+        core::ptr::addr_of_mut!((*ptr).scheduler).write(CooperativeScheduler::new());
+
+        let channels_ptr = core::ptr::addr_of_mut!((*ptr).channels) as *mut Channel;
+        for idx in 0..MAX_CHANNELS {
+            channels_ptr.add(idx).write(Channel::new());
+        }
+
+        let tasks_ptr = core::ptr::addr_of_mut!((*ptr).tasks) as *mut Option<TaskSlot>;
+        for idx in 0..MAX_TASKS {
+            tasks_ptr.add(idx).write(None);
+        }
+
+        let kernel = &mut *ptr;
+        let command_channel = kernel
+            .create_channel()
+            .expect("command channel available");
+        let response_channel = kernel
+            .create_channel()
+            .expect("response channel available");
+
+        let command_task = CommandService::new(command_channel);
+        let console_task = ConsoleService::new(command_channel, response_channel);
+
+        let _ = kernel.spawn_task(TaskDomain::Kernel, TaskKind::Command(command_task));
+        let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Console(console_task));
+
+        kernel
+    }
+
     fn new(boot: BootInfo, allocator: Option<FrameAllocator>, heap: Option<BumpHeap>) -> Self {
         let mut kernel = Self {
             boot,
