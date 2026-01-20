@@ -1,5 +1,13 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
+// Allow unused code - this is infrastructure for future phases
+#![allow(dead_code)]
+// Allow manual div_ceil - explicit for readability in no_std
+#![allow(clippy::manual_div_ceil)]
+// Allow manual is_multiple_of - explicit for readability
+#![allow(clippy::manual_is_multiple_of)]
+// Allow large enum variants - this is a boot kernel
+#![allow(clippy::large_enum_variant)]
 
 #[cfg(test)]
 extern crate std;
@@ -21,7 +29,6 @@ use limine_protocol::{HHDMRequest, KernelAddressRequest, MemoryMapRequest, Reque
 // Provide a small, deterministic stack and jump into Rust.
 //
 // This is only needed for bare-metal execution, not for tests.
-#[cfg_attr(not(test), allow(dead_code))]
 global_asm!(
     r#"
 .section .text.entry, "ax"
@@ -161,7 +168,7 @@ fn install_idt() {
 
         let idtr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
-            base: IDT.as_ptr() as u64,
+            base: core::ptr::addr_of!(IDT) as *const _ as u64,
         };
 
         asm!(
@@ -302,7 +309,7 @@ pub extern "C" fn rust_main() -> ! {
     
     kprintln!(serial, "Initializing interrupts...");
     install_idt();
-    klog!(serial, "IDT installed at 0x{:x}\r\n", unsafe { IDT.as_ptr() as usize });
+    klog!(serial, "IDT installed at 0x{:x}\r\n", core::ptr::addr_of!(IDT) as usize);
     
     init_pic();
     kprintln!(serial, "PIC remapped to IRQ base 32");
@@ -314,7 +321,7 @@ pub extern "C" fn rust_main() -> ! {
     enable_interrupts();
     kprintln!(serial, "Interrupts enabled, timer at 100 Hz");
     
-    let kernel = unsafe { Kernel::init_in_place(&mut KERNEL_STORAGE, boot, allocator, heap) };
+    let kernel = unsafe { Kernel::init_in_place(&mut *core::ptr::addr_of_mut!(KERNEL_STORAGE), boot, allocator, heap) };
     kprintln!(serial, "Type 'help' for commands.");
     klog!(serial, "> ");
 

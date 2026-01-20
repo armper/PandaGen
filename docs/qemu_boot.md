@@ -41,6 +41,61 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display none 
 - Limine menu appears.
 - Selecting the entry boots the stub kernel.
 - Boot diagnostics are printed (HHDM offset, kernel addresses, memory map summary).
+- Interrupt initialization messages appear.
 - A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
+- Timer ticks are shown as dots (. printed every second at 100 Hz).
 - Typing happens in the terminal window (QEMU runs without a graphical display).
-- Typing `help` prints available commands (`help`, `halt`, `boot`, `mem`, `alloc`, `heap`, `heap-alloc`).
+- Typing `help` prints available commands (`help`, `halt`, `boot`, `mem`, `alloc`, `heap`, `heap-alloc`, `ticks`).
+
+## Expected Serial Output
+
+```
+PandaGen: kernel_bootstrap online
+hhdm: offset=0xffff800000000000
+kernel: phys=0x... virt=0x...
+memory: entries=... total=... KiB usable=... KiB
+allocator: ranges=... frames=... reserved=...
+heap: base=0x... size=... bytes
+Initializing interrupts...
+IDT installed at 0x...
+PIC remapped to IRQ base 32
+PIT configured for 100 Hz
+Interrupts enabled, timer at 100 Hz
+Type 'help' for commands.
+> .............  (dots appear every second from timer ticks)
+```
+
+## Kernel Features Demonstrated
+
+### Bare-Metal Interrupt Infrastructure
+- **IDT (Interrupt Descriptor Table)**: 256-entry x86_64 IDT with proper gate descriptors
+- **PIC (8259 Controller)**: Initialized with IRQ remapping from 0-15 to 32-47
+- **PIT (Programmable Interval Timer)**: Configured at 100 Hz periodic interrupts
+- **Timer IRQ Handler**: Assembly entry stub with full register save/restore + EOI to PIC
+- **Global Tick Counter**: Atomic u64 incremented by timer IRQ, queryable via `ticks` command
+
+### User Space Simulation
+- **Syscall Infrastructure**: sys_yield, sys_sleep, sys_send, sys_recv implemented
+- **User Tasks**: CommandService demonstrates syscalls by alternating yield/sleep
+- **IPC**: Channel-based message passing between console and command services
+- **Time Slicing**: Cooperative scheduling with quantum-based task switching
+
+### Console Commands
+- `help` - List all commands
+- `halt` - Halt the system
+- `boot` - Display boot information (HHDM, kernel addresses)
+- `mem` - Display memory allocator state
+- `alloc` - Allocate a single physical frame
+- `heap` - Display heap statistics
+- `heap-alloc` - Allocate 64 bytes from heap
+- `ticks` - Display current kernel tick count
+
+## Troubleshooting
+
+If the ISO doesn't build:
+- Ensure `xorriso` is installed
+- Verify Limine files are present in `third_party/limine/`
+
+If QEMU doesn't boot:
+- The ISO is UEFI-only (BIOS boot requires a native limine-deploy binary)
+- Try running with `-d int` for interrupt debugging
