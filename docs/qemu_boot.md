@@ -33,7 +33,7 @@ cargo xtask qemu
 This runs:
 
 ```
-qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -no-reboot
+qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display none -no-reboot
 ```
 
 ## Expected Behavior
@@ -41,4 +41,5 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -no-reboot
 - Limine menu appears.
 - Selecting the entry boots the stub kernel.
 - A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
+- Typing happens in the terminal window (QEMU runs without a graphical display).
 - Typing `help` prints available commands.

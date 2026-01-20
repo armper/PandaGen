@@ -86,7 +86,7 @@ fn console_loop(serial: &mut serial::SerialPort) -> ! {
             }
         } else {
             unsafe {
-                asm!("hlt", options(nomem, nostack, preserves_flags));
+                asm!("pause", options(nomem, nostack, preserves_flags));
             }
         }
     }
