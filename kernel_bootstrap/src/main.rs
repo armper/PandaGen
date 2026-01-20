@@ -26,7 +26,7 @@ use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use limine_protocol::structures::memory_map_entry::EntryType;
-use limine_protocol::{HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request};
+use limine_protocol::{FramebufferRequest, HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request};
 
 #[cfg(not(test))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -1171,6 +1171,31 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
             info.mem_total_kib = total / 1024;
             info.mem_usable_kib = usable / 1024;
         }
+
+        // Request framebuffer from Limine
+        match FRAMEBUFFER_REQUEST.get_response() {
+            Some(fb_resp) => {
+                if let Some(framebuffers) = fb_resp.get_framebuffers() {
+                    if !framebuffers.is_empty() {
+                        let fb = framebuffers[0];
+                        info.framebuffer_addr = Some(fb.address);
+                        info.framebuffer_width = fb.width;
+                        info.framebuffer_height = fb.height;
+                        info.framebuffer_pitch = fb.pitch;
+                        info.framebuffer_bpp = fb.bpp;
+                        kprintln!(serial, "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
+                            fb.width, fb.height, fb.address as usize, fb.bpp);
+                    } else {
+                        kprintln!(serial, "framebuffer: no framebuffer devices available");
+                    }
+                } else {
+                    kprintln!(serial, "framebuffer: unavailable (failed to get list)");
+                }
+            }
+            None => {
+                kprintln!(serial, "framebuffer: unavailable (no response)");
+            }
+        }
     }
 
     print_boot_info(serial, &info);
@@ -1288,6 +1313,11 @@ static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().i
 static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> = KernelAddressRequest::new().into();
 
 #[cfg(not(test))]
+#[used]
+#[link_section = ".limine_requests"]
+static FRAMEBUFFER_REQUEST: Request<FramebufferRequest> = FramebufferRequest::new().into();
+
+#[cfg(not(test))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
 const PAGE_SIZE: u64 = 4096;
@@ -1364,6 +1394,11 @@ struct BootInfo {
     mem_entries: usize,
     mem_total_kib: u64,
     mem_usable_kib: u64,
+    framebuffer_addr: Option<*mut u8>,
+    framebuffer_width: u16,
+    framebuffer_height: u16,
+    framebuffer_pitch: u16,
+    framebuffer_bpp: u16,
 }
 
 impl BootInfo {
@@ -1375,6 +1410,11 @@ impl BootInfo {
             mem_entries: 0,
             mem_total_kib: 0,
             mem_usable_kib: 0,
+            framebuffer_addr: None,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_pitch: 0,
+            framebuffer_bpp: 0,
         }
     }
 }
