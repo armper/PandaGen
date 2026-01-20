@@ -374,7 +374,7 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
         .map(|arg| arg.to_string_lossy().to_string())
         .collect();
     let full_command = if args.is_empty() {
-        program.clone()
+        program.to_string()
     } else {
         format!("{} {}", program, args.join(" "))
     };
