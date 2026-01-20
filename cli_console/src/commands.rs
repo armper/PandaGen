@@ -36,7 +36,7 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
         let entries = self
             .fs
             .list(dir_id)
-            .map_err(|e| format!("ls failed: {}", e))?;
+            .map_err(|e| format!("Failed to list directory '{}': {}", path, e))?;
 
         let names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
         Ok(names)
@@ -47,46 +47,64 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
         let file_id = self.resolve_path(path)?;
         self.fs
             .read_file(file_id)
-            .map_err(|e| format!("cat failed: {}", e))
+            .map_err(|e| format!("Failed to read file '{}': {}", path, e))
     }
 
     /// Creates a directory
     pub fn mkdir(&mut self, name: &str) -> Result<String, String> {
+        if name.is_empty() {
+            return Err("Directory name cannot be empty".to_string());
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err("Directory name cannot contain path separators".to_string());
+        }
+
         let timestamp = get_timestamp();
         let dir_id = self
             .fs
             .mkdir(name, self.current_dir, "user", timestamp)
-            .map_err(|e| format!("mkdir failed: {}", e))?;
+            .map_err(|e| format!("Failed to create directory '{}': {}", name, e))?;
 
-        Ok(format!("Created directory: {}", dir_id))
+        Ok(format!("Created directory: {} (id: {})", name, dir_id))
     }
 
     /// Writes a file
     pub fn write_file(&mut self, name: &str, content: &[u8]) -> Result<String, String> {
+        if name.is_empty() {
+            return Err("File name cannot be empty".to_string());
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err("File name cannot contain path separators".to_string());
+        }
+
         let timestamp = get_timestamp();
         let file_id = self
             .fs
             .write_file(content)
-            .map_err(|e| format!("write failed: {}", e))?;
+            .map_err(|e| format!("Failed to write file '{}': {}", name, e))?;
 
         self.fs
             .link(name, self.current_dir, file_id, ObjectKind::Blob, timestamp)
-            .map_err(|e| format!("link failed: {}", e))?;
+            .map_err(|e| format!("Failed to link file '{}': {}", name, e))?;
 
-        Ok(format!("Wrote file: {}", file_id))
+        Ok(format!("Wrote file: {} ({} bytes, id: {})", name, content.len(), file_id))
     }
 
     /// Removes a file or directory entry
     pub fn rm(&mut self, name: &str) -> Result<String, String> {
+        if name.is_empty() {
+            return Err("File name cannot be empty".to_string());
+        }
+
         let timestamp = get_timestamp();
         let removed = self
             .fs
             .unlink(name, self.current_dir, timestamp)
-            .map_err(|e| format!("rm failed: {}", e))?;
+            .map_err(|e| format!("Failed to remove '{}': {}", name, e))?;
 
         match removed {
-            Some(entry) => Ok(format!("Removed: {} ({})", name, entry.object_id)),
-            None => Err(format!("Not found: {}", name)),
+            Some(entry) => Ok(format!("Removed: {} (id: {})", name, entry.object_id)),
+            None => Err(format!("Not found: '{}'", name)),
         }
     }
 
@@ -101,7 +119,7 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
         let entries = self
             .fs
             .list(self.current_dir)
-            .map_err(|e| format!("Failed to list directory: {}", e))?;
+            .map_err(|e| format!("Failed to read current directory: {}", e))?;
 
         for (name, entry) in entries {
             if name == path {
@@ -109,7 +127,7 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
             }
         }
 
-        Err(format!("Not found: {}", path))
+        Err(format!("Path not found: '{}' (current directory only supported)", path))
     }
 }
 

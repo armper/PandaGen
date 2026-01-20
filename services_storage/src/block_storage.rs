@@ -332,7 +332,7 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
         
         // Discard pending writes
         self.pending.remove(&tx.id());
-        tx.rollback();
+        let _ = tx.rollback();
         Ok(())
     }
 }
