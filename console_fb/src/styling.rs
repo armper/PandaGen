@@ -6,8 +6,6 @@
 //! - Banner/help screens
 //! - Clean redraw rules
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;

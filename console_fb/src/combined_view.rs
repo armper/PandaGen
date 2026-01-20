@@ -5,7 +5,6 @@
 
 use crate::{ConsoleFb, ScrollbackBuffer};
 use alloc::format;
-use alloc::string::String;
 use hal::Framebuffer;
 use services_editor_vi::state::EditorState;
 use services_editor_vi::render::EditorView;
