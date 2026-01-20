@@ -280,17 +280,17 @@ impl InteractiveConsole {
         let text_before_cursor = &self.text_buffer[0..self.cursor_pos];
         let mut chars: Vec<char> = text_before_cursor.chars().collect();
         let mut pos = chars.len();
-        
+
         // Skip trailing whitespace
         while pos > 0 && chars[pos - 1].is_whitespace() {
             pos -= 1;
         }
-        
+
         // Delete word characters
         while pos > 0 && !chars[pos - 1].is_whitespace() {
             pos -= 1;
         }
-        
+
         // Reconstruct buffer
         let before: String = chars[0..pos].iter().collect();
         let after = &self.text_buffer[self.cursor_pos..];
@@ -1180,7 +1180,10 @@ mod tests {
                 _ => continue,
             };
             console
-                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    keycode,
+                    Modifiers::none(),
+                )))
                 .unwrap();
         }
 
@@ -1226,7 +1229,10 @@ mod tests {
                 _ => continue,
             };
             console
-                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    keycode,
+                    Modifiers::none(),
+                )))
                 .unwrap();
         }
 
@@ -1348,11 +1354,17 @@ mod tests {
                 _ => continue,
             };
             console
-                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    keycode,
+                    Modifiers::none(),
+                )))
                 .unwrap();
         }
         console
-            .process_event(InputEvent::key(KeyEvent::pressed(KeyCode::Space, Modifiers::none())))
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Space,
+                Modifiers::none(),
+            )))
             .unwrap();
         for ch in "world".chars() {
             let keycode = match ch {
@@ -1364,7 +1376,10 @@ mod tests {
                 _ => continue,
             };
             console
-                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    keycode,
+                    Modifiers::none(),
+                )))
                 .unwrap();
         }
 

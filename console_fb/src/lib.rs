@@ -31,7 +31,7 @@ use hal::{Framebuffer, FramebufferInfo};
 
 use font::{get_char_bitmap, FONT_HEIGHT, FONT_WIDTH};
 pub use scrollback::{Line, ScrollbackBuffer};
-pub use styling::{Style, StyledText, Banner, RedrawManager};
+pub use styling::{Banner, RedrawManager, Style, StyledText};
 
 #[cfg(feature = "editor-integration")]
 pub use combined_view::{CombinedView, ViewMode};
@@ -252,18 +252,25 @@ impl<F: Framebuffer> ConsoleFb<F> {
     ///
     /// Renders the visible viewport from the scrollback buffer.
     /// If no scrollback is configured, this does nothing.
-    pub fn present_from_scrollback(&mut self, cursor_col: Option<usize>, cursor_row: Option<usize>) {
+    pub fn present_from_scrollback(
+        &mut self,
+        cursor_col: Option<usize>,
+        cursor_row: Option<usize>,
+    ) {
         // Collect visible lines first to avoid borrow checker issues
-        let lines_to_draw: alloc::vec::Vec<alloc::string::String> = if let Some(ref scrollback) = self.scrollback {
-            scrollback.visible_lines().iter().map(|line| {
-                alloc::string::String::from(line.as_str())
-            }).collect()
-        } else {
-            return;
-        };
+        let lines_to_draw: alloc::vec::Vec<alloc::string::String> =
+            if let Some(ref scrollback) = self.scrollback {
+                scrollback
+                    .visible_lines()
+                    .iter()
+                    .map(|line| alloc::string::String::from(line.as_str()))
+                    .collect()
+            } else {
+                return;
+            };
 
         self.clear();
-        
+
         for (row, line) in lines_to_draw.iter().enumerate() {
             if row >= self.rows {
                 break;
@@ -473,7 +480,7 @@ mod tests {
     fn test_console_with_scrollback() {
         let fb = MockFramebuffer::new(160, 160);
         let console = ConsoleFb::with_scrollback(fb, 100);
-        
+
         assert!(console.scrollback().is_some());
         assert_eq!(console.scrollback().unwrap().cols(), console.cols());
     }
@@ -482,9 +489,9 @@ mod tests {
     fn test_append_to_scrollback() {
         let fb = MockFramebuffer::new(160, 160);
         let mut console = ConsoleFb::with_scrollback(fb, 100);
-        
+
         console.append_to_scrollback("Line 1\nLine 2");
-        
+
         let scrollback = console.scrollback().unwrap();
         assert_eq!(scrollback.total_lines(), 2);
     }
@@ -493,10 +500,10 @@ mod tests {
     fn test_present_from_scrollback() {
         let fb = MockFramebuffer::new(160, 160);
         let mut console = ConsoleFb::with_scrollback(fb, 100);
-        
+
         console.append_to_scrollback("Line 1\nLine 2\nLine 3");
         console.present_from_scrollback(None, None);
-        
+
         // Should not crash
     }
 
@@ -504,18 +511,18 @@ mod tests {
     fn test_scrollback_viewport_operations() {
         let fb = MockFramebuffer::new(160, 48); // 3 rows
         let mut console = ConsoleFb::with_scrollback(fb, 100);
-        
+
         // Add more lines than viewport can show
         for i in 1..=10 {
             console.append_to_scrollback(&format!("Line {}", i));
         }
-        
+
         // Test scrolling
         assert!(console.scroll_up(2));
         assert!(console.scroll_down(1));
         console.scroll_to_top();
         console.scroll_to_bottom();
-        
+
         // Should have scrollback
         assert!(console.scrollback().unwrap().at_bottom());
     }

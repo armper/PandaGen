@@ -6,8 +6,8 @@
 use crate::{ConsoleFb, ScrollbackBuffer};
 use alloc::format;
 use hal::Framebuffer;
-use services_editor_vi::state::EditorState;
 use services_editor_vi::render::EditorView;
+use services_editor_vi::state::EditorState;
 
 /// Combined view mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,7 @@ impl<F: Framebuffer> CombinedView<F> {
     pub fn new(console: ConsoleFb<F>, reserved_lines: usize) -> Self {
         let editor_lines = console.rows().saturating_sub(reserved_lines);
         let editor_view = EditorView::new(editor_lines);
-        
+
         Self {
             console,
             editor_view,
@@ -83,16 +83,19 @@ impl<F: Framebuffer> CombinedView<F> {
     /// Shows scrollback output and a prompt line at the bottom.
     pub fn render_cli(&mut self, prompt: &str, input: &str, cursor_col: usize) {
         self.console.clear();
-        
+
         // Collect visible lines first to avoid borrow checker issues
-        let visible_lines: alloc::vec::Vec<alloc::string::String> = if let Some(scrollback) = self.console.scrollback() {
-            scrollback.visible_lines().iter().map(|line| {
-                alloc::string::String::from(line.as_str())
-            }).collect()
-        } else {
-            alloc::vec::Vec::new()
-        };
-        
+        let visible_lines: alloc::vec::Vec<alloc::string::String> =
+            if let Some(scrollback) = self.console.scrollback() {
+                scrollback
+                    .visible_lines()
+                    .iter()
+                    .map(|line| alloc::string::String::from(line.as_str()))
+                    .collect()
+            } else {
+                alloc::vec::Vec::new()
+            };
+
         // Render scrollback in main area
         let output_lines = self.console.rows() - self.reserved_lines;
         for (row, line) in visible_lines.iter().enumerate() {
@@ -101,12 +104,12 @@ impl<F: Framebuffer> CombinedView<F> {
             }
             self.console.draw_text_at(0, row, line);
         }
-        
+
         // Render prompt and input line at bottom
         let prompt_row = self.console.rows() - 1;
         let prompt_with_input = format!("{}{}", prompt, input);
         self.console.draw_text_at(0, prompt_row, &prompt_with_input);
-        
+
         // Draw cursor
         let cursor_col_abs = prompt.len() + cursor_col;
         self.console.draw_cursor(cursor_col_abs, prompt_row);
@@ -117,11 +120,11 @@ impl<F: Framebuffer> CombinedView<F> {
     /// Shows editor content in main area and status line at bottom.
     pub fn render_editor(&mut self, editor_state: &EditorState) {
         self.console.clear();
-        
+
         // Render editor content
         let content = self.editor_view.render(editor_state);
         let mut row = 0;
-        
+
         for (idx, line) in content.lines().enumerate() {
             if idx >= self.console.rows() - self.reserved_lines {
                 // Save last line for status
@@ -130,12 +133,12 @@ impl<F: Framebuffer> CombinedView<F> {
             self.console.draw_text_at(0, row, line);
             row += 1;
         }
-        
+
         // Render status line at bottom
         let status_row = self.console.rows() - 1;
         let status = self.editor_view.render_status(editor_state);
         self.console.draw_text_at(0, status_row, &status);
-        
+
         // Draw editor cursor
         let cursor_pos = editor_state.cursor().position();
         if cursor_pos.row < self.console.rows() - self.reserved_lines {
@@ -222,7 +225,7 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let view = CombinedView::new(console, 2);
-        
+
         assert_eq!(view.mode(), ViewMode::Cli);
     }
 
@@ -231,12 +234,12 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let mut view = CombinedView::new(console, 2);
-        
+
         assert_eq!(view.mode(), ViewMode::Cli);
-        
+
         view.switch_to_editor();
         assert_eq!(view.mode(), ViewMode::Editor);
-        
+
         view.switch_to_cli();
         assert_eq!(view.mode(), ViewMode::Cli);
     }
@@ -247,7 +250,7 @@ mod tests {
         let console = ConsoleFb::new(fb);
         let total_rows = console.rows();
         let view = CombinedView::new(console, 2);
-        
+
         assert_eq!(view.content_lines(), total_rows - 2);
     }
 
@@ -256,7 +259,7 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let mut view = CombinedView::new(console, 2);
-        
+
         // Should not crash
         view.render_cli("> ", "ls", 2);
     }
@@ -266,9 +269,9 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let mut view = CombinedView::new(console, 2);
-        
+
         let editor_state = EditorState::new();
-        
+
         // Should not crash
         view.render_editor(&editor_state);
     }
@@ -278,13 +281,13 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let mut view = CombinedView::new(console, 2);
-        
+
         let editor_state = EditorState::new();
-        
+
         // CLI mode
         view.render("> ", "test", 4, Some(&editor_state));
         assert_eq!(view.mode(), ViewMode::Cli);
-        
+
         // Switch to editor mode
         view.switch_to_editor();
         view.render("> ", "test", 4, Some(&editor_state));
@@ -296,12 +299,12 @@ mod tests {
         let fb = MockFramebuffer::new(640, 480);
         let console = ConsoleFb::new(fb);
         let mut view = CombinedView::new(console, 2);
-        
+
         view.switch_to_editor();
-        
+
         // Should fall back to CLI when no editor state
         view.render("> ", "fallback", 8, None);
-        
+
         // Should not crash
     }
 }

@@ -16,3 +16,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 sim_kernel.workspace = true
 hal = { path = "../hal", features = ["alloc"] }
+crc32fast = "1.4"
