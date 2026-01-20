@@ -600,13 +600,19 @@ fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
 /// Phase 60: This now uses the unified output model instead of direct printing.
 /// The editor state is converted to structured views before rendering.
 ///
-/// Note: Single-threaded kernel_bootstrap context. The static OUTPUT is safe
-/// because only one task calls render_editor at a time. Future multi-tasking
-/// would require explicit synchronization or per-task rendering contexts.
+/// # Safety
+///
+/// This function uses `static mut OUTPUT` which is safe in the current single-task
+/// bare-metal kernel_bootstrap context. Only one execution path calls this function
+/// sequentially. Future multi-tasking kernel would need either:
+/// - Per-task rendering contexts, or
+/// - Mutex/spinlock around OUTPUT access, or
+/// - Message-passing to a dedicated rendering task
 #[cfg(not(test))]
 fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
     // Static output handler for revision tracking
-    // SAFETY: kernel_bootstrap is single-task; only one thread accesses this.
+    // SAFETY: Single-task bare-metal kernel; no concurrent access possible.
+    // This is documented architectural constraint, not an oversight.
     static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
     
     // Convert editor buffer to text lines (simple line splitting)
@@ -619,7 +625,6 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
     let cursor_line = Some(0);
     let cursor_col = Some(editor.cursor);
     
-    // Status line shows cursor info
     let mut status_buf: [u8; 64] = [0; 64];
     let status = {
         let mut cursor_pos = 0usize;
@@ -682,11 +687,9 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
         core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
     };
     
-    // Static revision counter (atomic for potential future multi-tasking)
-    // Note: kernel_bootstrap is currently single-task bare-metal, so atomics provide
-    // future-proofing without overhead in the current execution model.
-    static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
-    let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Revision counter starts at 0; first render will be revision 1
+    static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     
     // Render using the unified output model
     unsafe {

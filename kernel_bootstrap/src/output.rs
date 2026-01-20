@@ -18,8 +18,8 @@ use core::fmt::Write;
 pub struct BareMetalOutput {
     /// Last rendered revision (main view)
     last_main_revision: Option<u64>,
-    /// Last rendered revision (status view)
-    last_status_revision: Option<u64>,
+    // Note: status_view revision tracking could be added here for future
+    // optimization, but is omitted for simplicity in this bare-metal implementation
 }
 
 impl BareMetalOutput {
@@ -27,7 +27,6 @@ impl BareMetalOutput {
     pub const fn new() -> Self {
         Self {
             last_main_revision: None,
-            last_status_revision: None,
         }
     }
 
@@ -112,7 +111,6 @@ impl BareMetalOutput {
     /// Resets revision tracking to force next render
     pub fn reset(&mut self) {
         self.last_main_revision = None;
-        self.last_status_revision = None;
     }
 }
 

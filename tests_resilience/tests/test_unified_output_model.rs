@@ -147,9 +147,6 @@ fn test_text_renderer_processes_snapshot() {
     // Render the snapshot
     let output = renderer.render_snapshot(Some(&main_frame), Some(&status_frame));
 
-    // Debug: print output to understand what's being rendered
-    println!("Rendered output:\n{}", output);
-
     // Verify output contains expected content
     assert!(output.contains("Line 1"), "Output missing 'Line 1'");
     assert!(output.contains("Lin|e 2"), "Output missing cursor marker on 'Line 2'");
