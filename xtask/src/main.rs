@@ -116,7 +116,10 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let bios_sys = vendor.join("limine-bios.sys");
     copy_file(bios_sys.clone(), staging.join("boot/limine-bios.sys"))?;
     copy_file(bios_sys, staging.join("limine-bios.sys"))?;
-    copy_file(vendor.join("limine-bios.sys"), staging.join("limine/limine-bios.sys"))?;
+    copy_file(
+        vendor.join("limine-bios.sys"),
+        staging.join("limine/limine-bios.sys"),
+    )?;
     copy_file(
         vendor.join("limine-bios-cd.bin"),
         staging.join("boot/limine-bios-cd.bin"),
@@ -366,6 +369,16 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     command.stderr(Stdio::inherit());
 
     let program = command.get_program().to_string_lossy().to_string();
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    let full_command = if args.is_empty() {
+        program.clone()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    };
+
     let status = match command.status() {
         Ok(status) => status,
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -382,7 +395,7 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Err(io::Error::new(
             ErrorKind::Other,
-            format!("command failed with status {status}"),
+            format!("command `{}` failed with status {}", full_command, status),
         )
         .into())
     }
