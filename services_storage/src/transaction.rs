@@ -43,6 +43,10 @@ pub enum TransactionError {
     /// Invalid operation
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    /// Storage error (I/O, block device, etc.)
+    #[error("Storage error: {0}")]
+    StorageError(String),
 }
 
 /// Transaction state

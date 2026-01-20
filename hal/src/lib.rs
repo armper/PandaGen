@@ -16,6 +16,7 @@
 //! 3. **Minimal unsafe**: Hardware access requires unsafe, but keep it isolated
 //! 4. **Testable**: HAL can be mocked for testing
 
+pub mod block_device;
 pub mod cpu;
 pub mod interrupts;
 pub mod keyboard;
@@ -23,6 +24,7 @@ pub mod keyboard_translation;
 pub mod memory;
 pub mod timer;
 
+pub use block_device::{BlockDevice, BlockError, RamDisk, BLOCK_SIZE};
 pub use cpu::CpuHal;
 pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
