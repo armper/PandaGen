@@ -40,7 +40,7 @@ use fault_injection::FaultInjector;
 use hal::TimerDevice;
 use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, MessageEnvelope};
-use kernel_api::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
+use kernel_api::{Duration, Instant, KernelApi, KernelApiV0, KernelError, TaskDescriptor, TaskHandle};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::CpuTicks;
 use std::collections::{HashMap, VecDeque};
@@ -1766,6 +1766,41 @@ impl KernelApi for SimulatedKernel {
     }
 }
 
+impl KernelApiV0 for SimulatedKernel {
+    fn create_task(
+        &mut self,
+        name: String,
+        capabilities: Vec<Cap<()>>,
+    ) -> Result<TaskId, KernelError> {
+        let descriptor = TaskDescriptor {
+            name,
+            capabilities,
+        };
+        let handle = self.spawn_task(descriptor)?;
+        Ok(handle.task_id)
+    }
+
+    fn create_channel(&mut self) -> Result<ChannelId, KernelError> {
+        KernelApi::create_channel(self)
+    }
+
+    fn send(
+        &mut self,
+        channel: ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<(), KernelError> {
+        KernelApi::send_message(self, channel, message)
+    }
+
+    fn recv(&mut self, channel: ChannelId) -> Result<MessageEnvelope, KernelError> {
+        KernelApi::receive_message(self, channel, None)
+    }
+
+    fn grant(&mut self, task: TaskId, capability: Cap<()>) -> Result<(), KernelError> {
+        KernelApi::grant_capability(self, task, capability)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1789,7 +1824,7 @@ mod tests {
     #[test]
     fn test_create_channel() {
         let mut kernel = SimulatedKernel::new();
-        let channel = kernel.create_channel().unwrap();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
         assert_eq!(kernel.channel_count(), 1);
         assert!(kernel.channels.contains_key(&channel));
     }
@@ -1797,7 +1832,7 @@ mod tests {
     #[test]
     fn test_send_receive_message() {
         let mut kernel = SimulatedKernel::new();
-        let channel = kernel.create_channel().unwrap();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
 
         let service_id = ServiceId::new();
         let payload = ipc::MessagePayload::new(&"test").unwrap();
@@ -1835,7 +1870,7 @@ mod tests {
     fn test_service_registration() {
         let mut kernel = SimulatedKernel::new();
         let service_id = ServiceId::new();
-        let channel = kernel.create_channel().unwrap();
+        let channel = KernelApi::create_channel(&mut kernel).unwrap();
 
         kernel.register_service(service_id, channel).unwrap();
         assert_eq!(kernel.service_count(), 1);
@@ -1848,8 +1883,8 @@ mod tests {
     fn test_duplicate_service_registration() {
         let mut kernel = SimulatedKernel::new();
         let service_id = ServiceId::new();
-        let channel1 = kernel.create_channel().unwrap();
-        let channel2 = kernel.create_channel().unwrap();
+        let channel1 = KernelApi::create_channel(&mut kernel).unwrap();
+        let channel2 = KernelApi::create_channel(&mut kernel).unwrap();
 
         kernel.register_service(service_id, channel1).unwrap();
         let result = kernel.register_service(service_id, channel2);

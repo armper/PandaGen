@@ -10,13 +10,15 @@
 use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};
 
+pub mod idt;
 pub mod keyboard;
 pub mod port_io;
 pub mod timer;
 
+pub use idt::{Idt, IdtError};
 pub use keyboard::X86Ps2Keyboard;
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
-pub use timer::{FakeTimerDevice, PitTimer};
+pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;
@@ -77,12 +79,31 @@ impl MemoryHal for X86_64Memory {
 /// x86_64 interrupt handling implementation (skeleton)
 pub struct X86_64Interrupts {
     enabled: bool,
+    idt: Idt,
 }
 
 impl X86_64Interrupts {
     /// Creates a new interrupt handler
     pub fn new() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            idt: Idt::new(),
+        }
+    }
+
+    /// Installs the IDT (skeleton).
+    pub fn install_idt(&mut self) {
+        self.idt.install();
+    }
+
+    /// Registers a handler with error reporting.
+    pub fn register_handler_safe(&mut self, vector: u8, handler: fn()) -> Result<(), IdtError> {
+        self.idt.register_handler(vector, handler)
+    }
+
+    /// Returns whether the IDT is installed.
+    pub fn idt_installed(&self) -> bool {
+        self.idt.is_installed()
     }
 }
 
@@ -108,7 +129,7 @@ impl InterruptHal for X86_64Interrupts {
     }
 
     fn register_handler(&mut self, _vector: u8, _handler: fn()) {
-        // In real implementation: update IDT
+        let _ = self.idt.register_handler(_vector, _handler);
     }
 }
 
@@ -133,5 +154,19 @@ mod tests {
 
         interrupts.disable_interrupts();
         assert!(!interrupts.interrupts_enabled());
+    }
+
+    #[test]
+    fn test_idt_install_and_register() {
+        let mut interrupts = X86_64Interrupts::new();
+        assert!(!interrupts.idt_installed());
+        interrupts.install_idt();
+        assert!(interrupts.idt_installed());
+
+        fn handler_stub() {}
+
+        interrupts.register_handler_safe(32, handler_stub).unwrap();
+        let result = interrupts.register_handler_safe(32, handler_stub);
+        assert_eq!(result, Err(IdtError::AlreadyRegistered(32)));
     }
 }

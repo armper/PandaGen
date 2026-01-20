@@ -49,7 +49,11 @@ use core_types::TaskId;
 use hal::{KeyboardDevice, KeyboardTranslator};
 use identity::ExecutionId;
 use input_types::InputEvent;
-use services_input::InputSubscriptionCap;
+use kernel_api::KernelApiV0;
+use services_input::{
+    build_input_event_envelope, InputEventSink, InputService, InputServiceError,
+    InputSubscriptionCap,
+};
 use thiserror::Error;
 
 /// Bridge error types
@@ -75,6 +79,34 @@ pub enum PollResult {
     EventDelivered,
     /// No event was available from hardware
     NoEvent,
+}
+
+/// Input sink that delivers events through a kernel API.
+pub struct KernelInputSink<'a, K: KernelApiV0> {
+    kernel: &'a mut K,
+    source_task: Option<TaskId>,
+}
+
+impl<'a, K: KernelApiV0> KernelInputSink<'a, K> {
+    pub fn new(kernel: &'a mut K, source_task: Option<TaskId>) -> Self {
+        Self { kernel, source_task }
+    }
+}
+
+impl<'a, K: KernelApiV0> InputEventSink for KernelInputSink<'a, K> {
+    fn send_event(
+        &mut self,
+        cap: &InputSubscriptionCap,
+        event: &InputEvent,
+    ) -> Result<(), InputServiceError> {
+        let envelope = build_input_event_envelope(event, self.source_task)?;
+        self.kernel
+            .send(cap.channel, envelope)
+            .map_err(|err| InputServiceError::DeliveryFailed {
+                reason: err.to_string(),
+            })?;
+        Ok(())
+    }
 }
 
 /// Input HAL Bridge
@@ -169,6 +201,38 @@ impl InputHalBridge {
         Ok(PollResult::EventDelivered)
     }
 
+    /// Polls for a keyboard event and delivers it through the input service.
+    ///
+    /// This is the preferred path for integration, as it validates
+    /// subscriptions and routes through a delivery sink (kernel IPC, queue, etc.).
+    pub fn poll_with_sink<S: InputEventSink>(
+        &mut self,
+        input_service: &InputService,
+        sink: &mut S,
+    ) -> Result<PollResult, BridgeError> {
+        let hal_event = match self.keyboard.poll_event() {
+            Some(event) => event,
+            None => return Ok(PollResult::NoEvent),
+        };
+
+        let key_event = match self.translator.translate(hal_event) {
+            Some(event) => event,
+            None => return Ok(PollResult::NoEvent),
+        };
+
+        let input_event = InputEvent::key(key_event);
+        let delivered = input_service
+            .deliver_event_with(&self.subscription, &input_event, sink)
+            .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
+
+        if delivered {
+            self.events_delivered += 1;
+            Ok(PollResult::EventDelivered)
+        } else {
+            Ok(PollResult::NoEvent)
+        }
+    }
+
     /// Delivers an input event (internal helper)
     fn deliver_event(&mut self, _event: InputEvent) -> Result<(), BridgeError> {
         // Placeholder for message delivery
@@ -215,6 +279,7 @@ mod tests {
     use core_types::TaskId;
     use hal::HalKeyEvent;
     use ipc::ChannelId;
+    use services_input::InputService;
 
     /// Fake keyboard for testing
     struct FakeKeyboard {
@@ -403,5 +468,47 @@ mod tests {
         }
         assert_eq!(bridge.poll().unwrap(), PollResult::NoEvent);
         assert_eq!(bridge.events_delivered(), 6);
+    }
+
+    struct TestSink {
+        delivered: usize,
+    }
+
+    impl TestSink {
+        fn new() -> Self {
+            Self { delivered: 0 }
+        }
+    }
+
+    impl InputEventSink for TestSink {
+        fn send_event(
+            &mut self,
+            _cap: &InputSubscriptionCap,
+            _event: &InputEvent,
+        ) -> Result<(), InputServiceError> {
+            self.delivered += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_bridge_poll_with_sink() {
+        let exec_id = ExecutionId::new();
+        let task_id = TaskId::new();
+        let channel = ChannelId::new();
+        let mut input_service = InputService::new();
+        let subscription = input_service
+            .subscribe_keyboard(task_id, channel)
+            .unwrap();
+
+        let events = vec![HalKeyEvent::new(0x1E, true)];
+        let keyboard = Box::new(FakeKeyboard::new(events));
+        let mut bridge = InputHalBridge::new(exec_id, task_id, subscription, keyboard);
+
+        let mut sink = TestSink::new();
+        let result = bridge.poll_with_sink(&input_service, &mut sink).unwrap();
+
+        assert_eq!(result, PollResult::EventDelivered);
+        assert_eq!(sink.delivered, 1);
     }
 }

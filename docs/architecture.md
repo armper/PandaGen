@@ -3848,6 +3848,14 @@ impl InputHalBridge {
         // 3. Deliver to services_input
         // 4. Consume MessageCount budget
     }
+
+    pub fn poll_with_sink<S: InputEventSink>(
+        &mut self,
+        input_service: &InputService,
+        sink: &mut S,
+    ) -> Result<PollResult, BridgeError> {
+        // Same as poll, but routes through a sink for real delivery.
+    }
 }
 ```
 

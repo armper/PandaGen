@@ -22,6 +22,11 @@ impl ServiceId {
         Self(uuid)
     }
 
+    /// Creates a service ID from a fixed u128 value
+    pub fn from_u128(value: u128) -> Self {
+        Self(Uuid::from_u128(value))
+    }
+
     /// Returns the inner UUID
     pub fn as_uuid(&self) -> Uuid {
         self.0
@@ -57,6 +62,11 @@ impl TaskId {
     /// Creates a task ID from a UUID
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
+    }
+
+    /// Creates a task ID from a fixed u128 value
+    pub fn from_u128(value: u128) -> Self {
+        Self(Uuid::from_u128(value))
     }
 
     /// Returns the inner UUID
@@ -96,6 +106,13 @@ mod tests {
     }
 
     #[test]
+    fn test_service_id_from_u128() {
+        let value = 0x1234_5678_9abc_def0_1234_5678_9abc_def0u128;
+        let id = ServiceId::from_u128(value);
+        assert_eq!(id.as_uuid(), Uuid::from_u128(value));
+    }
+
+    #[test]
     fn test_task_id_creation() {
         let id1 = TaskId::new();
         let id2 = TaskId::new();
@@ -107,6 +124,13 @@ mod tests {
         let uuid = Uuid::new_v4();
         let id = TaskId::from_uuid(uuid);
         assert_eq!(id.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn test_task_id_from_u128() {
+        let value = 0x0fed_cba9_8765_4321_0fed_cba9_8765_4321u128;
+        let id = TaskId::from_u128(value);
+        assert_eq!(id.as_uuid(), Uuid::from_u128(value));
     }
 
     #[test]

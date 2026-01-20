@@ -1,14 +1,25 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
-use core::arch::{asm, global_asm};
+#[cfg(test)]
+extern crate std;
+
 use core::fmt::Write;
-use core::panic::PanicInfo;
+use core::marker::PhantomData;
 use core::str;
+
+#[cfg(not(test))]
+use core::arch::{asm, global_asm};
+#[cfg(not(test))]
+use core::panic::PanicInfo;
 use limine_protocol::structures::memory_map_entry::EntryType;
 use limine_protocol::{HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request};
 
+#[cfg(not(test))]
 // Provide a small, deterministic stack and jump into Rust.
+//
+// This is only needed for bare-metal execution, not for tests.
+#[cfg_attr(not(test), allow(dead_code))]
 global_asm!(
     r#"
 .section .text.entry, "ax"
@@ -30,6 +41,7 @@ stack_top:
 "#
 );
 
+#[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -44,6 +56,7 @@ pub extern "C" fn rust_main() -> ! {
     console_loop(&mut serial, &mut kernel)
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     // In this minimal bootstrap kernel we cannot rely on any output device
@@ -54,6 +67,7 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 #[inline(always)]
+#[cfg(not(test))]
 fn halt_loop() -> ! {
     loop {
         unsafe {
@@ -62,42 +76,25 @@ fn halt_loop() -> ! {
     }
 }
 
-fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
-    let mut buffer = [0u8; 128];
-    let mut len = 0usize;
+#[inline(always)]
+fn idle_pause() {
+    #[cfg(not(test))]
+    unsafe {
+        asm!("pause", options(nomem, nostack, preserves_flags));
+    }
+}
 
+#[cfg(not(test))]
+fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
     loop {
-        if let Some(byte) = serial.try_read_byte() {
-            match byte {
-                b'\r' | b'\n' => {
-                    let _ = serial.write_str("\r\n");
-                    kernel.enqueue_command(serial, &buffer[..len]);
-                    kernel.poll(serial);
-                    len = 0;
-                    let _ = serial.write_str("> ");
-                }
-                0x08 | 0x7f => {
-                    if len > 0 {
-                        len -= 1;
-                        let _ = serial.write_str("\x08 \x08");
-                    }
-                }
-                byte => {
-                    if len < buffer.len() {
-                        buffer[len] = byte;
-                        len += 1;
-                        let _ = serial.write_byte(byte);
-                    }
-                }
-            }
-        } else {
-            unsafe {
-                asm!("pause", options(nomem, nostack, preserves_flags));
-            }
+        let progressed = kernel.run_once(serial);
+        if !progressed {
+            idle_pause();
         }
     }
 }
 
+#[cfg(not(test))]
 fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     let mut info = BootInfo::empty();
     unsafe {
@@ -141,6 +138,7 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     info
 }
 
+#[cfg(not(test))]
 fn print_boot_info(serial: &mut serial::SerialPort, info: &BootInfo) {
     match info.hhdm_offset {
         Some(offset) => {
@@ -173,6 +171,7 @@ fn print_boot_info(serial: &mut serial::SerialPort, info: &BootInfo) {
     }
 }
 
+#[cfg(not(test))]
 fn init_memory(
     serial: &mut serial::SerialPort,
     boot: &BootInfo,
@@ -188,17 +187,22 @@ fn init_memory(
 
     let mut allocator = FrameAllocator::new();
     for entry in map {
-        if entry.kind == EntryType::Usable {
-            allocator.add_range(entry.base, entry.length);
+        match entry.kind {
+            EntryType::Usable => allocator.add_range(entry.base, entry.length),
+            EntryType::BootloaderReclaimable | EntryType::KernelAndModules => {
+                allocator.add_reserved_range(entry.base, entry.length)
+            }
+            _ => {}
         }
     }
     allocator.reset_cursor();
 
     let _ = writeln!(
         serial,
-        "allocator: ranges={} frames={}",
+        "allocator: ranges={} frames={} reserved={}",
         allocator.range_count(),
-        allocator.total_frames()
+        allocator.total_frames(),
+        allocator.reserved_range_count()
     );
 
     let heap = match boot.hhdm_offset {
@@ -212,6 +216,7 @@ fn init_memory(
     (Some(allocator), heap)
 }
 
+#[cfg(not(test))]
 fn init_heap(
     serial: &mut serial::SerialPort,
     allocator: &mut FrameAllocator,
@@ -222,26 +227,30 @@ fn init_heap(
         let _ = writeln!(serial, "heap: allocation failed");
         return None;
     };
-    let size = (HEAP_PAGES * PAGE_SIZE) as usize;
     let virt_base = (hhdm_offset + phys_base) as usize;
+    let size = (HEAP_PAGES * PAGE_SIZE) as usize;
+
     let heap = BumpHeap::new(virt_base, size);
     let _ = writeln!(
         serial,
-        "heap: virt=0x{:x} size={} KiB",
+        "heap: base=0x{:x} size={} bytes",
         virt_base,
-        size / 1024
+        size
     );
     Some(heap)
 }
 
+#[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
 static HHDM_REQUEST: Request<HHDMRequest> = HHDMRequest::new().into();
 
+#[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
 static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().into();
 
+#[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
 static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> =
@@ -250,6 +259,10 @@ static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> =
 const PAGE_SIZE: u64 = 4096;
 const CHANNEL_CAPACITY: usize = 8;
 const COMMAND_MAX: usize = 64;
+const RESPONSE_MAX: usize = 256;
+const ERROR_MAX: usize = 96;
+const MAX_TASKS: usize = 8;
+const MAX_CHANNELS: usize = 16;
 
 #[derive(Copy, Clone)]
 struct BootInfo {
@@ -274,172 +287,100 @@ impl BootInfo {
     }
 }
 
-struct Kernel {
-    boot: BootInfo,
-    allocator: Option<FrameAllocator>,
-    heap: Option<BumpHeap>,
-    channel: Channel,
-}
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct TaskId(u32);
 
-impl Kernel {
-    fn new(boot: BootInfo, allocator: Option<FrameAllocator>, heap: Option<BumpHeap>) -> Self {
-        Self {
-            boot,
-            allocator,
-            heap,
-            channel: Channel::new(),
-        }
-    }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct ChannelId(u8);
 
-    fn enqueue_command(&mut self, serial: &mut serial::SerialPort, line: &[u8]) {
-        let Some(msg) = Message::from_bytes(line) else {
-            let _ = writeln!(serial, "error: command too long");
-            return;
-        };
-        if let Err(ChannelError::Full) = self.channel.send(msg) {
-            let _ = writeln!(serial, "error: command queue full");
-        }
-    }
-
-    fn poll(&mut self, serial: &mut serial::SerialPort) {
-        while let Some(msg) = self.channel.recv() {
-            self.handle_message(serial, msg);
-        }
-    }
-
-    fn handle_message(&mut self, serial: &mut serial::SerialPort, msg: Message) {
-        if msg.kind != MessageKind::Command {
-            return;
-        }
-
-        let Some(command) = msg.as_str() else {
-            let _ = writeln!(serial, "error: invalid utf-8");
-            return;
-        };
-        let command = command.trim();
-        if command.is_empty() {
-            return;
-        }
-
-        match command {
-            "help" => {
-                let _ = writeln!(
-                    serial,
-                    "commands: help, halt, boot, mem, alloc, heap, heap-alloc"
-                );
-            }
-            "halt" => {
-                let _ = writeln!(serial, "halting...");
-                halt_loop();
-            }
-            "boot" => {
-                print_boot_info(serial, &self.boot);
-            }
-            "mem" => {
-                let _ = writeln!(
-                    serial,
-                    "memory: entries={} total={} KiB usable={} KiB",
-                    self.boot.mem_entries,
-                    self.boot.mem_total_kib,
-                    self.boot.mem_usable_kib
-                );
-                if let Some(allocator) = self.allocator.as_ref() {
-                    let _ = writeln!(
-                        serial,
-                        "allocator: ranges={} frames={} next=0x{:x}",
-                        allocator.range_count(),
-                        allocator.total_frames(),
-                        allocator.next_frame()
-                    );
-                } else {
-                    let _ = writeln!(serial, "allocator: unavailable");
-                }
-            }
-            "alloc" => {
-                if let Some(allocator) = self.allocator.as_mut() {
-                    if let Some(frame) = allocator.allocate_frame() {
-                        if let Some(offset) = self.boot.hhdm_offset {
-                            let virt = offset + frame;
-                            let _ = writeln!(
-                                serial,
-                                "frame: phys=0x{:x} virt=0x{:x}",
-                                frame,
-                                virt
-                            );
-                        } else {
-                            let _ = writeln!(serial, "frame: phys=0x{:x}", frame);
-                        }
-                    } else {
-                        let _ = writeln!(serial, "frame: out of memory");
-                    }
-                } else {
-                    let _ = writeln!(serial, "frame: allocator unavailable");
-                }
-            }
-            "heap" => {
-                if let Some(heap) = self.heap.as_ref() {
-                    let _ = writeln!(
-                        serial,
-                        "heap: used={} bytes free={} bytes",
-                        heap.used(),
-                        heap.free()
-                    );
-                } else {
-                    let _ = writeln!(serial, "heap: unavailable");
-                }
-            }
-            "heap-alloc" => {
-                if let Some(heap) = self.heap.as_mut() {
-                    match heap.alloc(64, 16) {
-                        Some(ptr) => {
-                            let _ = writeln!(
-                                serial,
-                                "heap: allocated 64 bytes at 0x{:x}",
-                                ptr
-                            );
-                        }
-                        None => {
-                            let _ = writeln!(serial, "heap: out of memory");
-                        }
-                    }
-                } else {
-                    let _ = writeln!(serial, "heap: unavailable");
-                }
-            }
-            _ => {
-                let _ = writeln!(serial, "unknown command: {}", command);
-            }
-        }
+impl ChannelId {
+    fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum MessageKind {
-    Command,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct MessageId(u64);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct SchemaVersion {
+    major: u16,
+    minor: u16,
+}
+
+impl SchemaVersion {
+    const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+}
+
+const COMMAND_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CommandErrorCode {
+    InvalidCommand,
+    InvalidArguments,
+    Internal,
+    ServiceUnavailable,
 }
 
 #[derive(Copy, Clone)]
-struct Message {
-    kind: MessageKind,
+struct CommandError {
+    code: CommandErrorCode,
+    len: usize,
+    message: [u8; ERROR_MAX],
+}
+
+impl CommandError {
+    fn new(code: CommandErrorCode, message: &str) -> Self {
+        let mut error = Self {
+            code,
+            len: 0,
+            message: [0; ERROR_MAX],
+        };
+        error.write_message(message);
+        error
+    }
+
+    fn write_message(&mut self, message: &str) {
+        let bytes = message.as_bytes();
+        let len = bytes.len().min(ERROR_MAX);
+        self.message[..len].copy_from_slice(&bytes[..len]);
+        self.len = len;
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        str::from_utf8(&self.message[..self.len]).ok()
+    }
+}
+
+#[derive(Copy, Clone)]
+enum CommandStatus {
+    Ok,
+    Error(CommandError),
+}
+
+#[derive(Copy, Clone)]
+struct CommandRequest {
+    version: SchemaVersion,
+    request_id: MessageId,
+    reply_channel: ChannelId,
     len: usize,
     data: [u8; COMMAND_MAX],
 }
 
-impl Message {
-    const fn empty() -> Self {
-        Self {
-            kind: MessageKind::Command,
-            len: 0,
-            data: [0; COMMAND_MAX],
-        }
-    }
-
-    fn from_bytes(line: &[u8]) -> Option<Self> {
+impl CommandRequest {
+    fn from_bytes(line: &[u8], request_id: MessageId, reply_channel: ChannelId) -> Option<Self> {
         if line.len() > COMMAND_MAX {
             return None;
         }
-        let mut msg = Self::empty();
-        msg.len = line.len();
+        let mut msg = Self {
+            version: COMMAND_SCHEMA_VERSION,
+            request_id,
+            reply_channel,
+            len: line.len(),
+            data: [0; COMMAND_MAX],
+        };
         let mut i = 0;
         while i < line.len() {
             msg.data[i] = line[i];
@@ -454,8 +395,714 @@ impl Message {
 }
 
 #[derive(Copy, Clone)]
+struct CommandResponse {
+    version: SchemaVersion,
+    correlation_id: MessageId,
+    status: CommandStatus,
+    len: usize,
+    output: [u8; RESPONSE_MAX],
+}
+
+impl CommandResponse {
+    fn ok(correlation_id: MessageId, output: &FixedBuffer<RESPONSE_MAX>) -> Self {
+        let mut response = Self {
+            version: COMMAND_SCHEMA_VERSION,
+            correlation_id,
+            status: CommandStatus::Ok,
+            len: 0,
+            output: [0; RESPONSE_MAX],
+        };
+        response.write_output(output.as_bytes());
+        response
+    }
+
+    fn error(correlation_id: MessageId, error: CommandError) -> Self {
+        Self {
+            version: COMMAND_SCHEMA_VERSION,
+            correlation_id,
+            status: CommandStatus::Error(error),
+            len: 0,
+            output: [0; RESPONSE_MAX],
+        }
+    }
+
+    fn write_output(&mut self, data: &[u8]) {
+        let len = data.len().min(RESPONSE_MAX);
+        self.output[..len].copy_from_slice(&data[..len]);
+        self.len = len;
+    }
+
+    fn output_str(&self) -> Option<&str> {
+        str::from_utf8(&self.output[..self.len]).ok()
+    }
+}
+
+#[derive(Copy, Clone)]
+enum KernelMessage {
+    Empty,
+    CommandRequest(CommandRequest),
+    CommandResponse(CommandResponse),
+}
+
+impl KernelMessage {
+    const fn empty() -> Self {
+        Self::Empty
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TaskDomain {
+    Kernel,
+    User,
+}
+
+struct TaskSlot {
+    id: TaskId,
+    domain: TaskDomain,
+    time_slice: TimeSlice,
+    kind: TaskKind,
+}
+
+impl TaskSlot {
+    fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
+        self.time_slice.advance(1);
+        if self.time_slice.should_preempt() {
+            self.time_slice.reset();
+        }
+        self.kind.poll(ctx, serial)
+    }
+}
+
+enum TaskKind {
+    Console(ConsoleService),
+    Command(CommandService),
+}
+
+impl TaskKind {
+    fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
+        match self {
+            TaskKind::Console(service) => service.poll(ctx, serial),
+            TaskKind::Command(service) => service.poll(ctx, serial),
+        }
+    }
+
+    fn set_task_id(&mut self, task_id: TaskId) {
+        match self {
+            TaskKind::Console(service) => service.task_id = task_id,
+            TaskKind::Command(service) => service.task_id = task_id,
+        }
+    }
+}
+
+struct CooperativeScheduler {
+    order: [TaskId; MAX_TASKS],
+    count: usize,
+    cursor: usize,
+}
+
+impl CooperativeScheduler {
+    const fn new() -> Self {
+        Self {
+            order: [TaskId(0); MAX_TASKS],
+            count: 0,
+            cursor: 0,
+        }
+    }
+
+    fn add_task(&mut self, id: TaskId) {
+        if self.count < MAX_TASKS {
+            self.order[self.count] = id;
+            self.count += 1;
+        }
+    }
+
+    fn next_task(&mut self) -> Option<TaskId> {
+        if self.count == 0 {
+            return None;
+        }
+        let id = self.order[self.cursor];
+        self.cursor = (self.cursor + 1) % self.count;
+        Some(id)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct TimeSlice {
+    quantum_ticks: u64,
+    used_ticks: u64,
+}
+
+impl TimeSlice {
+    fn new(quantum_ticks: u64) -> Self {
+        Self {
+            quantum_ticks,
+            used_ticks: 0,
+        }
+    }
+
+    fn advance(&mut self, ticks: u64) {
+        self.used_ticks = self.used_ticks.saturating_add(ticks);
+    }
+
+    fn should_preempt(&self) -> bool {
+        self.quantum_ticks > 0 && self.used_ticks >= self.quantum_ticks
+    }
+
+    fn reset(&mut self) {
+        self.used_ticks = 0;
+    }
+}
+
+#[derive(Copy, Clone)]
+struct Cap<T> {
+    id: u32,
+    _marker: PhantomData<T>,
+}
+
+impl<T> Cap<T> {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.id
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum KernelError {
+    OutOfTasks,
+    OutOfChannels,
+    ChannelFull,
+    ChannelEmpty,
+    InvalidChannel,
+    Unsupported,
+}
+
+trait KernelApiV0 {
+    fn create_task(&mut self, name: &str, caps: &[Cap<()>]) -> Result<TaskId, KernelError>;
+    fn create_channel(&mut self) -> Result<ChannelId, KernelError>;
+    fn send(&mut self, channel: ChannelId, message: KernelMessage) -> Result<(), KernelError>;
+    fn recv(&mut self, channel: ChannelId) -> Result<KernelMessage, KernelError>;
+    fn grant(&mut self, _task: TaskId, _cap: Cap<()>) -> Result<(), KernelError> {
+        Ok(())
+    }
+}
+
+struct KernelContext<'a> {
+    boot: &'a BootInfo,
+    allocator: &'a mut Option<FrameAllocator>,
+    heap: &'a mut Option<BumpHeap>,
+    channels: &'a mut [Channel; MAX_CHANNELS],
+    next_message_id: &'a mut u64,
+}
+
+impl KernelContext<'_> {
+    fn next_message_id(&mut self) -> MessageId {
+        let id = *self.next_message_id;
+        *self.next_message_id = (*self.next_message_id).saturating_add(1);
+        MessageId(id)
+    }
+
+    fn try_recv(&mut self, channel: ChannelId) -> Option<KernelMessage> {
+        if channel.index() >= MAX_CHANNELS {
+            return None;
+        }
+        self.channels[channel.index()].recv()
+    }
+
+    fn boot(&self) -> &BootInfo {
+        self.boot
+    }
+}
+
+impl KernelApiV0 for KernelContext<'_> {
+    fn create_task(&mut self, _name: &str, _caps: &[Cap<()>]) -> Result<TaskId, KernelError> {
+        Err(KernelError::Unsupported)
+    }
+
+    fn create_channel(&mut self) -> Result<ChannelId, KernelError> {
+        Err(KernelError::Unsupported)
+    }
+
+    fn send(&mut self, channel: ChannelId, message: KernelMessage) -> Result<(), KernelError> {
+        if channel.index() >= MAX_CHANNELS {
+            return Err(KernelError::InvalidChannel);
+        }
+        self.channels[channel.index()]
+            .send(message)
+            .map_err(|_| KernelError::ChannelFull)
+    }
+
+    fn recv(&mut self, channel: ChannelId) -> Result<KernelMessage, KernelError> {
+        if channel.index() >= MAX_CHANNELS {
+            return Err(KernelError::InvalidChannel);
+        }
+        self.channels[channel.index()]
+            .recv()
+            .ok_or(KernelError::ChannelEmpty)
+    }
+}
+
+struct Kernel {
+    boot: BootInfo,
+    allocator: Option<FrameAllocator>,
+    heap: Option<BumpHeap>,
+    channels: [Channel; MAX_CHANNELS],
+    channel_count: u8,
+    next_message_id: u64,
+    scheduler: CooperativeScheduler,
+    tasks: [Option<TaskSlot>; MAX_TASKS],
+}
+
+impl Kernel {
+    fn new(boot: BootInfo, allocator: Option<FrameAllocator>, heap: Option<BumpHeap>) -> Self {
+        let mut kernel = Self {
+            boot,
+            allocator,
+            heap,
+            channels: [Channel::new(); MAX_CHANNELS],
+            channel_count: 0,
+            next_message_id: 1,
+            scheduler: CooperativeScheduler::new(),
+            tasks: core::array::from_fn(|_| None),
+        };
+
+        let command_channel = kernel
+            .create_channel()
+            .expect("command channel available");
+        let response_channel = kernel
+            .create_channel()
+            .expect("response channel available");
+
+        let command_task = CommandService::new(command_channel);
+        let console_task = ConsoleService::new(command_channel, response_channel);
+
+        let _ = kernel.spawn_task(TaskDomain::Kernel, TaskKind::Command(command_task));
+        let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Console(console_task));
+
+        kernel
+    }
+
+    fn run_once(&mut self, serial: &mut serial::SerialPort) -> bool {
+        let Kernel {
+            boot,
+            allocator,
+            heap,
+            channels,
+            next_message_id,
+            scheduler,
+            tasks,
+            ..
+        } = self;
+
+        let Some(task_id) = scheduler.next_task() else {
+            return false;
+        };
+        let index = task_id.0 as usize;
+        let Some(task) = tasks.get_mut(index).and_then(Option::as_mut) else {
+            return false;
+        };
+        let mut ctx = KernelContext {
+            boot,
+            allocator,
+            heap,
+            channels,
+            next_message_id,
+        };
+        task.poll(&mut ctx, serial)
+    }
+
+    fn spawn_task(&mut self, domain: TaskDomain, mut kind: TaskKind) -> Result<TaskId, KernelError> {
+        if let Some((index, slot_ref)) = self
+            .tasks
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.is_none())
+        {
+            let id = TaskId(index as u32);
+            kind.set_task_id(id);
+            *slot_ref = Some(TaskSlot {
+                id,
+                domain,
+                time_slice: TimeSlice::new(5),
+                kind,
+            });
+            self.scheduler.add_task(id);
+            Ok(id)
+        } else {
+            Err(KernelError::OutOfTasks)
+        }
+    }
+}
+
+impl KernelApiV0 for Kernel {
+    fn create_task(&mut self, _name: &str, _caps: &[Cap<()>]) -> Result<TaskId, KernelError> {
+        Err(KernelError::Unsupported)
+    }
+
+    fn create_channel(&mut self) -> Result<ChannelId, KernelError> {
+        if self.channel_count as usize >= MAX_CHANNELS {
+            return Err(KernelError::OutOfChannels);
+        }
+        let id = ChannelId(self.channel_count);
+        self.channel_count = self.channel_count.saturating_add(1);
+        self.channels[id.index()].reset();
+        Ok(id)
+    }
+
+    fn send(&mut self, channel: ChannelId, message: KernelMessage) -> Result<(), KernelError> {
+        if channel.index() >= MAX_CHANNELS {
+            return Err(KernelError::InvalidChannel);
+        }
+        self.channels[channel.index()]
+            .send(message)
+            .map_err(|_| KernelError::ChannelFull)
+    }
+
+    fn recv(&mut self, channel: ChannelId) -> Result<KernelMessage, KernelError> {
+        if channel.index() >= MAX_CHANNELS {
+            return Err(KernelError::InvalidChannel);
+        }
+        self.channels[channel.index()]
+            .recv()
+            .ok_or(KernelError::ChannelEmpty)
+    }
+}
+
+struct ConsoleService {
+    task_id: TaskId,
+    command_channel: ChannelId,
+    response_channel: ChannelId,
+    buffer: [u8; COMMAND_MAX],
+    len: usize,
+    awaiting_response: bool,
+}
+
+impl ConsoleService {
+    fn new(command_channel: ChannelId, response_channel: ChannelId) -> Self {
+        Self {
+            task_id: TaskId(0),
+            command_channel,
+            response_channel,
+            buffer: [0; COMMAND_MAX],
+            len: 0,
+            awaiting_response: false,
+        }
+    }
+
+    fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
+        let mut progressed = false;
+
+        while let Some(message) = ctx.try_recv(self.response_channel) {
+            if let KernelMessage::CommandResponse(response) = message {
+                self.render_response(serial, &response);
+                let _ = write!(serial, "> ");
+                self.awaiting_response = false;
+                progressed = true;
+            }
+        }
+
+        if let Some(byte) = serial.try_read_byte() {
+            progressed = true;
+            match byte {
+                b'\r' | b'\n' => {
+                    let _ = serial.write_str("\r\n");
+                    self.submit_command(ctx, serial);
+                    self.len = 0;
+                }
+                0x08 | 0x7f => {
+                    if self.len > 0 {
+                        self.len -= 1;
+                        let _ = serial.write_str("\x08 \x08");
+                    }
+                }
+                byte => {
+                    if self.len < self.buffer.len() {
+                        self.buffer[self.len] = byte;
+                        self.len += 1;
+                        let _ = serial.write_byte(byte);
+                    } else {
+                        let _ = serial.write_str("\r\nerror: command too long\r\n> ");
+                        self.len = 0;
+                    }
+                }
+            }
+        }
+
+        progressed
+    }
+
+    fn submit_command(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) {
+        let request_id = ctx.next_message_id();
+        let Some(request) =
+            CommandRequest::from_bytes(&self.buffer[..self.len], request_id, self.response_channel)
+        else {
+            let _ = writeln!(serial, "error: command too long");
+            return;
+        };
+
+        if ctx
+            .send(self.command_channel, KernelMessage::CommandRequest(request))
+            .is_err()
+        {
+            let _ = writeln!(serial, "error: command queue full");
+            return;
+        }
+
+        self.awaiting_response = true;
+    }
+
+    fn render_response(&self, serial: &mut serial::SerialPort, response: &CommandResponse) {
+        match response.status {
+            CommandStatus::Ok => {
+                if let Some(output) = response.output_str() {
+                    let _ = serial.write_str(output);
+                    let _ = serial.write_str("\r\n");
+                }
+            }
+            CommandStatus::Error(err) => {
+                let _ = serial.write_str("error: ");
+                if let Some(msg) = err.as_str() {
+                    let _ = serial.write_str(msg);
+                } else {
+                    let _ = serial.write_str("invalid error");
+                }
+                let _ = serial.write_str("\r\n");
+            }
+        }
+    }
+}
+
+struct CommandService {
+    task_id: TaskId,
+    command_channel: ChannelId,
+}
+
+impl CommandService {
+    fn new(command_channel: ChannelId) -> Self {
+        Self {
+            task_id: TaskId(0),
+            command_channel,
+        }
+    }
+
+    fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
+        let mut progressed = false;
+        while let Some(message) = ctx.try_recv(self.command_channel) {
+            progressed = true;
+            if let KernelMessage::CommandRequest(request) = message {
+                let response = self.handle_command(ctx, serial, &request);
+                let _ = ctx.send(
+                    request.reply_channel,
+                    KernelMessage::CommandResponse(response),
+                );
+            }
+        }
+        progressed
+    }
+
+    fn handle_command(
+        &mut self,
+        ctx: &mut KernelContext,
+        _serial: &mut serial::SerialPort,
+        request: &CommandRequest,
+    ) -> CommandResponse {
+        let correlation_id = request.request_id;
+        let Some(command) = request.as_str() else {
+            return CommandResponse::error(
+                correlation_id,
+                CommandError::new(CommandErrorCode::InvalidCommand, "invalid utf-8"),
+            );
+        };
+        let command = command.trim();
+        if command.is_empty() {
+            return CommandResponse::ok(correlation_id, &FixedBuffer::new());
+        }
+
+        let mut output = FixedBuffer::<RESPONSE_MAX>::new();
+
+        match command {
+            "help" => {
+                let _ = writeln!(
+                    output,
+                    "commands: help, halt, boot, mem, alloc, heap, heap-alloc"
+                );
+            }
+            "halt" => {
+                #[cfg(not(test))]
+                {
+                    let _ = writeln!(output, "halting...");
+                    let response = CommandResponse::ok(correlation_id, &output);
+                    #[cfg(not(test))]
+                    halt_loop();
+                    return response;
+                }
+
+                #[cfg(test)]
+                {
+                    return CommandResponse::error(
+                        correlation_id,
+                        CommandError::new(CommandErrorCode::ServiceUnavailable, "halt unavailable"),
+                    );
+                }
+            }
+            "boot" => {
+                let boot = ctx.boot();
+                match boot.hhdm_offset {
+                    Some(offset) => {
+                        let _ = writeln!(output, "hhdm: offset=0x{:x}", offset);
+                    }
+                    None => {
+                        let _ = writeln!(output, "hhdm: unavailable");
+                    }
+                }
+                match (boot.kernel_phys, boot.kernel_virt) {
+                    (Some(phys), Some(virt)) => {
+                        let _ = writeln!(
+                            output,
+                            "kernel: phys=0x{:x} virt=0x{:x}",
+                            phys, virt
+                        );
+                    }
+                    _ => {
+                        let _ = writeln!(output, "kernel: address unavailable");
+                    }
+                }
+            }
+            "mem" => {
+                let boot = ctx.boot();
+                let _ = writeln!(
+                    output,
+                    "memory: entries={} total={} KiB usable={} KiB",
+                    boot.mem_entries,
+                    boot.mem_total_kib,
+                    boot.mem_usable_kib
+                );
+                if let Some(allocator) = ctx.allocator.as_ref() {
+                    let _ = writeln!(
+                        output,
+                        "allocator: ranges={} frames={} next=0x{:x} reclaimed={}",
+                        allocator.range_count(),
+                        allocator.total_frames(),
+                        allocator.next_frame(),
+                        allocator.reclaimed_count()
+                    );
+                } else {
+                    let _ = writeln!(output, "allocator: unavailable");
+                }
+            }
+            "alloc" => {
+                if let Some(allocator) = ctx.allocator.as_mut() {
+                    if let Some(frame) = allocator.allocate_frame() {
+                        if let Some(offset) = ctx.boot().hhdm_offset {
+                            let virt = offset + frame;
+                            let _ = writeln!(
+                                output,
+                                "frame: phys=0x{:x} virt=0x{:x}",
+                                frame, virt
+                            );
+                        } else {
+                            let _ = writeln!(output, "frame: phys=0x{:x}", frame);
+                        }
+                    } else {
+                        return CommandResponse::error(
+                            correlation_id,
+                            CommandError::new(CommandErrorCode::Internal, "out of memory"),
+                        );
+                    }
+                } else {
+                    return CommandResponse::error(
+                        correlation_id,
+                        CommandError::new(CommandErrorCode::ServiceUnavailable, "allocator unavailable"),
+                    );
+                }
+            }
+            "heap" => {
+                if let Some(heap) = ctx.heap.as_ref() {
+                    let stats = heap.stats();
+                    let _ = writeln!(
+                        output,
+                        "heap: used={} bytes free={} bytes total={} allocs={}",
+                        stats.used,
+                        stats.free,
+                        stats.total,
+                        stats.allocations
+                    );
+                } else {
+                    let _ = writeln!(output, "heap: unavailable");
+                }
+            }
+            "heap-alloc" => {
+                if let Some(heap) = ctx.heap.as_mut() {
+                    match heap.alloc(64, 16, AllocationLifetime::KernelTransient) {
+                        Some(record) => {
+                            let _ = writeln!(
+                                output,
+                                "heap: allocated 64 bytes at 0x{:x} ({:?})",
+                                record.start,
+                                record.lifetime
+                            );
+                        }
+                        None => {
+                            return CommandResponse::error(
+                                correlation_id,
+                                CommandError::new(CommandErrorCode::Internal, "heap out of memory"),
+                            );
+                        }
+                    }
+                } else {
+                    return CommandResponse::error(
+                        correlation_id,
+                        CommandError::new(CommandErrorCode::ServiceUnavailable, "heap unavailable"),
+                    );
+                }
+            }
+            _ => {
+                return CommandResponse::error(
+                    correlation_id,
+                    CommandError::new(CommandErrorCode::InvalidCommand, "unknown command"),
+                );
+            }
+        }
+
+        CommandResponse::ok(correlation_id, &output)
+    }
+}
+
+#[derive(Copy, Clone)]
+struct FixedBuffer<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedBuffer<N> {
+    fn new() -> Self {
+        Self { buf: [0; N], len: 0 }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl<const N: usize> Write for FixedBuffer<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let available = N.saturating_sub(self.len);
+        let len = bytes.len().min(available);
+        self.buf[self.len..self.len + len].copy_from_slice(&bytes[..len]);
+        self.len += len;
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone)]
 struct Channel {
-    queue: [Message; CHANNEL_CAPACITY],
+    queue: [KernelMessage; CHANNEL_CAPACITY],
     head: usize,
     tail: usize,
     full: bool,
@@ -464,14 +1111,21 @@ struct Channel {
 impl Channel {
     const fn new() -> Self {
         Self {
-            queue: [Message::empty(); CHANNEL_CAPACITY],
+            queue: [KernelMessage::empty(); CHANNEL_CAPACITY],
             head: 0,
             tail: 0,
             full: false,
         }
     }
 
-    fn send(&mut self, msg: Message) -> Result<(), ChannelError> {
+    fn reset(&mut self) {
+        self.queue = [KernelMessage::empty(); CHANNEL_CAPACITY];
+        self.head = 0;
+        self.tail = 0;
+        self.full = false;
+    }
+
+    fn send(&mut self, msg: KernelMessage) -> Result<(), ChannelError> {
         if self.full {
             return Err(ChannelError::Full);
         }
@@ -483,7 +1137,7 @@ impl Channel {
         Ok(())
     }
 
-    fn recv(&mut self) -> Option<Message> {
+    fn recv(&mut self) -> Option<KernelMessage> {
         if self.is_empty() {
             return None;
         }
@@ -513,6 +1167,10 @@ struct FrameAllocator {
     len: usize,
     current: usize,
     next: u64,
+    reclaimed: [u64; 64],
+    reclaimed_len: usize,
+    reserved: [Range; 32],
+    reserved_len: usize,
 }
 
 impl FrameAllocator {
@@ -522,6 +1180,10 @@ impl FrameAllocator {
             len: 0,
             current: 0,
             next: 0,
+            reclaimed: [0; 64],
+            reclaimed_len: 0,
+            reserved: [Range { start: 0, end: 0 }; 32],
+            reserved_len: 0,
         }
     }
 
@@ -533,6 +1195,20 @@ impl FrameAllocator {
         }
         self.ranges[self.len] = Range { start, end };
         self.len += 1;
+    }
+
+    fn add_reserved_range(&mut self, base: u64, length: u64) {
+        let start = align_up(base, PAGE_SIZE);
+        let end = align_down(base.saturating_add(length), PAGE_SIZE);
+        if end <= start || self.reserved_len >= self.reserved.len() {
+            return;
+        }
+        self.reserved[self.reserved_len] = Range { start, end };
+        self.reserved_len += 1;
+    }
+
+    fn reserved_range_count(&self) -> usize {
+        self.reserved_len
     }
 
     fn reset_cursor(&mut self) {
@@ -563,8 +1239,24 @@ impl FrameAllocator {
         self.next
     }
 
+    fn reclaimed_count(&self) -> usize {
+        self.reclaimed_len
+    }
+
     fn allocate_frame(&mut self) -> Option<u64> {
+        if self.reclaimed_len > 0 {
+            self.reclaimed_len -= 1;
+            return Some(self.reclaimed[self.reclaimed_len]);
+        }
         self.allocate_contiguous(1)
+    }
+
+    fn free_frame(&mut self, frame: u64) {
+        if self.reclaimed_len >= self.reclaimed.len() {
+            return;
+        }
+        self.reclaimed[self.reclaimed_len] = frame;
+        self.reclaimed_len += 1;
     }
 
     fn allocate_contiguous(&mut self, pages: u64) -> Option<u64> {
@@ -574,16 +1266,25 @@ impl FrameAllocator {
         let bytes = pages.saturating_mul(PAGE_SIZE);
         while self.current < self.len {
             let range = self.ranges[self.current];
-            let start = if self.next < range.start {
+            let mut start = if self.next < range.start {
                 range.start
             } else {
                 self.next
             };
-            let end = start.saturating_add(bytes);
-            if end <= range.end {
+
+            loop {
+                let end = start.saturating_add(bytes);
+                if end > range.end {
+                    break;
+                }
+                if let Some(reserved) = self.first_reserved_overlap(start, end) {
+                    start = reserved.end;
+                    continue;
+                }
                 self.next = end;
                 return Some(start);
             }
+
             self.current += 1;
             if self.current < self.len {
                 self.next = self.ranges[self.current].start;
@@ -591,12 +1292,57 @@ impl FrameAllocator {
         }
         None
     }
+
+    fn first_reserved_overlap(&self, start: u64, end: u64) -> Option<Range> {
+        let mut i = 0usize;
+        while i < self.reserved_len {
+            let range = self.reserved[i];
+            if start < range.end && end > range.start {
+                return Some(range);
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum AllocationLifetime {
+    KernelStatic,
+    KernelTransient,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct AllocationRecord {
+    start: usize,
+    size: usize,
+    lifetime: AllocationLifetime,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct AllocationStats {
+    used: usize,
+    free: usize,
+    total: usize,
+    allocations: usize,
+}
+
+trait KernelAllocator {
+    fn alloc(
+        &mut self,
+        size: usize,
+        align: usize,
+        lifetime: AllocationLifetime,
+    ) -> Option<AllocationRecord>;
+
+    fn stats(&self) -> AllocationStats;
 }
 
 struct BumpHeap {
     start: usize,
     end: usize,
     next: usize,
+    allocations: usize,
 }
 
 impl BumpHeap {
@@ -605,25 +1351,39 @@ impl BumpHeap {
             start,
             end: start.saturating_add(size),
             next: start,
+            allocations: 0,
         }
     }
+}
 
-    fn alloc(&mut self, size: usize, align: usize) -> Option<usize> {
+impl KernelAllocator for BumpHeap {
+    fn alloc(
+        &mut self,
+        size: usize,
+        align: usize,
+        lifetime: AllocationLifetime,
+    ) -> Option<AllocationRecord> {
         let aligned = align_up_usize(self.next, align);
         let end = aligned.saturating_add(size);
         if end > self.end {
             return None;
         }
         self.next = end;
-        Some(aligned)
+        self.allocations += 1;
+        Some(AllocationRecord {
+            start: aligned,
+            size,
+            lifetime,
+        })
     }
 
-    fn used(&self) -> usize {
-        self.next.saturating_sub(self.start)
-    }
-
-    fn free(&self) -> usize {
-        self.end.saturating_sub(self.next)
+    fn stats(&self) -> AllocationStats {
+        AllocationStats {
+            used: self.next.saturating_sub(self.start),
+            free: self.end.saturating_sub(self.next),
+            total: self.end.saturating_sub(self.start),
+            allocations: self.allocations,
+        }
     }
 }
 
@@ -648,6 +1408,72 @@ fn align_up_usize(value: usize, align: usize) -> usize {
     (value + align - 1) / align * align
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frame_allocator_reclaims() {
+        let mut allocator = FrameAllocator::new();
+        allocator.add_range(0x1000, 0x9000);
+        allocator.reset_cursor();
+
+        let first = allocator.allocate_frame().unwrap();
+        let second = allocator.allocate_frame().unwrap();
+        allocator.free_frame(first);
+
+        let reclaimed = allocator.allocate_frame().unwrap();
+        assert_eq!(reclaimed, first);
+        assert_ne!(reclaimed, second);
+    }
+
+    #[test]
+    fn test_frame_allocator_excludes_reserved() {
+        let mut allocator = FrameAllocator::new();
+        allocator.add_range(0x1000, 0x9000);
+        allocator.add_reserved_range(0x3000, 0x2000);
+        allocator.reset_cursor();
+
+        let a = allocator.allocate_frame().unwrap();
+        let b = allocator.allocate_frame().unwrap();
+        let c = allocator.allocate_frame().unwrap();
+
+        assert_eq!(a, 0x1000);
+        assert_eq!(b, 0x2000);
+        assert_eq!(c, 0x5000);
+    }
+
+    #[test]
+    fn test_bump_heap_stats() {
+        let mut heap = BumpHeap::new(0x1000, 0x1000);
+        let stats = heap.stats();
+        assert_eq!(stats.used, 0);
+        assert_eq!(stats.free, 0x1000);
+
+        let alloc = heap
+            .alloc(64, 16, AllocationLifetime::KernelTransient)
+            .unwrap();
+        assert_eq!(alloc.size, 64);
+
+        let stats = heap.stats();
+        assert_eq!(stats.allocations, 1);
+        assert!(stats.used >= 64);
+    }
+
+    #[test]
+    fn test_time_slice_preemption() {
+        let mut slice = TimeSlice::new(3);
+        assert!(!slice.should_preempt());
+        slice.advance(1);
+        assert!(!slice.should_preempt());
+        slice.advance(1);
+        assert!(!slice.should_preempt());
+        slice.advance(1);
+        assert!(slice.should_preempt());
+    }
+}
+
+#[cfg(not(test))]
 mod serial {
     use core::arch::asm;
     use core::fmt;
@@ -734,6 +1560,44 @@ mod serial {
                 }
                 self.write_byte(byte)?;
             }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod serial {
+    use std::fmt;
+
+    pub const COM1: u16 = 0x3F8;
+
+    #[derive(Default)]
+    pub struct SerialPort {
+        pub buffer: std::string::String,
+    }
+
+    impl SerialPort {
+        pub fn new(_base: u16) -> Self {
+            Self {
+                buffer: std::string::String::new(),
+            }
+        }
+
+        pub fn init(&mut self) {}
+
+        pub fn write_byte(&mut self, byte: u8) -> fmt::Result {
+            self.buffer.push(byte as char);
+            Ok(())
+        }
+
+        pub fn try_read_byte(&mut self) -> Option<u8> {
+            None
+        }
+    }
+
+    impl fmt::Write for SerialPort {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.buffer.push_str(s);
             Ok(())
         }
     }

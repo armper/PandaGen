@@ -28,4 +28,4 @@ pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
 pub use keyboard_translation::{scancode_to_keycode, KeyboardTranslator};
 pub use memory::MemoryHal;
-pub use timer::TimerDevice;
+pub use timer::{TimerDevice, TimerInterrupt};

@@ -72,6 +72,21 @@ pub trait TimerDevice {
     fn poll_ticks(&mut self) -> u64;
 }
 
+/// Optional timer interrupt configuration hooks.
+///
+/// Implementations can ignore hardware details and simply record
+/// configuration state; this is a scaffold for preemption.
+pub trait TimerInterrupt {
+    /// Configure periodic interrupts at a target frequency.
+    fn configure_periodic(&mut self, hz: u32);
+
+    /// Enables timer interrupts.
+    fn enable_interrupts(&mut self);
+
+    /// Disables timer interrupts.
+    fn disable_interrupts(&mut self);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4113,6 +4113,11 @@ impl InputHalBridge {
     ) -> Self;
     
     pub fn poll(&mut self) -> Result<PollResult, BridgeError>;
+    pub fn poll_with_sink<S: InputEventSink>(
+        &mut self,
+        input_service: &InputService,
+        sink: &mut S,
+    ) -> Result<PollResult, BridgeError>;
     pub fn execution_id(&self) -> ExecutionId;
     pub fn subscription(&self) -> &InputSubscriptionCap;
     pub fn events_delivered(&self) -> u64;
@@ -4121,6 +4126,11 @@ impl InputHalBridge {
 ```
 
 **Purpose**: Bridges hardware keyboard input to PandaGen's input system.
+
+**Note**: `poll_with_sink` is the preferred integration path because it
+validates subscriptions and routes events through a delivery sink (kernel
+IPC, queue, or test harness). `poll` remains as a legacy stub for skeleton
+integration tests.
 
 **Contract**:
 - Polls `KeyboardDevice` for events

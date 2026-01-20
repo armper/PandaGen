@@ -17,9 +17,9 @@
 //! - Global keyboard state
 //! - A focus manager (that's a separate service)
 
-use core_types::TaskId;
+use core_types::{ServiceId, TaskId};
 use input_types::InputEvent;
-use ipc::ChannelId;
+use ipc::{ChannelId, MessageEnvelope, MessagePayload, SchemaVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -63,6 +63,50 @@ pub enum InputServiceError {
 
     #[error("Event delivery failed: {reason}")]
     DeliveryFailed { reason: String },
+}
+
+/// Input service schema version (v1.0).
+pub const INPUT_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1, 0);
+
+/// Action identifier for input event messages.
+pub const INPUT_EVENT_ACTION: &str = "input.event";
+
+/// Stable service ID for the input service.
+const INPUT_SERVICE_ID: u128 = 0x91a7_2f0e_c9c3_4d8a_8e76_0e8c_9f0a_2d4bu128;
+
+/// Returns the stable service ID for the input service.
+pub fn input_service_id() -> ServiceId {
+    ServiceId::from_u128(INPUT_SERVICE_ID)
+}
+
+/// Builds an input event message envelope.
+pub fn build_input_event_envelope(
+    event: &InputEvent,
+    source: Option<TaskId>,
+) -> Result<MessageEnvelope, InputServiceError> {
+    let payload =
+        MessagePayload::new(event).map_err(|err| InputServiceError::DeliveryFailed {
+            reason: err.to_string(),
+        })?;
+    let mut envelope = MessageEnvelope::new(
+        input_service_id(),
+        INPUT_EVENT_ACTION.to_string(),
+        INPUT_SCHEMA_VERSION,
+        payload,
+    );
+    if let Some(task_id) = source {
+        envelope = envelope.with_source(task_id);
+    }
+    Ok(envelope)
+}
+
+/// Sink interface for delivering input events.
+pub trait InputEventSink {
+    fn send_event(
+        &mut self,
+        cap: &InputSubscriptionCap,
+        event: &InputEvent,
+    ) -> Result<(), InputServiceError>;
 }
 
 /// Input subscription record
@@ -191,6 +235,22 @@ impl InputService {
         Ok(subscription.active)
     }
 
+    /// Delivers an event via a sink (kernel message, queue, etc.)
+    ///
+    /// Returns Ok(true) if delivered, Ok(false) if subscription inactive.
+    pub fn deliver_event_with<S: InputEventSink>(
+        &self,
+        cap: &InputSubscriptionCap,
+        event: &InputEvent,
+        sink: &mut S,
+    ) -> Result<bool, InputServiceError> {
+        let active = self.deliver_event(cap, event)?;
+        if active {
+            sink.send_event(cap, event)?;
+        }
+        Ok(active)
+    }
+
     /// Checks if a subscription is active
     pub fn is_subscription_active(&self, cap: &InputSubscriptionCap) -> bool {
         self.subscriptions
@@ -227,6 +287,7 @@ impl Default for InputService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_types::{KeyCode, KeyEvent, Modifiers};
 
     #[test]
     fn test_input_service_creation() {
@@ -445,5 +506,54 @@ mod tests {
         let deserialized: InputSubscriptionCap = serde_json::from_str(&json).unwrap();
 
         assert_eq!(cap, deserialized);
+    }
+
+    struct TestSink {
+        delivered: usize,
+    }
+
+    impl TestSink {
+        fn new() -> Self {
+            Self { delivered: 0 }
+        }
+    }
+
+    impl InputEventSink for TestSink {
+        fn send_event(
+            &mut self,
+            _cap: &InputSubscriptionCap,
+            _event: &InputEvent,
+        ) -> Result<(), InputServiceError> {
+            self.delivered += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_deliver_event_with_sink() {
+        let mut service = InputService::new();
+        let task_id = TaskId::new();
+        let channel = ChannelId::new();
+        let cap = service.subscribe_keyboard(task_id, channel).unwrap();
+        let event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
+
+        let mut sink = TestSink::new();
+        let delivered = service
+            .deliver_event_with(&cap, &event, &mut sink)
+            .unwrap();
+
+        assert!(delivered);
+        assert_eq!(sink.delivered, 1);
+    }
+
+    #[test]
+    fn test_build_input_event_envelope() {
+        let event = InputEvent::key(KeyEvent::pressed(KeyCode::B, Modifiers::none()));
+        let envelope = build_input_event_envelope(&event, None).unwrap();
+
+        assert_eq!(envelope.action, INPUT_EVENT_ACTION);
+        assert_eq!(envelope.schema_version, INPUT_SCHEMA_VERSION);
+        let decoded: InputEvent = envelope.payload.deserialize().unwrap();
+        assert_eq!(decoded, event);
     }
 }

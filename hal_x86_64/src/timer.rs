@@ -13,7 +13,7 @@
 //! - Monotonicity is enforced
 //! - Minimal unsafe code, isolated to port I/O
 
-use hal::TimerDevice;
+use hal::{TimerDevice, TimerInterrupt};
 
 /// Fake timer device for testing
 ///
@@ -125,6 +125,10 @@ pub struct PitTimer<P: super::port_io::PortIo> {
     last_counter: u16,
     /// Whether the timer has been initialized
     initialized: bool,
+    /// Whether interrupts are enabled
+    interrupts_enabled: bool,
+    /// Configured periodic interrupt frequency
+    configured_hz: Option<u32>,
 }
 
 impl<P: super::port_io::PortIo> PitTimer<P> {
@@ -145,6 +149,8 @@ impl<P: super::port_io::PortIo> PitTimer<P> {
             cumulative_ticks: 0,
             last_counter: 0,
             initialized: false,
+            interrupts_enabled: false,
+            configured_hz: None,
         }
     }
 
@@ -230,6 +236,79 @@ impl<P: super::port_io::PortIo> TimerDevice for PitTimer<P> {
     }
 }
 
+impl<P: super::port_io::PortIo> TimerInterrupt for PitTimer<P> {
+    fn configure_periodic(&mut self, hz: u32) {
+        self.configured_hz = Some(hz);
+    }
+
+    fn enable_interrupts(&mut self) {
+        self.interrupts_enabled = true;
+    }
+
+    fn disable_interrupts(&mut self) {
+        self.interrupts_enabled = false;
+    }
+}
+
+/// HPET timer (skeleton).
+#[derive(Debug)]
+pub struct HpetTimer {
+    ticks: u64,
+    interrupts_enabled: bool,
+    configured_hz: Option<u32>,
+}
+
+impl HpetTimer {
+    pub fn new() -> Self {
+        Self {
+            ticks: 0,
+            interrupts_enabled: false,
+            configured_hz: None,
+        }
+    }
+
+    /// Advances ticks (test helper).
+    pub fn advance_ticks(&mut self, delta: u64) {
+        self.ticks = self.ticks.saturating_add(delta);
+    }
+
+    /// Returns configured interrupt frequency (test helper).
+    pub fn configured_hz(&self) -> Option<u32> {
+        self.configured_hz
+    }
+
+    /// Returns whether interrupts are enabled.
+    pub fn interrupts_enabled(&self) -> bool {
+        self.interrupts_enabled
+    }
+}
+
+impl Default for HpetTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimerDevice for HpetTimer {
+    fn poll_ticks(&mut self) -> u64 {
+        self.ticks
+    }
+}
+
+impl TimerInterrupt for HpetTimer {
+    fn configure_periodic(&mut self, hz: u32) {
+        self.configured_hz = Some(hz);
+    }
+
+    fn enable_interrupts(&mut self) {
+        self.interrupts_enabled = true;
+    }
+
+    fn disable_interrupts(&mut self) {
+        self.interrupts_enabled = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +386,30 @@ mod tests {
         let timer = PitTimer::new(io);
         assert!(!timer.initialized);
         assert_eq!(timer.cumulative_ticks, 0);
+    }
+
+    #[test]
+    fn test_pit_timer_interrupt_config() {
+        use crate::FakePortIo;
+        let io = FakePortIo::new();
+        let mut timer = PitTimer::new(io);
+        timer.configure_periodic(1000);
+        timer.enable_interrupts();
+        assert!(timer.interrupts_enabled);
+        timer.disable_interrupts();
+        assert!(!timer.interrupts_enabled);
+    }
+
+    #[test]
+    fn test_hpet_timer_scaffold() {
+        let mut timer = HpetTimer::new();
+        assert_eq!(timer.poll_ticks(), 0);
+        timer.configure_periodic(2000);
+        timer.enable_interrupts();
+        timer.advance_ticks(10);
+        assert_eq!(timer.poll_ticks(), 10);
+        assert_eq!(timer.configured_hz(), Some(2000));
+        assert!(timer.interrupts_enabled());
     }
 
     // Note: We can't test PitTimer::poll_ticks() without real hardware

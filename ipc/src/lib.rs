@@ -23,9 +23,14 @@
 
 pub mod channel;
 pub mod message;
+pub mod typed;
 
 pub use channel::{ChannelEnd, ChannelId};
 pub use message::{
     Compatibility, Message, MessageEnvelope, MessageId, MessagePayload, SchemaMismatchError,
     SchemaVersion, VersionPolicy,
+};
+pub use typed::{
+    CommandError, CommandErrorCode, CommandRequest, CommandResponse, CommandStatus,
+    COMMAND_REQUEST_ACTION, COMMAND_RESPONSE_ACTION, COMMAND_SCHEMA_VERSION,
 };
