@@ -4,7 +4,125 @@
 
 use fs_view::DirectoryView;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
-use services_storage::{ObjectId, ObjectKind};
+use services_storage::{ObjectId, ObjectKind, PersistentFilesystem, TransactionError};
+use hal::BlockDevice;
+
+/// CLI Command handler with persistent storage backend
+pub struct PersistentCommandHandler<D: BlockDevice> {
+    /// Persistent filesystem
+    pub fs: PersistentFilesystem<D>,
+    /// Current working directory
+    pub current_dir: ObjectId,
+}
+
+impl<D: BlockDevice> PersistentCommandHandler<D> {
+    /// Creates a new command handler with a formatted filesystem
+    pub fn new(device: D, owner: impl Into<String>) -> Result<Self, TransactionError> {
+        let fs = PersistentFilesystem::format(device, owner)?;
+        let current_dir = fs.root_dir_id();
+        Ok(Self { fs, current_dir })
+    }
+
+    /// Opens an existing filesystem
+    pub fn open(device: D, root_dir_id: ObjectId) -> Result<Self, TransactionError> {
+        let fs = PersistentFilesystem::open(device, root_dir_id)?;
+        let current_dir = fs.root_dir_id();
+        Ok(Self { fs, current_dir })
+    }
+
+    /// Lists directory contents
+    pub fn ls(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let dir_id = self.resolve_path(path)?;
+        let entries = self
+            .fs
+            .list(dir_id)
+            .map_err(|e| format!("ls failed: {}", e))?;
+
+        let names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+        Ok(names)
+    }
+
+    /// Reads file contents
+    pub fn cat(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        let file_id = self.resolve_path(path)?;
+        self.fs
+            .read_file(file_id)
+            .map_err(|e| format!("cat failed: {}", e))
+    }
+
+    /// Creates a directory
+    pub fn mkdir(&mut self, name: &str) -> Result<String, String> {
+        let timestamp = get_timestamp();
+        let dir_id = self
+            .fs
+            .mkdir(name, self.current_dir, "user", timestamp)
+            .map_err(|e| format!("mkdir failed: {}", e))?;
+
+        Ok(format!("Created directory: {}", dir_id))
+    }
+
+    /// Writes a file
+    pub fn write_file(&mut self, name: &str, content: &[u8]) -> Result<String, String> {
+        let timestamp = get_timestamp();
+        let file_id = self
+            .fs
+            .write_file(content)
+            .map_err(|e| format!("write failed: {}", e))?;
+
+        self.fs
+            .link(name, self.current_dir, file_id, ObjectKind::Blob, timestamp)
+            .map_err(|e| format!("link failed: {}", e))?;
+
+        Ok(format!("Wrote file: {}", file_id))
+    }
+
+    /// Removes a file or directory entry
+    pub fn rm(&mut self, name: &str) -> Result<String, String> {
+        let timestamp = get_timestamp();
+        let removed = self
+            .fs
+            .unlink(name, self.current_dir, timestamp)
+            .map_err(|e| format!("rm failed: {}", e))?;
+
+        match removed {
+            Some(entry) => Ok(format!("Removed: {} ({})", name, entry.object_id)),
+            None => Err(format!("Not found: {}", name)),
+        }
+    }
+
+    /// Resolves a path to an ObjectId (simplified - just returns current dir or parses name)
+    fn resolve_path(&mut self, path: &str) -> Result<ObjectId, String> {
+        let path = path.trim();
+        if path.is_empty() || path == "/" || path == "." {
+            return Ok(self.current_dir);
+        }
+
+        // Simple case: just a name in current directory
+        let entries = self
+            .fs
+            .list(self.current_dir)
+            .map_err(|e| format!("Failed to list directory: {}", e))?;
+
+        for (name, entry) in entries {
+            if name == path {
+                return Ok(entry.object_id);
+            }
+        }
+
+        Err(format!("Not found: {}", path))
+    }
+}
+
+/// Get current timestamp (nanoseconds since epoch)
+fn get_timestamp() -> u64 {
+    // In a real system, this would get actual time
+    // For now, use a simple counter
+    static mut COUNTER: u64 = 1000;
+    unsafe {
+        COUNTER += 1;
+        COUNTER
+    }
+}
 
 /// CLI Command handler
 pub struct CommandHandler {
@@ -112,6 +230,58 @@ impl Default for CommandHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hal::RamDisk;
+
+    #[test]
+    fn test_persistent_handler_creation() {
+        let disk = RamDisk::with_capacity_mb(10);
+        let handler = PersistentCommandHandler::new(disk, "test_user");
+        assert!(handler.is_ok());
+    }
+
+    #[test]
+    fn test_persistent_mkdir_and_ls() {
+        let disk = RamDisk::with_capacity_mb(10);
+        let mut handler = PersistentCommandHandler::new(disk, "test_user").unwrap();
+
+        let result = handler.mkdir("docs");
+        assert!(result.is_ok());
+
+        let ls_result = handler.ls("/");
+        assert!(ls_result.is_ok());
+        let entries = ls_result.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains(&"docs".to_string()));
+    }
+
+    #[test]
+    fn test_persistent_write_and_cat() {
+        let disk = RamDisk::with_capacity_mb(10);
+        let mut handler = PersistentCommandHandler::new(disk, "test_user").unwrap();
+
+        let content = b"Hello, persistent storage!";
+        let write_result = handler.write_file("test.txt", content);
+        assert!(write_result.is_ok());
+
+        let cat_result = handler.cat("test.txt");
+        assert!(cat_result.is_ok());
+        assert_eq!(cat_result.unwrap(), content);
+    }
+
+    #[test]
+    fn test_persistent_rm() {
+        let disk = RamDisk::with_capacity_mb(10);
+        let mut handler = PersistentCommandHandler::new(disk, "test_user").unwrap();
+
+        handler.write_file("file.txt", b"data").unwrap();
+
+        let rm_result = handler.rm("file.txt");
+        assert!(rm_result.is_ok());
+
+        let ls_result = handler.ls("/");
+        assert!(ls_result.is_ok());
+        assert_eq!(ls_result.unwrap().len(), 0);
+    }
 
     #[test]
     fn test_command_handler_creation() {

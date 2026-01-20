@@ -21,3 +21,4 @@ fs_view.workspace = true
 input_types.workspace = true
 services_input.workspace = true
 services_focus_manager.workspace = true
+hal.workspace = true
