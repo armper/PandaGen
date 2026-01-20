@@ -16,7 +16,7 @@ use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
@@ -103,6 +103,10 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::new(); 256];
 #[cfg(not(test))]
 static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// Keyboard event queue (lock-free ring buffer)
+#[cfg(not(test))]
+static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
+
 // x86_64 GDT segment selectors (assumes standard bootloader setup)
 #[cfg(not(test))]
 const KERNEL_CODE_SEGMENT: u16 = 0x08;
@@ -151,21 +155,77 @@ irq_timer_entry:
     pop rcx
     pop rax
     iretq
+
+.global irq_keyboard_entry
+irq_keyboard_entry:
+    # Save all general-purpose registers
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    call keyboard_irq_handler
+    
+    # Restore all registers in reverse order
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 "#
 );
 
 #[cfg(not(test))]
 extern "C" {
     fn irq_timer_entry();
+    fn irq_keyboard_entry();
 }
 
 #[cfg(not(test))]
 #[no_mangle]
 extern "C" fn timer_irq_handler() {
     KERNEL_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    
+
     // Send EOI to PIC
     unsafe {
+        outb(0x20, 0x20);
+    }
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn keyboard_irq_handler() {
+    // Read scancode from PS/2 data port
+    unsafe {
+        let status = inb(0x64);
+        if (status & 0x01) != 0 {
+            let scancode = inb(0x60);
+            KEYBOARD_EVENT_QUEUE.push(scancode);
+        }
+
+        // Send EOI to PIC
         outb(0x20, 0x20);
     }
 }
@@ -186,6 +246,9 @@ fn install_idt() {
         // Set up timer interrupt (IRQ 0 = vector 32)
         IDT[32].set_handler(irq_timer_entry);
 
+        // Set up keyboard interrupt (IRQ 1 = vector 33)
+        IDT[33].set_handler(irq_keyboard_entry);
+
         let idtr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as *const _ as u64,
@@ -205,19 +268,19 @@ fn init_pic() {
         // Start initialization sequence
         outb(0x20, 0x11);
         outb(0xA0, 0x11);
-        
+
         // Remap IRQs to 32-47
         outb(0x21, 32);
         outb(0xA1, 40);
-        
+
         // Configure cascade
         outb(0x21, 0x04);
         outb(0xA1, 0x02);
-        
+
         // 8086 mode
         outb(0x21, 0x01);
         outb(0xA1, 0x01);
-        
+
         // Mask all IRQs initially
         outb(0x21, 0xFF);
         outb(0xA1, 0xFF);
@@ -231,10 +294,10 @@ fn init_pit() {
         // Frequency = 1193182 / divisor
         // For 100 Hz: divisor = 11932
         let divisor: u16 = 11932;
-        
+
         // Command: channel 0, lo/hi byte, rate generator, binary
         outb(0x43, 0x36);
-        
+
         // Send divisor
         outb(0x40, (divisor & 0xFF) as u8);
         outb(0x40, ((divisor >> 8) & 0xFF) as u8);
@@ -246,6 +309,14 @@ fn unmask_timer_irq() {
     unsafe {
         let mask = inb(0x21);
         outb(0x21, mask & !0x01); // Unmask IRQ 0
+    }
+}
+
+#[cfg(not(test))]
+fn unmask_keyboard_irq() {
+    unsafe {
+        let mask = inb(0x21);
+        outb(0x21, mask & !0x02); // Unmask IRQ 1
     }
 }
 
@@ -290,7 +361,11 @@ fn sys_sleep(ticks: u64) {
 }
 
 #[cfg(not(test))]
-fn sys_send(ctx: &mut KernelContext, channel: ChannelId, msg: KernelMessage) -> Result<(), KernelError> {
+fn sys_send(
+    ctx: &mut KernelContext,
+    channel: ChannelId,
+    msg: KernelMessage,
+) -> Result<(), KernelError> {
     ctx.send(channel, msg)
 }
 
@@ -328,26 +403,40 @@ pub extern "C" fn rust_main() -> ! {
     kprintln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
     let (allocator, heap) = init_memory(&mut serial, &boot);
-    
+
     kprintln!(serial, "Initializing interrupts...");
     install_idt();
-    klog!(serial, "IDT installed at 0x{:x}\r\n", core::ptr::addr_of!(IDT) as usize);
-    
+    klog!(
+        serial,
+        "IDT installed at 0x{:x}\r\n",
+        core::ptr::addr_of!(IDT) as usize
+    );
+
     init_pic();
     kprintln!(serial, "PIC remapped to IRQ base 32");
-    
+
     init_pit();
     kprintln!(serial, "PIT configured for 100 Hz");
-    
-    unmask_timer_irq();
-    enable_interrupts();
-    kprintln!(serial, "Interrupts enabled, timer at 100 Hz");
-    
-    let kernel = unsafe { Kernel::init_in_place(&mut *core::ptr::addr_of_mut!(KERNEL_STORAGE), boot, allocator, heap) };
-    kprintln!(serial, "Type 'help' for commands.");
-    klog!(serial, "> ");
 
-    console_loop(&mut serial, kernel)
+    unmask_timer_irq();
+    unmask_keyboard_irq();
+    enable_interrupts();
+    kprintln!(
+        serial,
+        "Interrupts enabled, timer at 100 Hz, keyboard IRQ 1"
+    );
+
+    let kernel = unsafe {
+        Kernel::init_in_place(
+            &mut *core::ptr::addr_of_mut!(KERNEL_STORAGE),
+            boot,
+            allocator,
+            heap,
+        )
+    };
+    kprintln!(serial, "Type to see keyboard input (editor mode)...");
+
+    editor_loop(&mut serial, kernel)
 }
 
 #[cfg(not(test))]
@@ -356,7 +445,13 @@ fn panic(info: &PanicInfo) -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
     kprintln!(serial, "\r\n\r\nKERNEL PANIC:");
     if let Some(location) = info.location() {
-        kprintln!(serial, "  at {}:{}:{}", location.file(), location.line(), location.column());
+        kprintln!(
+            serial,
+            "  at {}:{}:{}",
+            location.file(),
+            location.line(),
+            location.column()
+        );
     }
     kprintln!(serial, "  {}", info.message());
     halt_loop()
@@ -385,17 +480,381 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
     let mut last_tick_display = 0u64;
     loop {
         let progressed = kernel.run_once(serial);
-        
+
         // Display a dot every 100 ticks (every second at 100Hz)
         let current_tick = get_tick_count();
         if current_tick >= last_tick_display + 100 {
             klog!(serial, ".");
             last_tick_display = current_tick;
         }
-        
+
         if !progressed {
             idle_pause();
         }
+    }
+}
+
+/// Simple editor state for keyboard demo
+#[cfg(not(test))]
+struct EditorState {
+    buffer: [u8; 1024],
+    len: usize,
+    cursor: usize,
+    pending_e0: bool,
+}
+
+#[cfg(not(test))]
+impl EditorState {
+    fn new() -> Self {
+        Self {
+            buffer: [0; 1024],
+            len: 0,
+            cursor: 0,
+            pending_e0: false,
+        }
+    }
+
+    fn insert_char(&mut self, ch: u8) {
+        if self.len < self.buffer.len() {
+            // Shift text right if needed
+            if self.cursor < self.len {
+                for i in (self.cursor..self.len).rev() {
+                    self.buffer[i + 1] = self.buffer[i];
+                }
+            }
+            self.buffer[self.cursor] = ch;
+            self.len += 1;
+            self.cursor += 1;
+        }
+    }
+
+    fn delete_char(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            for i in self.cursor..self.len - 1 {
+                self.buffer[i] = self.buffer[i + 1];
+            }
+            if self.len > 0 {
+                self.len -= 1;
+            }
+        }
+    }
+
+    fn get_text(&self) -> &[u8] {
+        &self.buffer[..self.len]
+    }
+}
+
+/// Main editor loop with keyboard input
+#[cfg(not(test))]
+fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
+    let mut editor = EditorState::new();
+    let mut last_render = 0u64;
+    let mut parser_state = Ps2ParserState::new();
+
+    loop {
+        // Drain keyboard queue and process scancodes
+        let mut events_processed = 0;
+        while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
+            if let Some(ch) = parser_state.process_scancode(scancode) {
+                if ch == 0x08 {
+                    // Backspace
+                    editor.delete_char();
+                } else {
+                    editor.insert_char(ch);
+                }
+                events_processed += 1;
+            }
+        }
+
+        // Render on change (rate-limited to every 10 ticks = 100ms)
+        let current_tick = get_tick_count();
+        if events_processed > 0 && current_tick >= last_render + 10 {
+            render_editor(serial, &editor);
+            last_render = current_tick;
+        }
+
+        idle_pause();
+    }
+}
+
+/// Renders editor state to serial
+#[cfg(not(test))]
+fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
+    kprintln!(serial, "\r\n--- Editor State ---");
+    klog!(serial, "Text: ");
+    for &byte in editor.get_text() {
+        if (0x20..0x7F).contains(&byte) {
+            klog!(serial, "{}", byte as char);
+        } else if byte == b'\n' {
+            klog!(serial, "\\n");
+        } else {
+            klog!(serial, "\\x{:02x}", byte);
+        }
+    }
+    kprintln!(serial, "");
+    kprintln!(serial, "Cursor: {} | Length: {}", editor.cursor, editor.len);
+    kprintln!(serial, "-------------------");
+}
+
+/// PS/2 scancode parser state for translating to ASCII
+#[cfg(not(test))]
+struct Ps2ParserState {
+    pending_e0: bool,
+    shift_pressed: bool,
+}
+
+#[cfg(not(test))]
+impl Ps2ParserState {
+    fn new() -> Self {
+        Self {
+            pending_e0: false,
+            shift_pressed: false,
+        }
+    }
+
+    /// Process a scancode byte and return ASCII character if available
+    fn process_scancode(&mut self, scancode: u8) -> Option<u8> {
+        // E0 prefix handling
+        if scancode == 0xE0 {
+            self.pending_e0 = true;
+            return None;
+        }
+
+        let is_break = (scancode & 0x80) != 0;
+        let code = scancode & 0x7F;
+
+        // Handle shift state
+        if code == 0x2A || code == 0x36 {
+            // Left/Right Shift
+            self.shift_pressed = !is_break;
+            self.pending_e0 = false;
+            return None;
+        }
+
+        // Ignore E0-prefixed keys and break codes for now
+        if self.pending_e0 || is_break {
+            self.pending_e0 = false;
+            return None;
+        }
+
+        self.pending_e0 = false;
+
+        // Translate make code to ASCII
+        let ascii = match code {
+            0x02..=0x0B => {
+                // 1-9, 0
+                let digit = if code == 0x0B { 0 } else { code - 0x01 };
+                if self.shift_pressed {
+                    match digit {
+                        1 => b'!',
+                        2 => b'@',
+                        3 => b'#',
+                        4 => b'$',
+                        5 => b'%',
+                        6 => b'^',
+                        7 => b'&',
+                        8 => b'*',
+                        9 => b'(',
+                        0 => b')',
+                        _ => return None,
+                    }
+                } else {
+                    b'0' + digit
+                }
+            }
+            0x10 => {
+                if self.shift_pressed {
+                    b'Q'
+                } else {
+                    b'q'
+                }
+            }
+            0x11 => {
+                if self.shift_pressed {
+                    b'W'
+                } else {
+                    b'w'
+                }
+            }
+            0x12 => {
+                if self.shift_pressed {
+                    b'E'
+                } else {
+                    b'e'
+                }
+            }
+            0x13 => {
+                if self.shift_pressed {
+                    b'R'
+                } else {
+                    b'r'
+                }
+            }
+            0x14 => {
+                if self.shift_pressed {
+                    b'T'
+                } else {
+                    b't'
+                }
+            }
+            0x15 => {
+                if self.shift_pressed {
+                    b'Y'
+                } else {
+                    b'y'
+                }
+            }
+            0x16 => {
+                if self.shift_pressed {
+                    b'U'
+                } else {
+                    b'u'
+                }
+            }
+            0x17 => {
+                if self.shift_pressed {
+                    b'I'
+                } else {
+                    b'i'
+                }
+            }
+            0x18 => {
+                if self.shift_pressed {
+                    b'O'
+                } else {
+                    b'o'
+                }
+            }
+            0x19 => {
+                if self.shift_pressed {
+                    b'P'
+                } else {
+                    b'p'
+                }
+            }
+            0x1E => {
+                if self.shift_pressed {
+                    b'A'
+                } else {
+                    b'a'
+                }
+            }
+            0x1F => {
+                if self.shift_pressed {
+                    b'S'
+                } else {
+                    b's'
+                }
+            }
+            0x20 => {
+                if self.shift_pressed {
+                    b'D'
+                } else {
+                    b'd'
+                }
+            }
+            0x21 => {
+                if self.shift_pressed {
+                    b'F'
+                } else {
+                    b'f'
+                }
+            }
+            0x22 => {
+                if self.shift_pressed {
+                    b'G'
+                } else {
+                    b'g'
+                }
+            }
+            0x23 => {
+                if self.shift_pressed {
+                    b'H'
+                } else {
+                    b'h'
+                }
+            }
+            0x24 => {
+                if self.shift_pressed {
+                    b'J'
+                } else {
+                    b'j'
+                }
+            }
+            0x25 => {
+                if self.shift_pressed {
+                    b'K'
+                } else {
+                    b'k'
+                }
+            }
+            0x26 => {
+                if self.shift_pressed {
+                    b'L'
+                } else {
+                    b'l'
+                }
+            }
+            0x2C => {
+                if self.shift_pressed {
+                    b'Z'
+                } else {
+                    b'z'
+                }
+            }
+            0x2D => {
+                if self.shift_pressed {
+                    b'X'
+                } else {
+                    b'x'
+                }
+            }
+            0x2E => {
+                if self.shift_pressed {
+                    b'C'
+                } else {
+                    b'c'
+                }
+            }
+            0x2F => {
+                if self.shift_pressed {
+                    b'V'
+                } else {
+                    b'v'
+                }
+            }
+            0x30 => {
+                if self.shift_pressed {
+                    b'B'
+                } else {
+                    b'b'
+                }
+            }
+            0x31 => {
+                if self.shift_pressed {
+                    b'N'
+                } else {
+                    b'n'
+                }
+            }
+            0x32 => {
+                if self.shift_pressed {
+                    b'M'
+                } else {
+                    b'm'
+                }
+            }
+            0x39 => b' ',  // Space
+            0x1C => b'\n', // Enter
+            0x0E => {
+                // Backspace
+                return Some(0x08); // Special marker for backspace
+            }
+            _ => return None,
+        };
+
+        Some(ascii)
     }
 }
 
@@ -423,7 +882,9 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
             }
         }
 
-        if let Some(map) = MEMORY_MAP_REQUEST.get_response().and_then(|resp| resp.get_memory_map())
+        if let Some(map) = MEMORY_MAP_REQUEST
+            .get_response()
+            .and_then(|resp| resp.get_memory_map())
         {
             let mut usable = 0u64;
             let mut total = 0u64;
@@ -467,9 +928,7 @@ fn print_boot_info(serial: &mut serial::SerialPort, info: &BootInfo) {
         let _ = writeln!(
             serial,
             "memory: entries={} total={} KiB usable={} KiB",
-            info.mem_entries,
-            info.mem_total_kib,
-            info.mem_usable_kib
+            info.mem_entries, info.mem_total_kib, info.mem_usable_kib
         );
     } else {
         let _ = writeln!(serial, "memory: map unavailable");
@@ -536,12 +995,7 @@ fn init_heap(
     let size = (HEAP_PAGES * PAGE_SIZE) as usize;
 
     let heap = BumpHeap::new(virt_base, size);
-    let _ = writeln!(
-        serial,
-        "heap: base=0x{:x} size={} bytes",
-        virt_base,
-        size
-    );
+    let _ = writeln!(serial, "heap: base=0x{:x} size={} bytes", virt_base, size);
     Some(heap)
 }
 
@@ -558,8 +1012,7 @@ static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().i
 #[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
-static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> =
-    KernelAddressRequest::new().into();
+static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> = KernelAddressRequest::new().into();
 
 #[cfg(not(test))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
@@ -571,6 +1024,64 @@ const RESPONSE_MAX: usize = 256;
 const ERROR_MAX: usize = 96;
 const MAX_TASKS: usize = 8;
 const MAX_CHANNELS: usize = 16;
+const KEYBOARD_QUEUE_SIZE: usize = 64;
+
+/// Bounded lock-free ring buffer for keyboard scancodes
+///
+/// This queue is written from IRQ context (push) and read from main loop (drain).
+/// Drop policy: DropOldest - when full, oldest scancode is overwritten.
+#[cfg(not(test))]
+struct KeyboardEventQueue {
+    buffer: [AtomicU8; KEYBOARD_QUEUE_SIZE],
+    write_pos: AtomicU8,
+    read_pos: AtomicU8,
+}
+
+#[cfg(not(test))]
+impl KeyboardEventQueue {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const fn new() -> Self {
+        const ZERO: AtomicU8 = AtomicU8::new(0);
+        Self {
+            buffer: [ZERO; KEYBOARD_QUEUE_SIZE],
+            write_pos: AtomicU8::new(0),
+            read_pos: AtomicU8::new(0),
+        }
+    }
+
+    /// Pushes a scancode from IRQ context.
+    /// If queue is full, overwrites oldest entry (DropOldest policy).
+    fn push(&self, scancode: u8) {
+        let write_idx = self.write_pos.load(Ordering::Relaxed) as usize % KEYBOARD_QUEUE_SIZE;
+        self.buffer[write_idx].store(scancode, Ordering::Release);
+
+        let new_write = self.write_pos.load(Ordering::Relaxed).wrapping_add(1);
+        self.write_pos.store(new_write, Ordering::Release);
+
+        // If we've caught up to read position, advance it (drop oldest)
+        let read = self.read_pos.load(Ordering::Acquire);
+        if new_write.wrapping_sub(read) >= KEYBOARD_QUEUE_SIZE as u8 {
+            self.read_pos.store(read.wrapping_add(1), Ordering::Release);
+        }
+    }
+
+    /// Pops a scancode from main loop context.
+    /// Returns None if queue is empty.
+    fn pop(&self) -> Option<u8> {
+        let read = self.read_pos.load(Ordering::Acquire);
+        let write = self.write_pos.load(Ordering::Acquire);
+
+        if read == write {
+            return None; // Empty
+        }
+
+        let read_idx = read as usize % KEYBOARD_QUEUE_SIZE;
+        let scancode = self.buffer[read_idx].load(Ordering::Acquire);
+        self.read_pos.store(read.wrapping_add(1), Ordering::Release);
+
+        Some(scancode)
+    }
+}
 
 #[derive(Copy, Clone)]
 struct BootInfo {
@@ -996,12 +1507,8 @@ impl Kernel {
         }
 
         let kernel = &mut *ptr;
-        let command_channel = kernel
-            .create_channel()
-            .expect("command channel available");
-        let response_channel = kernel
-            .create_channel()
-            .expect("response channel available");
+        let command_channel = kernel.create_channel().expect("command channel available");
+        let response_channel = kernel.create_channel().expect("response channel available");
 
         let command_task = CommandService::new(command_channel);
         let console_task = ConsoleService::new(command_channel, response_channel);
@@ -1024,12 +1531,8 @@ impl Kernel {
             tasks: core::array::from_fn(|_| None),
         };
 
-        let command_channel = kernel
-            .create_channel()
-            .expect("command channel available");
-        let response_channel = kernel
-            .create_channel()
-            .expect("response channel available");
+        let command_channel = kernel.create_channel().expect("command channel available");
+        let response_channel = kernel.create_channel().expect("response channel available");
 
         let command_task = CommandService::new(command_channel);
         let console_task = ConsoleService::new(command_channel, response_channel);
@@ -1069,7 +1572,11 @@ impl Kernel {
         task.poll(&mut ctx, serial)
     }
 
-    fn spawn_task(&mut self, domain: TaskDomain, mut kind: TaskKind) -> Result<TaskId, KernelError> {
+    fn spawn_task(
+        &mut self,
+        domain: TaskDomain,
+        mut kind: TaskKind,
+    ) -> Result<TaskId, KernelError> {
         if let Some((index, slot_ref)) = self
             .tasks
             .iter_mut()
@@ -1247,7 +1754,7 @@ impl CommandService {
 
     fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
         let mut progressed = false;
-        
+
         // Demonstrate syscalls (alternating between yield and sleep)
         #[cfg(not(test))]
         {
@@ -1258,7 +1765,7 @@ impl CommandService {
             }
             self.poll_count += 1;
         }
-        
+
         while let Some(message) = ctx.try_recv(self.command_channel) {
             progressed = true;
             if let KernelMessage::CommandRequest(request) = message {
@@ -1327,11 +1834,7 @@ impl CommandService {
                 }
                 match (boot.kernel_phys, boot.kernel_virt) {
                     (Some(phys), Some(virt)) => {
-                        let _ = writeln!(
-                            output,
-                            "kernel: phys=0x{:x} virt=0x{:x}",
-                            phys, virt
-                        );
+                        let _ = writeln!(output, "kernel: phys=0x{:x} virt=0x{:x}", phys, virt);
                     }
                     _ => {
                         let _ = writeln!(output, "kernel: address unavailable");
@@ -1343,9 +1846,7 @@ impl CommandService {
                 let _ = writeln!(
                     output,
                     "memory: entries={} total={} KiB usable={} KiB",
-                    boot.mem_entries,
-                    boot.mem_total_kib,
-                    boot.mem_usable_kib
+                    boot.mem_entries, boot.mem_total_kib, boot.mem_usable_kib
                 );
                 if let Some(allocator) = ctx.allocator.as_ref() {
                     let _ = writeln!(
@@ -1365,11 +1866,7 @@ impl CommandService {
                     if let Some(frame) = allocator.allocate_frame() {
                         if let Some(offset) = ctx.boot().hhdm_offset {
                             let virt = offset + frame;
-                            let _ = writeln!(
-                                output,
-                                "frame: phys=0x{:x} virt=0x{:x}",
-                                frame, virt
-                            );
+                            let _ = writeln!(output, "frame: phys=0x{:x} virt=0x{:x}", frame, virt);
                         } else {
                             let _ = writeln!(output, "frame: phys=0x{:x}", frame);
                         }
@@ -1382,7 +1879,10 @@ impl CommandService {
                 } else {
                     return CommandResponse::error(
                         correlation_id,
-                        CommandError::new(CommandErrorCode::ServiceUnavailable, "allocator unavailable"),
+                        CommandError::new(
+                            CommandErrorCode::ServiceUnavailable,
+                            "allocator unavailable",
+                        ),
                     );
                 }
             }
@@ -1392,10 +1892,7 @@ impl CommandService {
                     let _ = writeln!(
                         output,
                         "heap: used={} bytes free={} bytes total={} allocs={}",
-                        stats.used,
-                        stats.free,
-                        stats.total,
-                        stats.allocations
+                        stats.used, stats.free, stats.total, stats.allocations
                     );
                 } else {
                     let _ = writeln!(output, "heap: unavailable");
@@ -1408,8 +1905,7 @@ impl CommandService {
                             let _ = writeln!(
                                 output,
                                 "heap: allocated 64 bytes at 0x{:x} ({:?})",
-                                record.start,
-                                record.lifetime
+                                record.start, record.lifetime
                             );
                         }
                         None => {
@@ -1457,7 +1953,10 @@ struct FixedBuffer<const N: usize> {
 
 impl<const N: usize> FixedBuffer<N> {
     fn new() -> Self {
-        Self { buf: [0; N], len: 0 }
+        Self {
+            buf: [0; N],
+            len: 0,
+        }
     }
 
     fn as_bytes(&self) -> &[u8] {
