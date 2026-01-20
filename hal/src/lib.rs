@@ -18,14 +18,18 @@
 
 pub mod block_device;
 pub mod cpu;
+pub mod framebuffer;
 pub mod interrupts;
 pub mod keyboard;
 pub mod keyboard_translation;
 pub mod memory;
 pub mod timer;
 
-pub use block_device::{BlockDevice, BlockError, RamDisk, BLOCK_SIZE};
+pub use block_device::{BlockDevice, BlockError, BLOCK_SIZE};
+#[cfg(feature = "alloc")]
+pub use block_device::RamDisk;
 pub use cpu::CpuHal;
+pub use framebuffer::{Framebuffer, FramebufferInfo, PixelFormat};
 pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
 pub use keyboard_translation::{scancode_to_keycode, KeyboardTranslator};
