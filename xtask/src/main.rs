@@ -384,7 +384,7 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
         Err(err) if err.kind() == ErrorKind::NotFound => {
             return Err(io::Error::new(
                 ErrorKind::NotFound,
-                format!("{full_command} not found; ensure it is installed and on PATH"),
+                format!("`{full_command}` not found; ensure it is installed and on PATH"),
             )
             .into());
         }
