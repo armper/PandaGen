@@ -16,13 +16,17 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod font;
+pub mod scrollback;
 
 #[cfg(test)]
 use hal::PixelFormat;
 use hal::{Framebuffer, FramebufferInfo};
 
 use font::{get_char_bitmap, FONT_HEIGHT, FONT_WIDTH};
+pub use scrollback::{Line, ScrollbackBuffer};
 
 /// Foreground color (white)
 const FG_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
@@ -33,15 +37,16 @@ const BG_COLOR: (u8, u8, u8) = (0x00, 0x00, 0x00);
 /// Cursor color (white, inverted)
 const CURSOR_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
 
-/// Framebuffer text console
+/// Framebuffer text console with scrollback support
 pub struct ConsoleFb<F: Framebuffer> {
     framebuffer: F,
     cols: usize,
     rows: usize,
+    scrollback: Option<ScrollbackBuffer>,
 }
 
 impl<F: Framebuffer> ConsoleFb<F> {
-    /// Create a new framebuffer console
+    /// Create a new framebuffer console without scrollback
     pub fn new(framebuffer: F) -> Self {
         let info = framebuffer.info();
         let cols = info.width / FONT_WIDTH;
@@ -50,6 +55,21 @@ impl<F: Framebuffer> ConsoleFb<F> {
             framebuffer,
             cols,
             rows,
+            scrollback: None,
+        }
+    }
+
+    /// Create a new framebuffer console with scrollback buffer
+    pub fn with_scrollback(framebuffer: F, max_lines: usize) -> Self {
+        let info = framebuffer.info();
+        let cols = info.width / FONT_WIDTH;
+        let rows = info.height / FONT_HEIGHT;
+        let scrollback = ScrollbackBuffer::new(cols, rows, max_lines);
+        Self {
+            framebuffer,
+            cols,
+            rows,
+            scrollback: Some(scrollback),
         }
     }
 
@@ -219,6 +239,86 @@ impl<F: Framebuffer> ConsoleFb<F> {
             self.draw_cursor(col, row);
         }
     }
+
+    /// Present from scrollback buffer
+    ///
+    /// Renders the visible viewport from the scrollback buffer.
+    /// If no scrollback is configured, this does nothing.
+    pub fn present_from_scrollback(&mut self, cursor_col: Option<usize>, cursor_row: Option<usize>) {
+        // Collect visible lines first to avoid borrow checker issues
+        let lines_to_draw: alloc::vec::Vec<alloc::string::String> = if let Some(ref scrollback) = self.scrollback {
+            scrollback.visible_lines().iter().map(|line| {
+                alloc::string::String::from(line.as_str())
+            }).collect()
+        } else {
+            return;
+        };
+
+        self.clear();
+        
+        for (row, line) in lines_to_draw.iter().enumerate() {
+            if row >= self.rows {
+                break;
+            }
+            self.draw_text_at(0, row, line);
+        }
+
+        // Draw cursor if specified
+        if let (Some(col), Some(row)) = (cursor_col, cursor_row) {
+            self.draw_cursor(col, row);
+        }
+    }
+
+    /// Add text to scrollback buffer
+    ///
+    /// Appends text to the scrollback buffer and resets viewport to bottom.
+    pub fn append_to_scrollback(&mut self, text: &str) {
+        if let Some(ref mut scrollback) = self.scrollback {
+            scrollback.push_text(text);
+        }
+    }
+
+    /// Scroll the viewport up
+    pub fn scroll_up(&mut self, lines: usize) -> bool {
+        if let Some(ref mut scrollback) = self.scrollback {
+            scrollback.scroll_up(lines)
+        } else {
+            false
+        }
+    }
+
+    /// Scroll the viewport down
+    pub fn scroll_down(&mut self, lines: usize) -> bool {
+        if let Some(ref mut scrollback) = self.scrollback {
+            scrollback.scroll_down(lines)
+        } else {
+            false
+        }
+    }
+
+    /// Scroll to the bottom of the buffer
+    pub fn scroll_to_bottom(&mut self) {
+        if let Some(ref mut scrollback) = self.scrollback {
+            scrollback.scroll_to_bottom();
+        }
+    }
+
+    /// Scroll to the top of the buffer
+    pub fn scroll_to_top(&mut self) {
+        if let Some(ref mut scrollback) = self.scrollback {
+            scrollback.scroll_to_top();
+        }
+    }
+
+    /// Get mutable reference to scrollback buffer
+    pub fn scrollback_mut(&mut self) -> Option<&mut ScrollbackBuffer> {
+        self.scrollback.as_mut()
+    }
+
+    /// Get reference to scrollback buffer
+    pub fn scrollback(&self) -> Option<&ScrollbackBuffer> {
+        self.scrollback.as_ref()
+    }
 }
 
 /// Calculate text dimensions (cols, rows) for a framebuffer
@@ -359,5 +459,56 @@ mod tests {
 
         // Should clamp to visible area
         assert!(drawn <= console.cols() * console.rows());
+    }
+
+    #[test]
+    fn test_console_with_scrollback() {
+        let fb = MockFramebuffer::new(160, 160);
+        let console = ConsoleFb::with_scrollback(fb, 100);
+        
+        assert!(console.scrollback().is_some());
+        assert_eq!(console.scrollback().unwrap().cols(), console.cols());
+    }
+
+    #[test]
+    fn test_append_to_scrollback() {
+        let fb = MockFramebuffer::new(160, 160);
+        let mut console = ConsoleFb::with_scrollback(fb, 100);
+        
+        console.append_to_scrollback("Line 1\nLine 2");
+        
+        let scrollback = console.scrollback().unwrap();
+        assert_eq!(scrollback.total_lines(), 2);
+    }
+
+    #[test]
+    fn test_present_from_scrollback() {
+        let fb = MockFramebuffer::new(160, 160);
+        let mut console = ConsoleFb::with_scrollback(fb, 100);
+        
+        console.append_to_scrollback("Line 1\nLine 2\nLine 3");
+        console.present_from_scrollback(None, None);
+        
+        // Should not crash
+    }
+
+    #[test]
+    fn test_scrollback_viewport_operations() {
+        let fb = MockFramebuffer::new(160, 48); // 3 rows
+        let mut console = ConsoleFb::with_scrollback(fb, 100);
+        
+        // Add more lines than viewport can show
+        for i in 1..=10 {
+            console.append_to_scrollback(&format!("Line {}", i));
+        }
+        
+        // Test scrolling
+        assert!(console.scroll_up(2));
+        assert!(console.scroll_down(1));
+        console.scroll_to_top();
+        console.scroll_to_bottom();
+        
+        // Should have scrollback
+        assert!(console.scrollback().unwrap().at_bottom());
     }
 }
