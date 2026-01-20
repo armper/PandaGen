@@ -23,13 +23,15 @@
 //! - **Migration**: Deterministic, testable data transformations
 
 pub mod block_storage;
+pub mod failing_device;
 pub mod journaled_storage;
 pub mod migration;
 pub mod object;
 pub mod persistent_fs;
 pub mod transaction;
 
-pub use block_storage::{BlockStorage, BlockStorageError};
+pub use block_storage::{BlockStorage, BlockStorageError, StorageRecoveryReport};
+pub use failing_device::{FailingBlockDevice, FailurePolicy};
 pub use journaled_storage::{
     JournaledStorage, StorageBudget, StorageOperation, StorageService, StorageServiceError,
 };
