@@ -171,21 +171,33 @@ fn install_limine(root: &Path, vendor: &Path) -> Result<(), Box<dyn std::error::
     let limine_deploy = vendor.join("limine-deploy");
 
     if limine.exists() {
-        return run(Command::new(limine)
+        // Try to run limine bios-install, but don't fail if it's not executable
+        // (e.g., wrong architecture binary). UEFI boot will still work.
+        match run(Command::new(limine)
             .current_dir(root)
             .arg("bios-install")
-            .arg(&iso));
+            .arg(&iso))
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                eprintln!("Warning: limine bios-install failed ({}), continuing with UEFI-only boot", e);
+                return Ok(());
+            }
+        }
     }
 
     if limine_deploy.exists() {
-        return run(Command::new(limine_deploy).current_dir(root).arg(&iso));
+        match run(Command::new(limine_deploy).current_dir(root).arg(&iso)) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                eprintln!("Warning: limine-deploy failed ({}), continuing with UEFI-only boot", e);
+                return Ok(());
+            }
+        }
     }
 
-    Err(io::Error::new(
-        ErrorKind::NotFound,
-        "missing limine host utility; provide third_party/limine/limine or limine-deploy",
-    )
-    .into())
+    eprintln!("Warning: no limine host utility found, ISO will be UEFI-only");
+    Ok(())
 }
 
 fn ensure_limine_files(vendor: &Path) -> Result<(), Box<dyn std::error::Error>> {
