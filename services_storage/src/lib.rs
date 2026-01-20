@@ -22,11 +22,13 @@
 //! - **Schema Evolution**: Objects have schema identity and version
 //! - **Migration**: Deterministic, testable data transformations
 
+pub mod block_storage;
 pub mod journaled_storage;
 pub mod migration;
 pub mod object;
 pub mod transaction;
 
+pub use block_storage::{BlockStorage, BlockStorageError};
 pub use journaled_storage::{
     JournaledStorage, StorageBudget, StorageOperation, StorageService, StorageServiceError,
 };

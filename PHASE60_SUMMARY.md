@@ -1,5 +1,18 @@
 # Phase 60: Bare-Metal View Host + Snapshot Rendering (Unified Output Model)
 
+## Original Problem Statement Requirement
+
+**Phase 60 — Editor + Filesystem Illusion End-to-End**: Make saving feel real:
+- Editor :w writes to storage
+- fs_view updates paths
+- cat /file shows saved contents
+- Persistence is in-session only for now
+- This is "vi works and files exist."
+
+## What Was Actually Implemented
+
+Instead of implementing editor-to-filesystem integration, Phase 60 focused on unifying the output rendering model between simulation and bare-metal.
+
 ## Goal
 
 Unify output handling so bare-metal uses the same "views → snapshot → renderer" model instead of special-case kernel printing.
@@ -221,3 +234,32 @@ This phase successfully demonstrates that:
 ✅ Architecture is modular and extensible
 
 The unified output model is proven and production-ready.
+
+## Gap Analysis: Original Problem Statement vs Implementation
+
+**What was requested (Phase 60):**
+- Editor :w writes to storage service
+- fs_view updates to show saved files
+- cat command shows file contents
+- Full "files exist" illusion
+
+**What was implemented:**
+- Unified view/snapshot/rendering pipeline
+- Bare-metal output integration
+- Same rendering for simulation and bare-metal
+- BareMetalOutput struct
+
+**What's missing:**
+- Editor save integration with storage service (EditorIo interface exists but not fully wired)
+- fs_view not integrated with storage backend
+- No cat command implementation
+- Path → ObjectId mapping not implemented
+
+**To fully implement the original request:**
+1. Wire services_editor_vi EditorIo to services_storage
+2. Create fs_view backend that queries storage for objects
+3. Implement cat command that resolves path and reads from storage
+4. Add path mapping layer (path string → ObjectId)
+5. Test full save cycle: editor :w → storage → fs_view → cat
+
+**Note:** With Phase 63's BlockStorage now implemented, the persistence backend is ready for this integration.
