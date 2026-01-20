@@ -599,9 +599,14 @@ fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
 ///
 /// Phase 60: This now uses the unified output model instead of direct printing.
 /// The editor state is converted to structured views before rendering.
+///
+/// Note: Single-threaded kernel_bootstrap context. The static OUTPUT is safe
+/// because only one task calls render_editor at a time. Future multi-tasking
+/// would require explicit synchronization or per-task rendering contexts.
 #[cfg(not(test))]
 fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
     // Static output handler for revision tracking
+    // SAFETY: kernel_bootstrap is single-task; only one thread accesses this.
     static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
     
     // Convert editor buffer to text lines (simple line splitting)
@@ -677,13 +682,11 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
         core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
     };
     
-    // Static revision counter
-    static mut REVISION: u64 = 1;
-    let revision = unsafe {
-        let r = REVISION;
-        REVISION += 1;
-        r
-    };
+    // Static revision counter (atomic for potential future multi-tasking)
+    // Note: kernel_bootstrap is currently single-task bare-metal, so atomics provide
+    // future-proofing without overhead in the current execution model.
+    static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     
     // Render using the unified output model
     unsafe {
