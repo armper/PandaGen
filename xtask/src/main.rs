@@ -25,12 +25,12 @@ fn usage(attempted_command: Option<String>) -> Result<(), Box<dyn std::error::Er
     eprintln!("  cargo xtask iso");
     eprintln!("  cargo xtask qemu");
     eprintln!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
-    
+
     let error_msg = match attempted_command {
         Some(cmd) => format!("unknown xtask command: '{}'", cmd),
         None => "no xtask command provided".to_string(),
     };
-    
+
     Err(io::Error::new(ErrorKind::InvalidInput, error_msg).into())
 }
 
@@ -123,7 +123,10 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let bios_sys = vendor.join("limine-bios.sys");
     copy_file(bios_sys.clone(), staging.join("boot/limine-bios.sys"))?;
     copy_file(bios_sys, staging.join("limine-bios.sys"))?;
-    copy_file(vendor.join("limine-bios.sys"), staging.join("limine/limine-bios.sys"))?;
+    copy_file(
+        vendor.join("limine-bios.sys"),
+        staging.join("limine/limine-bios.sys"),
+    )?;
     copy_file(
         vendor.join("limine-bios-cd.bin"),
         staging.join("boot/limine-bios-cd.bin"),
