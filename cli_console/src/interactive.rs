@@ -17,6 +17,7 @@ use services_input::{InputService, InputSubscriptionCap};
 /// - Processes input events
 /// - Translates events to actions
 /// - Maintains command history
+/// - Supports cursor movement and line editing
 pub struct InteractiveConsole {
     /// Task ID for this console
     task_id: TaskId,
@@ -26,6 +27,8 @@ pub struct InteractiveConsole {
     event_buffer: Vec<InputEvent>,
     /// Typed text buffer (simple demo)
     text_buffer: String,
+    /// Cursor position within text buffer
+    cursor_pos: usize,
     /// Command history (max 100 commands)
     history: Vec<String>,
     /// Current history position (for up/down arrow navigation)
@@ -40,6 +43,7 @@ impl InteractiveConsole {
             subscription: None,
             event_buffer: Vec::new(),
             text_buffer: String::new(),
+            cursor_pos: 0,
             history: Vec::new(),
             history_pos: None,
         }
@@ -116,16 +120,47 @@ impl InteractiveConsole {
                     self.history.push(command.clone());
                 }
                 self.text_buffer.clear();
+                self.cursor_pos = 0;
                 self.history_pos = None;
                 return Ok(Some(command));
             }
             KeyCode::Backspace => {
-                self.text_buffer.pop();
+                if self.cursor_pos > 0 {
+                    self.text_buffer.remove(self.cursor_pos - 1);
+                    self.cursor_pos -= 1;
+                }
+                return Ok(None);
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.text_buffer.len() {
+                    self.text_buffer.remove(self.cursor_pos);
+                }
                 return Ok(None);
             }
             KeyCode::Escape => {
                 self.text_buffer.clear();
+                self.cursor_pos = 0;
                 self.history_pos = None;
+                return Ok(None);
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+                return Ok(None);
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.text_buffer.len() {
+                    self.cursor_pos += 1;
+                }
+                return Ok(None);
+            }
+            KeyCode::Home => {
+                self.cursor_pos = 0;
+                return Ok(None);
+            }
+            KeyCode::End => {
+                self.cursor_pos = self.text_buffer.len();
                 return Ok(None);
             }
             KeyCode::Up => {
@@ -138,6 +173,7 @@ impl InteractiveConsole {
                     };
                     self.history_pos = Some(pos);
                     self.text_buffer = self.history[pos].clone();
+                    self.cursor_pos = self.text_buffer.len();
                 }
                 return Ok(None);
             }
@@ -147,10 +183,12 @@ impl InteractiveConsole {
                     if pos + 1 < self.history.len() {
                         self.history_pos = Some(pos + 1);
                         self.text_buffer = self.history[pos + 1].clone();
+                        self.cursor_pos = self.text_buffer.len();
                     } else {
                         // At end of history, clear buffer
                         self.history_pos = None;
                         self.text_buffer.clear();
+                        self.cursor_pos = 0;
                     }
                 }
                 return Ok(None);
@@ -161,7 +199,8 @@ impl InteractiveConsole {
         // Handle simple text input (very basic, no shift/caps)
         let ch = self.key_to_char(event)?;
         if let Some(c) = ch {
-            self.text_buffer.push(c);
+            self.text_buffer.insert(self.cursor_pos, c);
+            self.cursor_pos += 1;
             self.history_pos = None; // Reset history position on new input
         }
 
@@ -206,6 +245,11 @@ impl InteractiveConsole {
     /// Returns the current text buffer
     pub fn text_buffer(&self) -> &str {
         &self.text_buffer
+    }
+
+    /// Returns the current cursor position
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor_pos
     }
 
     /// Returns the event buffer (for testing)
@@ -632,5 +676,341 @@ mod tests {
 
         assert_eq!(command, Some("ls".to_string()));
         assert_eq!(console.text_buffer(), "");
+    }
+
+    #[test]
+    fn test_cursor_left_right() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "abc"
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::B,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::C,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "abc");
+        assert_eq!(console.cursor_pos(), 3);
+
+        // Move left twice
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Left,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 2);
+
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Left,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 1);
+
+        // Move right once
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Right,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 2);
+    }
+
+    #[test]
+    fn test_cursor_home_end() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello"
+        for ch in [KeyCode::H, KeyCode::E, KeyCode::L, KeyCode::L, KeyCode::O] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+
+        assert_eq!(console.cursor_pos(), 5);
+
+        // Home key
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 0);
+
+        // End key
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::End,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_insert_at_cursor() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "ac"
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::C,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "ac");
+
+        // Move left
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Left,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // Insert 'b'
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::B,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "abc");
+        assert_eq!(console.cursor_pos(), 2);
+    }
+
+    #[test]
+    fn test_backspace_at_cursor() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "abc"
+        for ch in [KeyCode::A, KeyCode::B, KeyCode::C] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+
+        // Move to position 2 (between 'b' and 'c')
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Left,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 2);
+
+        // Backspace (should remove 'b')
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Backspace,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "ac");
+        assert_eq!(console.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_delete_at_cursor() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "abc"
+        for ch in [KeyCode::A, KeyCode::B, KeyCode::C] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+
+        // Move to position 1 (after 'a', before 'b')
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Right,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 1);
+
+        // Delete (should remove 'b')
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Delete,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "ac");
+        assert_eq!(console.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_backspace_at_start() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // Backspace at position 0 should do nothing
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Backspace,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "a");
+        assert_eq!(console.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_delete_at_end() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // Delete at end should do nothing
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Delete,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "a");
+        assert_eq!(console.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_cursor_movement_bounds() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "ab"
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::B,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // Try to move right beyond end
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Right,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 2); // Should stay at 2
+
+        // Move to start
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // Try to move left beyond start
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Left,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.cursor_pos(), 0); // Should stay at 0
+    }
+
+    #[test]
+    fn test_history_navigation_updates_cursor() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Add commands to history
+        console.history.push("ls".to_string());
+        console.history.push("pwd".to_string());
+
+        // Press up arrow
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Up,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "pwd");
+        assert_eq!(console.cursor_pos(), 3); // Cursor at end
+
+        // Press up again
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Up,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "ls");
+        assert_eq!(console.cursor_pos(), 2); // Cursor at end
     }
 }
