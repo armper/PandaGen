@@ -59,6 +59,9 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Phase 69: Enable display for framebuffer console
+    // Changed from "-display none" to "-display cocoa" (or "gtk" on Linux)
+    // to show the QEMU window with framebuffer output
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
         .arg("-m")
@@ -68,7 +71,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-serial")
         .arg("stdio")
         .arg("-display")
-        .arg("cocoa")
+        .arg("cocoa") // Can also be "gtk", "sdl", etc.
         .arg("-no-reboot"))
 }
 

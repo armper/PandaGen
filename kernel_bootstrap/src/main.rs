@@ -12,6 +12,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod framebuffer;
 mod output;
 mod workspace;
 
@@ -453,11 +454,24 @@ pub extern "C" fn rust_main() -> ! {
         )
     };
     
-    // Phase 64: Boot directly into workspace prompt
+    // Phase 69: Boot directly into workspace prompt with framebuffer if available
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
+    
+    // Try to initialize framebuffer console
+    let mut fb_console = unsafe {
+        framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot)
+    };
+    
+    if fb_console.is_some() {
+        kprintln!(serial, "Framebuffer console initialized");
+        kprintln!(serial, "Display output enabled on QEMU window");
+    } else {
+        kprintln!(serial, "Framebuffer unavailable - serial-only mode");
+    }
+    
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
-    workspace_loop(&mut serial, kernel)
+    workspace_loop(&mut serial, kernel, fb_console.as_mut())
 }
 
 #[cfg(not(test))]
@@ -517,8 +531,13 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
 
 /// Workspace loop - main interactive session
 /// Phase 64: This replaces the demo editor loop with a proper workspace prompt
+/// Phase 69: Now supports framebuffer console output
 #[cfg(not(test))]
-fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
+fn workspace_loop(
+    serial: &mut serial::SerialPort,
+    kernel: &mut Kernel,
+    mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
+) -> ! {
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
     let response_channel = ChannelId(1);
@@ -526,8 +545,17 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
     let mut parser_state = Ps2ParserState::new();
     
+    // Track revision for rate-limited rendering
+    static LAST_FB_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let mut current_revision = 1u64;
+    
     // Show initial prompt
     workspace.show_prompt(serial);
+    
+    // Initial framebuffer render if available
+    if let Some(ref mut fb) = fb_console {
+        fb.draw_text("PandaGen Workspace - Framebuffer Active");
+    }
     
     loop {
         // Run kernel tasks
@@ -556,6 +584,11 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
                 };
                 
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
+                
+                // Update framebuffer on input change
+                if input_progressed {
+                    current_revision += 1;
+                }
             }
         }
         
@@ -598,6 +631,17 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
                     }
                 }
                 workspace.show_prompt(serial);
+                current_revision += 1;
+            }
+        }
+        
+        // Update framebuffer if revision changed (rate-limited)
+        let last_revision = LAST_FB_REVISION.load(core::sync::atomic::Ordering::Relaxed);
+        if current_revision != last_revision {
+            if let Some(ref mut fb) = fb_console {
+                // Simple framebuffer update - just show it's active
+                fb.draw_text("PandaGen Workspace Active");
+                LAST_FB_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
         }
         
