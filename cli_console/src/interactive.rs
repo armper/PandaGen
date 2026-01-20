@@ -107,6 +107,11 @@ impl InteractiveConsole {
 
     /// Handles a key press event
     fn handle_key_press(&mut self, event: &KeyEvent) -> Result<Option<String>, String> {
+        // Handle Ctrl combinations first
+        if event.modifiers.is_ctrl() {
+            return self.handle_ctrl_key(event);
+        }
+
         // Handle special keys
         match event.code {
             KeyCode::Enter => {
@@ -193,6 +198,11 @@ impl InteractiveConsole {
                 }
                 return Ok(None);
             }
+            // PageUp/PageDown are typically handled by the view manager for scrollback
+            // not by the input handler, so we ignore them here
+            KeyCode::PageUp | KeyCode::PageDown => {
+                return Ok(None);
+            }
             _ => {}
         }
 
@@ -205,6 +215,87 @@ impl InteractiveConsole {
         }
 
         Ok(None)
+    }
+
+    /// Handle Ctrl key combinations
+    fn handle_ctrl_key(&mut self, event: &KeyEvent) -> Result<Option<String>, String> {
+        match event.code {
+            KeyCode::A => {
+                // Ctrl+A: Jump to start of line (like Home)
+                self.cursor_pos = 0;
+                Ok(None)
+            }
+            KeyCode::E => {
+                // Ctrl+E: Jump to end of line (like End)
+                self.cursor_pos = self.text_buffer.len();
+                Ok(None)
+            }
+            KeyCode::U => {
+                // Ctrl+U: Delete from cursor to start of line
+                self.text_buffer.drain(0..self.cursor_pos);
+                self.cursor_pos = 0;
+                Ok(None)
+            }
+            KeyCode::K => {
+                // Ctrl+K: Delete from cursor to end of line
+                self.text_buffer.truncate(self.cursor_pos);
+                Ok(None)
+            }
+            KeyCode::W => {
+                // Ctrl+W: Delete word before cursor
+                self.delete_word_before_cursor();
+                Ok(None)
+            }
+            KeyCode::L => {
+                // Ctrl+L: Clear screen (in terminal context, could clear scrollback)
+                // For now, just clear the input buffer
+                self.text_buffer.clear();
+                self.cursor_pos = 0;
+                Ok(None)
+            }
+            KeyCode::C => {
+                // Ctrl+C: Cancel current input
+                self.text_buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                Ok(None)
+            }
+            KeyCode::D => {
+                // Ctrl+D: Delete character at cursor (like Delete key)
+                if self.cursor_pos < self.text_buffer.len() {
+                    self.text_buffer.remove(self.cursor_pos);
+                }
+                Ok(None)
+            }
+            _ => Ok(None), // Ignore other Ctrl combinations
+        }
+    }
+
+    /// Delete word before cursor (for Ctrl+W)
+    fn delete_word_before_cursor(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+
+        let text_before_cursor = &self.text_buffer[0..self.cursor_pos];
+        let mut chars: Vec<char> = text_before_cursor.chars().collect();
+        let mut pos = chars.len();
+        
+        // Skip trailing whitespace
+        while pos > 0 && chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        
+        // Delete word characters
+        while pos > 0 && !chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        
+        // Reconstruct buffer
+        let before: String = chars[0..pos].iter().collect();
+        let after = &self.text_buffer[self.cursor_pos..];
+        self.text_buffer = format!("{}{}", before, after);
+        self.cursor_pos = before.len();
     }
 
     /// Converts a key event to a character (simplified)
@@ -1012,5 +1103,357 @@ mod tests {
 
         assert_eq!(console.text_buffer(), "ls");
         assert_eq!(console.cursor_pos(), 2); // Cursor at end
+    }
+
+    #[test]
+    fn test_ctrl_a_jump_to_start() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello"
+        for ch in [KeyCode::H, KeyCode::E, KeyCode::L, KeyCode::L, KeyCode::O] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+
+        assert_eq!(console.cursor_pos(), 5);
+
+        // Ctrl+A
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::A,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 0);
+        assert_eq!(console.text_buffer(), "hello");
+    }
+
+    #[test]
+    fn test_ctrl_e_jump_to_end() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello" and move to start
+        for ch in [KeyCode::H, KeyCode::E, KeyCode::L, KeyCode::L, KeyCode::O] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 0);
+
+        // Ctrl+E
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::E,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_ctrl_u_delete_to_start() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello world"
+        for ch in "helloworld".chars() {
+            let keycode = match ch {
+                'h' => KeyCode::H,
+                'e' => KeyCode::E,
+                'l' => KeyCode::L,
+                'o' => KeyCode::O,
+                'w' => KeyCode::W,
+                'r' => KeyCode::R,
+                'd' => KeyCode::D,
+                _ => continue,
+            };
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .unwrap();
+        }
+
+        // Move cursor to position 5 (after "hello")
+        for _ in 0..5 {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    KeyCode::Left,
+                    Modifiers::none(),
+                )))
+                .unwrap();
+        }
+
+        assert_eq!(console.cursor_pos(), 5);
+
+        // Ctrl+U (delete to start)
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::U,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "world");
+        assert_eq!(console.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_ctrl_k_delete_to_end() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello world"
+        for ch in "helloworld".chars() {
+            let keycode = match ch {
+                'h' => KeyCode::H,
+                'e' => KeyCode::E,
+                'l' => KeyCode::L,
+                'o' => KeyCode::O,
+                'w' => KeyCode::W,
+                'r' => KeyCode::R,
+                'd' => KeyCode::D,
+                _ => continue,
+            };
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .unwrap();
+        }
+
+        // Move to position 5
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        for _ in 0..5 {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(
+                    KeyCode::Right,
+                    Modifiers::none(),
+                )))
+                .unwrap();
+        }
+
+        assert_eq!(console.cursor_pos(), 5);
+
+        // Ctrl+K (delete to end)
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::K,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "hello");
+        assert_eq!(console.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_ctrl_c_cancel_input() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type something
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::H,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::I,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "hi");
+
+        // Ctrl+C
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::C,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "");
+        assert_eq!(console.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_ctrl_d_delete_at_cursor() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "abc"
+        for ch in [KeyCode::A, KeyCode::B, KeyCode::C] {
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(ch, Modifiers::none())))
+                .unwrap();
+        }
+
+        // Move to position 1
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Home,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Right,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.cursor_pos(), 1);
+
+        // Ctrl+D (delete at cursor)
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::D,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "ac");
+        assert_eq!(console.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_ctrl_w_delete_word() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type "hello world test" using Space
+        for ch in "hello".chars() {
+            let keycode = match ch {
+                'h' => KeyCode::H,
+                'e' => KeyCode::E,
+                'l' => KeyCode::L,
+                'o' => KeyCode::O,
+                _ => continue,
+            };
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .unwrap();
+        }
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(KeyCode::Space, Modifiers::none())))
+            .unwrap();
+        for ch in "world".chars() {
+            let keycode = match ch {
+                'w' => KeyCode::W,
+                'o' => KeyCode::O,
+                'r' => KeyCode::R,
+                'l' => KeyCode::L,
+                'd' => KeyCode::D,
+                _ => continue,
+            };
+            console
+                .process_event(InputEvent::key(KeyEvent::pressed(keycode, Modifiers::none())))
+                .unwrap();
+        }
+
+        assert_eq!(console.text_buffer(), "hello world");
+
+        // Ctrl+W (delete last word "world")
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::W,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        // Should have "hello " remaining
+        assert_eq!(console.text_buffer(), "hello ");
+    }
+
+    #[test]
+    fn test_ctrl_l_clear_input() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type something
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::T,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::E,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::S,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::T,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "test");
+
+        // Ctrl+L
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::L,
+                Modifiers::CTRL,
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "");
+        assert_eq!(console.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_pageup_pagedown_ignored() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type something
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::H,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        // PageUp/PageDown should be ignored (handled by view manager)
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::PageUp,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::PageDown,
+                Modifiers::none(),
+            )))
+            .unwrap();
+
+        assert_eq!(console.text_buffer(), "h");
     }
 }
