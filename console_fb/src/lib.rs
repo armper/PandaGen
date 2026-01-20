@@ -21,12 +21,18 @@ extern crate alloc;
 pub mod font;
 pub mod scrollback;
 
+#[cfg(feature = "editor-integration")]
+pub mod combined_view;
+
 #[cfg(test)]
 use hal::PixelFormat;
 use hal::{Framebuffer, FramebufferInfo};
 
 use font::{get_char_bitmap, FONT_HEIGHT, FONT_WIDTH};
 pub use scrollback::{Line, ScrollbackBuffer};
+
+#[cfg(feature = "editor-integration")]
+pub use combined_view::{CombinedView, ViewMode};
 
 /// Foreground color (white)
 const FG_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
