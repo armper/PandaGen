@@ -259,7 +259,7 @@ mod tests {
     fn test_redraw_manager_no_change() {
         let mut manager = RedrawManager::new();
         let frame = vec!["line1".to_string(), "line2".to_string()];
-        
+
         manager.update(frame.clone());
         assert!(!manager.has_changed(&frame));
     }
@@ -269,7 +269,7 @@ mod tests {
         let mut manager = RedrawManager::new();
         let frame1 = vec!["line1".to_string()];
         let frame2 = vec!["line2".to_string()];
-        
+
         manager.update(frame1);
         assert!(manager.has_changed(&frame2));
     }
@@ -278,10 +278,10 @@ mod tests {
     fn test_redraw_manager_mark_dirty() {
         let mut manager = RedrawManager::new();
         let frame = vec!["line1".to_string()];
-        
+
         manager.update(frame.clone());
         assert!(!manager.has_changed(&frame));
-        
+
         manager.mark_dirty();
         assert!(manager.has_changed(&frame));
     }

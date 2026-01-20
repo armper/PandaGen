@@ -8,12 +8,15 @@ const TARGET: &str = "x86_64-unknown-none";
 const KERNEL_CRATE: &str = "kernel_bootstrap";
 const LIMINE_VENDOR_DIR: &str = "third_party/limine";
 const ISO_OUTPUT: &str = "dist/pandagen.iso";
+const DISK_OUTPUT: &str = "dist/pandagen.disk";
+const DEFAULT_DISK_SIZE_MB: usize = 64;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("iso") => cmd_iso(),
         Some("qemu") => cmd_qemu(),
+        Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
     }
@@ -23,6 +26,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("Usage:");
     println!("  cargo xtask iso");
     println!("  cargo xtask qemu");
+    println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::new(ErrorKind::Other, "unknown xtask command").into())
 }
@@ -59,20 +63,62 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // Phase 69: Enable display for framebuffer console
-    // Changed from "-display none" to "-display cocoa" (or "gtk" on Linux)
-    // to show the QEMU window with framebuffer output
+    // Ensure disk image exists
+    let disk = root.join(DISK_OUTPUT);
+    if !disk.exists() {
+        println!("Disk image not found, creating...");
+        cmd_image()?;
+    }
+
+    // Phase 76: Attach virtio-blk disk for persistent storage
+    // Print command line for debugging
+    let qemu_cmd = format!(
+        "qemu-system-x86_64 -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial stdio -display cocoa -no-reboot",
+        iso.display(),
+        disk.display()
+    );
+    println!("Running QEMU with command:");
+    println!("  {}", qemu_cmd);
+
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
         .arg("-m")
         .arg("512M")
         .arg("-cdrom")
         .arg(&iso)
+        .arg("-drive")
+        .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
+        .arg("-device")
+        .arg("virtio-blk-pci,drive=hd0")
         .arg("-serial")
         .arg("stdio")
         .arg("-display")
         .arg("cocoa") // Can also be "gtk", "sdl", etc.
         .arg("-no-reboot"))
+}
+
+fn cmd_image() -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    let dist = root.join("dist");
+    fs::create_dir_all(&dist)?;
+
+    let disk = root.join(DISK_OUTPUT);
+    let size_bytes = DEFAULT_DISK_SIZE_MB * 1024 * 1024;
+
+    // Create empty disk image
+    println!(
+        "Creating disk image: {} ({} MB)",
+        disk.display(),
+        DEFAULT_DISK_SIZE_MB
+    );
+    let disk_file = fs::File::create(&disk)?;
+    disk_file.set_len(size_bytes as u64)?;
+
+    println!("Disk image created: {}", disk.display());
+    println!("  Size: {} MB ({} bytes)", DEFAULT_DISK_SIZE_MB, size_bytes);
+    println!("  Blocks: {}", size_bytes / 4096);
+
+    Ok(())
 }
 
 fn build_kernel(root: &Path) -> Result<(), Box<dyn std::error::Error>> {

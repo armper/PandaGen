@@ -122,15 +122,15 @@ impl ScrollbackBuffer {
     /// Add a new line to the buffer
     pub fn push_line(&mut self, text: &str) {
         let line = Line::from_text(text, self.cols);
-        
+
         // Add new line
         self.lines.push(line);
-        
+
         // Remove old lines if we exceed max
         while self.lines.len() > self.max_lines {
             self.lines.remove(0);
         }
-        
+
         // Reset viewport to bottom when new content is added
         self.viewport_offset = 0;
     }
@@ -294,7 +294,7 @@ mod tests {
         let mut buffer = ScrollbackBuffer::new(80, 25, 1000);
         buffer.push_line("Line 1");
         buffer.push_line("Line 2");
-        
+
         let visible = buffer.visible_lines();
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].as_str(), "Line 1");
@@ -307,7 +307,7 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         let visible = buffer.visible_lines();
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].as_str(), "Line 8");
@@ -321,7 +321,7 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         assert!(buffer.scroll_up(2));
         let visible = buffer.visible_lines();
         assert_eq!(visible[0].as_str(), "Line 6");
@@ -335,10 +335,10 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         buffer.scroll_up(5);
         assert!(buffer.scroll_down(2));
-        
+
         let visible = buffer.visible_lines();
         // After scrolling up 5, we're at offset 5, viewing lines 3-5
         // After scrolling down 2, we're at offset 3, viewing lines 5-7
@@ -353,10 +353,10 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         buffer.scroll_up(5);
         buffer.scroll_to_bottom();
-        
+
         let visible = buffer.visible_lines();
         assert_eq!(visible[0].as_str(), "Line 8");
         assert_eq!(visible[2].as_str(), "Line 10");
@@ -368,9 +368,9 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         buffer.scroll_to_top();
-        
+
         let visible = buffer.visible_lines();
         assert_eq!(visible[0].as_str(), "Line 1");
         assert_eq!(visible[2].as_str(), "Line 3");
@@ -382,7 +382,7 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         assert!(buffer.at_bottom());
         buffer.scroll_up(1);
         assert!(!buffer.at_bottom());
@@ -396,7 +396,7 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         assert!(!buffer.at_top());
         buffer.scroll_to_top();
         assert!(buffer.at_top());
@@ -408,7 +408,7 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         // Should only keep last 5 lines
         assert_eq!(buffer.total_lines(), 5);
         let visible = buffer.visible_lines();
@@ -422,7 +422,7 @@ mod tests {
         buffer.push_line("Line 1");
         buffer.push_line("Line 2");
         buffer.clear();
-        
+
         assert_eq!(buffer.total_lines(), 0);
         assert_eq!(buffer.visible_lines().len(), 0);
     }
@@ -433,10 +433,10 @@ mod tests {
         for i in 1..=10 {
             buffer.push_line(&format!("Line {}", i));
         }
-        
+
         buffer.scroll_up(5);
         assert!(!buffer.at_bottom());
-        
+
         // Adding new content should reset to bottom
         buffer.push_line("New Line");
         assert!(buffer.at_bottom());

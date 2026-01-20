@@ -16,6 +16,8 @@ pub mod keyboard;
 pub mod port_io;
 pub mod tick;
 pub mod timer;
+pub mod virtio;
+pub mod virtio_blk;
 
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
@@ -23,6 +25,8 @@ pub use keyboard::X86Ps2Keyboard;
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
 pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
+pub use virtio::{VirtioMmioDevice, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue};
+pub use virtio_blk::VirtioBlkDevice;
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;
