@@ -57,6 +57,12 @@ edition = "2021"
 authors = ["PandaGen Contributors"]
 license = "MIT OR Apache-2.0"
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [workspace.dependencies]
 # Core crates
 core_types = { path = "core_types" }

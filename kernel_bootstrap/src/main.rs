@@ -8,6 +8,7 @@ use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
@@ -42,28 +43,293 @@ stack_top:
 "#
 );
 
+// IDT structure and interrupt handlers
+#[cfg(not(test))]
+#[repr(C, packed)]
+#[derive(Copy, Clone)]
+struct IdtEntry {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    flags: u8,
+    offset_mid: u16,
+    offset_high: u32,
+    reserved: u32,
+}
+
+#[cfg(not(test))]
+impl IdtEntry {
+    const fn new() -> Self {
+        Self {
+            offset_low: 0,
+            selector: 0,
+            ist: 0,
+            flags: 0,
+            offset_mid: 0,
+            offset_high: 0,
+            reserved: 0,
+        }
+    }
+
+    fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
+        let addr = handler as usize;
+        self.offset_low = (addr & 0xFFFF) as u16;
+        self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
+        self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
+        self.selector = 0x08; // Kernel code segment
+        self.ist = 0;
+        self.flags = 0x8E; // Present, DPL=0, interrupt gate
+        self.reserved = 0;
+    }
+}
+
+#[cfg(not(test))]
+#[repr(C, packed)]
+struct IdtPointer {
+    limit: u16,
+    base: u64,
+}
+
+#[cfg(not(test))]
+static mut IDT: [IdtEntry; 256] = [IdtEntry::new(); 256];
+
+#[cfg(not(test))]
+static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(not(test))]
+global_asm!(
+    r#"
+.section .text
+.global irq_timer_entry
+irq_timer_entry:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    
+    call timer_irq_handler
+    
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+"#
+);
+
+#[cfg(not(test))]
+extern "C" {
+    fn irq_timer_entry();
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn timer_irq_handler() {
+    KERNEL_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    
+    // Send EOI to PIC
+    unsafe {
+        outb(0x20, 0x20);
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn outb(port: u16, value: u8) {
+    asm!(
+        "out dx, al",
+        in("dx") port,
+        in("al") value,
+        options(nomem, nostack, preserves_flags)
+    );
+}
+
+#[cfg(not(test))]
+fn install_idt() {
+    unsafe {
+        // Set up timer interrupt (IRQ 0 = vector 32)
+        IDT[32].set_handler(irq_timer_entry);
+
+        let idtr = IdtPointer {
+            limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
+            base: IDT.as_ptr() as u64,
+        };
+
+        asm!(
+            "lidt [{}]",
+            in(reg) &idtr,
+            options(readonly, nostack, preserves_flags)
+        );
+    }
+}
+
+#[cfg(not(test))]
+fn init_pic() {
+    unsafe {
+        // Start initialization sequence
+        outb(0x20, 0x11);
+        outb(0xA0, 0x11);
+        
+        // Remap IRQs to 32-47
+        outb(0x21, 32);
+        outb(0xA1, 40);
+        
+        // Configure cascade
+        outb(0x21, 0x04);
+        outb(0xA1, 0x02);
+        
+        // 8086 mode
+        outb(0x21, 0x01);
+        outb(0xA1, 0x01);
+        
+        // Mask all IRQs initially
+        outb(0x21, 0xFF);
+        outb(0xA1, 0xFF);
+    }
+}
+
+#[cfg(not(test))]
+fn init_pit() {
+    unsafe {
+        // Configure PIT channel 0 for 100 Hz
+        // Frequency = 1193182 / divisor
+        // For 100 Hz: divisor = 11932
+        let divisor: u16 = 11932;
+        
+        // Command: channel 0, lo/hi byte, rate generator, binary
+        outb(0x43, 0x36);
+        
+        // Send divisor
+        outb(0x40, (divisor & 0xFF) as u8);
+        outb(0x40, ((divisor >> 8) & 0xFF) as u8);
+    }
+}
+
+#[cfg(not(test))]
+fn unmask_timer_irq() {
+    unsafe {
+        let mask = inb(0x21);
+        outb(0x21, mask & !0x01); // Unmask IRQ 0
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn inb(port: u16) -> u8 {
+    let value: u8;
+    asm!(
+        "in al, dx",
+        in("dx") port,
+        out("al") value,
+        options(nomem, nostack, preserves_flags)
+    );
+    value
+}
+
+#[cfg(not(test))]
+fn enable_interrupts() {
+    unsafe {
+        asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(not(test))]
+fn get_tick_count() -> u64 {
+    KERNEL_TICK_COUNTER.load(Ordering::Relaxed)
+}
+
+// Syscall stubs
+#[cfg(not(test))]
+fn sys_yield() {
+    // No-op for now
+}
+
+#[cfg(not(test))]
+fn sys_sleep(ticks: u64) {
+    let start = get_tick_count();
+    while get_tick_count() < start + ticks {
+        idle_pause();
+    }
+}
+
+#[cfg(not(test))]
+fn sys_send(ctx: &mut KernelContext, channel: ChannelId, msg: KernelMessage) -> Result<(), KernelError> {
+    ctx.send(channel, msg)
+}
+
+#[cfg(not(test))]
+fn sys_recv(ctx: &mut KernelContext, channel: ChannelId) -> Result<KernelMessage, KernelError> {
+    ctx.recv(channel)
+}
+
+// Logging macros
+#[cfg(not(test))]
+macro_rules! klog {
+    ($serial:expr, $($arg:tt)*) => {
+        {
+            use core::fmt::Write;
+            let _ = write!($serial, $($arg)*);
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! kprintln {
+    ($serial:expr, $($arg:tt)*) => {
+        {
+            use core::fmt::Write;
+            let _ = writeln!($serial, $($arg)*);
+        }
+    };
+}
+
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
     serial.init();
-    let _ = writeln!(serial, "PandaGen: kernel_bootstrap online");
+    kprintln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
     let (allocator, heap) = init_memory(&mut serial, &boot);
+    
+    kprintln!(serial, "Initializing interrupts...");
+    install_idt();
+    klog!(serial, "IDT installed at 0x{:x}\r\n", unsafe { IDT.as_ptr() as usize });
+    
+    init_pic();
+    kprintln!(serial, "PIC remapped to IRQ base 32");
+    
+    init_pit();
+    kprintln!(serial, "PIT configured for 100 Hz");
+    
+    unmask_timer_irq();
+    enable_interrupts();
+    kprintln!(serial, "Interrupts enabled, timer at 100 Hz");
+    
     let kernel = unsafe { Kernel::init_in_place(&mut KERNEL_STORAGE, boot, allocator, heap) };
-    let _ = writeln!(serial, "Type 'help' for commands.");
-    let _ = write!(serial, "> ");
+    kprintln!(serial, "Type 'help' for commands.");
+    klog!(serial, "> ");
 
     console_loop(&mut serial, kernel)
 }
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    // In this minimal bootstrap kernel we cannot rely on any output device
-    // (such as a serial port or VGA text buffer) being initialized yet, so
-    // we intentionally ignore the panic information and simply halt.
-    // Future work may attempt to log `_info` once basic I/O is available.
+fn panic(info: &PanicInfo) -> ! {
+    let mut serial = serial::SerialPort::new(serial::COM1);
+    kprintln!(serial, "\r\n\r\nKERNEL PANIC:");
+    if let Some(location) = info.location() {
+        kprintln!(serial, "  at {}:{}:{}", location.file(), location.line(), location.column());
+    }
+    kprintln!(serial, "  {}", info.message());
     halt_loop()
 }
 
@@ -87,8 +353,17 @@ fn idle_pause() {
 
 #[cfg(not(test))]
 fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
+    let mut last_tick_display = 0u64;
     loop {
         let progressed = kernel.run_once(serial);
+        
+        // Display a dot every 100 ticks (every second at 100Hz)
+        let current_tick = get_tick_count();
+        if current_tick >= last_tick_display + 100 {
+            klog!(serial, ".");
+            last_tick_display = current_tick;
+        }
+        
         if !progressed {
             idle_pause();
         }
@@ -929,6 +1204,7 @@ impl ConsoleService {
 struct CommandService {
     task_id: TaskId,
     command_channel: ChannelId,
+    poll_count: u64,
 }
 
 impl CommandService {
@@ -936,11 +1212,24 @@ impl CommandService {
         Self {
             task_id: TaskId(0),
             command_channel,
+            poll_count: 0,
         }
     }
 
     fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
         let mut progressed = false;
+        
+        // Demonstrate syscalls (alternating between yield and sleep)
+        #[cfg(not(test))]
+        {
+            if self.poll_count % 2 == 0 {
+                sys_yield();
+            } else {
+                sys_sleep(1); // Sleep for 1 tick
+            }
+            self.poll_count += 1;
+        }
+        
         while let Some(message) = ctx.try_recv(self.command_channel) {
             progressed = true;
             if let KernelMessage::CommandRequest(request) = message {
@@ -978,17 +1267,15 @@ impl CommandService {
             "help" => {
                 let _ = writeln!(
                     output,
-                    "commands: help, halt, boot, mem, alloc, heap, heap-alloc"
+                    "commands: help, halt, boot, mem, alloc, heap, heap-alloc, ticks"
                 );
             }
             "halt" => {
                 #[cfg(not(test))]
                 {
                     let _ = writeln!(output, "halting...");
-                    let response = CommandResponse::ok(correlation_id, &output);
-                    #[cfg(not(test))]
+                    let _response = CommandResponse::ok(correlation_id, &output);
                     halt_loop();
-                    return response;
                 }
 
                 #[cfg(test)]
@@ -1108,6 +1395,17 @@ impl CommandService {
                         correlation_id,
                         CommandError::new(CommandErrorCode::ServiceUnavailable, "heap unavailable"),
                     );
+                }
+            }
+            "ticks" => {
+                #[cfg(not(test))]
+                {
+                    let ticks = get_tick_count();
+                    let _ = writeln!(output, "kernel ticks: {} (at 100 Hz)", ticks);
+                }
+                #[cfg(test)]
+                {
+                    let _ = writeln!(output, "ticks: unavailable in test mode");
                 }
             }
             _ => {
