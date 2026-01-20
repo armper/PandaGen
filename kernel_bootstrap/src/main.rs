@@ -12,6 +12,8 @@
 #[cfg(test)]
 extern crate std;
 
+mod output;
+
 use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -593,23 +595,100 @@ fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
     }
 }
 
-/// Renders editor state to serial
+/// Renders editor state to serial using structured view output
+///
+/// Phase 60: This now uses the unified output model instead of direct printing.
+/// The editor state is converted to structured views before rendering.
 #[cfg(not(test))]
 fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
-    kprintln!(serial, "\r\n--- Editor State ---");
-    klog!(serial, "Text: ");
-    for &byte in editor.get_text() {
-        if (0x20..0x7F).contains(&byte) {
-            klog!(serial, "{}", byte as char);
-        } else if byte == b'\n' {
-            klog!(serial, "\\n");
-        } else {
-            klog!(serial, "\\x{:02x}", byte);
+    // Static output handler for revision tracking
+    static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
+    
+    // Convert editor buffer to text lines (simple line splitting)
+    // For now, just show as single line for simplicity
+    let text = editor.get_text();
+    let text_str = core::str::from_utf8(text).unwrap_or("<invalid utf8>");
+    let lines: [&str; 1] = [text_str];
+    
+    // Cursor position (for now, just show line 0)
+    let cursor_line = Some(0);
+    let cursor_col = Some(editor.cursor);
+    
+    // Status line shows cursor info
+    let mut status_buf: [u8; 64] = [0; 64];
+    let status = {
+        let mut cursor_pos = 0usize;
+        // Manually format the status string
+        let prefix = b"Cursor: ";
+        for &b in prefix {
+            if cursor_pos < status_buf.len() {
+                status_buf[cursor_pos] = b;
+                cursor_pos += 1;
+            }
         }
+        // Simple number formatting for cursor
+        let mut cursor_val = editor.cursor;
+        let mut digits = [0u8; 20];
+        let mut digit_count = 0;
+        if cursor_val == 0 {
+            digits[0] = b'0';
+            digit_count = 1;
+        } else {
+            while cursor_val > 0 && digit_count < 20 {
+                digits[digit_count] = b'0' + (cursor_val % 10) as u8;
+                cursor_val /= 10;
+                digit_count += 1;
+            }
+        }
+        // Reverse and copy digits
+        for i in 0..digit_count {
+            if cursor_pos < status_buf.len() {
+                status_buf[cursor_pos] = digits[digit_count - 1 - i];
+                cursor_pos += 1;
+            }
+        }
+        let mid = b" | Length: ";
+        for &b in mid {
+            if cursor_pos < status_buf.len() {
+                status_buf[cursor_pos] = b;
+                cursor_pos += 1;
+            }
+        }
+        // Format length
+        let mut len_val = editor.len;
+        let mut len_digits = [0u8; 20];
+        let mut len_digit_count = 0;
+        if len_val == 0 {
+            len_digits[0] = b'0';
+            len_digit_count = 1;
+        } else {
+            while len_val > 0 && len_digit_count < 20 {
+                len_digits[len_digit_count] = b'0' + (len_val % 10) as u8;
+                len_val /= 10;
+                len_digit_count += 1;
+            }
+        }
+        for i in 0..len_digit_count {
+            if cursor_pos < status_buf.len() {
+                status_buf[cursor_pos] = len_digits[len_digit_count - 1 - i];
+                cursor_pos += 1;
+            }
+        }
+        core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
+    };
+    
+    // Static revision counter
+    static mut REVISION: u64 = 1;
+    let revision = unsafe {
+        let r = REVISION;
+        REVISION += 1;
+        r
+    };
+    
+    // Render using the unified output model
+    unsafe {
+        OUTPUT.render_to_serial(serial, &lines, cursor_line, cursor_col, Some(status), revision);
     }
-    kprintln!(serial, "");
-    kprintln!(serial, "Cursor: {} | Length: {}", editor.cursor, editor.len);
-    kprintln!(serial, "-------------------");
 }
 
 /// PS/2 scancode parser state for translating to ASCII
@@ -2364,7 +2443,7 @@ mod tests {
 }
 
 #[cfg(not(test))]
-mod serial {
+pub mod serial {
     use core::arch::asm;
     use core::fmt;
 
@@ -2456,7 +2535,7 @@ mod serial {
 }
 
 #[cfg(test)]
-mod serial {
+pub mod serial {
     use std::fmt;
 
     pub const COM1: u16 = 0x3F8;

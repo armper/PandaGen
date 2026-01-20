@@ -16,6 +16,11 @@ services_storage.workspace = true
 cli_console.workspace = true
 identity.workspace = true
 resources.workspace = true
+view_types.workspace = true
+services_view_host.workspace = true
+services_workspace_manager.workspace = true
+text_renderer_host.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # No additional dev dependencies needed
