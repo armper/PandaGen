@@ -13,6 +13,7 @@
 extern crate std;
 
 mod output;
+mod workspace;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -451,9 +452,12 @@ pub extern "C" fn rust_main() -> ! {
             heap,
         )
     };
-    kprintln!(serial, "Type to see keyboard input (editor mode)...");
+    
+    // Phase 64: Boot directly into workspace prompt
+    kprintln!(serial, "\r\n=== PandaGen Workspace ===");
+    kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
-    editor_loop(&mut serial, kernel)
+    workspace_loop(&mut serial, kernel)
 }
 
 #[cfg(not(test))]
@@ -506,6 +510,98 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
         }
 
         if !progressed {
+            idle_pause();
+        }
+    }
+}
+
+/// Workspace loop - main interactive session
+/// Phase 64: This replaces the demo editor loop with a proper workspace prompt
+#[cfg(not(test))]
+fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
+    // Get command and response channels from kernel
+    let command_channel = ChannelId(0);
+    let response_channel = ChannelId(1);
+    
+    let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
+    let mut parser_state = Ps2ParserState::new();
+    
+    // Show initial prompt
+    workspace.show_prompt(serial);
+    
+    loop {
+        // Run kernel tasks
+        let kernel_progressed = kernel.run_once(serial);
+        
+        // Process keyboard input
+        let mut input_progressed = false;
+        while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
+            if let Some(ch) = parser_state.process_scancode(scancode) {
+                // Build kernel context
+                let Kernel {
+                    boot,
+                    allocator,
+                    heap,
+                    channels,
+                    next_message_id,
+                    ..
+                } = kernel;
+                
+                let mut ctx = KernelContext {
+                    boot,
+                    allocator,
+                    heap,
+                    channels,
+                    next_message_id,
+                };
+                
+                input_progressed = workspace.process_input(ch, &mut ctx, serial);
+            }
+        }
+        
+        // Check for responses from command service
+        let Kernel {
+            boot,
+            allocator,
+            heap,
+            channels,
+            next_message_id,
+            ..
+        } = kernel;
+        
+        let mut ctx = KernelContext {
+            boot,
+            allocator,
+            heap,
+            channels,
+            next_message_id,
+        };
+        
+        // Try to receive response
+        if let Some(message) = ctx.try_recv(response_channel) {
+            if let KernelMessage::CommandResponse(response) = message {
+                match response.status {
+                    CommandStatus::Ok => {
+                        if let Some(output) = response.output_str() {
+                            let _ = serial.write_str(output);
+                            let _ = serial.write_str("\r\n");
+                        }
+                    }
+                    CommandStatus::Error(err) => {
+                        let _ = serial.write_str("error: ");
+                        if let Some(msg) = err.as_str() {
+                            let _ = serial.write_str(msg);
+                        } else {
+                            let _ = serial.write_str("invalid error");
+                        }
+                        let _ = serial.write_str("\r\n");
+                    }
+                }
+                workspace.show_prompt(serial);
+            }
+        }
+        
+        if !kernel_progressed && !input_progressed {
             idle_pause();
         }
     }

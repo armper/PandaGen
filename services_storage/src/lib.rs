@@ -26,6 +26,7 @@ pub mod block_storage;
 pub mod journaled_storage;
 pub mod migration;
 pub mod object;
+pub mod persistent_fs;
 pub mod transaction;
 
 pub use block_storage::{BlockStorage, BlockStorageError};
@@ -34,6 +35,7 @@ pub use journaled_storage::{
 };
 pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
+pub use persistent_fs::{PersistentDirectory, PersistentFilesystem, DirectoryMetadata};
 pub use transaction::{
     Transaction, TransactionError, TransactionId, TransactionState, TransactionalStorage,
 };

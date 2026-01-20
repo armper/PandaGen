@@ -16,6 +16,7 @@ use services_input::{InputService, InputSubscriptionCap};
 /// - Requests focus
 /// - Processes input events
 /// - Translates events to actions
+/// - Maintains command history
 pub struct InteractiveConsole {
     /// Task ID for this console
     task_id: TaskId,
@@ -25,6 +26,10 @@ pub struct InteractiveConsole {
     event_buffer: Vec<InputEvent>,
     /// Typed text buffer (simple demo)
     text_buffer: String,
+    /// Command history (max 100 commands)
+    history: Vec<String>,
+    /// Current history position (for up/down arrow navigation)
+    history_pos: Option<usize>,
 }
 
 impl InteractiveConsole {
@@ -35,6 +40,8 @@ impl InteractiveConsole {
             subscription: None,
             event_buffer: Vec::new(),
             text_buffer: String::new(),
+            history: Vec::new(),
+            history_pos: None,
         }
     }
 
@@ -101,7 +108,15 @@ impl InteractiveConsole {
             KeyCode::Enter => {
                 // Execute command
                 let command = self.text_buffer.clone();
+                if !command.is_empty() {
+                    // Add to history (max 100 commands)
+                    if self.history.len() >= 100 {
+                        self.history.remove(0);
+                    }
+                    self.history.push(command.clone());
+                }
                 self.text_buffer.clear();
+                self.history_pos = None;
                 return Ok(Some(command));
             }
             KeyCode::Backspace => {
@@ -110,6 +125,34 @@ impl InteractiveConsole {
             }
             KeyCode::Escape => {
                 self.text_buffer.clear();
+                self.history_pos = None;
+                return Ok(None);
+            }
+            KeyCode::Up => {
+                // Navigate history backward
+                if !self.history.is_empty() {
+                    let pos = match self.history_pos {
+                        None => self.history.len() - 1,
+                        Some(p) if p > 0 => p - 1,
+                        Some(p) => p,
+                    };
+                    self.history_pos = Some(pos);
+                    self.text_buffer = self.history[pos].clone();
+                }
+                return Ok(None);
+            }
+            KeyCode::Down => {
+                // Navigate history forward
+                if let Some(pos) = self.history_pos {
+                    if pos + 1 < self.history.len() {
+                        self.history_pos = Some(pos + 1);
+                        self.text_buffer = self.history[pos + 1].clone();
+                    } else {
+                        // At end of history, clear buffer
+                        self.history_pos = None;
+                        self.text_buffer.clear();
+                    }
+                }
                 return Ok(None);
             }
             _ => {}
@@ -119,6 +162,7 @@ impl InteractiveConsole {
         let ch = self.key_to_char(event)?;
         if let Some(c) = ch {
             self.text_buffer.push(c);
+            self.history_pos = None; // Reset history position on new input
         }
 
         Ok(None)
@@ -167,6 +211,11 @@ impl InteractiveConsole {
     /// Returns the event buffer (for testing)
     pub fn event_buffer(&self) -> &[InputEvent] {
         &self.event_buffer
+    }
+
+    /// Returns the command history
+    pub fn history(&self) -> &[String] {
+        &self.history
     }
 
     /// Clears the event buffer (for testing)
@@ -426,6 +475,127 @@ mod tests {
 
     #[test]
     fn test_simulated_typing_session() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Simulate typing "ls"
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::L,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::S,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.text_buffer(), "ls");
+
+        let command = console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Enter,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(command, Some("ls".to_string()));
+        assert_eq!(console.text_buffer(), "");
+    }
+
+    #[test]
+    fn test_command_history() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Type and execute first command
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::L,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::S,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        let cmd1 = console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Enter,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(cmd1, Some("ls".to_string()));
+
+        // Type and execute second command
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::C,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::D,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        let cmd2 = console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Enter,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(cmd2, Some("cd".to_string()));
+
+        // Check history
+        assert_eq!(console.history().len(), 2);
+        assert_eq!(console.history()[0], "ls");
+        assert_eq!(console.history()[1], "cd");
+    }
+
+    #[test]
+    fn test_history_navigation() {
+        let task_id = TaskId::new();
+        let mut console = InteractiveConsole::new(task_id);
+
+        // Add commands to history
+        console.history.push("ls".to_string());
+        console.history.push("cd".to_string());
+        console.history.push("pwd".to_string());
+
+        // Press up arrow - should get last command
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Up,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.text_buffer(), "pwd");
+
+        // Press up again - should get second-to-last
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Up,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.text_buffer(), "cd");
+
+        // Press down - should get back to last
+        console
+            .process_event(InputEvent::key(KeyEvent::pressed(
+                KeyCode::Down,
+                Modifiers::none(),
+            )))
+            .unwrap();
+        assert_eq!(console.text_buffer(), "pwd");
+    }
+
+    #[test]
+    fn test_simulated_typing_session_old() {
         let task_id = TaskId::new();
         let mut console = InteractiveConsole::new(task_id);
         let mut input_service = InputService::new();
