@@ -35,7 +35,7 @@ pub use journaled_storage::{
 };
 pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
-pub use persistent_fs::{PersistentDirectory, PersistentFilesystem, DirectoryMetadata};
+pub use persistent_fs::{DirectoryMetadata, PersistentDirectory, PersistentFilesystem};
 pub use transaction::{
     Transaction, TransactionError, TransactionId, TransactionState, TransactionalStorage,
 };

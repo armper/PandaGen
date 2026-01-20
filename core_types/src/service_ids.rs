@@ -33,8 +33,14 @@ mod tests {
 
     #[test]
     fn test_core_service_ids_stable() {
-        assert_eq!(console_service_id(), ServiceId::from_u128(CONSOLE_SERVICE_ID));
-        assert_eq!(command_service_id(), ServiceId::from_u128(COMMAND_SERVICE_ID));
+        assert_eq!(
+            console_service_id(),
+            ServiceId::from_u128(CONSOLE_SERVICE_ID)
+        );
+        assert_eq!(
+            command_service_id(),
+            ServiceId::from_u128(COMMAND_SERVICE_ID)
+        );
         assert_eq!(timer_service_id(), ServiceId::from_u128(TIMER_SERVICE_ID));
         assert_eq!(input_service_id(), ServiceId::from_u128(INPUT_SERVICE_ID));
     }

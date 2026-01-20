@@ -18,7 +18,9 @@
 
 pub mod font;
 
-use hal::{Framebuffer, FramebufferInfo, PixelFormat};
+#[cfg(test)]
+use hal::PixelFormat;
+use hal::{Framebuffer, FramebufferInfo};
 
 use font::{get_char_bitmap, FONT_HEIGHT, FONT_WIDTH};
 
@@ -165,7 +167,9 @@ impl<F: Framebuffer> ConsoleFb<F> {
 
         let info = self.framebuffer.info();
         let buffer = self.framebuffer.buffer_mut();
-        let cursor_bytes = info.format.to_bytes(CURSOR_COLOR.0, CURSOR_COLOR.1, CURSOR_COLOR.2);
+        let cursor_bytes = info
+            .format
+            .to_bytes(CURSOR_COLOR.0, CURSOR_COLOR.1, CURSOR_COLOR.2);
 
         let x_offset = col * FONT_WIDTH;
         let y_offset = row * FONT_HEIGHT;
@@ -195,16 +199,19 @@ impl<F: Framebuffer> ConsoleFb<F> {
     ///
     /// Clears screen, draws lines, and optionally draws cursor.
     /// Lines beyond visible rows are clipped.
-    pub fn present_snapshot(&mut self, snapshot_text: &str, cursor_col: Option<usize>, cursor_row: Option<usize>) {
+    pub fn present_snapshot(
+        &mut self,
+        snapshot_text: &str,
+        cursor_col: Option<usize>,
+        cursor_row: Option<usize>,
+    ) {
         self.clear();
 
-        let mut row = 0;
-        for line in snapshot_text.lines() {
+        for (row, line) in snapshot_text.lines().enumerate() {
             if row >= self.rows {
                 break;
             }
             self.draw_text_at(0, row, line);
-            row += 1;
         }
 
         // Draw cursor if specified

@@ -89,7 +89,10 @@ pub struct KernelInputSink<'a, K: KernelApiV0> {
 
 impl<'a, K: KernelApiV0> KernelInputSink<'a, K> {
     pub fn new(kernel: &'a mut K, source_task: Option<TaskId>) -> Self {
-        Self { kernel, source_task }
+        Self {
+            kernel,
+            source_task,
+        }
     }
 }
 
@@ -100,11 +103,11 @@ impl<'a, K: KernelApiV0> InputEventSink for KernelInputSink<'a, K> {
         event: &InputEvent,
     ) -> Result<(), InputServiceError> {
         let envelope = build_input_event_envelope(event, self.source_task)?;
-        self.kernel
-            .send(cap.channel, envelope)
-            .map_err(|err| InputServiceError::DeliveryFailed {
+        self.kernel.send(cap.channel, envelope).map_err(|err| {
+            InputServiceError::DeliveryFailed {
                 reason: err.to_string(),
-            })?;
+            }
+        })?;
         Ok(())
     }
 }
@@ -497,9 +500,7 @@ mod tests {
         let task_id = TaskId::new();
         let channel = ChannelId::new();
         let mut input_service = InputService::new();
-        let subscription = input_service
-            .subscribe_keyboard(task_id, channel)
-            .unwrap();
+        let subscription = input_service.subscribe_keyboard(task_id, channel).unwrap();
 
         let events = vec![HalKeyEvent::new(0x1E, true)];
         let keyboard = Box::new(FakeKeyboard::new(events));
@@ -520,9 +521,7 @@ mod tests {
         let channel = kernel_api::KernelApiV0::create_channel(&mut kernel).unwrap();
 
         let mut input_service = InputService::new();
-        let subscription = input_service
-            .subscribe_keyboard(task_id, channel)
-            .unwrap();
+        let subscription = input_service.subscribe_keyboard(task_id, channel).unwrap();
 
         let events = vec![HalKeyEvent::new(0x1E, true)];
         let keyboard = Box::new(FakeKeyboard::new(events));

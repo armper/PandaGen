@@ -81,10 +81,9 @@ pub fn build_input_event_envelope(
     event: &InputEvent,
     source: Option<TaskId>,
 ) -> Result<MessageEnvelope, InputServiceError> {
-    let payload =
-        MessagePayload::new(event).map_err(|err| InputServiceError::DeliveryFailed {
-            reason: err.to_string(),
-        })?;
+    let payload = MessagePayload::new(event).map_err(|err| InputServiceError::DeliveryFailed {
+        reason: err.to_string(),
+    })?;
     let mut envelope = MessageEnvelope::new(
         input_service_id(),
         INPUT_EVENT_ACTION.to_string(),
@@ -535,9 +534,7 @@ mod tests {
         let event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
 
         let mut sink = TestSink::new();
-        let delivered = service
-            .deliver_event_with(&cap, &event, &mut sink)
-            .unwrap();
+        let delivered = service.deliver_event_with(&cap, &event, &mut sink).unwrap();
 
         assert!(delivered);
         assert_eq!(sink.delivered, 1);

@@ -101,7 +101,7 @@ impl BareMetalFramebuffer {
 
         Some(Self { info, buffer })
     }
-    
+
     /// Returns framebuffer information
     pub fn info(&self) -> FramebufferInfo {
         self.info
@@ -111,7 +111,7 @@ impl BareMetalFramebuffer {
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.buffer
     }
-    
+
     /// Clear the screen with a color
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         let info = self.info();
@@ -127,7 +127,7 @@ impl BareMetalFramebuffer {
             }
         }
     }
-    
+
     /// Draw a simple text message (for demonstration)
     pub fn draw_text(&mut self, _text: &str) {
         // For now, just clear to show something is working

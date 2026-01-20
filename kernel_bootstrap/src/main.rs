@@ -27,7 +27,9 @@ use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use limine_protocol::structures::memory_map_entry::EntryType;
-use limine_protocol::{FramebufferRequest, HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request};
+use limine_protocol::{
+    FramebufferRequest, HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request,
+};
 
 #[cfg(not(test))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -453,22 +455,20 @@ pub extern "C" fn rust_main() -> ! {
             heap,
         )
     };
-    
+
     // Phase 69: Boot directly into workspace prompt with framebuffer if available
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
-    
+
     // Try to initialize framebuffer console
-    let mut fb_console = unsafe {
-        framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot)
-    };
-    
+    let mut fb_console = unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) };
+
     if fb_console.is_some() {
         kprintln!(serial, "Framebuffer console initialized");
         kprintln!(serial, "Display output enabled on QEMU window");
     } else {
         kprintln!(serial, "Framebuffer unavailable - serial-only mode");
     }
-    
+
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
     workspace_loop(&mut serial, kernel, fb_console.as_mut())
@@ -541,26 +541,26 @@ fn workspace_loop(
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
     let response_channel = ChannelId(1);
-    
+
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
     let mut parser_state = Ps2ParserState::new();
-    
+
     // Track revision for rate-limited rendering
     static LAST_FB_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let mut current_revision = 1u64;
-    
+
     // Show initial prompt
     workspace.show_prompt(serial);
-    
+
     // Initial framebuffer render if available
     if let Some(ref mut fb) = fb_console {
         fb.draw_text("PandaGen Workspace - Framebuffer Active");
     }
-    
+
     loop {
         // Run kernel tasks
         let kernel_progressed = kernel.run_once(serial);
-        
+
         // Process keyboard input
         let mut input_progressed = false;
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
@@ -574,7 +574,7 @@ fn workspace_loop(
                     next_message_id,
                     ..
                 } = kernel;
-                
+
                 let mut ctx = KernelContext {
                     boot,
                     allocator,
@@ -582,16 +582,16 @@ fn workspace_loop(
                     channels,
                     next_message_id,
                 };
-                
+
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
-                
+
                 // Update framebuffer on input change
                 if input_progressed {
                     current_revision += 1;
                 }
             }
         }
-        
+
         // Check for responses from command service
         let Kernel {
             boot,
@@ -601,7 +601,7 @@ fn workspace_loop(
             next_message_id,
             ..
         } = kernel;
-        
+
         let mut ctx = KernelContext {
             boot,
             allocator,
@@ -609,7 +609,7 @@ fn workspace_loop(
             channels,
             next_message_id,
         };
-        
+
         // Try to receive response
         if let Some(message) = ctx.try_recv(response_channel) {
             if let KernelMessage::CommandResponse(response) = message {
@@ -634,7 +634,7 @@ fn workspace_loop(
                 current_revision += 1;
             }
         }
-        
+
         // Update framebuffer if revision changed (rate-limited)
         let last_revision = LAST_FB_REVISION.load(core::sync::atomic::Ordering::Relaxed);
         if current_revision != last_revision {
@@ -644,7 +644,7 @@ fn workspace_loop(
                 LAST_FB_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
         }
-        
+
         if !kernel_progressed && !input_progressed {
             idle_pause();
         }
@@ -754,17 +754,17 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
     // SAFETY: Single-task bare-metal kernel; no concurrent access possible.
     // This is documented architectural constraint, not an oversight.
     static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
-    
+
     // Convert editor buffer to text lines (simple line splitting)
     // For now, just show as single line for simplicity
     let text = editor.get_text();
     let text_str = core::str::from_utf8(text).unwrap_or("<invalid utf8>");
     let lines: [&str; 1] = [text_str];
-    
+
     // Cursor position (for now, just show line 0)
     let cursor_line = Some(0);
     let cursor_col = Some(editor.cursor);
-    
+
     let mut status_buf: [u8; 64] = [0; 64];
     let status = {
         let mut cursor_pos = 0usize;
@@ -826,14 +826,21 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
         }
         core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
     };
-    
+
     // Revision counter starts at 0; first render will be revision 1
     static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-    
+
     // Render using the unified output model
     unsafe {
-        OUTPUT.render_to_serial(serial, &lines, cursor_line, cursor_col, Some(status), revision);
+        OUTPUT.render_to_serial(
+            serial,
+            &lines,
+            cursor_line,
+            cursor_col,
+            Some(status),
+            revision,
+        );
     }
 }
 
@@ -1227,8 +1234,14 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
                         info.framebuffer_height = fb.height;
                         info.framebuffer_pitch = fb.pitch;
                         info.framebuffer_bpp = fb.bpp;
-                        kprintln!(serial, "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
-                            fb.width, fb.height, fb.address as usize, fb.bpp);
+                        kprintln!(
+                            serial,
+                            "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
+                            fb.width,
+                            fb.height,
+                            fb.address as usize,
+                            fb.bpp
+                        );
                     } else {
                         kprintln!(serial, "framebuffer: no framebuffer devices available");
                     }

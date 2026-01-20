@@ -222,12 +222,7 @@ mod tests {
         let schema_version = SchemaVersion::new(1, 0);
 
         registry
-            .register_named(
-                "input".to_string(),
-                service_id,
-                channel_id,
-                schema_version,
-            )
+            .register_named("input".to_string(), service_id, channel_id, schema_version)
             .unwrap();
 
         let looked_up = registry.lookup_by_name("input").unwrap();

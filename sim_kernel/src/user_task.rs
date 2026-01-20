@@ -9,16 +9,23 @@ use identity::ExecutionId;
 use kernel_api::{KernelApi, KernelError};
 
 /// Minimal syscall set for user tasks (Phase 61: replaced with syscall_gate::Syscall).
-/// 
+///
 /// This remains for backwards compatibility with existing code.
 /// New code should use syscall_gate::Syscall directly.
 #[derive(Debug, Clone)]
 #[deprecated(note = "Use syscall_gate::Syscall instead")]
 pub enum UserSyscall {
-    Send { channel: ipc::ChannelId, message: ipc::MessageEnvelope },
-    Recv { channel: ipc::ChannelId },
+    Send {
+        channel: ipc::ChannelId,
+        message: ipc::MessageEnvelope,
+    },
+    Recv {
+        channel: ipc::ChannelId,
+    },
     Yield,
-    Sleep { duration: kernel_api::Duration },
+    Sleep {
+        duration: kernel_api::Duration,
+    },
 }
 
 /// Syscall result for user tasks (Phase 61: replaced with syscall_gate::SyscallResult).
@@ -32,7 +39,8 @@ pub enum UserSyscallResult {
 /// Trap entry signature for user task syscalls.
 ///
 /// Phase 61: This now uses the syscall gate and requires ExecutionId.
-pub type TrapEntry = fn(&mut crate::SimulatedKernel, ExecutionId, Syscall) -> Result<SyscallResult, KernelError>;
+pub type TrapEntry =
+    fn(&mut crate::SimulatedKernel, ExecutionId, Syscall) -> Result<SyscallResult, KernelError>;
 
 /// Default trap handler for user tasks (Phase 61: uses syscall gate).
 pub fn default_trap(
@@ -41,33 +49,72 @@ pub fn default_trap(
     syscall: Syscall,
 ) -> Result<SyscallResult, KernelError> {
     let timestamp_nanos = kernel.now().as_nanos();
-    
+
     // All syscalls must go through the gate - this enforces the isolation boundary
     match syscall {
         Syscall::CreateChannel => {
-            kernel.syscall_gate_mut().record_invoked(caller, "CreateChannel".to_string(), timestamp_nanos);
+            kernel.syscall_gate_mut().record_invoked(
+                caller,
+                "CreateChannel".to_string(),
+                timestamp_nanos,
+            );
             let result = kernel.create_channel().map(SyscallResult::ChannelId);
             match &result {
-                Ok(_) => kernel.syscall_gate_mut().record_completed(caller, "CreateChannel".to_string(), timestamp_nanos),
-                Err(err) => kernel.syscall_gate_mut().record_rejected(caller, "CreateChannel".to_string(), format!("{:?}", err), timestamp_nanos),
+                Ok(_) => kernel.syscall_gate_mut().record_completed(
+                    caller,
+                    "CreateChannel".to_string(),
+                    timestamp_nanos,
+                ),
+                Err(err) => kernel.syscall_gate_mut().record_rejected(
+                    caller,
+                    "CreateChannel".to_string(),
+                    format!("{:?}", err),
+                    timestamp_nanos,
+                ),
             }
             result
         }
         Syscall::Send { channel, message } => {
-            kernel.syscall_gate_mut().record_invoked(caller, "Send".to_string(), timestamp_nanos);
-            let result = kernel.send_message(channel, message).map(|_| SyscallResult::Ok);
+            kernel
+                .syscall_gate_mut()
+                .record_invoked(caller, "Send".to_string(), timestamp_nanos);
+            let result = kernel
+                .send_message(channel, message)
+                .map(|_| SyscallResult::Ok);
             match &result {
-                Ok(_) => kernel.syscall_gate_mut().record_completed(caller, "Send".to_string(), timestamp_nanos),
-                Err(err) => kernel.syscall_gate_mut().record_rejected(caller, "Send".to_string(), format!("{:?}", err), timestamp_nanos),
+                Ok(_) => kernel.syscall_gate_mut().record_completed(
+                    caller,
+                    "Send".to_string(),
+                    timestamp_nanos,
+                ),
+                Err(err) => kernel.syscall_gate_mut().record_rejected(
+                    caller,
+                    "Send".to_string(),
+                    format!("{:?}", err),
+                    timestamp_nanos,
+                ),
             }
             result
         }
         Syscall::Recv { channel } => {
-            kernel.syscall_gate_mut().record_invoked(caller, "Recv".to_string(), timestamp_nanos);
-            let result = kernel.receive_message(channel, None).map(SyscallResult::Message);
+            kernel
+                .syscall_gate_mut()
+                .record_invoked(caller, "Recv".to_string(), timestamp_nanos);
+            let result = kernel
+                .receive_message(channel, None)
+                .map(SyscallResult::Message);
             match &result {
-                Ok(_) => kernel.syscall_gate_mut().record_completed(caller, "Recv".to_string(), timestamp_nanos),
-                Err(err) => kernel.syscall_gate_mut().record_rejected(caller, "Recv".to_string(), format!("{:?}", err), timestamp_nanos),
+                Ok(_) => kernel.syscall_gate_mut().record_completed(
+                    caller,
+                    "Recv".to_string(),
+                    timestamp_nanos,
+                ),
+                Err(err) => kernel.syscall_gate_mut().record_rejected(
+                    caller,
+                    "Recv".to_string(),
+                    format!("{:?}", err),
+                    timestamp_nanos,
+                ),
             }
             result
         }
@@ -75,14 +122,15 @@ pub fn default_trap(
             // Other syscalls not yet implemented in default_trap
             let syscall_name = format!("{:?}", other);
             kernel.syscall_gate_mut().record_rejected(
-                caller, 
-                syscall_name.clone(), 
-                "Not supported in default_trap".to_string(), 
-                timestamp_nanos
+                caller,
+                syscall_name.clone(),
+                "Not supported in default_trap".to_string(),
+                timestamp_nanos,
             );
-            Err(KernelError::InsufficientAuthority(
-                format!("Syscall {} not supported in default_trap", syscall_name)
-            ))
+            Err(KernelError::InsufficientAuthority(format!(
+                "Syscall {} not supported in default_trap",
+                syscall_name
+            )))
         }
     }
 }
@@ -155,16 +203,18 @@ mod tests {
     #[test]
     fn test_user_task_syscalls_through_gate() {
         use kernel_api::TaskDescriptor;
-        
+
         let mut kernel = crate::SimulatedKernel::new();
-        let handle = kernel.spawn_task(TaskDescriptor::new("user".to_string())).unwrap();
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("user".to_string()))
+            .unwrap();
         let task_id = handle.task_id;
         let exec_id = kernel.get_task_identity(task_id).unwrap();
-        
+
         let channel = kernel.create_channel().unwrap();
 
         let ctx = UserTaskContext::new(task_id, exec_id, 256, 256, default_trap);
-        
+
         let payload = MessagePayload::new(&"ping").unwrap();
         let message = ipc::MessageEnvelope::new(
             core_types::ServiceId::new(),
@@ -174,20 +224,26 @@ mod tests {
         );
 
         // Send through syscall gate
-        let result = ctx.syscall(&mut kernel, Syscall::Send { channel, message: message.clone() });
+        let result = ctx.syscall(
+            &mut kernel,
+            Syscall::Send {
+                channel,
+                message: message.clone(),
+            },
+        );
         assert!(result.is_ok());
 
         // Recv through syscall gate
         let result = ctx.syscall(&mut kernel, Syscall::Recv { channel });
         assert!(result.is_ok());
-        
+
         match result.unwrap() {
             SyscallResult::Message(envelope) => {
                 assert_eq!(envelope.action, "ping");
             }
             _ => panic!("Expected message"),
         }
-        
+
         // Verify syscall gate recorded events
         let audit = kernel.syscall_gate().audit_log();
         assert!(audit.events().len() >= 2); // At least Send and Recv

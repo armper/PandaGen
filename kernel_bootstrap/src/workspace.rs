@@ -6,7 +6,7 @@
 use core::fmt::Write;
 
 use crate::serial::SerialPort;
-use crate::{KernelContext, KernelMessage, CommandRequest, ChannelId, KernelApiV0, COMMAND_MAX};
+use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -176,14 +176,19 @@ impl WorkspaceSession {
         command: &str,
     ) {
         let request_id = ctx.next_message_id();
-        
+
         let mut command_bytes = [0u8; COMMAND_MAX];
         let cmd_bytes = command.as_bytes();
         let len = cmd_bytes.len().min(COMMAND_MAX);
         command_bytes[..len].copy_from_slice(&cmd_bytes[..len]);
 
-        if let Some(request) = CommandRequest::from_bytes(&command_bytes[..len], request_id, self.response_channel) {
-            if ctx.send(self.command_channel, KernelMessage::CommandRequest(request)).is_ok() {
+        if let Some(request) =
+            CommandRequest::from_bytes(&command_bytes[..len], request_id, self.response_channel)
+        {
+            if ctx
+                .send(self.command_channel, KernelMessage::CommandRequest(request))
+                .is_ok()
+            {
                 // Wait for response (simplified synchronous handling)
                 // In a real implementation, this would be async
                 let _ = writeln!(serial, "(Delegated to command service)");

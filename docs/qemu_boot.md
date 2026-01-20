@@ -33,8 +33,11 @@ cargo xtask qemu
 This runs:
 
 ```
-qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display none -no-reboot
+qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display cocoa -no-reboot
 ```
+
+**Phase 69 Update**: The QEMU window now displays framebuffer output! The workspace and console
+are visible on-screen, not just on the serial console.
 
 ## Expected Behavior
 
@@ -44,8 +47,27 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display none 
 - Interrupt initialization messages appear.
 - A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
 - **NEW in Phase 57**: Keyboard input is now IRQ-driven - typing on keyboard generates visible characters.
+- **NEW in Phase 69**: The QEMU window shows a **framebuffer console** with a blue background, indicating the framebuffer is active.
 - **Editor mode**: The kernel now runs in editor mode, displaying typed characters in a simple text editor.
 - Timer ticks are shown as dots (. printed every second at 100 Hz) in the old console mode.
+
+## Framebuffer Console (Phase 69)
+
+The kernel now initializes a framebuffer console at boot:
+
+- **Limine Framebuffer Request**: The kernel requests a framebuffer from Limine bootloader
+- **Blue Screen Indicator**: If the framebuffer is available, the QEMU window displays a blue background
+- **Fallback**: If no framebuffer is available, the kernel continues in serial-only mode
+- **Serial Logging**: Serial output is always available for debugging, regardless of framebuffer status
+
+### Framebuffer Details
+
+- Resolution: Determined by QEMU/firmware (typically 1024x768 or 800x600)
+- Format: 32-bit RGB (most common)
+- The blue background confirms that:
+  1. Limine provided a valid framebuffer
+  2. The kernel successfully mapped and accessed video memory
+  3. Pixel writes are working correctly
 
 ## Expected Serial Output
 

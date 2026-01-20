@@ -2,7 +2,9 @@
 
 use fs_view::DirectoryView;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
-use services_storage::{JournaledStorage, ObjectId, TransactionError, TransactionalStorage, VersionId};
+use services_storage::{
+    JournaledStorage, ObjectId, TransactionError, TransactionalStorage, VersionId,
+};
 use thiserror::Error;
 
 /// Document I/O error
@@ -168,7 +170,9 @@ impl EditorIo for StorageEditorIo {
                 .ok_or_else(|| IoError::PermissionDenied("No root directory".to_string()))?;
             match fs.open(root, &path) {
                 Ok(id) => id,
-                Err(services_fs_view::OperationError::NotFound(_)) => return Err(IoError::NotFound),
+                Err(services_fs_view::OperationError::NotFound(_)) => {
+                    return Err(IoError::NotFound)
+                }
                 Err(services_fs_view::OperationError::AccessDenied(reason)) => {
                     return Err(IoError::PermissionDenied(reason))
                 }
@@ -214,15 +218,9 @@ impl EditorIo for StorageEditorIo {
             .storage
             .write(&mut tx, handle.object_id, content.as_bytes())
             .map_err(Self::map_tx_error)?;
-        self.storage
-            .commit(&mut tx)
-            .map_err(Self::map_tx_error)?;
+        self.storage.commit(&mut tx).map_err(Self::map_tx_error)?;
 
-        Ok(SaveResult::new(
-            new_version_id,
-            false,
-            "Saved successfully",
-        ))
+        Ok(SaveResult::new(new_version_id, false, "Saved successfully"))
     }
 }
 

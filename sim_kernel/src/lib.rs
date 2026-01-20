@@ -25,6 +25,7 @@ pub mod address_space;
 pub mod capability_audit;
 pub mod executable;
 pub mod fault_injection;
+pub mod message_queue;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod scheduler;
@@ -32,19 +33,20 @@ pub mod smp;
 pub mod syscall_gate;
 pub mod test_utils;
 pub mod timer;
-pub mod message_queue;
 pub mod user_task;
 
 use core_types::{
     AddressSpaceCap, Cap, CapabilityEvent, CapabilityInvalidReason, CapabilityMetadata,
-    CapabilityStatus, MemoryAccessType, MemoryBacking, MemoryError, MemoryPerms, MemoryRegion, MemoryRegionCap,
-    ServiceId, TaskId,
+    CapabilityStatus, MemoryAccessType, MemoryBacking, MemoryError, MemoryPerms, MemoryRegion,
+    MemoryRegionCap, ServiceId, TaskId,
 };
 use fault_injection::FaultInjector;
 use hal::TimerDevice;
 use identity::{ExecutionId, ExitNotification, ExitReason, IdentityMetadata};
 use ipc::{ChannelId, Compatibility, MessageEnvelope, SchemaMismatchError, VersionPolicy};
-use kernel_api::{Duration, Instant, KernelApi, KernelApiV0, KernelError, TaskDescriptor, TaskHandle};
+use kernel_api::{
+    Duration, Instant, KernelApi, KernelApiV0, KernelError, TaskDescriptor, TaskHandle,
+};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::CpuTicks;
 use std::collections::{HashMap, HashSet};
@@ -342,9 +344,10 @@ impl SimulatedKernel {
         kernel_stack_bytes: usize,
     ) -> Result<user_task::UserTaskContext, KernelError> {
         let handle = self.spawn_task(TaskDescriptor::new(name))?;
-        let execution_id = self.get_task_identity(handle.task_id)
+        let execution_id = self
+            .get_task_identity(handle.task_id)
             .ok_or_else(|| KernelError::SpawnFailed("Failed to get task identity".to_string()))?;
-        
+
         Ok(user_task::UserTaskContext::new(
             handle.task_id,
             execution_id,
@@ -355,23 +358,36 @@ impl SimulatedKernel {
     }
 
     /// Loads an executable and prepares it for execution (Phase 62)
-    pub fn load_executable(&mut self, name: String, data: &[u8]) -> Result<executable::LoadedProgram, executable::LoadError> {
+    pub fn load_executable(
+        &mut self,
+        name: String,
+        data: &[u8],
+    ) -> Result<executable::LoadedProgram, executable::LoadError> {
         let mut loader = executable::ExecutableLoader::new(self);
         let mut program = loader.load(name, data)?;
-        
+
         // Update the execution_id with the actual one from the kernel
         if let Some(exec_id) = self.get_task_identity(program.task_id) {
             program.execution_id = exec_id;
         }
-        
+
         Ok(program)
     }
 
     /// Maps a loaded program's sections into its address space (Phase 62)
-    pub fn map_program_sections(&mut self, program: &executable::LoadedProgram) -> Result<(), executable::LoadError> {
-        let space_cap = self.create_address_space(program.execution_id)
-            .map_err(|e| executable::LoadError::KernelError(KernelError::SpawnFailed(format!("Failed to create address space: {:?}", e))))?;
-        
+    pub fn map_program_sections(
+        &mut self,
+        program: &executable::LoadedProgram,
+    ) -> Result<(), executable::LoadError> {
+        let space_cap = self
+            .create_address_space(program.execution_id)
+            .map_err(|e| {
+                executable::LoadError::KernelError(KernelError::SpawnFailed(format!(
+                    "Failed to create address space: {:?}",
+                    e
+                )))
+            })?;
+
         for section in &program.sections {
             let permissions = section.permissions.to_memory_perms();
             let backing = match section.section_type {
@@ -379,16 +395,22 @@ impl SimulatedKernel {
                 executable::SectionType::Data => MemoryBacking::Anonymous,
                 executable::SectionType::Bss => MemoryBacking::Anonymous,
             };
-            
+
             self.allocate_region(
                 &space_cap,
                 section.size,
                 permissions,
                 backing,
                 program.execution_id,
-            ).map_err(|e| executable::LoadError::KernelError(KernelError::SpawnFailed(format!("Failed to allocate region: {:?}", e))))?;
+            )
+            .map_err(|e| {
+                executable::LoadError::KernelError(KernelError::SpawnFailed(format!(
+                    "Failed to allocate region: {:?}",
+                    e
+                )))
+            })?;
         }
-        
+
         Ok(())
     }
 
@@ -396,19 +418,22 @@ impl SimulatedKernel {
     ///
     /// This creates the user task context and returns it ready for execution.
     /// The caller can then invoke the program by simulating execution at the entry point.
-    pub fn launch_program(&mut self, program: executable::LoadedProgram) -> Result<user_task::UserTaskContext, executable::LoadError> {
+    pub fn launch_program(
+        &mut self,
+        program: executable::LoadedProgram,
+    ) -> Result<user_task::UserTaskContext, executable::LoadError> {
         // Map sections into address space
         self.map_program_sections(&program)?;
-        
+
         // Create user task context with proper stacks
         let ctx = user_task::UserTaskContext::new(
             program.task_id,
             program.execution_id,
-            8192,  // 8KB user stack
-            4096,  // 4KB kernel stack
+            8192, // 8KB user stack
+            4096, // 4KB kernel stack
             user_task::default_trap,
         );
-        
+
         Ok(ctx)
     }
 
@@ -930,10 +955,7 @@ impl SimulatedKernel {
 
     /// Checks if the kernel is idle (no messages pending)
     pub fn is_idle(&self) -> bool {
-        self.channels
-            .values()
-            .all(|ch| ch.queue.is_empty())
-            && self.delayed_messages.is_empty()
+        self.channels.values().all(|ch| ch.queue.is_empty()) && self.delayed_messages.is_empty()
     }
 
     /// Returns the number of spawned tasks
@@ -2067,10 +2089,7 @@ impl KernelApiV0 for SimulatedKernel {
         name: String,
         capabilities: Vec<Cap<()>>,
     ) -> Result<TaskId, KernelError> {
-        let descriptor = TaskDescriptor {
-            name,
-            capabilities,
-        };
+        let descriptor = TaskDescriptor { name, capabilities };
         let handle = self.spawn_task(descriptor)?;
         Ok(handle.task_id)
     }
@@ -2079,11 +2098,7 @@ impl KernelApiV0 for SimulatedKernel {
         KernelApi::create_channel(self)
     }
 
-    fn send(
-        &mut self,
-        channel: ChannelId,
-        message: MessageEnvelope,
-    ) -> Result<(), KernelError> {
+    fn send(&mut self, channel: ChannelId, message: MessageEnvelope) -> Result<(), KernelError> {
         KernelApi::send_message(self, channel, message)
     }
 
@@ -2110,9 +2125,14 @@ impl KernelApiV0 for SimulatedKernel {
 // ============================================================================
 
 impl syscall_gate::MemoryOps for SimulatedKernel {
-    fn create_address_space_op(&mut self, execution_id: ExecutionId) -> Result<AddressSpaceCap, MemoryError> {
+    fn create_address_space_op(
+        &mut self,
+        execution_id: ExecutionId,
+    ) -> Result<AddressSpaceCap, MemoryError> {
         let timestamp_nanos = self.current_time.as_nanos();
-        let cap = self.address_space_manager.create_address_space(execution_id, timestamp_nanos);
+        let cap = self
+            .address_space_manager
+            .create_address_space(execution_id, timestamp_nanos);
         Ok(cap)
     }
 
@@ -2126,7 +2146,7 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
     ) -> Result<MemoryRegionCap, MemoryError> {
         let timestamp_nanos = self.current_time.as_nanos();
         let region = MemoryRegion::new(size_bytes, permissions, backing);
-        
+
         // Check memory budget before allocation
         if let Some(identity) = self.identity_table.get_mut(&caller_execution_id) {
             if let Some(budget) = &identity.budget {
@@ -2134,7 +2154,7 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
                     // Calculate units: 1 unit per 4096 bytes (1 page)
                     let units_needed = ((size_bytes + 4095) / 4096) as u64;
                     let current_usage = identity.usage.memory_units.0;
-                    
+
                     if current_usage + units_needed > limit.0 {
                         // Record budget exhaustion
                         self.resource_audit.record_event(
@@ -2147,20 +2167,27 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
                                 operation: "allocate_region".to_string(),
                             },
                         );
-                        
+
                         return Err(MemoryError::BudgetExhausted {
                             requested: units_needed,
                             available: limit.0.saturating_sub(current_usage),
                         });
                     }
-                    
+
                     // Consume memory units
-                    identity.usage.consume_memory_units(resources::MemoryUnits::new(units_needed));
+                    identity
+                        .usage
+                        .consume_memory_units(resources::MemoryUnits::new(units_needed));
                 }
             }
         }
-        
-        self.address_space_manager.allocate_region(space_cap, region, caller_execution_id, timestamp_nanos)
+
+        self.address_space_manager.allocate_region(
+            space_cap,
+            region,
+            caller_execution_id,
+            timestamp_nanos,
+        )
     }
 
     fn access_region_op(
@@ -2170,7 +2197,12 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
         caller_execution_id: ExecutionId,
     ) -> Result<(), MemoryError> {
         let timestamp_nanos = self.current_time.as_nanos();
-        self.address_space_manager.access_region(region_cap, access_type, caller_execution_id, timestamp_nanos)
+        self.address_space_manager.access_region(
+            region_cap,
+            access_type,
+            caller_execution_id,
+            timestamp_nanos,
+        )
     }
 }
 
@@ -3619,7 +3651,9 @@ mod tests {
     #[test]
     fn test_isolation_syscall_gate_enforces_all_operations() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // All operations must go through syscall gate
         let channel_result = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
@@ -3634,11 +3668,15 @@ mod tests {
     #[test]
     fn test_isolation_task_cannot_bypass_syscall_gate() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // Record a bypass attempt
         let timestamp = kernel.now().as_nanos();
-        kernel.syscall_gate_mut().record_bypass_attempt(ctx.execution_id, timestamp);
+        kernel
+            .syscall_gate_mut()
+            .record_bypass_attempt(ctx.execution_id, timestamp);
 
         // Verify it was recorded
         let audit = kernel.syscall_gate().audit_log();
@@ -3650,8 +3688,12 @@ mod tests {
         let mut kernel = SimulatedKernel::new();
 
         // Spawn two user tasks
-        let ctx1 = kernel.spawn_user_task("task1".to_string(), 4096, 4096).unwrap();
-        let ctx2 = kernel.spawn_user_task("task2".to_string(), 4096, 4096).unwrap();
+        let ctx1 = kernel
+            .spawn_user_task("task1".to_string(), 4096, 4096)
+            .unwrap();
+        let ctx2 = kernel
+            .spawn_user_task("task2".to_string(), 4096, 4096)
+            .unwrap();
 
         // Each task should have its own address space
         let space1 = kernel.get_address_space(ctx1.execution_id);
@@ -3665,7 +3707,9 @@ mod tests {
     #[test]
     fn test_isolation_capability_based_access() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // Create address space capability
         let space_cap = kernel.create_address_space(ctx.execution_id).unwrap();
@@ -3695,7 +3739,9 @@ mod tests {
     #[test]
     fn test_isolation_syscall_rejection_recorded() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // Try to lookup non-existent service
         let result = ctx.syscall(
@@ -3716,7 +3762,9 @@ mod tests {
     #[test]
     fn test_isolation_no_ambient_authority() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // Create a channel - this creates it in kernel space
         let channel = kernel_api::KernelApi::create_channel(&mut kernel).unwrap();
@@ -3733,54 +3781,73 @@ mod tests {
 
         // This succeeds in current implementation but demonstrates the pattern
         // In a full implementation, this would require a channel capability
-        let _ = ctx.syscall(&mut kernel, syscall_gate::Syscall::Send { channel, message });
+        let _ = ctx.syscall(
+            &mut kernel,
+            syscall_gate::Syscall::Send { channel, message },
+        );
     }
 
     #[test]
     fn test_isolation_memory_access_enforced() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         let space_cap = kernel.create_address_space(ctx.execution_id).unwrap();
-        
+
         // Allocate a read-only region
-        let region_cap = kernel.allocate_region(
-            &space_cap,
-            4096,
-            MemoryPerms::read_only(),
-            MemoryBacking::Anonymous,
-            ctx.execution_id,
-        ).unwrap();
+        let region_cap = kernel
+            .allocate_region(
+                &space_cap,
+                4096,
+                MemoryPerms::read_only(),
+                MemoryBacking::Anonymous,
+                ctx.execution_id,
+            )
+            .unwrap();
 
         // Read access should succeed
-        assert!(kernel.access_region(&region_cap, MemoryAccessType::Read, ctx.execution_id).is_ok());
+        assert!(kernel
+            .access_region(&region_cap, MemoryAccessType::Read, ctx.execution_id)
+            .is_ok());
 
         // Write access should fail
         let result = kernel.access_region(&region_cap, MemoryAccessType::Write, ctx.execution_id);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MemoryError::PermissionDenied { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            MemoryError::PermissionDenied { .. }
+        ));
 
         // Verify access attempts were audited
         let audit = kernel.address_space_audit();
-        assert!(audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::AccessAttempted { .. })));
+        assert!(audit
+            .has_event(|e| matches!(e, address_space::AddressSpaceEvent::AccessAttempted { .. })));
     }
 
     #[test]
     fn test_isolation_cross_task_memory_denied() {
         let mut kernel = SimulatedKernel::new();
-        
-        let ctx1 = kernel.spawn_user_task("task1".to_string(), 4096, 4096).unwrap();
-        let ctx2 = kernel.spawn_user_task("task2".to_string(), 4096, 4096).unwrap();
+
+        let ctx1 = kernel
+            .spawn_user_task("task1".to_string(), 4096, 4096)
+            .unwrap();
+        let ctx2 = kernel
+            .spawn_user_task("task2".to_string(), 4096, 4096)
+            .unwrap();
 
         // Task 1 allocates a region
         let space_cap1 = kernel.create_address_space(ctx1.execution_id).unwrap();
-        let region_cap1 = kernel.allocate_region(
-            &space_cap1,
-            4096,
-            MemoryPerms::read_write(),
-            MemoryBacking::Anonymous,
-            ctx1.execution_id,
-        ).unwrap();
+        let region_cap1 = kernel
+            .allocate_region(
+                &space_cap1,
+                4096,
+                MemoryPerms::read_write(),
+                MemoryBacking::Anonymous,
+                ctx1.execution_id,
+            )
+            .unwrap();
 
         // Task 2 cannot access task 1's region
         let result = kernel.access_region(&region_cap1, MemoryAccessType::Read, ctx2.execution_id);
@@ -3791,7 +3858,9 @@ mod tests {
     #[test]
     fn test_isolation_deterministic_syscall_audit() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // Perform a series of syscalls
         let _ = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
@@ -3799,8 +3868,10 @@ mod tests {
 
         // Verify exact sequence was recorded
         let audit = kernel.syscall_gate().audit_log();
-        let invocations = audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Invoked { .. }));
-        let completions = audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Completed { .. }));
+        let invocations =
+            audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Invoked { .. }));
+        let completions =
+            audit.count_events(|e| matches!(e, syscall_gate::SyscallEvent::Completed { .. }));
 
         assert_eq!(invocations, 2);
         assert_eq!(completions, 2);
@@ -3809,7 +3880,9 @@ mod tests {
     #[test]
     fn test_isolation_syscall_gate_validates_caller() {
         let mut kernel = SimulatedKernel::new();
-        let ctx = kernel.spawn_user_task("user_task".to_string(), 4096, 4096).unwrap();
+        let ctx = kernel
+            .spawn_user_task("user_task".to_string(), 4096, 4096)
+            .unwrap();
 
         // All syscalls include caller ExecutionId for validation
         let result = ctx.syscall(&mut kernel, syscall_gate::Syscall::CreateChannel);
@@ -3830,56 +3903,68 @@ mod tests {
     #[test]
     fn test_executable_load_and_parse() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Create a simple executable
         let code = vec![0x90u8; 4096]; // NOP sled
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
+
         // Load it
-        let program = kernel.load_executable("test_program".to_string(), &exe_data).unwrap();
-        
+        let program = kernel
+            .load_executable("test_program".to_string(), &exe_data)
+            .unwrap();
+
         // Verify loaded program
         assert_eq!(program.entry_point, 0x1000);
         assert_eq!(program.sections.len(), 1);
-        assert_eq!(program.sections[0].section_type, executable::SectionType::Text);
+        assert_eq!(
+            program.sections[0].section_type,
+            executable::SectionType::Text
+        );
     }
 
     #[test]
     fn test_executable_section_mapping() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let code = vec![0x90u8; 4096];
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
-        let program = kernel.load_executable("test_program".to_string(), &exe_data).unwrap();
+
+        let program = kernel
+            .load_executable("test_program".to_string(), &exe_data)
+            .unwrap();
         let exec_id = program.execution_id;
-        
+
         // Map sections
         kernel.map_program_sections(&program).unwrap();
-        
+
         // Verify address space was created and sections mapped
         let space = kernel.get_address_space(exec_id).unwrap();
         assert_eq!(space.region_count(), 1);
-        
+
         // Check audit log
         let audit = kernel.address_space_audit();
-        assert!(audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::SpaceCreated { .. })));
-        assert!(audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::RegionAllocated { .. })));
+        assert!(
+            audit.has_event(|e| matches!(e, address_space::AddressSpaceEvent::SpaceCreated { .. }))
+        );
+        assert!(audit
+            .has_event(|e| matches!(e, address_space::AddressSpaceEvent::RegionAllocated { .. })));
     }
 
     #[test]
     fn test_executable_launch_creates_user_task() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let code = vec![0x90u8; 4096];
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
-        let program = kernel.load_executable("test_program".to_string(), &exe_data).unwrap();
+
+        let program = kernel
+            .load_executable("test_program".to_string(), &exe_data)
+            .unwrap();
         let task_id = program.task_id;
-        
+
         // Launch the program
         let ctx = kernel.launch_program(program).unwrap();
-        
+
         // Verify user task context was created
         assert_eq!(ctx.task_id, task_id);
         assert_eq!(ctx.user_stack_size(), 8192);
@@ -3889,7 +3974,7 @@ mod tests {
     #[test]
     fn test_executable_invalid_format_rejected() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Invalid magic number
         let bad_data = vec![0u8; 100];
         let result = kernel.load_executable("bad_program".to_string(), &bad_data);
@@ -3899,25 +3984,27 @@ mod tests {
     #[test]
     fn test_executable_section_permissions() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let code = vec![0x90u8; 4096];
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
-        let program = kernel.load_executable("test_program".to_string(), &exe_data).unwrap();
+
+        let program = kernel
+            .load_executable("test_program".to_string(), &exe_data)
+            .unwrap();
         let exec_id = program.execution_id;
-        
+
         // Text section should have read+execute permissions
         let text_section = program.text_section().unwrap();
         assert!(text_section.permissions.read);
         assert!(!text_section.permissions.write);
         assert!(text_section.permissions.execute);
-        
+
         // Map and verify permissions are enforced
         kernel.map_program_sections(&program).unwrap();
-        
+
         let space = kernel.get_address_space(exec_id).unwrap();
         let region = &space.regions()[0];
-        
+
         assert!(region.can_read());
         assert!(!region.can_write());
         assert!(region.can_execute());
@@ -3926,39 +4013,41 @@ mod tests {
     #[test]
     fn test_executable_multiple_sections() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Create executable with text, data, and bss sections
         let mut buf = Vec::new();
-        
+
         // Header
         buf.extend_from_slice(&executable::PEX_MAGIC.to_le_bytes());
         buf.extend_from_slice(&executable::PEX_VERSION.to_le_bytes());
         buf.extend_from_slice(&0x1000u64.to_le_bytes());
         buf.extend_from_slice(&3u32.to_le_bytes()); // 3 sections
-        
+
         // Text section (read+execute)
         buf.extend_from_slice(&1u32.to_le_bytes()); // Text
         buf.extend_from_slice(&4096u64.to_le_bytes());
         buf.extend_from_slice(&5u32.to_le_bytes()); // read(1) + execute(4)
         buf.extend_from_slice(&vec![0x90u8; 4096]);
-        
+
         // Data section (read+write)
         buf.extend_from_slice(&2u32.to_le_bytes()); // Data
         buf.extend_from_slice(&4096u64.to_le_bytes());
         buf.extend_from_slice(&3u32.to_le_bytes()); // read(1) + write(2)
         buf.extend_from_slice(&vec![0x42u8; 4096]);
-        
+
         // BSS section (read+write, zero-initialized)
         buf.extend_from_slice(&3u32.to_le_bytes()); // Bss
         buf.extend_from_slice(&4096u64.to_le_bytes());
         buf.extend_from_slice(&3u32.to_le_bytes()); // read(1) + write(2)
-        
-        let program = kernel.load_executable("multi_section".to_string(), &buf).unwrap();
+
+        let program = kernel
+            .load_executable("multi_section".to_string(), &buf)
+            .unwrap();
         assert_eq!(program.sections.len(), 3);
-        
+
         // Map sections
         kernel.map_program_sections(&program).unwrap();
-        
+
         let space = kernel.get_address_space(program.execution_id).unwrap();
         assert_eq!(space.region_count(), 3);
     }
@@ -3966,41 +4055,45 @@ mod tests {
     #[test]
     fn test_executable_entry_point_stored() {
         let mut kernel = SimulatedKernel::new();
-        
+
         let code = vec![0x90u8; 4096];
         let entry = 0x1234u64;
         let exe_data = executable::Executable::create_test_program(entry, code);
-        
-        let program = kernel.load_executable("entry_test".to_string(), &exe_data).unwrap();
+
+        let program = kernel
+            .load_executable("entry_test".to_string(), &exe_data)
+            .unwrap();
         assert_eq!(program.entry_point, entry);
     }
 
     #[test]
     fn test_executable_complete_lifecycle() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Create executable
         let code = vec![0x90u8; 4096];
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
+
         // Load
-        let program = kernel.load_executable("lifecycle_test".to_string(), &exe_data).unwrap();
+        let program = kernel
+            .load_executable("lifecycle_test".to_string(), &exe_data)
+            .unwrap();
         let task_id = program.task_id;
         let exec_id = program.execution_id;
-        
+
         // Launch
         let _ctx = kernel.launch_program(program).unwrap();
-        
+
         // Verify everything is set up
         assert!(kernel.get_address_space(exec_id).is_some());
         assert!(kernel.get_task_identity(task_id).is_some());
-        
+
         // Terminate
         kernel.terminate_task(task_id);
-        
+
         // Verify cleanup
         assert!(kernel.get_address_space(exec_id).is_none());
-        
+
         // Verify exit notification
         let notifications = kernel.get_exit_notifications();
         assert_eq!(notifications.len(), 1);
@@ -4010,26 +4103,28 @@ mod tests {
     #[test]
     fn test_executable_isolated_address_spaces() {
         let mut kernel = SimulatedKernel::new();
-        
+
         // Load two programs
         let code = vec![0x90u8; 4096];
         let exe_data = executable::Executable::create_test_program(0x1000, code);
-        
-        let program1 = kernel.load_executable("prog1".to_string(), &exe_data).unwrap();
+
+        let program1 = kernel
+            .load_executable("prog1".to_string(), &exe_data)
+            .unwrap();
         let exec_id1 = program1.execution_id;
-        let program2 = kernel.load_executable("prog2".to_string(), &exe_data).unwrap();
+        let program2 = kernel
+            .load_executable("prog2".to_string(), &exe_data)
+            .unwrap();
         let exec_id2 = program2.execution_id;
-        
+
         // Launch both
         let _ctx1 = kernel.launch_program(program1).unwrap();
         let _ctx2 = kernel.launch_program(program2).unwrap();
-        
+
         // Verify separate address spaces
         let space1 = kernel.get_address_space(exec_id1).unwrap();
         let space2 = kernel.get_address_space(exec_id2).unwrap();
-        
+
         assert_ne!(space1.space_id, space2.space_id);
     }
 }
-
-

@@ -174,8 +174,12 @@ impl Executable {
         if data.len() < offset + 4 {
             return Err(ExecutableError::FileTooShort);
         }
-        let section_count =
-            u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+        let section_count = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
         offset += 4;
 
         // Read sections
@@ -335,7 +339,7 @@ impl<'a, K: KernelApi> ExecutableLoader<'a, K> {
             .map_err(LoadError::KernelError)?;
 
         let task_id = task_handle.task_id;
-        
+
         // Create a synthetic execution ID
         // In real usage with SimulatedKernel, this will be overridden
         let execution_id = ExecutionId::new();

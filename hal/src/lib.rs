@@ -25,9 +25,9 @@ pub mod keyboard_translation;
 pub mod memory;
 pub mod timer;
 
-pub use block_device::{BlockDevice, BlockError, BLOCK_SIZE};
 #[cfg(feature = "alloc")]
 pub use block_device::RamDisk;
+pub use block_device::{BlockDevice, BlockError, BLOCK_SIZE};
 pub use cpu::CpuHal;
 pub use framebuffer::{Framebuffer, FramebufferInfo, PixelFormat};
 pub use interrupts::InterruptHal;

@@ -4,8 +4,7 @@
 //! persistent filesystem capabilities.
 
 use crate::{
-    BlockStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage,
-    VersionId,
+    BlockStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage, VersionId,
 };
 use hal::BlockDevice;
 use serde::{Deserialize, Serialize};
@@ -144,13 +143,18 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
     }
 
     /// Read a directory by object ID
-    pub fn read_directory(&mut self, dir_id: ObjectId) -> Result<PersistentDirectory, TransactionError> {
+    pub fn read_directory(
+        &mut self,
+        dir_id: ObjectId,
+    ) -> Result<PersistentDirectory, TransactionError> {
         let tx = self.storage.begin_transaction()?;
         let version_id = self.storage.read(&tx, dir_id)?;
-        
-        let data = self.storage.read_object_data(dir_id, version_id)
+
+        let data = self
+            .storage
+            .read_object_data(dir_id, version_id)
             .map_err(|e| TransactionError::StorageError(format!("read data failed: {:?}", e)))?;
-        
+
         let dir: PersistentDirectory = serde_json::from_slice(&data)
             .map_err(|e| TransactionError::StorageError(format!("deserialize failed: {:?}", e)))?;
 
@@ -228,16 +232,16 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
     }
 
     /// List directory contents
-    pub fn list(&mut self, dir_id: ObjectId) -> Result<Vec<(String, DirectoryEntry)>, TransactionError> {
+    pub fn list(
+        &mut self,
+        dir_id: ObjectId,
+    ) -> Result<Vec<(String, DirectoryEntry)>, TransactionError> {
         let dir = self.read_directory(dir_id)?;
         Ok(dir.list_entries())
     }
 
     /// Write file content (as a Blob object)
-    pub fn write_file(
-        &mut self,
-        content: &[u8],
-    ) -> Result<ObjectId, TransactionError> {
+    pub fn write_file(&mut self, content: &[u8]) -> Result<ObjectId, TransactionError> {
         let file_id = ObjectId::new();
         let mut tx = self.storage.begin_transaction()?;
         self.storage.write(&mut tx, file_id, content)?;
@@ -249,7 +253,9 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
     pub fn read_file(&mut self, file_id: ObjectId) -> Result<Vec<u8>, TransactionError> {
         let tx = self.storage.begin_transaction()?;
         let version_id = self.storage.read(&tx, file_id)?;
-        let data = self.storage.read_object_data(file_id, version_id)
+        let data = self
+            .storage
+            .read_object_data(file_id, version_id)
             .map_err(|e| TransactionError::StorageError(format!("read data failed: {:?}", e)))?;
         Ok(data)
     }
@@ -264,13 +270,14 @@ mod tests {
     fn test_link_then_read() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root_id = fs.root_dir_id();
         let file_id = fs.write_file(b"test").unwrap();
-        
+
         // Link the file
-        fs.link("test.txt", root_id, file_id, ObjectKind::Blob, 1000).unwrap();
-        
+        fs.link("test.txt", root_id, file_id, ObjectKind::Blob, 1000)
+            .unwrap();
+
         // Try to read the directory
         let root_dir = fs.read_directory(root_id).unwrap();
         assert_eq!(root_dir.entries.len(), 1);
@@ -281,9 +288,9 @@ mod tests {
     fn test_read_after_write() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root_id = fs.root_dir_id();
-        
+
         // Try to read the root directory that was just created
         let root_dir = fs.read_directory(root_id).unwrap();
         assert_eq!(root_dir.entries.len(), 0);
@@ -293,7 +300,7 @@ mod tests {
     fn test_format_and_root() {
         let disk = RamDisk::with_capacity_mb(10);
         let fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root = fs.root_dir_id();
         assert!(root.to_string().len() > 0);
     }
@@ -302,7 +309,7 @@ mod tests {
     fn test_mkdir() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root_id = fs.root_dir_id();
         let usr_id = fs.mkdir("usr", root_id, "root", 1000).unwrap();
 
@@ -317,10 +324,10 @@ mod tests {
     fn test_write_read_file() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let content = b"Hello, PandaGen!";
         let file_id = fs.write_file(content).unwrap();
-        
+
         let read_content = fs.read_file(file_id).unwrap();
         assert_eq!(read_content, content);
     }
@@ -329,13 +336,14 @@ mod tests {
     fn test_link_and_list() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root_id = fs.root_dir_id();
         let content = b"test file";
         let file_id = fs.write_file(content).unwrap();
-        
-        fs.link("test.txt", root_id, file_id, ObjectKind::Blob, 2000).unwrap();
-        
+
+        fs.link("test.txt", root_id, file_id, ObjectKind::Blob, 2000)
+            .unwrap();
+
         let entries = fs.list(root_id).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "test.txt");
@@ -346,15 +354,16 @@ mod tests {
     fn test_unlink() {
         let disk = RamDisk::with_capacity_mb(10);
         let mut fs = PersistentFilesystem::format(disk, "root").unwrap();
-        
+
         let root_id = fs.root_dir_id();
         let file_id = fs.write_file(b"data").unwrap();
-        fs.link("file.txt", root_id, file_id, ObjectKind::Blob, 3000).unwrap();
-        
+        fs.link("file.txt", root_id, file_id, ObjectKind::Blob, 3000)
+            .unwrap();
+
         let removed = fs.unlink("file.txt", root_id, 4000).unwrap();
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().name, "file.txt");
-        
+
         let entries = fs.list(root_id).unwrap();
         assert_eq!(entries.len(), 0);
     }

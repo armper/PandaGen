@@ -58,7 +58,9 @@ impl ProcessManager {
         descriptor: ServiceDescriptor,
     ) -> Result<ServiceHandle, ProcessManagerError> {
         if self.services.contains_key(&descriptor.service_id) {
-            return Err(ProcessManagerError::AlreadyRegistered(descriptor.service_id));
+            return Err(ProcessManagerError::AlreadyRegistered(
+                descriptor.service_id,
+            ));
         }
 
         let task_desc = TaskDescriptor {
@@ -187,7 +189,9 @@ mod tests {
         let mut manager = ProcessManager::new();
 
         let descriptor = ServiceDescriptor::new("svc".to_string(), RestartPolicy::OnFailure);
-        let handle = manager.start_service(&mut kernel, descriptor.clone()).unwrap();
+        let handle = manager
+            .start_service(&mut kernel, descriptor.clone())
+            .unwrap();
 
         let notification = ExitNotification {
             execution_id: identity::ExecutionId::new(),
@@ -212,7 +216,9 @@ mod tests {
         let mut manager = ProcessManager::new();
 
         let descriptor = ServiceDescriptor::new("svc".to_string(), RestartPolicy::OnFailure);
-        let handle = manager.start_service(&mut kernel, descriptor.clone()).unwrap();
+        let handle = manager
+            .start_service(&mut kernel, descriptor.clone())
+            .unwrap();
 
         let notification = ExitNotification {
             execution_id: identity::ExecutionId::new(),
