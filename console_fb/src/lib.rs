@@ -20,6 +20,7 @@ extern crate alloc;
 
 pub mod font;
 pub mod scrollback;
+pub mod styling;
 
 #[cfg(feature = "editor-integration")]
 pub mod combined_view;
@@ -30,6 +31,7 @@ use hal::{Framebuffer, FramebufferInfo};
 
 use font::{get_char_bitmap, FONT_HEIGHT, FONT_WIDTH};
 pub use scrollback::{Line, ScrollbackBuffer};
+pub use styling::{Style, StyledText, Banner, RedrawManager};
 
 #[cfg(feature = "editor-integration")]
 pub use combined_view::{CombinedView, ViewMode};
