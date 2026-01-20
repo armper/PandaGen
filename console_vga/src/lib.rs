@@ -187,7 +187,7 @@ impl VgaConsole {
 
         // Invert foreground and background
         let inverted_attr = ((attr & 0x0F) << 4) | ((attr & 0xF0) >> 4);
-        
+
         let offset = (row * VGA_WIDTH + col) * 2;
         unsafe {
             // Read current character, write with inverted attribute
@@ -209,7 +209,7 @@ unsafe impl Sync for VgaConsole {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     extern crate alloc;
     use alloc::vec;
 
@@ -392,7 +392,7 @@ mod tests {
 
         // Should have underscore at cursor position
         assert_eq!(buffer.get_char(5, 5), b'_');
-        
+
         // Attribute should be inverted
         let cursor_attr = buffer.get_attr(5, 5);
         assert_eq!(cursor_attr, 0x70); // Inverted 0x07

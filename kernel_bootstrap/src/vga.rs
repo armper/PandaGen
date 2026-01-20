@@ -25,10 +25,10 @@ pub const VGA_TEXT_BUFFER_SIZE: usize = 80 * 25 * 2;
 /// Returns None if HHDM offset is not available.
 pub unsafe fn init_vga_console(boot_info: &BootInfo) -> Option<VgaConsole> {
     let hhdm_offset = boot_info.hhdm_offset?;
-    
+
     // Calculate virtual address using HHDM offset
     let vga_virt = (hhdm_offset + VGA_TEXT_BUFFER_PHYS) as usize;
-    
+
     // Create VGA console
     Some(VgaConsole::new(vga_virt))
 }

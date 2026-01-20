@@ -14,8 +14,8 @@ extern crate std;
 
 mod framebuffer;
 mod output;
-mod workspace;
 mod vga;
+mod workspace;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -486,7 +486,12 @@ pub extern "C" fn rust_main() -> ! {
 
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
-    workspace_loop(&mut serial, kernel, vga_console.as_mut(), fb_console.as_mut())
+    workspace_loop(
+        &mut serial,
+        kernel,
+        vga_console.as_mut(),
+        fb_console.as_mut(),
+    )
 }
 
 #[cfg(not(test))]
@@ -572,8 +577,18 @@ fn workspace_loop(
     // Initial VGA render if available
     if let Some(ref mut vga) = vga_console {
         vga.clear(console_vga::Style::Normal.to_vga_attr());
-        vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode (80x25)", console_vga::Style::Bold.to_vga_attr());
-        vga.write_str_at(0, 1, "Type 'help' for commands", console_vga::Style::Normal.to_vga_attr());
+        vga.write_str_at(
+            0,
+            0,
+            "PandaGen Workspace - VGA Text Mode (80x25)",
+            console_vga::Style::Bold.to_vga_attr(),
+        );
+        vga.write_str_at(
+            0,
+            1,
+            "Type 'help' for commands",
+            console_vga::Style::Normal.to_vga_attr(),
+        );
         vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
     } else if let Some(ref mut fb) = fb_console {
         // Fallback to framebuffer if VGA unavailable
@@ -664,24 +679,38 @@ fn workspace_loop(
             if let Some(ref mut vga) = vga_console {
                 // Update VGA console with workspace state
                 vga.clear(console_vga::Style::Normal.to_vga_attr());
-                
+
                 // Draw header
-                vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode (80x25)", console_vga::Style::Bold.to_vga_attr());
-                vga.write_str_at(0, 1, "Type 'help' for commands", console_vga::Style::Normal.to_vga_attr());
-                
+                vga.write_str_at(
+                    0,
+                    0,
+                    "PandaGen Workspace - VGA Text Mode (80x25)",
+                    console_vga::Style::Bold.to_vga_attr(),
+                );
+                vga.write_str_at(
+                    0,
+                    1,
+                    "Type 'help' for commands",
+                    console_vga::Style::Normal.to_vga_attr(),
+                );
+
                 // Draw prompt
                 vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
-                
+
                 // Draw command text
                 let cmd_bytes = workspace.get_command_text();
                 if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
                     vga.write_str_at(2, 3, cmd_str, console_vga::Style::Normal.to_vga_attr());
                 }
-                
+
                 // Draw cursor at current position
                 let cursor_pos = workspace.get_cursor_position();
-                vga.draw_cursor(cursor_pos.0, cursor_pos.1, console_vga::Style::Normal.to_vga_attr());
-                
+                vga.draw_cursor(
+                    cursor_pos.0,
+                    cursor_pos.1,
+                    console_vga::Style::Normal.to_vga_attr(),
+                );
+
                 LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             } else if let Some(ref mut fb) = fb_console {
                 // Fallback to framebuffer
