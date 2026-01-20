@@ -33,8 +33,9 @@ use std::collections::VecDeque;
 pub enum TaskState {
     /// Task is ready to run
     Runnable,
-    /// Task is blocked (e.g., waiting for I/O)
-    Blocked,
+    /// Task is blocked waiting for a specific tick count
+    /// The task will be unblocked when current_ticks >= wake_tick
+    Blocked { wake_tick: u64 },
     /// Task has exited normally or abnormally
     Exited,
     /// Task was cancelled due to resource exhaustion
@@ -218,6 +219,7 @@ impl Scheduler {
     /// Advances the scheduler by the given number of ticks
     ///
     /// Updates tick counters for the currently running task.
+    /// Also checks for blocked tasks that should be woken up.
     pub fn on_tick_advanced(&mut self, delta_ticks: u64) {
         self.current_ticks += delta_ticks;
 
@@ -226,6 +228,32 @@ impl Scheduler {
             if let Some(task_info) = self.tasks.get_mut(&task_id) {
                 task_info.ticks_in_quantum += delta_ticks;
             }
+        }
+
+        // Wake up blocked tasks whose wake_tick has been reached
+        self.wake_ready_tasks();
+    }
+
+    /// Wakes up tasks that have reached their wake_tick
+    ///
+    /// This should be called after advancing time to unblock tasks
+    /// that were sleeping and are now ready to run.
+    pub fn wake_ready_tasks(&mut self) {
+        let current_ticks = self.current_ticks;
+        let tasks_to_wake: Vec<TaskId> = self.tasks
+            .iter()
+            .filter_map(|(task_id, info)| {
+                if let TaskState::Blocked { wake_tick } = info.state {
+                    if current_ticks >= wake_tick {
+                        return Some(*task_id);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for task_id in tasks_to_wake {
+            self.unblock_task(task_id);
         }
     }
 
@@ -266,12 +294,13 @@ impl Scheduler {
         false
     }
 
-    /// Marks a task as blocked
+    /// Marks a task as blocked until a specific tick count
     ///
     /// Blocked tasks are not scheduled until they become runnable again.
-    pub fn block_task(&mut self, task_id: TaskId) {
+    /// The task will be automatically unblocked when current_ticks >= wake_tick.
+    pub fn block_task(&mut self, task_id: TaskId, wake_tick: u64) {
         if let Some(task_info) = self.tasks.get_mut(&task_id) {
-            task_info.state = TaskState::Blocked;
+            task_info.state = TaskState::Blocked { wake_tick };
             task_info.ticks_in_quantum = 0;
         }
         // Remove from run queue if present
@@ -287,7 +316,7 @@ impl Scheduler {
     /// The task is added to the run queue.
     pub fn unblock_task(&mut self, task_id: TaskId) {
         if let Some(task_info) = self.tasks.get_mut(&task_id) {
-            if task_info.state == TaskState::Blocked {
+            if matches!(task_info.state, TaskState::Blocked { .. }) {
                 task_info.state = TaskState::Runnable;
                 task_info.ticks_in_quantum = 0;
                 self.run_queue.enqueue(task_id);
@@ -538,9 +567,10 @@ mod tests {
         scheduler.enqueue(task);
         scheduler.dequeue_next();
 
-        // Block task
-        scheduler.block_task(task);
-        assert_eq!(scheduler.task_state(task), Some(TaskState::Blocked));
+        // Block task until tick 100
+        let wake_tick = 100;
+        scheduler.block_task(task, wake_tick);
+        assert_eq!(scheduler.task_state(task), Some(TaskState::Blocked { wake_tick }));
         assert!(!scheduler.has_runnable_tasks());
 
         // Unblock task
@@ -705,5 +735,70 @@ mod tests {
         assert!(matches!(log[1], ScheduleEvent::TaskPreempted { task_id, .. } if task_id == task1));
         assert!(matches!(log[2], ScheduleEvent::TaskSelected { task_id, .. } if task_id == task2));
         assert!(matches!(log[3], ScheduleEvent::TaskPreempted { task_id, .. } if task_id == task2));
+    }
+
+    #[test]
+    fn test_blocked_task_automatic_wakeup() {
+        let mut scheduler = Scheduler::new();
+        let task = TaskId::new();
+
+        scheduler.enqueue(task);
+        scheduler.dequeue_next();
+
+        // Block task until tick 50
+        scheduler.block_task(task, 50);
+        assert_eq!(scheduler.task_state(task), Some(TaskState::Blocked { wake_tick: 50 }));
+        assert!(!scheduler.has_runnable_tasks());
+
+        // Advance to tick 30 - should still be blocked
+        scheduler.on_tick_advanced(30);
+        assert_eq!(scheduler.task_state(task), Some(TaskState::Blocked { wake_tick: 50 }));
+        assert!(!scheduler.has_runnable_tasks());
+
+        // Advance to tick 50 - should wake up
+        scheduler.on_tick_advanced(20);
+        assert_eq!(scheduler.task_state(task), Some(TaskState::Runnable));
+        assert!(scheduler.has_runnable_tasks());
+    }
+
+    #[test]
+    fn test_multiple_blocked_tasks_wake_at_different_times() {
+        let mut scheduler = Scheduler::new();
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+        let task3 = TaskId::new();
+
+        scheduler.enqueue(task1);
+        scheduler.enqueue(task2);
+        scheduler.enqueue(task3);
+
+        scheduler.dequeue_next();
+        scheduler.block_task(task1, 10);
+
+        scheduler.dequeue_next();
+        scheduler.block_task(task2, 20);
+
+        scheduler.dequeue_next();
+        scheduler.block_task(task3, 30);
+
+        assert!(!scheduler.has_runnable_tasks());
+
+        // Advance to tick 10 - task1 should wake
+        scheduler.on_tick_advanced(10);
+        assert_eq!(scheduler.task_state(task1), Some(TaskState::Runnable));
+        assert_eq!(scheduler.task_state(task2), Some(TaskState::Blocked { wake_tick: 20 }));
+        assert_eq!(scheduler.task_state(task3), Some(TaskState::Blocked { wake_tick: 30 }));
+        assert_eq!(scheduler.runnable_count(), 1);
+
+        // Advance to tick 20 - task2 should wake
+        scheduler.on_tick_advanced(10);
+        assert_eq!(scheduler.task_state(task2), Some(TaskState::Runnable));
+        assert_eq!(scheduler.task_state(task3), Some(TaskState::Blocked { wake_tick: 30 }));
+        assert_eq!(scheduler.runnable_count(), 2);
+
+        // Advance to tick 30 - task3 should wake
+        scheduler.on_tick_advanced(10);
+        assert_eq!(scheduler.task_state(task3), Some(TaskState::Runnable));
+        assert_eq!(scheduler.runnable_count(), 3);
     }
 }
