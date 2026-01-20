@@ -361,8 +361,12 @@ fn sys_yield() {
     // No-op for now
 }
 
-// NOTE: This is an intentionally simple busy-wait implementation for the boot proof.
-// In a real kernel, this should yield to other tasks or use hlt to wait for interrupts.
+// NOTE: Phase 58 Update - This busy-wait implementation is acceptable for single-task bare-metal.
+// When multi-tasking is added to bare-metal, this should use scheduler blocking like sim_kernel does:
+//   - Task enters Blocked { wake_tick } state
+//   - Scheduler skips blocked tasks
+//   - Timer IRQ wakes tasks when current_tick >= wake_tick
+// For now, idle_pause() provides CPU power savings while waiting.
 #[cfg(not(test))]
 fn sys_sleep(ticks: u64) {
     let start = get_tick_count();

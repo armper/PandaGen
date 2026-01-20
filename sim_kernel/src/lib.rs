@@ -1931,6 +1931,16 @@ impl KernelApi for SimulatedKernel {
     }
 
     fn sleep(&mut self, duration: Duration) -> Result<(), KernelError> {
+        // Calculate wake tick based on duration
+        let ticks_to_sleep = duration.as_nanos() / self.nanos_per_tick;
+        let wake_tick = self.timer.poll_ticks() + ticks_to_sleep;
+
+        // If there's a current task, block it in the scheduler
+        if let Some(task_id) = self.scheduler.current_task() {
+            self.scheduler.block_task(task_id, wake_tick);
+        }
+
+        // Still advance time for the simulation
         self.advance_time(duration);
         Ok(())
     }
