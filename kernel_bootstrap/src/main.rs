@@ -78,12 +78,12 @@ impl IdtEntry {
         }
     }
 
-    fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
+    fn set_handler(&mut self, handler: unsafe extern "C" fn(), selector: u16) {
         let addr = handler as usize;
         self.offset_low = (addr & 0xFFFF) as u16;
         self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
         self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
-        self.selector = KERNEL_CODE_SEGMENT;
+        self.selector = selector;
         self.ist = 0;
         self.flags = IDT_PRESENT_INTERRUPT_GATE;
         self.reserved = 0;
@@ -107,9 +107,6 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
-// x86_64 GDT segment selectors (assumes standard bootloader setup)
-#[cfg(not(test))]
-const KERNEL_CODE_SEGMENT: u16 = 0x08;
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
 
@@ -243,11 +240,12 @@ unsafe fn outb(port: u16, value: u8) {
 #[cfg(not(test))]
 fn install_idt() {
     unsafe {
+        let code_segment = current_code_segment();
         // Set up timer interrupt (IRQ 0 = vector 32)
-        IDT[32].set_handler(irq_timer_entry);
+        IDT[32].set_handler(irq_timer_entry, code_segment);
 
         // Set up keyboard interrupt (IRQ 1 = vector 33)
-        IDT[33].set_handler(irq_keyboard_entry);
+        IDT[33].set_handler(irq_keyboard_entry, code_segment);
 
         let idtr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -260,6 +258,19 @@ fn install_idt() {
             options(readonly, nostack, preserves_flags)
         );
     }
+}
+
+#[cfg(not(test))]
+fn current_code_segment() -> u16 {
+    let cs: u16;
+    unsafe {
+        asm!(
+            "mov {0:x}, cs",
+            out(reg) cs,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    cs
 }
 
 #[cfg(not(test))]
