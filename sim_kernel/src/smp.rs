@@ -54,9 +54,23 @@ impl Default for SmpConfig {
 /// Scheduling event tagged with core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoreScheduleEvent {
-    TaskSelected { core_id: CoreId, task_id: TaskId, timestamp_ticks: u64 },
-    TaskPreempted { core_id: CoreId, task_id: TaskId, reason: PreemptionReason, timestamp_ticks: u64 },
-    TaskExited { core_id: CoreId, task_id: TaskId, reason: ExitReason, timestamp_ticks: u64 },
+    TaskSelected {
+        core_id: CoreId,
+        task_id: TaskId,
+        timestamp_ticks: u64,
+    },
+    TaskPreempted {
+        core_id: CoreId,
+        task_id: TaskId,
+        reason: PreemptionReason,
+        timestamp_ticks: u64,
+    },
+    TaskExited {
+        core_id: CoreId,
+        task_id: TaskId,
+        reason: ExitReason,
+        timestamp_ticks: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -110,7 +124,9 @@ impl MultiCoreScheduler {
     }
 
     pub fn enqueue(&mut self, task_id: TaskId) {
-        let task_info = TaskInfo { state: TaskState::Runnable };
+        let task_info = TaskInfo {
+            state: TaskState::Runnable,
+        };
         self.tasks.insert(task_id, task_info);
         let core_idx = self.next_core % self.cores.len();
         self.next_core += 1;
@@ -142,7 +158,12 @@ impl MultiCoreScheduler {
         core.ticks_in_quantum >= self.config.quantum_ticks && core.current_task.is_some()
     }
 
-    pub fn preempt_current(&mut self, core_id: CoreId, reason: PreemptionReason, timestamp_ticks: u64) {
+    pub fn preempt_current(
+        &mut self,
+        core_id: CoreId,
+        reason: PreemptionReason,
+        timestamp_ticks: u64,
+    ) {
         let core = &mut self.cores[core_id.0];
         if let Some(task_id) = core.current_task.take() {
             self.audit_log.push(CoreScheduleEvent::TaskPreempted {
@@ -156,7 +177,13 @@ impl MultiCoreScheduler {
         }
     }
 
-    pub fn exit_task(&mut self, core_id: CoreId, task_id: TaskId, reason: ExitReason, timestamp_ticks: u64) {
+    pub fn exit_task(
+        &mut self,
+        core_id: CoreId,
+        task_id: TaskId,
+        reason: ExitReason,
+        timestamp_ticks: u64,
+    ) {
         self.tasks.remove(&task_id);
         let core = &mut self.cores[core_id.0];
         core.run_queue.retain(|id| *id != task_id);
@@ -210,7 +237,10 @@ mod tests {
 
     #[test]
     fn test_multi_core_scheduler_round_robin() {
-        let config = SmpConfig { core_count: 2, quantum_ticks: 3 };
+        let config = SmpConfig {
+            core_count: 2,
+            quantum_ticks: 3,
+        };
         let mut runtime = SmpRuntime::new(config);
 
         let task1 = TaskId::new();
@@ -218,8 +248,12 @@ mod tests {
         runtime.scheduler.enqueue(task1);
         runtime.scheduler.enqueue(task2);
 
-        let t1 = runtime.scheduler.dequeue_next(CoreId(0), runtime.time.ticks(CoreId(0)));
-        let t2 = runtime.scheduler.dequeue_next(CoreId(1), runtime.time.ticks(CoreId(1)));
+        let t1 = runtime
+            .scheduler
+            .dequeue_next(CoreId(0), runtime.time.ticks(CoreId(0)));
+        let t2 = runtime
+            .scheduler
+            .dequeue_next(CoreId(1), runtime.time.ticks(CoreId(1)));
         assert_eq!(t1, Some(task1));
         assert_eq!(t2, Some(task2));
 

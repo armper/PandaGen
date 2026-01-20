@@ -102,7 +102,10 @@ impl SupplyChainReport {
     pub fn from_lock(lock: &RegistryLock) -> Self {
         let mut sources = BTreeMap::new();
         for pkg in &lock.packages {
-            sources.insert(format!("{}@{}", pkg.name, pkg.version), pkg.source_digest.clone());
+            sources.insert(
+                format!("{}@{}", pkg.name, pkg.version),
+                pkg.source_digest.clone(),
+            );
         }
         Self {
             build_hash: lock.build_hash.clone(),

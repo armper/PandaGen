@@ -875,10 +875,9 @@ impl SimulatedKernel {
         owner: TaskId,
         reason: String,
     ) -> Result<(), KernelError> {
-        self.validate_capability(cap_id, owner)
-            .map_err(|reason| {
-                KernelError::InvalidCapability(format!("Cannot revoke: {:?}", reason))
-            })?;
+        self.validate_capability(cap_id, owner).map_err(|reason| {
+            KernelError::InvalidCapability(format!("Cannot revoke: {:?}", reason))
+        })?;
 
         if let Some(meta) = self.capability_table.get_mut(&cap_id) {
             meta.status = CapabilityStatus::Invalid;
@@ -909,7 +908,10 @@ impl SimulatedKernel {
             return Err(KernelError::SendFailed("Target task not found".to_string()));
         }
 
-        let expires_at = self.current_time.as_nanos().saturating_add(lease.as_nanos());
+        let expires_at = self
+            .current_time
+            .as_nanos()
+            .saturating_add(lease.as_nanos());
 
         self.record_capability_grant(
             capability.id(),
@@ -2538,10 +2540,12 @@ mod tests {
 
         let exec_id = kernel.create_identity(metadata.clone());
 
-        let result = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Write);
+        let result =
+            kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Write);
         assert!(result.is_ok());
 
-        let result2 = kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Commit);
+        let result2 =
+            kernel.try_consume_storage_op(exec_id, resource_audit::StorageOperation::Commit);
         assert!(result2.is_err());
     }
 

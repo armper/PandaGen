@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "kernel_bootstrap",
     "core_types",
     "ipc",
     "kernel_api",
@@ -45,7 +46,9 @@ members = [
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
-    "contract_tests", "pandagend",
+    "contract_tests",
+    "pandagend",
+    "xtask",
 ]
 
 [workspace.package]

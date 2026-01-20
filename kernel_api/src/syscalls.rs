@@ -6,7 +6,7 @@
 
 use crate::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use core_types::{Cap, ServiceId, TaskId};
-use ipc::{ChannelId, MessageEnvelope, MessagePayload, MessageId, SchemaVersion};
+use ipc::{ChannelId, MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fmt;
@@ -25,18 +25,33 @@ pub struct SyscallRequest {
 /// Typed syscall request payloads
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyscallRequestPayload {
-    SpawnTask { descriptor: TaskDescriptor },
+    SpawnTask {
+        descriptor: TaskDescriptor,
+    },
     CreateChannel,
-    SendMessage { channel: ChannelId, message: MessageEnvelope },
+    SendMessage {
+        channel: ChannelId,
+        message: MessageEnvelope,
+    },
     ReceiveMessage {
         channel: ChannelId,
         timeout: Option<Duration>,
     },
     Now,
-    Sleep { duration: Duration },
-    GrantCapability { task: TaskId, capability: Cap<()> },
-    RegisterService { service_id: ServiceId, channel: ChannelId },
-    LookupService { service_id: ServiceId },
+    Sleep {
+        duration: Duration,
+    },
+    GrantCapability {
+        task: TaskId,
+        capability: Cap<()>,
+    },
+    RegisterService {
+        service_id: ServiceId,
+        channel: ChannelId,
+    },
+    LookupService {
+        service_id: ServiceId,
+    },
 }
 
 /// Syscall response wrapper
@@ -122,17 +137,15 @@ impl From<KernelError> for SyscallError {
             KernelError::ReceiveFailed(message) => {
                 SyscallError::new(SyscallErrorKind::ReceiveFailed, message)
             }
-            KernelError::Timeout => SyscallError::new(
-                SyscallErrorKind::Timeout,
-                "Operation timed out".to_string(),
-            ),
+            KernelError::Timeout => {
+                SyscallError::new(SyscallErrorKind::Timeout, "Operation timed out".to_string())
+            }
             KernelError::ServiceNotFound(message) => {
                 SyscallError::new(SyscallErrorKind::ServiceNotFound, message)
             }
-            KernelError::ServiceAlreadyRegistered(message) => SyscallError::new(
-                SyscallErrorKind::ServiceAlreadyRegistered,
-                message,
-            ),
+            KernelError::ServiceAlreadyRegistered(message) => {
+                SyscallError::new(SyscallErrorKind::ServiceAlreadyRegistered, message)
+            }
             KernelError::InsufficientAuthority(message) => {
                 SyscallError::new(SyscallErrorKind::InsufficientAuthority, message)
             }
@@ -216,7 +229,10 @@ impl From<SyscallError> for KernelError {
 #[derive(Debug)]
 pub enum SyscallCodecError {
     UnexpectedAction(String),
-    SchemaMismatch { expected: SchemaVersion, actual: SchemaVersion },
+    SchemaMismatch {
+        expected: SchemaVersion,
+        actual: SchemaVersion,
+    },
     Payload(String),
 }
 
@@ -246,7 +262,10 @@ impl SyscallCodec {
     }
 
     /// Encodes a syscall request into a MessageEnvelope.
-    pub fn encode_request(&self, request: SyscallRequest) -> Result<MessageEnvelope, SyscallCodecError> {
+    pub fn encode_request(
+        &self,
+        request: SyscallRequest,
+    ) -> Result<MessageEnvelope, SyscallCodecError> {
         let payload = MessagePayload::new(&request)
             .map_err(|err| SyscallCodecError::Payload(err.to_string()))?;
         Ok(MessageEnvelope::new(
@@ -265,23 +284,27 @@ impl SyscallCodec {
     ) -> Result<MessageEnvelope, SyscallCodecError> {
         let payload = MessagePayload::new(&response)
             .map_err(|err| SyscallCodecError::Payload(err.to_string()))?;
-        Ok(
-            MessageEnvelope::new(
-                self.service_id,
-                SYSCALL_RESPONSE_ACTION.to_string(),
-                SYSCALL_SCHEMA_VERSION,
-                payload,
-            )
-            .with_correlation(correlation_id),
+        Ok(MessageEnvelope::new(
+            self.service_id,
+            SYSCALL_RESPONSE_ACTION.to_string(),
+            SYSCALL_SCHEMA_VERSION,
+            payload,
         )
+        .with_correlation(correlation_id))
     }
 
     /// Decodes a syscall request from a MessageEnvelope.
-    pub fn decode_request(&self, message: &MessageEnvelope) -> Result<SyscallRequest, SyscallCodecError> {
+    pub fn decode_request(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<SyscallRequest, SyscallCodecError> {
         if message.action != SYSCALL_REQUEST_ACTION {
             return Err(SyscallCodecError::UnexpectedAction(message.action.clone()));
         }
-        if !message.schema_version.is_compatible_with(&SYSCALL_SCHEMA_VERSION) {
+        if !message
+            .schema_version
+            .is_compatible_with(&SYSCALL_SCHEMA_VERSION)
+        {
             return Err(SyscallCodecError::SchemaMismatch {
                 expected: SYSCALL_SCHEMA_VERSION,
                 actual: message.schema_version,
@@ -301,7 +324,10 @@ impl SyscallCodec {
         if message.action != SYSCALL_RESPONSE_ACTION {
             return Err(SyscallCodecError::UnexpectedAction(message.action.clone()));
         }
-        if !message.schema_version.is_compatible_with(&SYSCALL_SCHEMA_VERSION) {
+        if !message
+            .schema_version
+            .is_compatible_with(&SYSCALL_SCHEMA_VERSION)
+        {
             return Err(SyscallCodecError::SchemaMismatch {
                 expected: SYSCALL_SCHEMA_VERSION,
                 actual: message.schema_version,
@@ -335,40 +361,63 @@ impl<K: KernelApi> SyscallServer<K> {
         Self { kernel, codec }
     }
 
-    pub fn handle_message(&mut self, message: MessageEnvelope) -> Result<MessageEnvelope, KernelError> {
-        let request = self.codec.decode_request(&message).map_err(|err| {
-            KernelError::ReceiveFailed(format!("Syscall decode failed: {}", err))
-        })?;
+    pub fn handle_message(
+        &mut self,
+        message: MessageEnvelope,
+    ) -> Result<MessageEnvelope, KernelError> {
+        let request = self
+            .codec
+            .decode_request(&message)
+            .map_err(|err| KernelError::ReceiveFailed(format!("Syscall decode failed: {}", err)))?;
 
         let response_payload = match request.payload {
-            SyscallRequestPayload::SpawnTask { descriptor } => {
-                SyscallResponsePayload::SpawnTask(self.kernel.spawn_task(descriptor).map_err(SyscallError::from))
-            }
-            SyscallRequestPayload::CreateChannel => {
-                SyscallResponsePayload::CreateChannel(self.kernel.create_channel().map_err(SyscallError::from))
-            }
+            SyscallRequestPayload::SpawnTask { descriptor } => SyscallResponsePayload::SpawnTask(
+                self.kernel
+                    .spawn_task(descriptor)
+                    .map_err(SyscallError::from),
+            ),
+            SyscallRequestPayload::CreateChannel => SyscallResponsePayload::CreateChannel(
+                self.kernel.create_channel().map_err(SyscallError::from),
+            ),
             SyscallRequestPayload::SendMessage { channel, message } => {
-                SyscallResponsePayload::SendMessage(self.kernel.send_message(channel, message).map_err(SyscallError::from))
-            }
-            SyscallRequestPayload::ReceiveMessage { channel, timeout } => {
-                SyscallResponsePayload::ReceiveMessage(self.kernel.receive_message(channel, timeout).map_err(SyscallError::from))
-            }
-            SyscallRequestPayload::Now => {
-                SyscallResponsePayload::Now(Ok(self.kernel.now()))
-            }
-            SyscallRequestPayload::Sleep { duration } => {
-                SyscallResponsePayload::Sleep(self.kernel.sleep(duration).map_err(SyscallError::from))
-            }
-            SyscallRequestPayload::GrantCapability { task, capability } => {
-                SyscallResponsePayload::GrantCapability(self.kernel.grant_capability(task, capability).map_err(SyscallError::from))
-            }
-            SyscallRequestPayload::RegisterService { service_id, channel } => {
-                SyscallResponsePayload::RegisterService(
-                    self.kernel.register_service(service_id, channel).map_err(SyscallError::from),
+                SyscallResponsePayload::SendMessage(
+                    self.kernel
+                        .send_message(channel, message)
+                        .map_err(SyscallError::from),
                 )
             }
+            SyscallRequestPayload::ReceiveMessage { channel, timeout } => {
+                SyscallResponsePayload::ReceiveMessage(
+                    self.kernel
+                        .receive_message(channel, timeout)
+                        .map_err(SyscallError::from),
+                )
+            }
+            SyscallRequestPayload::Now => SyscallResponsePayload::Now(Ok(self.kernel.now())),
+            SyscallRequestPayload::Sleep { duration } => SyscallResponsePayload::Sleep(
+                self.kernel.sleep(duration).map_err(SyscallError::from),
+            ),
+            SyscallRequestPayload::GrantCapability { task, capability } => {
+                SyscallResponsePayload::GrantCapability(
+                    self.kernel
+                        .grant_capability(task, capability)
+                        .map_err(SyscallError::from),
+                )
+            }
+            SyscallRequestPayload::RegisterService {
+                service_id,
+                channel,
+            } => SyscallResponsePayload::RegisterService(
+                self.kernel
+                    .register_service(service_id, channel)
+                    .map_err(SyscallError::from),
+            ),
             SyscallRequestPayload::LookupService { service_id } => {
-                SyscallResponsePayload::LookupService(self.kernel.lookup_service(service_id).map_err(SyscallError::from))
+                SyscallResponsePayload::LookupService(
+                    self.kernel
+                        .lookup_service(service_id)
+                        .map_err(SyscallError::from),
+                )
             }
         };
 
@@ -411,16 +460,18 @@ impl<T: SyscallTransport> SyscallClient<T> {
             payload,
         };
 
-        let message = self.codec.encode_request(request.clone()).map_err(|err| {
-            KernelError::SendFailed(format!("Syscall encode failed: {}", err))
-        })?;
+        let message = self
+            .codec
+            .encode_request(request.clone())
+            .map_err(|err| KernelError::SendFailed(format!("Syscall encode failed: {}", err)))?;
 
         let request_id = request.request_id;
         self.transport.borrow_mut().send(message)?;
         let response_message = self.transport.borrow_mut().receive(None)?;
-        let response = self.codec.decode_response(&response_message).map_err(|err| {
-            KernelError::ReceiveFailed(format!("Syscall decode failed: {}", err))
-        })?;
+        let response = self
+            .codec
+            .decode_response(&response_message)
+            .map_err(|err| KernelError::ReceiveFailed(format!("Syscall decode failed: {}", err)))?;
 
         if response.request_id != request_id {
             return Err(KernelError::ReceiveFailed(
@@ -467,7 +518,11 @@ impl<T: SyscallTransport> KernelApi for SyscallClient<T> {
         })
     }
 
-    fn send_message(&mut self, channel: ChannelId, message: MessageEnvelope) -> Result<(), KernelError> {
+    fn send_message(
+        &mut self,
+        channel: ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<(), KernelError> {
         let response = self.round_trip(SyscallRequestPayload::SendMessage { channel, message })?;
         Self::extract(response, |payload| match payload {
             SyscallResponsePayload::SendMessage(result) => Some(result),
@@ -480,7 +535,8 @@ impl<T: SyscallTransport> KernelApi for SyscallClient<T> {
         channel: ChannelId,
         timeout: Option<Duration>,
     ) -> Result<MessageEnvelope, KernelError> {
-        let response = self.round_trip(SyscallRequestPayload::ReceiveMessage { channel, timeout })?;
+        let response =
+            self.round_trip(SyscallRequestPayload::ReceiveMessage { channel, timeout })?;
         Self::extract(response, |payload| match payload {
             SyscallResponsePayload::ReceiveMessage(result) => Some(result),
             _ => None,
@@ -508,15 +564,23 @@ impl<T: SyscallTransport> KernelApi for SyscallClient<T> {
     }
 
     fn grant_capability(&mut self, task: TaskId, capability: Cap<()>) -> Result<(), KernelError> {
-        let response = self.round_trip(SyscallRequestPayload::GrantCapability { task, capability })?;
+        let response =
+            self.round_trip(SyscallRequestPayload::GrantCapability { task, capability })?;
         Self::extract(response, |payload| match payload {
             SyscallResponsePayload::GrantCapability(result) => Some(result),
             _ => None,
         })
     }
 
-    fn register_service(&mut self, service_id: ServiceId, channel: ChannelId) -> Result<(), KernelError> {
-        let response = self.round_trip(SyscallRequestPayload::RegisterService { service_id, channel })?;
+    fn register_service(
+        &mut self,
+        service_id: ServiceId,
+        channel: ChannelId,
+    ) -> Result<(), KernelError> {
+        let response = self.round_trip(SyscallRequestPayload::RegisterService {
+            service_id,
+            channel,
+        })?;
         Self::extract(response, |payload| match payload {
             SyscallResponsePayload::RegisterService(result) => Some(result),
             _ => None,
@@ -540,7 +604,10 @@ pub struct LoopbackTransport<K: KernelApi> {
 
 impl<K: KernelApi> LoopbackTransport<K> {
     pub fn new(server: SyscallServer<K>) -> Self {
-        Self { server, pending: None }
+        Self {
+            server,
+            pending: None,
+        }
     }
 }
 
@@ -582,7 +649,11 @@ mod tests {
             Ok(ChannelId::new())
         }
 
-        fn send_message(&mut self, _channel: ChannelId, _message: MessageEnvelope) -> Result<(), KernelError> {
+        fn send_message(
+            &mut self,
+            _channel: ChannelId,
+            _message: MessageEnvelope,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 
@@ -602,11 +673,19 @@ mod tests {
             Ok(())
         }
 
-        fn grant_capability(&mut self, _task: TaskId, _capability: Cap<()>) -> Result<(), KernelError> {
+        fn grant_capability(
+            &mut self,
+            _task: TaskId,
+            _capability: Cap<()>,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 
-        fn register_service(&mut self, _service_id: ServiceId, _channel: ChannelId) -> Result<(), KernelError> {
+        fn register_service(
+            &mut self,
+            _service_id: ServiceId,
+            _channel: ChannelId,
+        ) -> Result<(), KernelError> {
             Ok(())
         }
 
@@ -648,6 +727,9 @@ mod tests {
         let decoded = codec.decode_request(&message).unwrap();
 
         assert_eq!(decoded.request_id, request.request_id);
-        assert!(matches!(decoded.payload, SyscallRequestPayload::CreateChannel));
+        assert!(matches!(
+            decoded.payload,
+            SyscallRequestPayload::CreateChannel
+        ));
     }
 }

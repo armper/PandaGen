@@ -55,7 +55,11 @@ pub enum BootError {
     MissingComponent(String),
 
     #[error("Digest mismatch for {name}: expected {expected}, got {actual}")]
-    DigestMismatch { name: String, expected: String, actual: String },
+    DigestMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 pub struct BootVerifier {

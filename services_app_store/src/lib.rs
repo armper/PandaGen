@@ -148,7 +148,12 @@ mod tests {
             source_digest: "abc".to_string(),
         });
 
-        let mut store = AppStorefront::new(index, Box::new(BudgetCapPolicy { max_cpu_ticks: Some(5) }));
+        let mut store = AppStorefront::new(
+            index,
+            Box::new(BudgetCapPolicy {
+                max_cpu_ticks: Some(5),
+            }),
+        );
         store.add_listing(AppListing {
             name: "heavy".to_string(),
             version: "0.1.0".to_string(),

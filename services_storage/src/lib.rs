@@ -22,15 +22,15 @@
 //! - **Schema Evolution**: Objects have schema identity and version
 //! - **Migration**: Deterministic, testable data transformations
 
+pub mod journaled_storage;
 pub mod migration;
 pub mod object;
-pub mod journaled_storage;
 pub mod transaction;
 
-pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use journaled_storage::{
     JournaledStorage, StorageBudget, StorageOperation, StorageService, StorageServiceError,
 };
+pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
 pub use transaction::{
     Transaction, TransactionError, TransactionId, TransactionState, TransactionalStorage,

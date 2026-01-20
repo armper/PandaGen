@@ -1,0 +1,10 @@
+[package]
+name = "kernel_bootstrap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "kernel_bootstrap"
+path = "src/main.rs"

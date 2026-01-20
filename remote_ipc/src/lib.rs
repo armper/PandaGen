@@ -1,7 +1,7 @@
 //! Remote IPC with explicit capability authority.
 
-use ipc::{MessageEnvelope, MessagePayload, MessageId, SchemaVersion};
 use core_types::ServiceId;
+use ipc::{MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -62,10 +62,18 @@ pub struct RemoteIpcClient<T: RemoteTransport> {
 
 impl<T: RemoteTransport> RemoteIpcClient<T> {
     pub fn new(transport: T, authority: CapabilityAuthority) -> Self {
-        Self { transport, authority }
+        Self {
+            transport,
+            authority,
+        }
     }
 
-    pub fn call(&mut self, cap_id: u64, action: impl Into<String>, payload: Vec<u8>) -> Result<Vec<u8>, RemoteIpcError> {
+    pub fn call(
+        &mut self,
+        cap_id: u64,
+        action: impl Into<String>,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RemoteIpcError> {
         if !self.authority.allows(cap_id) {
             return Err(RemoteIpcError::Unauthorized);
         }
@@ -103,7 +111,10 @@ impl<H: RemoteHandler> RemoteIpcServer<H> {
         }
     }
 
-    pub fn handle_message(&mut self, message: MessageEnvelope) -> Result<MessageEnvelope, RemoteIpcError> {
+    pub fn handle_message(
+        &mut self,
+        message: MessageEnvelope,
+    ) -> Result<MessageEnvelope, RemoteIpcError> {
         let call = decode_call(&message)?;
         if !self.allowed_caps.contains(&call.cap_id) || !call.authority.allows(call.cap_id) {
             let response = RemoteResponse {
@@ -114,13 +125,17 @@ impl<H: RemoteHandler> RemoteIpcServer<H> {
         }
 
         let result = self.handler.handle(call);
-        let response = RemoteResponse { request_id: message.id, result };
+        let response = RemoteResponse {
+            request_id: message.id,
+            result,
+        };
         encode_response(response, message.id)
     }
 }
 
 fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> {
-    let payload = MessagePayload::new(&call).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
+    let payload =
+        MessagePayload::new(&call).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
     Ok(MessageEnvelope::new(
         ServiceId::new(),
         REMOTE_CALL_ACTION.to_string(),
@@ -129,14 +144,19 @@ fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> {
     ))
 }
 
-fn encode_response(response: RemoteResponse, correlation_id: MessageId) -> Result<MessageEnvelope, RemoteIpcError> {
-    let payload = MessagePayload::new(&response).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
+fn encode_response(
+    response: RemoteResponse,
+    correlation_id: MessageId,
+) -> Result<MessageEnvelope, RemoteIpcError> {
+    let payload =
+        MessagePayload::new(&response).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
     Ok(MessageEnvelope::new(
         ServiceId::new(),
         REMOTE_RESPONSE_ACTION.to_string(),
         REMOTE_SCHEMA,
         payload,
-    ).with_correlation(correlation_id))
+    )
+    .with_correlation(correlation_id))
 }
 
 fn decode_call(message: &MessageEnvelope) -> Result<RemoteCall, RemoteIpcError> {
@@ -178,7 +198,10 @@ mod tests {
 
     impl Loopback {
         fn new(server: RemoteIpcServer<EchoHandler>) -> Self {
-            Self { pending: None, server }
+            Self {
+                pending: None,
+                server,
+            }
         }
     }
 
@@ -190,13 +213,18 @@ mod tests {
         }
 
         fn receive(&mut self) -> Result<MessageEnvelope, RemoteIpcError> {
-            self.pending.take().ok_or(RemoteIpcError::Codec("no response".to_string()))
+            self.pending
+                .take()
+                .ok_or(RemoteIpcError::Codec("no response".to_string()))
         }
     }
 
     #[test]
     fn test_remote_capability_call_success() {
-        let authority = CapabilityAuthority { caller: "client".to_string(), allowed_caps: vec![42] };
+        let authority = CapabilityAuthority {
+            caller: "client".to_string(),
+            allowed_caps: vec![42],
+        };
         let server = RemoteIpcServer::new(EchoHandler, vec![42]);
         let transport = Loopback::new(server);
         let mut client = RemoteIpcClient::new(transport, authority);
@@ -208,7 +236,10 @@ mod tests {
 
     #[test]
     fn test_remote_capability_call_denied() {
-        let authority = CapabilityAuthority { caller: "client".to_string(), allowed_caps: vec![1] };
+        let authority = CapabilityAuthority {
+            caller: "client".to_string(),
+            allowed_caps: vec![1],
+        };
         let server = RemoteIpcServer::new(EchoHandler, vec![42]);
         let transport = Loopback::new(server);
         let mut client = RemoteIpcClient::new(transport, authority);
