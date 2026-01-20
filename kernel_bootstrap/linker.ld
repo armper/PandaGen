@@ -1,48 +1,43 @@
 OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(_start)
 
-PHDRS
+MEMORY
 {
-    text PT_LOAD FLAGS(5);
-    data PT_LOAD FLAGS(6);
+    RAM (rwx) : ORIGIN = 0xffffffff80000000, LENGTH = 16M
+    ROM (rx)  : ORIGIN = 0x00100000, LENGTH = 16M
 }
-
-KERNEL_VMA = 0xffffffff80000000;
-KERNEL_LMA = 0x00100000;
 
 SECTIONS
 {
-    . = KERNEL_VMA;
-
-    .text : ALIGN(4096) AT(KERNEL_LMA)
+    .text : ALIGN(4096)
     {
         KEEP(*(.text.entry))
         *(.text .text.*)
-    } :text
+    } > RAM AT > ROM
 
-    .rodata : ALIGN(4096) AT(ADDR(.rodata) - KERNEL_VMA + KERNEL_LMA)
+    .rodata : ALIGN(4096)
     {
         *(.rodata .rodata.*)
-    } :text
+    } > RAM AT > ROM
 
-    .data : ALIGN(4096) AT(ADDR(.data) - KERNEL_VMA + KERNEL_LMA)
+    .data : ALIGN(4096)
     {
         *(.data .data.*)
-    } :data
+    } > RAM AT > ROM
 
-    .bss : ALIGN(4096) AT(ADDR(.bss) - KERNEL_VMA + KERNEL_LMA)
+    .bss : ALIGN(4096)
     {
         *(.bss .bss.*)
         *(.bss.stack)
         *(COMMON)
-    } :data
+    } > RAM AT > ROM
 
-    .limine_requests : ALIGN(16) AT(ADDR(.limine_requests) - KERNEL_VMA + KERNEL_LMA)
+    .limine_requests : ALIGN(16)
     {
         __limine_requests_start = .;
         KEEP(*(.limine_requests))
         __limine_requests_end = .;
-    } :data
+    } > RAM AT > ROM
 
     /DISCARD/ :
     {
