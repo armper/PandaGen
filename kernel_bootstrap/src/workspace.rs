@@ -202,4 +202,19 @@ impl WorkspaceSession {
     pub fn show_prompt(&self, serial: &mut SerialPort) {
         let _ = write!(serial, "> ");
     }
+
+    /// Get a text snapshot of the current workspace state for display
+    /// Returns command buffer text directly without heap allocation
+    pub fn get_command_text(&self) -> &[u8] {
+        &self.command_buffer[..self.command_len]
+    }
+
+    /// Get the cursor position (col, row) for the current state
+    pub fn get_cursor_position(&self) -> (usize, usize) {
+        // Cursor is at the end of the command on row 3
+        // ">" is at column 0-1, command starts at column 2
+        let col = 2 + self.command_len;
+        let row = 3;
+        (col, row)
+    }
 }

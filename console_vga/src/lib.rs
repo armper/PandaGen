@@ -16,7 +16,6 @@
 
 #![cfg_attr(not(test), no_std)]
 
-extern crate alloc;
 use core::ptr;
 
 /// VGA text mode dimensions
@@ -181,7 +180,7 @@ impl VgaConsole {
     }
 
     /// Draw cursor at (col, row) by inverting the attribute
-    fn draw_cursor(&mut self, col: usize, row: usize, attr: u8) {
+    pub fn draw_cursor(&mut self, col: usize, row: usize, attr: u8) {
         if col >= VGA_WIDTH || row >= VGA_HEIGHT {
             return;
         }
@@ -210,6 +209,8 @@ unsafe impl Sync for VgaConsole {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    extern crate alloc;
     use alloc::vec;
 
     // Mock VGA buffer for testing

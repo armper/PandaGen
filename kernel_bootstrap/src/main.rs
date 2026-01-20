@@ -15,6 +15,7 @@ extern crate std;
 mod framebuffer;
 mod output;
 mod workspace;
+mod vga;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -456,22 +457,36 @@ pub extern "C" fn rust_main() -> ! {
         )
     };
 
-    // Phase 69: Boot directly into workspace prompt with framebuffer if available
+    // Phase 78: Boot with VGA text console for QEMU window UI
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
 
-    // Try to initialize framebuffer console
-    let mut fb_console = unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) };
+    // Initialize VGA text console (primary UI for QEMU window)
+    let mut vga_console = unsafe { vga::init_vga_console(&kernel.boot) };
 
-    if fb_console.is_some() {
-        kprintln!(serial, "Framebuffer console initialized");
-        kprintln!(serial, "Display output enabled on QEMU window");
+    if vga_console.is_some() {
+        kprintln!(serial, "VGA text console initialized (80x25)");
+        kprintln!(serial, "Main UI in QEMU window, serial logs here");
     } else {
-        kprintln!(serial, "Framebuffer unavailable - serial-only mode");
+        kprintln!(serial, "VGA unavailable - trying framebuffer fallback");
+    }
+
+    // Try to initialize framebuffer console as fallback
+    let mut fb_console = if vga_console.is_none() {
+        unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) }
+    } else {
+        None
+    };
+
+    if fb_console.is_some() && vga_console.is_none() {
+        kprintln!(serial, "Framebuffer console initialized (fallback)");
+        kprintln!(serial, "Display output enabled on QEMU window");
+    } else if vga_console.is_none() && fb_console.is_none() {
+        kprintln!(serial, "No display available - serial-only mode");
     }
 
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
-    workspace_loop(&mut serial, kernel, fb_console.as_mut())
+    workspace_loop(&mut serial, kernel, vga_console.as_mut(), fb_console.as_mut())
 }
 
 #[cfg(not(test))]
@@ -532,10 +547,12 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
 /// Workspace loop - main interactive session
 /// Phase 64: This replaces the demo editor loop with a proper workspace prompt
 /// Phase 69: Now supports framebuffer console output
+/// Phase 78: VGA text console is primary UI for QEMU window
 #[cfg(not(test))]
 fn workspace_loop(
     serial: &mut serial::SerialPort,
     kernel: &mut Kernel,
+    mut vga_console: Option<&mut console_vga::VgaConsole>,
     mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
 ) -> ! {
     // Get command and response channels from kernel
@@ -546,14 +563,20 @@ fn workspace_loop(
     let mut parser_state = Ps2ParserState::new();
 
     // Track revision for rate-limited rendering
-    static LAST_FB_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static LAST_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let mut current_revision = 1u64;
 
     // Show initial prompt
     workspace.show_prompt(serial);
 
-    // Initial framebuffer render if available
-    if let Some(ref mut fb) = fb_console {
+    // Initial VGA render if available
+    if let Some(ref mut vga) = vga_console {
+        vga.clear(console_vga::Style::Normal.to_vga_attr());
+        vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode (80x25)", console_vga::Style::Bold.to_vga_attr());
+        vga.write_str_at(0, 1, "Type 'help' for commands", console_vga::Style::Normal.to_vga_attr());
+        vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
+    } else if let Some(ref mut fb) = fb_console {
+        // Fallback to framebuffer if VGA unavailable
         fb.draw_text("PandaGen Workspace - Framebuffer Active");
     }
 
@@ -585,7 +608,7 @@ fn workspace_loop(
 
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
 
-                // Update framebuffer on input change
+                // Update display on input change
                 if input_progressed {
                     current_revision += 1;
                 }
@@ -635,13 +658,35 @@ fn workspace_loop(
             }
         }
 
-        // Update framebuffer if revision changed (rate-limited)
-        let last_revision = LAST_FB_REVISION.load(core::sync::atomic::Ordering::Relaxed);
+        // Update display if revision changed (rate-limited)
+        let last_revision = LAST_REVISION.load(core::sync::atomic::Ordering::Relaxed);
         if current_revision != last_revision {
-            if let Some(ref mut fb) = fb_console {
-                // Simple framebuffer update - just show it's active
+            if let Some(ref mut vga) = vga_console {
+                // Update VGA console with workspace state
+                vga.clear(console_vga::Style::Normal.to_vga_attr());
+                
+                // Draw header
+                vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode (80x25)", console_vga::Style::Bold.to_vga_attr());
+                vga.write_str_at(0, 1, "Type 'help' for commands", console_vga::Style::Normal.to_vga_attr());
+                
+                // Draw prompt
+                vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
+                
+                // Draw command text
+                let cmd_bytes = workspace.get_command_text();
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                    vga.write_str_at(2, 3, cmd_str, console_vga::Style::Normal.to_vga_attr());
+                }
+                
+                // Draw cursor at current position
+                let cursor_pos = workspace.get_cursor_position();
+                vga.draw_cursor(cursor_pos.0, cursor_pos.1, console_vga::Style::Normal.to_vga_attr());
+                
+                LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
+            } else if let Some(ref mut fb) = fb_console {
+                // Fallback to framebuffer
                 fb.draw_text("PandaGen Workspace Active");
-                LAST_FB_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
+                LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
         }
 

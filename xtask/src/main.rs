@@ -70,15 +70,33 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         cmd_image()?;
     }
 
-    // Phase 76: Attach virtio-blk disk for persistent storage
+    // Ensure dist directory exists for serial log
+    let dist = root.join("dist");
+    fs::create_dir_all(&dist)?;
+
+    // Phase 78: VGA text console mode
+    // Route serial to file for debug logs, use QEMU display for main UI
+    let serial_log = root.join("dist/serial.log");
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║  PandaGen QEMU Boot (VGA Text Console Mode)              ║");
+    println!("╠═══════════════════════════════════════════════════════════╣");
+    println!("║  • UI is in the QEMU window (VGA text mode)              ║");
+    println!("║  • Serial logs: dist/serial.log                          ║");
+    println!("║  • Click QEMU window to capture keyboard                 ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial stdio -display cocoa -no-reboot",
+        "qemu-system-x86_64 -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display cocoa -no-reboot",
         iso.display(),
-        disk.display()
+        disk.display(),
+        serial_log.display()
     );
     println!("Running QEMU with command:");
     println!("  {}", qemu_cmd);
+    println!();
 
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
@@ -91,9 +109,9 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-serial")
-        .arg("stdio")
+        .arg(format!("file:{}", serial_log.display()))
         .arg("-display")
-        .arg("cocoa") // Can also be "gtk", "sdl", etc.
+        .arg("cocoa") // Can also be "gtk", "sdl" depending on platform
         .arg("-no-reboot"))
 }
 
