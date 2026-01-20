@@ -33,6 +33,10 @@ pub extern "C" fn rust_main() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    // In this minimal bootstrap kernel we cannot rely on any output device
+    // (such as a serial port or VGA text buffer) being initialized yet, so
+    // we intentionally ignore the panic information and simply halt.
+    // Future work may attempt to log `_info` once basic I/O is available.
     halt_loop()
 }
 
