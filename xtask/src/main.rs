@@ -11,20 +11,27 @@ const ISO_OUTPUT: &str = "dist/pandagen.iso";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    match args.next().as_deref() {
+    let command = args.next();
+    match command.as_deref() {
         Some("iso") => cmd_iso(),
         Some("qemu") => cmd_qemu(),
         Some("limine-fetch") => cmd_limine_fetch(args),
-        _ => usage(),
+        _ => usage(command),
     }
 }
 
-fn usage() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Usage:");
-    println!("  cargo xtask iso");
-    println!("  cargo xtask qemu");
-    println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
-    Err(io::Error::new(ErrorKind::Other, "unknown xtask command").into())
+fn usage(attempted_command: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Usage:");
+    eprintln!("  cargo xtask iso");
+    eprintln!("  cargo xtask qemu");
+    eprintln!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
+    
+    let error_msg = match attempted_command {
+        Some(cmd) => format!("unknown xtask command: '{}'", cmd),
+        None => "no xtask command provided".to_string(),
+    };
+    
+    Err(io::Error::new(ErrorKind::InvalidInput, error_msg).into())
 }
 
 fn repo_root() -> PathBuf {
