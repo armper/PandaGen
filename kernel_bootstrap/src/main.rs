@@ -2577,3 +2577,68 @@ pub mod serial {
         }
     }
 }
+
+// Compiler intrinsics required for no_std bare-metal
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
+    unsafe {
+        let c = c as u8;
+        for i in 0..n {
+            *dest.add(i) = c;
+        }
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe {
+        for i in 0..n {
+            *dest.add(i) = *src.add(i);
+        }
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe {
+        if dest < src as *mut u8 {
+            // Forward copy
+            for i in 0..n {
+                *dest.add(i) = *src.add(i);
+            }
+        } else {
+            // Backward copy to handle overlap
+            for i in (0..n).rev() {
+                *dest.add(i) = *src.add(i);
+            }
+        }
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    unsafe {
+        for i in 0..n {
+            let a = *s1.add(i);
+            let b = *s2.add(i);
+            if a != b {
+                return a as i32 - b as i32;
+            }
+        }
+    }
+    0
+}
+
+// Rust language item for unwinding (we don't support it, but it's required)
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn rust_eh_personality() {
+    // No-op: we don't support unwinding in bare-metal
+}
