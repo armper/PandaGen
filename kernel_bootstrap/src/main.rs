@@ -6,6 +6,7 @@ extern crate std;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 use core::str;
 
 #[cfg(not(test))]
@@ -49,11 +50,15 @@ pub extern "C" fn rust_main() -> ! {
     let _ = writeln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
     let (allocator, heap) = init_memory(&mut serial, &boot);
-    let mut kernel = Kernel::new(boot, allocator, heap);
+    let kernel = unsafe {
+        let ptr = KERNEL_STORAGE.as_mut_ptr();
+        ptr.write(Kernel::new(boot, allocator, heap));
+        &mut *ptr
+    };
     let _ = writeln!(serial, "Type 'help' for commands.");
     let _ = write!(serial, "> ");
 
-    console_loop(&mut serial, &mut kernel)
+    console_loop(&mut serial, kernel)
 }
 
 #[cfg(not(test))]
@@ -255,6 +260,9 @@ static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().i
 #[link_section = ".limine_requests"]
 static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> =
     KernelAddressRequest::new().into();
+
+#[cfg(not(test))]
+static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
 const PAGE_SIZE: u64 = 4096;
 const CHANNEL_CAPACITY: usize = 8;
