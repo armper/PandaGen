@@ -24,8 +24,11 @@ pub trait KernelApiV0 {
     fn create_channel(&mut self) -> Result<ChannelId, KernelError>;
 
     /// Sends a typed message envelope.
-    fn send(&mut self, channel: ChannelId, message: ipc::MessageEnvelope)
-        -> Result<(), KernelError>;
+    fn send(
+        &mut self,
+        channel: ChannelId,
+        message: ipc::MessageEnvelope,
+    ) -> Result<(), KernelError>;
 
     /// Receives a typed message envelope (non-blocking semantics are defined by the kernel).
     fn recv(&mut self, channel: ChannelId) -> Result<ipc::MessageEnvelope, KernelError>;

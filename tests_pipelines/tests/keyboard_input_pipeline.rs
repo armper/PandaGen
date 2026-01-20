@@ -57,7 +57,7 @@ fn test_keyboard_input_pipeline_end_to_end() {
     // Step 3: Simulate hardware: PS/2 keyboard generates scancodes
     // User types "A" (press and release)
     let scancodes = vec![
-        0x1E,      // A pressed (make code)
+        0x1E,        // A pressed (make code)
         0x1E | 0x80, // A released (break code)
     ];
 
@@ -104,7 +104,10 @@ fn test_keyboard_input_pipeline_end_to_end() {
             .deliver_event(&target_cap, &input_event)
             .expect("Delivery should succeed");
 
-        assert!(delivered, "Event should be delivered to active subscription");
+        assert!(
+            delivered,
+            "Event should be delivered to active subscription"
+        );
     }
 
     // Verify only the editor subscription is active in routing
@@ -127,8 +130,8 @@ fn test_keyboard_pipeline_with_modifiers() {
 
     // Simulate: User presses Ctrl+C
     let scancodes = vec![
-        0x1D,      // Left Ctrl pressed
-        0x2E,      // C pressed
+        0x1D,        // Left Ctrl pressed
+        0x2E,        // C pressed
         0x2E | 0x80, // C released
         0x1D | 0x80, // Left Ctrl released
     ];
@@ -180,10 +183,10 @@ fn test_keyboard_pipeline_extended_keys() {
     // Simulate: User presses arrow keys
     // Arrow keys are E0-prefixed in PS/2
     let hal_events = vec![
-        HalKeyEvent::with_scancode(HalScancode::e0(0x48), true),  // Up
-        HalKeyEvent::with_scancode(HalScancode::e0(0x50), true),  // Down
-        HalKeyEvent::with_scancode(HalScancode::e0(0x4B), true),  // Left
-        HalKeyEvent::with_scancode(HalScancode::e0(0x4D), true),  // Right
+        HalKeyEvent::with_scancode(HalScancode::e0(0x48), true), // Up
+        HalKeyEvent::with_scancode(HalScancode::e0(0x50), true), // Down
+        HalKeyEvent::with_scancode(HalScancode::e0(0x4B), true), // Left
+        HalKeyEvent::with_scancode(HalScancode::e0(0x4D), true), // Right
     ];
 
     let key_events: Vec<KeyEvent> = hal_events
@@ -261,9 +264,9 @@ fn test_keyboard_pipeline_typing_sequence() {
 
     // Simulate typing "hi" (lowercase)
     let scancodes = vec![
-        0x23,      // H pressed
+        0x23,        // H pressed
         0x23 | 0x80, // H released
-        0x17,      // I pressed
+        0x17,        // I pressed
         0x17 | 0x80, // I released
     ];
 
@@ -299,8 +302,8 @@ fn test_keyboard_pipeline_shift_letter() {
 
     // Simulate typing "A" (uppercase with Shift)
     let scancodes = vec![
-        0x2A,      // Left Shift pressed
-        0x1E,      // A pressed
+        0x2A,        // Left Shift pressed
+        0x1E,        // A pressed
         0x1E | 0x80, // A released
         0x2A | 0x80, // Left Shift released
     ];

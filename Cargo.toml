@@ -8,6 +8,7 @@ members = [
     "sim_kernel",
     "hal",
     "hal_x86_64",
+    "console_fb",
     "services_registry",
     "services_process_manager",
     "services_logger",
@@ -71,6 +72,7 @@ kernel_api = { path = "kernel_api" }
 sim_kernel = { path = "sim_kernel" }
 hal = { path = "hal" }
 hal_x86_64 = { path = "hal_x86_64" }
+console_fb = { path = "console_fb" }
 
 # Service crates
 services_registry = { path = "services_registry" }

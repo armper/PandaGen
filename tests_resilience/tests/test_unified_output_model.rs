@@ -67,7 +67,9 @@ fn test_workspace_render_snapshot() {
         .expect("Failed to launch component");
 
     // Get the component's view handles
-    let component = workspace.get_component(component_id).expect("Component not found");
+    let component = workspace
+        .get_component(component_id)
+        .expect("Component not found");
     let main_view_handle = component.main_view.expect("No main view");
     let status_view_handle = component.status_view.expect("No status view");
 
@@ -141,15 +143,17 @@ fn test_text_renderer_processes_snapshot() {
         .with_cursor(CursorPosition::new(1, 3));
 
     let status_content = ViewContent::status_line("Ready");
-    let status_frame =
-        ViewFrame::new(ViewId::new(), ViewKind::StatusLine, 1, status_content, 1001);
+    let status_frame = ViewFrame::new(ViewId::new(), ViewKind::StatusLine, 1, status_content, 1001);
 
     // Render the snapshot
     let output = renderer.render_snapshot(Some(&main_frame), Some(&status_frame));
 
     // Verify output contains expected content
     assert!(output.contains("Line 1"), "Output missing 'Line 1'");
-    assert!(output.contains("Lin|e 2"), "Output missing cursor marker on 'Line 2'");
+    assert!(
+        output.contains("Lin|e 2"),
+        "Output missing cursor marker on 'Line 2'"
+    );
     assert!(output.contains("Ready"), "Output missing 'Ready'");
     assert!(output.contains("─"), "Output missing separator");
 
@@ -163,7 +167,13 @@ fn test_renderer_revision_tracking() {
 
     // Create a frame
     let content = ViewContent::text_buffer(vec!["Test".to_string()]);
-    let frame1 = ViewFrame::new(ViewId::new(), ViewKind::TextBuffer, 1, content.clone(), 1000);
+    let frame1 = ViewFrame::new(
+        ViewId::new(),
+        ViewKind::TextBuffer,
+        1,
+        content.clone(),
+        1000,
+    );
 
     // First render should be needed
     assert!(renderer.needs_redraw(Some(&frame1), None));
@@ -285,11 +295,19 @@ fn test_session_snapshot_preserves_views() {
         .expect("Failed to launch component");
 
     // Publish content
-    let component = workspace.get_component(component_id).expect("Component not found");
+    let component = workspace
+        .get_component(component_id)
+        .expect("Component not found");
     let main_view_handle = component.main_view.expect("No main view");
 
     let content = ViewContent::text_buffer(vec!["Saved content".to_string()]);
-    let frame = ViewFrame::new(main_view_handle.view_id, ViewKind::TextBuffer, 1, content, 1000);
+    let frame = ViewFrame::new(
+        main_view_handle.view_id,
+        ViewKind::TextBuffer,
+        1,
+        content,
+        1000,
+    );
 
     workspace
         .view_host_mut()

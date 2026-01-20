@@ -28,11 +28,9 @@ pub use capability::{
     CapabilityMetadata, CapabilityStatus, CapabilityTransfer,
 };
 pub use ids::{ServiceId, TaskId};
-pub use service_ids::{
-    command_service_id, console_service_id, input_service_id, timer_service_id,
-};
 pub use memory::{
     AddressSpace, AddressSpaceCap, AddressSpaceId, MemoryAccessType, MemoryBacking, MemoryError,
     MemoryPerms, MemoryRegion, MemoryRegionCap, MemoryRegionId,
 };
+pub use service_ids::{command_service_id, console_service_id, input_service_id, timer_service_id};
 pub use storage_schema::{MigrationLineage, ObjectSchemaId, ObjectSchemaVersion};

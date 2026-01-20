@@ -35,7 +35,10 @@ impl CommandRequest {
     }
 
     /// Wraps this request in a message envelope.
-    pub fn into_envelope(self, destination: ServiceId) -> Result<MessageEnvelope, serde_json::Error> {
+    pub fn into_envelope(
+        self,
+        destination: ServiceId,
+    ) -> Result<MessageEnvelope, serde_json::Error> {
         let payload = MessagePayload::new(&self)?;
         Ok(MessageEnvelope::new(
             destination,
@@ -99,15 +102,13 @@ impl CommandResponse {
         correlation: MessageId,
     ) -> Result<MessageEnvelope, serde_json::Error> {
         let payload = MessagePayload::new(&self)?;
-        Ok(
-            MessageEnvelope::new(
-                destination,
-                COMMAND_RESPONSE_ACTION.to_string(),
-                self.version,
-                payload,
-            )
-            .with_correlation(correlation),
+        Ok(MessageEnvelope::new(
+            destination,
+            COMMAND_RESPONSE_ACTION.to_string(),
+            self.version,
+            payload,
         )
+        .with_correlation(correlation))
     }
 }
 
@@ -167,9 +168,7 @@ mod tests {
         let service = ServiceId::new();
         let correlation = MessageId::new();
         let response = CommandResponse::ok("ok");
-        let envelope = response
-            .into_envelope(service, correlation)
-            .unwrap();
+        let envelope = response.into_envelope(service, correlation).unwrap();
 
         assert_eq!(envelope.destination, service);
         assert_eq!(envelope.action, COMMAND_RESPONSE_ACTION);

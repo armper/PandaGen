@@ -3,9 +3,9 @@
 //! This module implements command-line interface commands for the filesystem view service.
 
 use fs_view::DirectoryView;
+use hal::BlockDevice;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
 use services_storage::{ObjectId, ObjectKind, PersistentFilesystem, TransactionError};
-use hal::BlockDevice;
 
 /// CLI Command handler with persistent storage backend
 pub struct PersistentCommandHandler<D: BlockDevice> {
@@ -87,7 +87,12 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
             .link(name, self.current_dir, file_id, ObjectKind::Blob, timestamp)
             .map_err(|e| format!("Failed to link file '{}': {}", name, e))?;
 
-        Ok(format!("Wrote file: {} ({} bytes, id: {})", name, content.len(), file_id))
+        Ok(format!(
+            "Wrote file: {} ({} bytes, id: {})",
+            name,
+            content.len(),
+            file_id
+        ))
     }
 
     /// Removes a file or directory entry
@@ -127,7 +132,10 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
             }
         }
 
-        Err(format!("Path not found: '{}' (current directory only supported)", path))
+        Err(format!(
+            "Path not found: '{}' (current directory only supported)",
+            path
+        ))
     }
 }
 

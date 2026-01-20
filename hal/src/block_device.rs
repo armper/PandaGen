@@ -2,7 +2,6 @@
 ///
 /// Provides a minimal block device API for reading and writing fixed-size blocks.
 /// This is the foundation for persistent storage in PandaGen.
-
 use core::fmt;
 
 #[cfg(feature = "alloc")]
@@ -95,7 +94,8 @@ impl RamDisk {
     /// Create a new RAM disk with the specified number of blocks
     pub fn new(block_count: usize) -> Self {
         Self {
-            blocks: alloc::vec![0; block_count].into_iter()
+            blocks: alloc::vec![0; block_count]
+                .into_iter()
                 .map(|_| [0u8; BLOCK_SIZE])
                 .collect(),
         }
@@ -156,15 +156,15 @@ mod tests {
     #[test]
     fn test_ramdisk_read_write() {
         let mut disk = RamDisk::new(10);
-        
+
         // Write some data
         let write_data = [0x42u8; BLOCK_SIZE];
         disk.write_block(0, &write_data).unwrap();
-        
+
         // Read it back
         let mut read_data = [0u8; BLOCK_SIZE];
         disk.read_block(0, &mut read_data).unwrap();
-        
+
         assert_eq!(write_data, read_data);
     }
 
@@ -172,11 +172,17 @@ mod tests {
     fn test_ramdisk_out_of_bounds() {
         let mut disk = RamDisk::new(10);
         let mut buffer = [0u8; BLOCK_SIZE];
-        
+
         // Reading beyond bounds should fail
-        assert_eq!(disk.read_block(10, &mut buffer), Err(BlockError::OutOfBounds));
-        assert_eq!(disk.read_block(100, &mut buffer), Err(BlockError::OutOfBounds));
-        
+        assert_eq!(
+            disk.read_block(10, &mut buffer),
+            Err(BlockError::OutOfBounds)
+        );
+        assert_eq!(
+            disk.read_block(100, &mut buffer),
+            Err(BlockError::OutOfBounds)
+        );
+
         // Writing beyond bounds should fail
         assert_eq!(disk.write_block(10, &buffer), Err(BlockError::OutOfBounds));
         assert_eq!(disk.write_block(100, &buffer), Err(BlockError::OutOfBounds));
@@ -186,25 +192,31 @@ mod tests {
     fn test_ramdisk_invalid_size() {
         let mut disk = RamDisk::new(10);
         let mut small_buffer = [0u8; 100];
-        
+
         // Reading with too-small buffer should fail
-        assert_eq!(disk.read_block(0, &mut small_buffer), Err(BlockError::InvalidSize));
-        
+        assert_eq!(
+            disk.read_block(0, &mut small_buffer),
+            Err(BlockError::InvalidSize)
+        );
+
         // Writing with too-small buffer should fail
-        assert_eq!(disk.write_block(0, &small_buffer), Err(BlockError::InvalidSize));
+        assert_eq!(
+            disk.write_block(0, &small_buffer),
+            Err(BlockError::InvalidSize)
+        );
     }
 
     #[test]
     fn test_ramdisk_persistence_within_session() {
         let mut disk = RamDisk::new(10);
-        
+
         // Write different patterns to different blocks
         for block_idx in 0..10u64 {
             let pattern = (block_idx as u8).wrapping_mul(17);
             let write_data = [pattern; BLOCK_SIZE];
             disk.write_block(block_idx, &write_data).unwrap();
         }
-        
+
         // Verify all blocks retained their data
         for block_idx in 0..10u64 {
             let pattern = (block_idx as u8).wrapping_mul(17);

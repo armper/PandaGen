@@ -12,6 +12,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod framebuffer;
 mod output;
 mod workspace;
 
@@ -26,7 +27,9 @@ use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use limine_protocol::structures::memory_map_entry::EntryType;
-use limine_protocol::{HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request};
+use limine_protocol::{
+    FramebufferRequest, HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request,
+};
 
 #[cfg(not(test))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -452,12 +455,23 @@ pub extern "C" fn rust_main() -> ! {
             heap,
         )
     };
-    
-    // Phase 64: Boot directly into workspace prompt
+
+    // Phase 69: Boot directly into workspace prompt with framebuffer if available
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
+
+    // Try to initialize framebuffer console
+    let mut fb_console = unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) };
+
+    if fb_console.is_some() {
+        kprintln!(serial, "Framebuffer console initialized");
+        kprintln!(serial, "Display output enabled on QEMU window");
+    } else {
+        kprintln!(serial, "Framebuffer unavailable - serial-only mode");
+    }
+
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
-    workspace_loop(&mut serial, kernel)
+    workspace_loop(&mut serial, kernel, fb_console.as_mut())
 }
 
 #[cfg(not(test))]
@@ -517,22 +531,36 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
 
 /// Workspace loop - main interactive session
 /// Phase 64: This replaces the demo editor loop with a proper workspace prompt
+/// Phase 69: Now supports framebuffer console output
 #[cfg(not(test))]
-fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
+fn workspace_loop(
+    serial: &mut serial::SerialPort,
+    kernel: &mut Kernel,
+    mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
+) -> ! {
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
     let response_channel = ChannelId(1);
-    
+
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
     let mut parser_state = Ps2ParserState::new();
-    
+
+    // Track revision for rate-limited rendering
+    static LAST_FB_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let mut current_revision = 1u64;
+
     // Show initial prompt
     workspace.show_prompt(serial);
-    
+
+    // Initial framebuffer render if available
+    if let Some(ref mut fb) = fb_console {
+        fb.draw_text("PandaGen Workspace - Framebuffer Active");
+    }
+
     loop {
         // Run kernel tasks
         let kernel_progressed = kernel.run_once(serial);
-        
+
         // Process keyboard input
         let mut input_progressed = false;
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
@@ -546,7 +574,7 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
                     next_message_id,
                     ..
                 } = kernel;
-                
+
                 let mut ctx = KernelContext {
                     boot,
                     allocator,
@@ -554,11 +582,16 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
                     channels,
                     next_message_id,
                 };
-                
+
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
+
+                // Update framebuffer on input change
+                if input_progressed {
+                    current_revision += 1;
+                }
             }
         }
-        
+
         // Check for responses from command service
         let Kernel {
             boot,
@@ -568,7 +601,7 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
             next_message_id,
             ..
         } = kernel;
-        
+
         let mut ctx = KernelContext {
             boot,
             allocator,
@@ -576,7 +609,7 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
             channels,
             next_message_id,
         };
-        
+
         // Try to receive response
         if let Some(message) = ctx.try_recv(response_channel) {
             if let KernelMessage::CommandResponse(response) = message {
@@ -598,9 +631,20 @@ fn workspace_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
                     }
                 }
                 workspace.show_prompt(serial);
+                current_revision += 1;
             }
         }
-        
+
+        // Update framebuffer if revision changed (rate-limited)
+        let last_revision = LAST_FB_REVISION.load(core::sync::atomic::Ordering::Relaxed);
+        if current_revision != last_revision {
+            if let Some(ref mut fb) = fb_console {
+                // Simple framebuffer update - just show it's active
+                fb.draw_text("PandaGen Workspace Active");
+                LAST_FB_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         if !kernel_progressed && !input_progressed {
             idle_pause();
         }
@@ -710,17 +754,17 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
     // SAFETY: Single-task bare-metal kernel; no concurrent access possible.
     // This is documented architectural constraint, not an oversight.
     static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
-    
+
     // Convert editor buffer to text lines (simple line splitting)
     // For now, just show as single line for simplicity
     let text = editor.get_text();
     let text_str = core::str::from_utf8(text).unwrap_or("<invalid utf8>");
     let lines: [&str; 1] = [text_str];
-    
+
     // Cursor position (for now, just show line 0)
     let cursor_line = Some(0);
     let cursor_col = Some(editor.cursor);
-    
+
     let mut status_buf: [u8; 64] = [0; 64];
     let status = {
         let mut cursor_pos = 0usize;
@@ -782,14 +826,21 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
         }
         core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
     };
-    
+
     // Revision counter starts at 0; first render will be revision 1
     static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-    
+
     // Render using the unified output model
     unsafe {
-        OUTPUT.render_to_serial(serial, &lines, cursor_line, cursor_col, Some(status), revision);
+        OUTPUT.render_to_serial(
+            serial,
+            &lines,
+            cursor_line,
+            cursor_col,
+            Some(status),
+            revision,
+        );
     }
 }
 
@@ -1171,6 +1222,37 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
             info.mem_total_kib = total / 1024;
             info.mem_usable_kib = usable / 1024;
         }
+
+        // Request framebuffer from Limine
+        match FRAMEBUFFER_REQUEST.get_response() {
+            Some(fb_resp) => {
+                if let Some(framebuffers) = fb_resp.get_framebuffers() {
+                    if !framebuffers.is_empty() {
+                        let fb = framebuffers[0];
+                        info.framebuffer_addr = Some(fb.address);
+                        info.framebuffer_width = fb.width;
+                        info.framebuffer_height = fb.height;
+                        info.framebuffer_pitch = fb.pitch;
+                        info.framebuffer_bpp = fb.bpp;
+                        kprintln!(
+                            serial,
+                            "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
+                            fb.width,
+                            fb.height,
+                            fb.address as usize,
+                            fb.bpp
+                        );
+                    } else {
+                        kprintln!(serial, "framebuffer: no framebuffer devices available");
+                    }
+                } else {
+                    kprintln!(serial, "framebuffer: unavailable (failed to get list)");
+                }
+            }
+            None => {
+                kprintln!(serial, "framebuffer: unavailable (no response)");
+            }
+        }
     }
 
     print_boot_info(serial, &info);
@@ -1288,6 +1370,11 @@ static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().i
 static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> = KernelAddressRequest::new().into();
 
 #[cfg(not(test))]
+#[used]
+#[link_section = ".limine_requests"]
+static FRAMEBUFFER_REQUEST: Request<FramebufferRequest> = FramebufferRequest::new().into();
+
+#[cfg(not(test))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
 const PAGE_SIZE: u64 = 4096;
@@ -1364,6 +1451,11 @@ struct BootInfo {
     mem_entries: usize,
     mem_total_kib: u64,
     mem_usable_kib: u64,
+    framebuffer_addr: Option<*mut u8>,
+    framebuffer_width: u16,
+    framebuffer_height: u16,
+    framebuffer_pitch: u16,
+    framebuffer_bpp: u16,
 }
 
 impl BootInfo {
@@ -1375,6 +1467,11 @@ impl BootInfo {
             mem_entries: 0,
             mem_total_kib: 0,
             mem_usable_kib: 0,
+            framebuffer_addr: None,
+            framebuffer_width: 0,
+            framebuffer_height: 0,
+            framebuffer_pitch: 0,
+            framebuffer_bpp: 0,
         }
     }
 }

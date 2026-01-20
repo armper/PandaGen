@@ -272,7 +272,10 @@ mod tests {
             .unwrap();
 
         let result = dispatcher.register_irq_handler(IrqLine::Timer, timer_handler);
-        assert_eq!(result, Err(InterruptError::AlreadyRegistered(IrqLine::Timer.vector())));
+        assert_eq!(
+            result,
+            Err(InterruptError::AlreadyRegistered(IrqLine::Timer.vector()))
+        );
     }
 
     #[test]
@@ -281,6 +284,9 @@ mod tests {
         dispatcher.install_idt();
 
         let result = dispatcher.dispatch_irq(IrqLine::Keyboard);
-        assert_eq!(result, Err(IrqError::HandlerMissing(IrqLine::Keyboard.vector())));
+        assert_eq!(
+            result,
+            Err(IrqError::HandlerMissing(IrqLine::Keyboard.vector()))
+        );
     }
 }

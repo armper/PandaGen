@@ -3,7 +3,10 @@
 //! This module implements the syscall gate that enforces the user/kernel
 //! boundary. All kernel operations from user tasks must go through this gate.
 
-use core_types::{AddressSpaceCap, AddressSpaceId, Cap, MemoryAccessType, MemoryBacking, MemoryError, MemoryPerms, MemoryRegionCap, ServiceId, TaskId};
+use core_types::{
+    AddressSpaceCap, AddressSpaceId, Cap, MemoryAccessType, MemoryBacking, MemoryError,
+    MemoryPerms, MemoryRegionCap, ServiceId, TaskId,
+};
 use identity::ExecutionId;
 use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, KernelApi, KernelError, TaskDescriptor, TaskHandle};
@@ -14,25 +17,42 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Syscall {
     // Task management
-    SpawnTask { descriptor: TaskDescriptor },
-    
+    SpawnTask {
+        descriptor: TaskDescriptor,
+    },
+
     // Channel operations
     CreateChannel,
-    Send { channel: ChannelId, message: MessageEnvelope },
-    Recv { channel: ChannelId },
-    
+    Send {
+        channel: ChannelId,
+        message: MessageEnvelope,
+    },
+    Recv {
+        channel: ChannelId,
+    },
+
     // Time operations
-    Sleep { duration: Duration },
+    Sleep {
+        duration: Duration,
+    },
     Now,
     Yield,
-    
+
     // Capability operations
-    Grant { task: TaskId, capability: Cap<()> },
-    
+    Grant {
+        task: TaskId,
+        capability: Cap<()>,
+    },
+
     // Service registry
-    RegisterService { service_id: ServiceId, channel: ChannelId },
-    LookupService { service_id: ServiceId },
-    
+    RegisterService {
+        service_id: ServiceId,
+        channel: ChannelId,
+    },
+    LookupService {
+        service_id: ServiceId,
+    },
+
     // Memory operations (Phase 61)
     CreateAddressSpace,
     AllocateRegion {
@@ -177,51 +197,44 @@ impl SyscallGate {
             Syscall::SpawnTask { descriptor } => {
                 kernel.spawn_task(descriptor).map(SyscallResult::TaskHandle)
             }
-            Syscall::CreateChannel => {
-                kernel.create_channel().map(SyscallResult::ChannelId)
-            }
-            Syscall::Send { channel, message } => {
-                kernel.send_message(channel, message).map(|_| SyscallResult::Ok)
-            }
-            Syscall::Recv { channel } => {
-                kernel.receive_message(channel, None).map(SyscallResult::Message)
-            }
-            Syscall::Sleep { duration } => {
-                kernel.sleep(duration).map(|_| SyscallResult::Ok)
-            }
-            Syscall::Now => {
-                Ok(SyscallResult::Instant(kernel.now()))
-            }
+            Syscall::CreateChannel => kernel.create_channel().map(SyscallResult::ChannelId),
+            Syscall::Send { channel, message } => kernel
+                .send_message(channel, message)
+                .map(|_| SyscallResult::Ok),
+            Syscall::Recv { channel } => kernel
+                .receive_message(channel, None)
+                .map(SyscallResult::Message),
+            Syscall::Sleep { duration } => kernel.sleep(duration).map(|_| SyscallResult::Ok),
+            Syscall::Now => Ok(SyscallResult::Instant(kernel.now())),
             Syscall::Yield => {
                 // Yield is a hint to the scheduler, always succeeds
                 Ok(SyscallResult::Ok)
             }
-            Syscall::Grant { task, capability } => {
-                kernel.grant_capability(task, capability).map(|_| SyscallResult::Ok)
-            }
-            Syscall::RegisterService { service_id, channel } => {
-                kernel.register_service(service_id, channel).map(|_| SyscallResult::Ok)
-            }
-            Syscall::LookupService { service_id } => {
-                kernel.lookup_service(service_id).map(SyscallResult::ChannelId)
-            }
+            Syscall::Grant { task, capability } => kernel
+                .grant_capability(task, capability)
+                .map(|_| SyscallResult::Ok),
+            Syscall::RegisterService {
+                service_id,
+                channel,
+            } => kernel
+                .register_service(service_id, channel)
+                .map(|_| SyscallResult::Ok),
+            Syscall::LookupService { service_id } => kernel
+                .lookup_service(service_id)
+                .map(SyscallResult::ChannelId),
             Syscall::CreateAddressSpace => {
                 // Memory operations need to be routed through SimulatedKernel
                 // For now, return an error indicating this needs special handling
                 Err(KernelError::InsufficientAuthority(
-                    "CreateAddressSpace requires SimulatedKernel access".to_string()
+                    "CreateAddressSpace requires SimulatedKernel access".to_string(),
                 ))
             }
-            Syscall::AllocateRegion { .. } => {
-                Err(KernelError::InsufficientAuthority(
-                    "AllocateRegion requires SimulatedKernel access".to_string()
-                ))
-            }
-            Syscall::AccessRegion { .. } => {
-                Err(KernelError::InsufficientAuthority(
-                    "AccessRegion requires SimulatedKernel access".to_string()
-                ))
-            }
+            Syscall::AllocateRegion { .. } => Err(KernelError::InsufficientAuthority(
+                "AllocateRegion requires SimulatedKernel access".to_string(),
+            )),
+            Syscall::AccessRegion { .. } => Err(KernelError::InsufficientAuthority(
+                "AccessRegion requires SimulatedKernel access".to_string(),
+            )),
         };
 
         // Record completion or rejection
@@ -270,21 +283,28 @@ impl SyscallGate {
 
         // Execute the syscall
         let result = match syscall {
-            Syscall::CreateAddressSpace => {
-                kernel.create_address_space_op(caller)
-                    .map(SyscallResult::AddressSpaceCap)
-            }
-            Syscall::AllocateRegion { space_cap, size_bytes, permissions, backing } => {
-                kernel.allocate_region_op(&space_cap, size_bytes, permissions, backing, caller)
-                    .map(SyscallResult::MemoryRegionCap)
-            }
-            Syscall::AccessRegion { region_cap, access_type } => {
-                kernel.access_region_op(&region_cap, access_type, caller)
-                    .map(|_| SyscallResult::Ok)
-            }
+            Syscall::CreateAddressSpace => kernel
+                .create_address_space_op(caller)
+                .map(SyscallResult::AddressSpaceCap),
+            Syscall::AllocateRegion {
+                space_cap,
+                size_bytes,
+                permissions,
+                backing,
+            } => kernel
+                .allocate_region_op(&space_cap, size_bytes, permissions, backing, caller)
+                .map(SyscallResult::MemoryRegionCap),
+            Syscall::AccessRegion {
+                region_cap,
+                access_type,
+            } => kernel
+                .access_region_op(&region_cap, access_type, caller)
+                .map(|_| SyscallResult::Ok),
             _ => {
                 // Non-memory syscalls should not be routed through execute_with_memory
-                return Err(MemoryError::RegionNotFound(core_types::MemoryRegionId::new()));
+                return Err(MemoryError::RegionNotFound(
+                    core_types::MemoryRegionId::new(),
+                ));
             }
         };
 
@@ -325,7 +345,8 @@ impl SyscallGate {
             Syscall::CreateAddressSpace => "CreateAddressSpace",
             Syscall::AllocateRegion { .. } => "AllocateRegion",
             Syscall::AccessRegion { .. } => "AccessRegion",
-        }.to_string()
+        }
+        .to_string()
     }
 
     /// Records a bypass attempt (security violation).
@@ -337,7 +358,12 @@ impl SyscallGate {
     }
 
     /// Records a syscall invocation event.
-    pub fn record_invoked(&mut self, caller: ExecutionId, syscall_name: String, timestamp_nanos: u64) {
+    pub fn record_invoked(
+        &mut self,
+        caller: ExecutionId,
+        syscall_name: String,
+        timestamp_nanos: u64,
+    ) {
         self.audit_log.record(SyscallEvent::Invoked {
             caller,
             syscall_name,
@@ -346,7 +372,12 @@ impl SyscallGate {
     }
 
     /// Records a syscall completion event.
-    pub fn record_completed(&mut self, caller: ExecutionId, syscall_name: String, timestamp_nanos: u64) {
+    pub fn record_completed(
+        &mut self,
+        caller: ExecutionId,
+        syscall_name: String,
+        timestamp_nanos: u64,
+    ) {
         self.audit_log.record(SyscallEvent::Completed {
             caller,
             syscall_name,
@@ -355,7 +386,13 @@ impl SyscallGate {
     }
 
     /// Records a syscall rejection event.
-    pub fn record_rejected(&mut self, caller: ExecutionId, syscall_name: String, reason: String, timestamp_nanos: u64) {
+    pub fn record_rejected(
+        &mut self,
+        caller: ExecutionId,
+        syscall_name: String,
+        reason: String,
+        timestamp_nanos: u64,
+    ) {
         self.audit_log.record(SyscallEvent::Rejected {
             caller,
             syscall_name,
@@ -376,7 +413,10 @@ impl Default for SyscallGate {
 /// This is implemented by SimulatedKernel to provide memory management
 /// operations through the syscall gate.
 pub trait MemoryOps {
-    fn create_address_space_op(&mut self, execution_id: ExecutionId) -> Result<AddressSpaceCap, MemoryError>;
+    fn create_address_space_op(
+        &mut self,
+        execution_id: ExecutionId,
+    ) -> Result<AddressSpaceCap, MemoryError>;
     fn allocate_region_op(
         &mut self,
         space_cap: &AddressSpaceCap,
@@ -412,8 +452,12 @@ mod tests {
 
         // Check audit log
         assert_eq!(gate.audit_log().events().len(), 2); // Invoked + Completed
-        assert!(gate.audit_log().has_event(|e| matches!(e, SyscallEvent::Invoked { .. })));
-        assert!(gate.audit_log().has_event(|e| matches!(e, SyscallEvent::Completed { .. })));
+        assert!(gate
+            .audit_log()
+            .has_event(|e| matches!(e, SyscallEvent::Invoked { .. })));
+        assert!(gate
+            .audit_log()
+            .has_event(|e| matches!(e, SyscallEvent::Completed { .. })));
     }
 
     #[test]
@@ -423,14 +467,18 @@ mod tests {
         let exec_id = ExecutionId::new();
 
         // Try to lookup a non-existent service
-        let syscall = Syscall::LookupService { service_id: ServiceId::new() };
+        let syscall = Syscall::LookupService {
+            service_id: ServiceId::new(),
+        };
         let result = gate.execute(&mut kernel, exec_id, syscall, 1000);
 
         assert!(result.is_err());
 
         // Check audit log
         assert_eq!(gate.audit_log().events().len(), 2); // Invoked + Rejected
-        assert!(gate.audit_log().has_event(|e| matches!(e, SyscallEvent::Rejected { .. })));
+        assert!(gate
+            .audit_log()
+            .has_event(|e| matches!(e, SyscallEvent::Rejected { .. })));
     }
 
     #[test]
@@ -448,7 +496,9 @@ mod tests {
         assert_eq!(gate.audit_log().events().len(), 6);
 
         // Count invocations
-        let invocations = gate.audit_log().count_events(|e| matches!(e, SyscallEvent::Invoked { .. }));
+        let invocations = gate
+            .audit_log()
+            .count_events(|e| matches!(e, SyscallEvent::Invoked { .. }));
         assert_eq!(invocations, 3);
     }
 
@@ -459,6 +509,8 @@ mod tests {
 
         gate.record_bypass_attempt(exec_id, 1000);
 
-        assert!(gate.audit_log().has_event(|e| matches!(e, SyscallEvent::BypassAttempt { .. })));
+        assert!(gate
+            .audit_log()
+            .has_event(|e| matches!(e, SyscallEvent::BypassAttempt { .. })));
     }
 }

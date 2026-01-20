@@ -59,6 +59,9 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Phase 69: Enable display for framebuffer console
+    // Changed from "-display none" to "-display cocoa" (or "gtk" on Linux)
+    // to show the QEMU window with framebuffer output
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
         .arg("-m")
@@ -68,7 +71,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-serial")
         .arg("stdio")
         .arg("-display")
-        .arg("cocoa")
+        .arg("cocoa") // Can also be "gtk", "sdl", etc.
         .arg("-no-reboot"))
 }
 
@@ -118,7 +121,10 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let bios_sys = vendor.join("limine-bios.sys");
     copy_file(bios_sys.clone(), staging.join("boot/limine-bios.sys"))?;
     copy_file(bios_sys, staging.join("limine-bios.sys"))?;
-    copy_file(vendor.join("limine-bios.sys"), staging.join("limine/limine-bios.sys"))?;
+    copy_file(
+        vendor.join("limine-bios.sys"),
+        staging.join("limine/limine-bios.sys"),
+    )?;
     copy_file(
         vendor.join("limine-bios-cd.bin"),
         staging.join("boot/limine-bios-cd.bin"),
@@ -180,7 +186,10 @@ fn install_limine(root: &Path, vendor: &Path) -> Result<(), Box<dyn std::error::
         {
             Ok(_) => return Ok(()),
             Err(e) => {
-                eprintln!("Warning: limine bios-install failed ({}), continuing with UEFI-only boot", e);
+                eprintln!(
+                    "Warning: limine bios-install failed ({}), continuing with UEFI-only boot",
+                    e
+                );
                 return Ok(());
             }
         }
@@ -190,7 +199,10 @@ fn install_limine(root: &Path, vendor: &Path) -> Result<(), Box<dyn std::error::
         match run(Command::new(limine_deploy).current_dir(root).arg(&iso)) {
             Ok(_) => return Ok(()),
             Err(e) => {
-                eprintln!("Warning: limine-deploy failed ({}), continuing with UEFI-only boot", e);
+                eprintln!(
+                    "Warning: limine-deploy failed ({}), continuing with UEFI-only boot",
+                    e
+                );
                 return Ok(());
             }
         }
