@@ -828,9 +828,10 @@ impl WorkspaceManager {
         // Track debug info (only in debug builds)
         #[cfg(debug_assertions)]
         {
-            let InputEvent::Key(key_event) = event;
-            self.key_routing_debug.last_key_event = Some(key_event.clone());
-            self.key_routing_debug.consumed_by_global = false;
+            if let InputEvent::Key(key_event) = event {
+                self.key_routing_debug.last_key_event = Some(key_event.clone());
+                self.key_routing_debug.consumed_by_global = false;
+            }
         }
 
         let focused_sub = self.focus_manager.route_event(event).ok()??;
@@ -936,7 +937,8 @@ impl WorkspaceManager {
                 focused_component_name: focused_component.map(|c| c.name.clone()),
                 focused_component_type: focused_component.map(|c| c.component_type),
                 last_key_event: self.key_routing_debug.last_key_event.as_ref().map(|ke| {
-                    format!("{:?} {} {}", ke.code, ke.modifiers, ke.state)
+                    // Use Debug format for robustness
+                    format!("{:?}", ke)
                 }),
                 last_routed_to: self.key_routing_debug.last_routed_to,
                 consumed_by_global: self.key_routing_debug.consumed_by_global,
