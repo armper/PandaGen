@@ -133,6 +133,18 @@ impl EditorCore {
 
     // Private mode handlers
 
+    /// Helper to insert a character in insert mode
+    fn insert_char_in_insert_mode(&mut self, ch: char) -> CoreOutcome {
+        self.save_undo_snapshot();
+        if self.buffer.insert_char(self.cursor, ch) {
+            self.cursor.col += 1;
+            self.dirty = true;
+            CoreOutcome::Changed
+        } else {
+            CoreOutcome::Continue
+        }
+    }
+
     fn handle_normal_mode(&mut self, key: Key) -> CoreOutcome {
         match key {
             // Enter insert mode
@@ -247,26 +259,20 @@ impl EditorCore {
                 self.clamp_cursor();
                 CoreOutcome::Changed
             }
-            Key::Char(ch) => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, ch) {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::Space => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, ' ') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
+            Key::Char(ch) => self.insert_char_in_insert_mode(ch),
+            // Handle dedicated key variants as their character equivalents in insert mode
+            // This allows typing 'i', 'a', 'h', etc. in insert mode
+            Key::I => self.insert_char_in_insert_mode('i'),
+            Key::A => self.insert_char_in_insert_mode('a'),
+            Key::H => self.insert_char_in_insert_mode('h'),
+            Key::J => self.insert_char_in_insert_mode('j'),
+            Key::K => self.insert_char_in_insert_mode('k'),
+            Key::L => self.insert_char_in_insert_mode('l'),
+            Key::X => self.insert_char_in_insert_mode('x'),
+            Key::D => self.insert_char_in_insert_mode('d'),
+            Key::U => self.insert_char_in_insert_mode('u'),
+            Key::N => self.insert_char_in_insert_mode('n'),
+            Key::Space => self.insert_char_in_insert_mode(' '),
             Key::Enter => {
                 self.save_undo_snapshot();
                 if self.buffer.insert_newline(self.cursor) {
@@ -600,6 +606,33 @@ mod tests {
         assert!(editor.dirty());
         assert_eq!(editor.buffer().line(0), Some("h"));
         assert_eq!(editor.cursor(), Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_insert_vi_command_letters_in_insert_mode() {
+        // Bug fix test: Ensure that vi command letters (i, a, h, j, k, l, etc.)
+        // can be typed normally in INSERT mode
+        let mut editor = EditorCore::new();
+        
+        // Enter insert mode
+        editor.apply_key(Key::I);
+        assert_eq!(editor.mode(), EditorMode::Insert);
+        
+        // Type the letters that are also vi commands
+        editor.apply_key(Key::I); // Should type 'i', not enter insert mode again
+        editor.apply_key(Key::A); // Should type 'a', not append mode
+        editor.apply_key(Key::H); // Should type 'h', not move left
+        editor.apply_key(Key::J); // Should type 'j', not move down
+        editor.apply_key(Key::K); // Should type 'k', not move up
+        editor.apply_key(Key::L); // Should type 'l', not move right
+        editor.apply_key(Key::X); // Should type 'x', not delete
+        editor.apply_key(Key::D); // Should type 'd', not delete line
+        editor.apply_key(Key::U); // Should type 'u', not undo
+        editor.apply_key(Key::N); // Should type 'n', not repeat search
+        
+        // Verify all letters were typed
+        assert_eq!(editor.buffer().as_string(), "iahjklxdun");
+        assert_eq!(editor.mode(), EditorMode::Insert);
     }
 
     #[test]
