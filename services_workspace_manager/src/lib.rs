@@ -358,6 +358,29 @@ enum ComponentInstance {
     None,
 }
 
+/// Debug info for keyboard routing (gated behind debug_assertions)
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct KeyRoutingDebug {
+    /// Last key event received
+    pub last_key_event: Option<input_types::KeyEvent>,
+    /// Last routed component ID
+    pub last_routed_to: Option<ComponentId>,
+    /// Whether last event was consumed by global keybinding
+    pub consumed_by_global: bool,
+}
+
+#[cfg(debug_assertions)]
+impl KeyRoutingDebug {
+    fn new() -> Self {
+        Self {
+            last_key_event: None,
+            last_routed_to: None,
+            consumed_by_global: false,
+        }
+    }
+}
+
 /// Workspace Manager
 ///
 /// Manages component lifecycle, focus, and orchestration.
@@ -381,6 +404,9 @@ pub struct WorkspaceManager {
     next_timestamp: u64,
     /// Workspace identity (for policy evaluation)
     workspace_identity: IdentityMetadata,
+    /// Debug info for keyboard routing (gated behind debug_assertions)
+    #[cfg(debug_assertions)]
+    key_routing_debug: KeyRoutingDebug,
 }
 
 impl WorkspaceManager {
@@ -396,6 +422,8 @@ impl WorkspaceManager {
             audit_trail: Vec::new(),
             next_timestamp: 0,
             workspace_identity,
+            #[cfg(debug_assertions)]
+            key_routing_debug: KeyRoutingDebug::new(),
         }
     }
 
@@ -797,6 +825,14 @@ impl WorkspaceManager {
 
     /// Routes an input event to the focused component and processes it
     pub fn route_input(&mut self, event: &InputEvent) -> Option<ComponentId> {
+        // Track debug info (only in debug builds)
+        #[cfg(debug_assertions)]
+        {
+            let InputEvent::Key(key_event) = event;
+            self.key_routing_debug.last_key_event = Some(key_event.clone());
+            self.key_routing_debug.consumed_by_global = false;
+        }
+
         let focused_sub = self.focus_manager.route_event(event).ok()??;
 
         // Find component with matching subscription
@@ -810,6 +846,12 @@ impl WorkspaceManager {
                     .unwrap_or(false)
             })
             .map(|c| c.id)?;
+
+        // Update debug info with routed component
+        #[cfg(debug_assertions)]
+        {
+            self.key_routing_debug.last_routed_to = Some(component_id);
+        }
 
         // Get timestamp before borrowing instances mutably
         let timestamp = self.next_timestamp();
@@ -889,6 +931,16 @@ impl WorkspaceManager {
             status_view: status_view_frame,
             component_count: self.components.len(),
             running_count: self.components.values().filter(|c| c.is_running()).count(),
+            #[cfg(debug_assertions)]
+            debug_info: Some(DebugInfo {
+                focused_component_name: focused_component.map(|c| c.name.clone()),
+                focused_component_type: focused_component.map(|c| c.component_type),
+                last_key_event: self.key_routing_debug.last_key_event.as_ref().map(|ke| {
+                    format!("{:?} {} {}", ke.code, ke.modifiers, ke.state)
+                }),
+                last_routed_to: self.key_routing_debug.last_routed_to,
+                consumed_by_global: self.key_routing_debug.consumed_by_global,
+            }),
         }
     }
 
@@ -1118,6 +1170,26 @@ pub struct WorkspaceRenderSnapshot {
     pub component_count: usize,
     /// Number of running components
     pub running_count: usize,
+    /// Debug info (only in debug builds)
+    #[cfg(debug_assertions)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_info: Option<DebugInfo>,
+}
+
+/// Debug information for troubleshooting (gated behind debug_assertions)
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugInfo {
+    /// Name of focused component
+    pub focused_component_name: Option<String>,
+    /// Type of focused component
+    pub focused_component_type: Option<ComponentType>,
+    /// Last key event decoded
+    pub last_key_event: Option<String>,
+    /// Last routed component ID
+    pub last_routed_to: Option<ComponentId>,
+    /// Whether last event was consumed by global keybinding
+    pub consumed_by_global: bool,
 }
 
 /// Workspace session snapshot format version.

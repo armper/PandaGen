@@ -430,9 +430,44 @@ impl HostRuntime {
             .renderer
             .needs_redraw(snapshot.main_view.as_ref(), snapshot.status_view.as_ref())
         {
-            let output = self
+            let mut output = self
                 .renderer
                 .render_snapshot(snapshot.main_view.as_ref(), snapshot.status_view.as_ref());
+
+            // Add debug info if present (only in debug builds)
+            #[cfg(debug_assertions)]
+            if let Some(debug_info) = &snapshot.debug_info {
+                output.push('\n');
+                output.push_str("╔══════════════ DEBUG INFO ══════════════╗\n");
+                output.push_str(&format!(
+                    "║ Focused: {:?} ({})\n",
+                    debug_info.focused_component_type,
+                    debug_info
+                        .focused_component_name
+                        .as_deref()
+                        .unwrap_or("none")
+                ));
+                output.push_str(&format!(
+                    "║ Last Key: {}\n",
+                    debug_info
+                        .last_key_event
+                        .as_deref()
+                        .unwrap_or("(no key events yet)")
+                ));
+                output.push_str(&format!(
+                    "║ Routed To: {:?}\n",
+                    debug_info.last_routed_to
+                ));
+                output.push_str(&format!(
+                    "║ Global Keybinding: {}\n",
+                    if debug_info.consumed_by_global {
+                        "YES"
+                    } else {
+                        "NO"
+                    }
+                ));
+                output.push_str("╚════════════════════════════════════════╝\n");
+            }
 
             // Host can print (it's a host, not a component)
             print!("{}", output);
