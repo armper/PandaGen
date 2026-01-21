@@ -6,11 +6,16 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 
 [dev-dependencies]
 # For testing with std
 sha2 = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = []
+serde_support = ["serde"]
 
 [lib]
 name = "editor_core"

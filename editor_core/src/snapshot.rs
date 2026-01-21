@@ -3,10 +3,13 @@
 use crate::{EditorMode, Position};
 use alloc::string::String;
 use alloc::vec::Vec;
+
+#[cfg(feature = "serde_support")]
 use serde::{Deserialize, Serialize};
 
 /// Complete editor state snapshot for parity testing
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub struct EditorSnapshot {
     pub mode: EditorMode,
     pub cursor: Position,

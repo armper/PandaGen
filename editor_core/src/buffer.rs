@@ -2,10 +2,13 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+#[cfg(feature = "serde_support")]
 use serde::{Deserialize, Serialize};
 
 /// Cursor position in the buffer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub struct Position {
     pub row: usize,
     pub col: usize,

@@ -1,9 +1,11 @@
 //! Platform-independent key representation
 
+#[cfg(feature = "serde_support")]
 use serde::{Deserialize, Serialize};
 
 /// Platform-independent key event
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub enum Key {
     // Printable ASCII
     Char(char),

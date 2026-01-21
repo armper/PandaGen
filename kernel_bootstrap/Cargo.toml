@@ -9,16 +9,10 @@ path = "src/lib.rs"
 
 [dependencies]
 limine = "0.5.0"
-editor_core = { path = "../editor_core" }
+editor_core = { path = "../editor_core", default-features = false }
 
 [target.'cfg(not(test))'.dependencies]
 console_vga = { path = "../console_vga", default-features = false }
-
-# TODO: Re-enable when dependencies are no_std compatible
-# services_editor_vi = { path = "../services_editor_vi" }
-# input_types = { path = "../input_types" }
-# view_types = { path = "../view_types" }
-# serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [[bin]]
 name = "kernel_bootstrap"
