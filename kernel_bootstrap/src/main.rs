@@ -566,6 +566,11 @@ fn workspace_loop(
     let mut output_initialized = false;
     let mut last_output_seq = 0u64;
     let mut last_output_rows = 0usize;
+    let mut prompt_initialized = false;
+    let mut last_prompt_row = 0usize;
+    let mut last_view_start = 0usize;
+    let mut last_view_len = 0usize;
+    let mut last_cursor_col = 0usize;
 
     // Show initial prompt
     workspace.show_prompt(serial);
@@ -714,15 +719,54 @@ fn workspace_loop(
                     last_output_rows = output_rows;
                     last_output_seq = output_seq;
                 }
-
-                clear_vga_line(vga, prompt_row, normal_attr);
-                vga.write_str_at(0, prompt_row, "> ", bold_attr);
                 let cmd_bytes = workspace.get_command_text();
-                let (cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
-                    vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
+                let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                let view_len = cmd_slice.len();
+                let prompt_full = !prompt_initialized
+                    || output_dirty
+                    || prompt_row != last_prompt_row
+                    || view_start != last_view_start;
+
+                if prompt_full {
+                    clear_vga_line(vga, prompt_row, normal_attr);
+                    vga.write_str_at(0, prompt_row, "> ", bold_attr);
+                    if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
+                        vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
+                    }
+                } else {
+                    vga.write_str_at(0, prompt_row, "> ", bold_attr);
+                    for (idx, &byte) in cmd_slice.iter().enumerate() {
+                        vga.write_at(2 + idx, prompt_row, byte, normal_attr);
+                    }
+                    if last_view_len > view_len {
+                        for col in (2 + view_len)..(2 + last_view_len) {
+                            vga.write_at(col, prompt_row, b' ', normal_attr);
+                        }
+                    }
+
+                    if last_cursor_col != cursor_col {
+                        let ch = if last_cursor_col >= 2 {
+                            let idx = last_cursor_col.saturating_sub(2);
+                            if idx < view_len {
+                                cmd_slice[idx]
+                            } else {
+                                b' '
+                            }
+                        } else if last_cursor_col == 0 {
+                            b'>'
+                        } else {
+                            b' '
+                        };
+                        vga.write_at(last_cursor_col, prompt_row, ch, normal_attr);
+                    }
                 }
+
                 vga.draw_cursor(cursor_col, prompt_row, normal_attr);
+                prompt_initialized = true;
+                last_prompt_row = prompt_row;
+                last_view_start = view_start;
+                last_view_len = view_len;
+                last_cursor_col = cursor_col;
             } else if let Some(ref mut fb) = fb_console {
                 // Render workspace state to framebuffer
                 let bg = (0x00, 0x20, 0x40);
@@ -777,15 +821,54 @@ fn workspace_loop(
                     last_output_rows = output_rows;
                     last_output_seq = output_seq;
                 }
-
-                clear_fb_line(fb, prompt_row, cols, bg, fg);
-                fb.draw_text_at(0, prompt_row, "> ", accent, bg);
                 let cmd_bytes = workspace.get_command_text();
-                let (cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
-                    fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
+                let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                let view_len = cmd_slice.len();
+                let prompt_full = !prompt_initialized
+                    || output_dirty
+                    || prompt_row != last_prompt_row
+                    || view_start != last_view_start;
+
+                if prompt_full {
+                    clear_fb_line(fb, prompt_row, cols, bg, fg);
+                    fb.draw_text_at(0, prompt_row, "> ", accent, bg);
+                    if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
+                        fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
+                    }
+                } else {
+                    fb.draw_text_at(0, prompt_row, "> ", accent, bg);
+                    for (idx, &byte) in cmd_slice.iter().enumerate() {
+                        fb.draw_char_at(2 + idx, prompt_row, byte, fg, bg);
+                    }
+                    if last_view_len > view_len {
+                        for col in (2 + view_len)..(2 + last_view_len) {
+                            fb.draw_char_at(col, prompt_row, b' ', fg, bg);
+                        }
+                    }
+
+                    if last_cursor_col != cursor_col {
+                        let ch = if last_cursor_col >= 2 {
+                            let idx = last_cursor_col.saturating_sub(2);
+                            if idx < view_len {
+                                cmd_slice[idx]
+                            } else {
+                                b' '
+                            }
+                        } else if last_cursor_col == 0 {
+                            b'>'
+                        } else {
+                            b' '
+                        };
+                        fb.draw_char_at(last_cursor_col, prompt_row, ch, fg, bg);
+                    }
                 }
+
                 fb.draw_cursor(cursor_col, prompt_row, fg, bg);
+                prompt_initialized = true;
+                last_prompt_row = prompt_row;
+                last_view_start = view_start;
+                last_view_len = view_len;
+                last_cursor_col = cursor_col;
             }
 
             input_dirty = false;
@@ -900,13 +983,13 @@ fn clear_fb_line(
     }
 }
 
-fn prompt_view(cmd: &[u8], cols: usize) -> (&[u8], usize) {
+fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {
     if cols < 2 {
-        return (&[], 0);
+        return (0, &[], 0);
     }
     let available = cols.saturating_sub(2);
     if available == 0 {
-        return (&[], cols.saturating_sub(1));
+        return (0, &[], cols.saturating_sub(1));
     }
 
     if cmd.len() > available {
@@ -916,14 +999,14 @@ fn prompt_view(cmd: &[u8], cols: usize) -> (&[u8], usize) {
         if cursor >= cols {
             cursor = cols - 1;
         }
-        (slice, cursor)
+        (start, slice, cursor)
     } else {
         let slice = cmd;
         let mut cursor = 2 + cmd.len();
         if cursor >= cols {
             cursor = cols - 1;
         }
-        (slice, cursor)
+        (0, slice, cursor)
     }
 }
 
