@@ -127,10 +127,10 @@ impl WorkspaceSession {
     //         }
     //         _ => return false,
     //     };
-    // 
+    //
     //     // Process input through editor
     //     let result = editor.process_input(InputEvent::Key(key_event));
-    // 
+    //
     //     // Check if editor wants to quit
     //     match result {
     //         Ok(EditorAction::Quit) => {
@@ -148,10 +148,10 @@ impl WorkspaceSession {
     //             self.emit_line(serial, &format!("\r\nEditor error: {}", e));
     //         }
     //     }
-    // 
+    //
     //     true
     // }
-    // 
+    //
     // /// Render editor to serial port
     // fn render_editor_to_serial(&self, editor: &Editor, serial: &mut SerialPort) {
     //     // Clear screen and render editor
@@ -212,8 +212,14 @@ impl WorkspaceSession {
                         self.editor = Some(editor);
                         self.active_component = Some(ComponentType::Editor);
                         self.emit_line(serial, "Editor opened");
-                        self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force");
-                        self.emit_line(serial, "Note: Filesystem unavailable (in-memory editing only)");
+                        self.emit_line(
+                            serial,
+                            "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force",
+                        );
+                        self.emit_line(
+                            serial,
+                            "Note: Filesystem unavailable (in-memory editing only)",
+                        );
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);

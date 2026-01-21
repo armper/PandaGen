@@ -492,17 +492,22 @@ pub extern "C" fn rust_main() -> ! {
     // Test that global allocator works
     {
         extern crate alloc;
-        use alloc::vec::Vec;
         use alloc::string::String;
-        
+        use alloc::vec::Vec;
+
         let mut test_vec: Vec<u32> = Vec::new();
         test_vec.push(1);
         test_vec.push(2);
         test_vec.push(3);
-        
+
         let test_string = String::from("Alloc works!");
-        
-        kprintln!(serial, "Alloc test: vec={:?}, string={}", test_vec, test_string);
+
+        kprintln!(
+            serial,
+            "Alloc test: vec={:?}, string={}",
+            test_vec,
+            test_string
+        );
     }
 
     workspace_loop(
@@ -1701,18 +1706,9 @@ fn init_heap(
     // Initialize the global allocator
     unsafe {
         let heap_ptr = &GLOBAL_HEAP as *const BumpHeap as *mut BumpHeap;
-        core::ptr::write(
-            (*heap_ptr).next.get(),
-            virt_base,
-        );
-        core::ptr::write(
-            (*heap_ptr).allocations.get(),
-            0,
-        );
-        core::ptr::write(
-            &mut (*heap_ptr).start as *mut usize,
-            virt_base,
-        );
+        core::ptr::write((*heap_ptr).next.get(), virt_base);
+        core::ptr::write((*heap_ptr).allocations.get(), 0);
+        core::ptr::write(&mut (*heap_ptr).start as *mut usize, virt_base);
         core::ptr::write(
             &mut (*heap_ptr).end as *mut usize,
             virt_base.saturating_add(size),
@@ -3045,11 +3041,11 @@ unsafe impl core::alloc::GlobalAlloc for BumpHeap {
         let next = *self.next.get();
         let aligned = align_up_usize(next, layout.align());
         let end = aligned.saturating_add(layout.size());
-        
+
         if end > self.end {
             return core::ptr::null_mut();
         }
-        
+
         *self.next.get() = end;
         *self.allocations.get() += 1;
         aligned as *mut u8

@@ -57,9 +57,66 @@ are visible in the QEMU window, not in the host terminal.
 - Selecting the entry boots the kernel.
 - Boot diagnostics are printed to serial log.
 - **Phase 78**: The QEMU window shows **VGA text console with workspace prompt**
+- **Phase 89**: You can run `open editor` to launch the vi-like editor
 - Keyboard input is visible in the QEMU window, not the host terminal
 - Serial logs written to `dist/serial.log`
 - Workspace prompt: `> ` with command history and editing
+
+## Using the Editor (Bare-Metal)
+
+### Opening the Editor
+
+At the workspace prompt:
+```
+> open editor
+```
+
+The editor will open in the QEMU window.
+
+### Editor Commands
+
+**Insert Mode:**
+- `i` - Enter insert mode at cursor
+- `a` - Enter insert mode after cursor
+- Type text normally
+- `Backspace` - Delete character before cursor
+- `Enter` - New line
+- `Esc` - Return to normal mode
+
+**Normal Mode (Navigation):**
+- `h` - Move left
+- `j` - Move down
+- `k` - Move up
+- `l` - Move right
+- `x` - Delete character at cursor
+- `dd` - Delete current line
+- `:` - Enter command mode
+
+**Command Mode:**
+- `:q` - Quit (fails if buffer is dirty)
+- `:q!` - Force quit (discard changes)
+- `:w` - Write (shows "Filesystem unavailable" in bare-metal mode)
+- `:wq` - Write and quit
+- `Esc` - Cancel command
+
+### Limitations in Bare-Metal Mode
+
+- **No Filesystem**: Bare-metal editor operates in-memory only. `:w` command shows a message that filesystem is unavailable.
+- **In-Memory Editing Only**: All edits are lost when you quit the editor or reboot.
+- **VGA Text Mode**: 80x25 character display, no syntax highlighting.
+- **PS/2 Keyboard Only**: USB keyboards may not work depending on BIOS/UEFI compatibility layer.
+
+### Editor Implementation
+
+The bare-metal editor uses a minimal implementation (`kernel_bootstrap/src/minimal_editor.rs`) that:
+- Shares the same modal editing philosophy as `services_editor_vi`
+- Uses alloc (Vec/String) with the global BumpHeap allocator
+- Renders directly to VGA without services_view_host
+- Has no external service dependencies
+
+For full-featured editing with filesystem support, use the simulator mode (`pandagend`).
+
+## Expected Behavior
 
 ## VGA Text Console (Phase 78)
 
