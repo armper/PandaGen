@@ -1,3 +1,5 @@
+#![no_std]
+
 //! # Input Types
 //!
 //! This crate defines the fundamental input event types for PandaGen OS.
@@ -17,8 +19,12 @@
 //! - Global keyboard state
 //! - A complete input subsystem (just the types)
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use core::fmt;
 
 /// Input event
 ///

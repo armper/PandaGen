@@ -6,6 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 uuid = { workspace = true }

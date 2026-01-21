@@ -1,7 +1,10 @@
 //! Editor state and buffer management
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use alloc::vec;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use core::fmt;
 
 /// Editor mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

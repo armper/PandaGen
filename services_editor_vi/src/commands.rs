@@ -1,18 +1,27 @@
 //! Command parsing and execution
 
-use thiserror::Error;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 
 /// Command parsing error
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CommandError {
-    #[error("Unknown command: {0}")]
     UnknownCommand(String),
-
-    #[error("Invalid syntax: {0}")]
     InvalidSyntax(String),
-
-    #[error("Cannot quit: unsaved changes (use :q! to force)")]
     UnsavedChanges,
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandError::UnknownCommand(cmd) => write!(f, "Unknown command: {}", cmd),
+            CommandError::InvalidSyntax(msg) => write!(f, "Invalid syntax: {}", msg),
+            CommandError::UnsavedChanges => {
+                write!(f, "Cannot quit: unsaved changes (use :q! to force)")
+            }
+        }
+    }
 }
 
 /// Editor command

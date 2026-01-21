@@ -8,6 +8,28 @@ use core::fmt::Write;
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
+// TODO: Re-enable when all dependencies are no_std
+// use alloc::boxed::Box;
+// use services_editor_vi::{Editor, EditorIo, DocumentHandle, OpenOptions, OpenResult, SaveResult, EditorAction};
+// use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers, KeyState};
+// 
+// /// Stub EditorIo for bare-metal (no filesystem yet)
+// struct StubEditorIo;
+// 
+// impl EditorIo for StubEditorIo {
+//     fn open(&mut self, _path: &str, _options: OpenOptions) -> OpenResult {
+//         Err(services_editor_vi::io::IoError::StorageError(
+//             "Filesystem unavailable in bare-metal mode".into()
+//         ))
+//     }
+// 
+//     fn save(&mut self, _handle: &DocumentHandle, _content: &str) -> SaveResult {
+//         Err(services_editor_vi::io::IoError::StorageError(
+//             "Filesystem unavailable in bare-metal mode".into()
+//         ))
+//     }
+// }
+
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ComponentType {
@@ -20,6 +42,9 @@ pub enum ComponentType {
 pub struct WorkspaceSession {
     /// Active component type
     active_component: Option<ComponentType>,
+    // TODO: Re-enable when dependencies are no_std
+    // /// Editor instance
+    // editor: Option<Editor>,
     /// Command channel for component communication
     command_channel: ChannelId,
     /// Response channel for replies
@@ -41,6 +66,7 @@ impl WorkspaceSession {
     pub fn new(command_channel: ChannelId, response_channel: ChannelId) -> Self {
         Self {
             active_component: None,
+            // editor: None,
             command_channel,
             response_channel,
             in_command_mode: true,
@@ -60,6 +86,15 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
+        // TODO: Re-enable when editor dependencies are no_std
+        // If editor is active, route input to it
+        // if self.active_component == Some(ComponentType::Editor) {
+        //     if let Some(ref mut editor) = self.editor {
+        //         return self.process_editor_input(editor, byte, serial);
+        //     }
+        // }
+
+        // Otherwise, handle as command input
         match byte {
             b'\r' | b'\n' => {
                 let _ = serial.write_str("\r\n");
@@ -87,6 +122,57 @@ impl WorkspaceSession {
             _ => false,
         }
     }
+
+    // TODO: Re-enable when dependencies are no_std
+    // /// Process input for the editor
+    // fn process_editor_input(
+    //     &mut self,
+    //     editor: &mut Editor,
+    //     byte: u8,
+    //     serial: &mut SerialPort,
+    // ) -> bool {
+    //     // Convert byte to KeyEvent
+    //     let key_event = match byte {
+    //         b'\r' | b'\n' => KeyEvent::pressed(KeyCode::Enter, Modifiers::none()),
+    //         0x08 | 0x7f => KeyEvent::pressed(KeyCode::Backspace, Modifiers::none()),
+    //         0x1b => KeyEvent::pressed(KeyCode::Escape, Modifiers::none()),
+    //         byte if byte >= 0x20 && byte < 0x7F => {
+    //             KeyEvent::pressed(KeyCode::Char(byte as char), Modifiers::none())
+    //         }
+    //         _ => return false,
+    //     };
+    // 
+    //     // Process input through editor
+    //     let result = editor.process_input(InputEvent::Key(key_event));
+    // 
+    //     // Check if editor wants to quit
+    //     match result {
+    //         Ok(EditorAction::Quit) => {
+    //             self.active_component = None;
+    //             self.editor = None;
+    //             self.emit_line(serial, "\r\nEditor closed");
+    //             let _ = write!(serial, "> ");
+    //         }
+    //         Ok(EditorAction::Continue) => {
+    //             // Render editor state to serial
+    //             self.render_editor_to_serial(editor, serial);
+    //         }
+    //         Err(e) => {
+    //             use alloc::format;
+    //             self.emit_line(serial, &format!("\r\nEditor error: {}", e));
+    //         }
+    //     }
+    // 
+    //     true
+    // }
+    // 
+    // /// Render editor to serial port
+    // fn render_editor_to_serial(&self, editor: &Editor, serial: &mut SerialPort) {
+    //     // Clear screen and render editor
+    //     let _ = serial.write_str("\x1b[2J\x1b[H"); // ANSI clear screen + home
+    //     let render = editor.render();
+    //     let _ = serial.write_str(&render);
+    // }
 
     /// Execute the current command
     fn execute_command(&mut self, ctx: &mut KernelContext, serial: &mut SerialPort) {
@@ -136,12 +222,13 @@ impl WorkspaceSession {
                 match what {
                     Some("editor") => {
                         self.active_component = Some(ComponentType::Editor);
-                        self.emit_line(serial, "Editor component registered");
-                        self.emit_line(
-                            serial,
-                            "Note: Full editor requires services_workspace_manager",
-                        );
-                        self.emit_line(serial, "Use pandagend (sim mode) for vi-like editing");
+                        // TODO: Re-enable when dependencies are no_std
+                        // let mut editor = Editor::new();
+                        // editor.set_io(Box::new(StubEditorIo));
+                        // self.editor = Some(editor);
+                        self.emit_line(serial, "Editor support coming soon");
+                        self.emit_line(serial, "Note: Requires no_std conversion of dependencies");
+                        self.emit_line(serial, "Alloc system ready for Vec/String usage");
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
@@ -173,6 +260,7 @@ impl WorkspaceSession {
             }
             "quit" => {
                 self.active_component = None;
+                // self.editor = None;
                 self.emit_line(serial, "Closed component");
             }
             "halt" => {
