@@ -3,32 +3,15 @@
 //! This provides a workspace-like experience in the bare-metal kernel without
 //! requiring the full std-based services_workspace_manager.
 
+#![cfg_attr(not(test), allow(unused_imports))]
+
 use core::fmt::Write;
 
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-// TODO: Re-enable when all dependencies are no_std
-// use alloc::boxed::Box;
-// use services_editor_vi::{Editor, EditorIo, DocumentHandle, OpenOptions, OpenResult, SaveResult, EditorAction};
-// use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers, KeyState};
-// 
-// /// Stub EditorIo for bare-metal (no filesystem yet)
-// struct StubEditorIo;
-// 
-// impl EditorIo for StubEditorIo {
-//     fn open(&mut self, _path: &str, _options: OpenOptions) -> OpenResult {
-//         Err(services_editor_vi::io::IoError::StorageError(
-//             "Filesystem unavailable in bare-metal mode".into()
-//         ))
-//     }
-// 
-//     fn save(&mut self, _handle: &DocumentHandle, _content: &str) -> SaveResult {
-//         Err(services_editor_vi::io::IoError::StorageError(
-//             "Filesystem unavailable in bare-metal mode".into()
-//         ))
-//     }
-// }
+#[cfg(not(test))]
+use crate::minimal_editor::MinimalEditor;
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -42,9 +25,9 @@ pub enum ComponentType {
 pub struct WorkspaceSession {
     /// Active component type
     active_component: Option<ComponentType>,
-    // TODO: Re-enable when dependencies are no_std
-    // /// Editor instance
-    // editor: Option<Editor>,
+    /// Editor instance (bare-metal)
+    #[cfg(not(test))]
+    editor: Option<MinimalEditor>,
     /// Command channel for component communication
     command_channel: ChannelId,
     /// Response channel for replies
@@ -66,7 +49,8 @@ impl WorkspaceSession {
     pub fn new(command_channel: ChannelId, response_channel: ChannelId) -> Self {
         Self {
             active_component: None,
-            // editor: None,
+            #[cfg(not(test))]
+            editor: None,
             command_channel,
             response_channel,
             in_command_mode: true,
@@ -86,13 +70,20 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
-        // TODO: Re-enable when editor dependencies are no_std
         // If editor is active, route input to it
-        // if self.active_component == Some(ComponentType::Editor) {
-        //     if let Some(ref mut editor) = self.editor {
-        //         return self.process_editor_input(editor, byte, serial);
-        //     }
-        // }
+        #[cfg(not(test))]
+        if self.active_component == Some(ComponentType::Editor) {
+            if let Some(ref mut editor) = self.editor {
+                let should_quit = editor.process_byte(byte);
+                if should_quit {
+                    self.active_component = None;
+                    self.editor = None;
+                    let _ = serial.write_str("\r\nEditor closed\r\n");
+                    self.show_prompt(serial);
+                }
+                return true;
+            }
+        }
 
         // Otherwise, handle as command input
         match byte {
@@ -221,14 +212,21 @@ impl WorkspaceSession {
                 let what = parts.next();
                 match what {
                     Some("editor") => {
-                        self.active_component = Some(ComponentType::Editor);
-                        // TODO: Re-enable when dependencies are no_std
-                        // let mut editor = Editor::new();
-                        // editor.set_io(Box::new(StubEditorIo));
-                        // self.editor = Some(editor);
-                        self.emit_line(serial, "Editor support coming soon");
-                        self.emit_line(serial, "Note: Requires no_std conversion of dependencies");
-                        self.emit_line(serial, "Alloc system ready for Vec/String usage");
+                        #[cfg(not(test))]
+                        {
+                            // Create editor with viewport size (e.g., 23 rows for VGA 80x25 minus status line)
+                            let editor = MinimalEditor::new(23);
+                            self.editor = Some(editor);
+                            self.active_component = Some(ComponentType::Editor);
+                            self.emit_line(serial, "Editor opened");
+                            self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force");
+                            self.emit_line(serial, "Note: Filesystem unavailable (in-memory editing only)");
+                        }
+                        #[cfg(test)]
+                        {
+                            self.active_component = Some(ComponentType::Editor);
+                            self.emit_line(serial, "Editor component registered");
+                        }
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
@@ -363,6 +361,18 @@ impl WorkspaceSession {
             let line = line.trim_end_matches('\r');
             self.push_output_bytes(line.as_bytes());
         }
+    }
+
+    /// Check if editor is active
+    #[cfg(not(test))]
+    pub fn is_editor_active(&self) -> bool {
+        self.active_component == Some(ComponentType::Editor) && self.editor.is_some()
+    }
+
+    /// Get reference to the editor
+    #[cfg(not(test))]
+    pub fn editor(&self) -> Option<&MinimalEditor> {
+        self.editor.as_ref()
     }
 
     fn emit_line(&mut self, serial: &mut SerialPort, text: &str) {

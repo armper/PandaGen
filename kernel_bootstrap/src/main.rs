@@ -17,6 +17,7 @@ extern crate std;
 extern crate alloc;
 
 mod framebuffer;
+mod minimal_editor;
 mod output;
 mod vga;
 mod workspace;
@@ -694,6 +695,49 @@ fn workspace_loop(
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
                 let rows = console_vga::VGA_HEIGHT;
                 let cols = console_vga::VGA_WIDTH;
+
+                // Check if editor is active
+                if workspace.is_editor_active() {
+                    // Render editor to VGA
+                    if let Some(editor) = workspace.editor() {
+                        // Clear screen on first render or mode change
+                        if output_dirty {
+                            for row in 0..rows {
+                                clear_vga_line(vga, row, normal_attr);
+                            }
+                        }
+
+                        // Render editor viewport (rows 0..rows-1)
+                        let viewport_rows = (rows - 1).min(editor.viewport_rows());
+                        for viewport_row in 0..viewport_rows {
+                            if let Some(line) = editor.get_viewport_line(viewport_row) {
+                                let len = line.len().min(cols);
+                                vga.write_str_at(0, viewport_row, &line[..len], normal_attr);
+                            }
+                        }
+
+                        // Render status line (last row)
+                        let status_row = rows - 1;
+                        clear_vga_line(vga, status_row, bold_attr);
+                        let status = editor.status_line();
+                        let status_len = status.len().min(cols);
+                        vga.write_str_at(0, status_row, &status[..status_len], bold_attr);
+
+                        // Set cursor position
+                        if let Some(cursor_pos) = editor.get_viewport_cursor() {
+                            vga.draw_cursor(cursor_pos.col, cursor_pos.row, normal_attr);
+                        } else {
+                            // Cursor off-screen, hide it
+                            vga.draw_cursor(0, status_row, bold_attr);
+                        }
+
+                        input_dirty = false;
+                        output_dirty = false;
+                        continue; // Skip normal workspace rendering
+                    }
+                }
+
+                // Normal workspace rendering (when editor not active)
                 let max_output_rows = rows.saturating_sub(1);
                 let total = workspace.output_line_count();
                 let output_rows = total.min(max_output_rows);
