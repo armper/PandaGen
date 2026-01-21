@@ -486,7 +486,7 @@ impl EditorState {
         self.undo_stack.push(snapshot);
         // Clear redo stack when making a new edit
         self.redo_stack.clear();
-        
+
         // Limit undo stack size to prevent unbounded growth
         const MAX_UNDO_STACK: usize = 100;
         if self.undo_stack.len() > MAX_UNDO_STACK {
@@ -503,7 +503,7 @@ impl EditorState {
                 cursor: self.cursor.clone(),
             };
             self.redo_stack.push(current);
-            
+
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;
@@ -523,7 +523,7 @@ impl EditorState {
                 cursor: self.cursor.clone(),
             };
             self.undo_stack.push(current);
-            
+
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;

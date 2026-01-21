@@ -470,10 +470,7 @@ fn test_open_nonexistent_file_shows_new_file() {
     assert!(editor.state().status_message().contains("New File"));
 
     // Should have the filename as document label
-    assert_eq!(
-        editor.state().document_label(),
-        Some("nonexistent.txt")
-    );
+    assert_eq!(editor.state().document_label(), Some("nonexistent.txt"));
 
     // Buffer should be empty
     assert_eq!(editor.get_content(), "");
@@ -508,10 +505,7 @@ fn test_undo_redo_insert_mode() {
     assert!(editor.state().status_message().contains("Undo"));
 
     // Redo - should restore "hello"
-    let ctrl_r = InputEvent::key(KeyEvent::pressed(
-        KeyCode::R,
-        input_types::Modifiers::CTRL,
-    ));
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(KeyCode::R, input_types::Modifiers::CTRL));
     editor.process_input(ctrl_r).unwrap();
     assert_eq!(editor.get_content(), "hello");
     assert!(editor.state().status_message().contains("Redo"));
@@ -565,10 +559,7 @@ fn test_undo_redo_multiple_edits() {
     assert_eq!(editor.get_content(), "a");
 
     // Redo once
-    let ctrl_r = InputEvent::key(KeyEvent::pressed(
-        KeyCode::R,
-        input_types::Modifiers::CTRL,
-    ));
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(KeyCode::R, input_types::Modifiers::CTRL));
     editor.process_input(ctrl_r).unwrap();
     assert_eq!(editor.get_content(), "ab");
 }
@@ -584,7 +575,10 @@ fn test_search_basic() {
 
     // Enter search mode
     editor.process_input(press_key(KeyCode::Slash)).unwrap();
-    assert_eq!(editor.state().mode(), services_editor_vi::EditorMode::Search);
+    assert_eq!(
+        editor.state().mode(),
+        services_editor_vi::EditorMode::Search
+    );
 
     // Type search query "world"
     editor.process_input(press_key(KeyCode::W)).unwrap();
@@ -662,7 +656,3 @@ fn test_search_not_found() {
     // Status should indicate not found
     assert!(editor.state().status_message().contains("not found"));
 }
-
-
-
-

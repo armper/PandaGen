@@ -118,7 +118,7 @@ impl Editor {
             .io
             .as_mut()
             .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
-        
+
         match io.open(options.clone()) {
             Ok(result) => {
                 self.load_document(result.content, result.handle);
@@ -142,8 +142,7 @@ impl Editor {
                 Err(EditorError::Io(IoError::PermissionDenied(reason)))
             }
             Err(err) => {
-                self.state
-                    .set_status_message(format!("Error: {}", err));
+                self.state.set_status_message(format!("Error: {}", err));
                 Err(EditorError::Io(err))
             }
         }
@@ -458,9 +457,10 @@ impl Editor {
     }
 
     fn save_document_as(&mut self, path: &str) -> EditorResult<VersionId> {
-        let io = self.io.as_mut().ok_or_else(|| {
-            EditorError::NotSupported("No I/O handler configured".to_string())
-        })?;
+        let io = self
+            .io
+            .as_mut()
+            .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
 
         let content = self.state.buffer().as_string();
         let result = io.save_as(path, &content)?;
