@@ -102,12 +102,14 @@ impl Serialize for KeyBindingProfile {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        
+
         // Convert bindings to a Vec for serialization
-        let bindings_vec: Vec<(KeyCombo, Action)> = self.bindings.iter()
+        let bindings_vec: Vec<(KeyCombo, Action)> = self
+            .bindings
+            .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        
+
         let mut state = serializer.serialize_struct("KeyBindingProfile", 2)?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("bindings", &bindings_vec)?;
@@ -125,10 +127,10 @@ impl<'de> Deserialize<'de> for KeyBindingProfile {
             name: String,
             bindings: Vec<(KeyCombo, Action)>,
         }
-        
+
         let helper = Helper::deserialize(deserializer)?;
         let bindings = helper.bindings.into_iter().collect();
-        
+
         Ok(KeyBindingProfile {
             name: helper.name,
             bindings,
@@ -192,16 +194,10 @@ impl KeyBindingProfile {
         );
 
         // Ctrl+S to save
-        profile.bind(
-            KeyCombo::new(KeyCode::S, Modifiers::CTRL),
-            Action::Save,
-        );
+        profile.bind(KeyCombo::new(KeyCode::S, Modifiers::CTRL), Action::Save);
 
         // Ctrl+Q to quit
-        profile.bind(
-            KeyCombo::new(KeyCode::Q, Modifiers::CTRL),
-            Action::Quit,
-        );
+        profile.bind(KeyCombo::new(KeyCode::Q, Modifiers::CTRL), Action::Quit);
 
         // Ctrl+1 to focus top
         profile.bind(
@@ -235,16 +231,10 @@ impl KeyBindingProfile {
         );
 
         // :w to save (in command mode, handled separately)
-        profile.bind(
-            KeyCombo::new(KeyCode::S, Modifiers::CTRL),
-            Action::Save,
-        );
+        profile.bind(KeyCombo::new(KeyCode::S, Modifiers::CTRL), Action::Save);
 
         // :q to quit (in command mode, handled separately)
-        profile.bind(
-            KeyCombo::new(KeyCode::Q, Modifiers::CTRL),
-            Action::Quit,
-        );
+        profile.bind(KeyCombo::new(KeyCode::Q, Modifiers::CTRL), Action::Quit);
 
         // Escape for command mode
         profile.bind(
@@ -355,16 +345,13 @@ impl KeyBindingManager {
 
     /// Deserialize from JSON
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let data: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let data: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
 
         let active_name = data["active_profile"]
             .as_str()
             .ok_or("Missing active_profile")?;
 
-        let profiles_data = data["profiles"]
-            .as_object()
-            .ok_or("Missing profiles")?;
+        let profiles_data = data["profiles"].as_object().ok_or("Missing profiles")?;
 
         let mut profiles = HashMap::new();
         for (name, profile_data) in profiles_data {
@@ -591,6 +578,9 @@ mod tests {
             manager.active_profile().name,
             deserialized.active_profile().name
         );
-        assert_eq!(manager.profile_names().len(), deserialized.profile_names().len());
+        assert_eq!(
+            manager.profile_names().len(),
+            deserialized.profile_names().len()
+        );
     }
 }

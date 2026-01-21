@@ -134,11 +134,20 @@ impl WorkspaceSession {
                 match what {
                     Some("editor") => {
                         self.active_component = Some(ComponentType::Editor);
-                        self.emit_line(serial, "Opened editor (not yet implemented)");
+                        self.emit_line(serial, "Editor component registered");
+                        self.emit_line(
+                            serial,
+                            "Note: Full editor requires services_workspace_manager",
+                        );
+                        self.emit_line(serial, "Use pandagend (sim mode) for vi-like editing");
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
-                        self.emit_line(serial, "Opened CLI (not yet implemented)");
+                        self.emit_line(serial, "CLI component registered");
+                        self.emit_line(
+                            serial,
+                            "Note: Full CLI requires services_workspace_manager",
+                        );
                     }
                     _ => {
                         self.emit_line(serial, "Usage: open <editor|cli>");

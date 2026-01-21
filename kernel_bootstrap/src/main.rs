@@ -28,7 +28,9 @@ use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use limine::memory_map::EntryType;
-use limine::request::{ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest};
+use limine::request::{
+    ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
+};
 use limine::BaseRevision;
 
 #[cfg(not(test))]
@@ -2775,7 +2777,6 @@ impl KernelAllocator for BumpHeap {
         }
     }
 }
-
 
 const fn align_up(value: u64, align: u64) -> u64 {
     if align == 0 {

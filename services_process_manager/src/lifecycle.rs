@@ -122,15 +122,15 @@ impl ServiceHandle {
     /// Gets a human-readable status summary
     pub fn status_summary(&self) -> String {
         let mut summary = format!("{}", self.state.as_str());
-        
+
         if let Some(ref reason) = self.crash_reason {
             summary.push_str(&format!(" ({})", reason.description()));
         }
-        
+
         if self.restart_count > 0 {
             summary.push_str(&format!(" [restarts: {}]", self.restart_count));
         }
-        
+
         summary
     }
 }

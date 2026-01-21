@@ -212,11 +212,11 @@ mod tests {
     #[test]
     fn test_selection_range_contains() {
         let range = SelectionRange::new((5, 1), (15, 1));
-        
-        assert!(range.contains(5, 1));   // Start
-        assert!(range.contains(10, 1));  // Middle
-        assert!(range.contains(15, 1));  // End
-        assert!(!range.contains(4, 1));  // Before start
+
+        assert!(range.contains(5, 1)); // Start
+        assert!(range.contains(10, 1)); // Middle
+        assert!(range.contains(15, 1)); // End
+        assert!(!range.contains(4, 1)); // Before start
         assert!(!range.contains(16, 1)); // After end
         assert!(!range.contains(10, 0)); // Wrong row
     }
@@ -224,16 +224,16 @@ mod tests {
     #[test]
     fn test_selection_range_multirow_contains() {
         let range = SelectionRange::new((5, 1), (10, 3));
-        
-        assert!(range.contains(5, 1));   // Start of first row
-        assert!(range.contains(20, 1));  // Rest of first row
-        assert!(range.contains(0, 2));   // Entire middle row
-        assert!(range.contains(50, 2));  // Entire middle row
-        assert!(range.contains(0, 3));   // Start of last row
-        assert!(range.contains(10, 3));  // End of last row
+
+        assert!(range.contains(5, 1)); // Start of first row
+        assert!(range.contains(20, 1)); // Rest of first row
+        assert!(range.contains(0, 2)); // Entire middle row
+        assert!(range.contains(50, 2)); // Entire middle row
+        assert!(range.contains(0, 3)); // Start of last row
+        assert!(range.contains(10, 3)); // End of last row
         assert!(!range.contains(11, 3)); // After end
-        assert!(!range.contains(0, 0));  // Before start row
-        assert!(!range.contains(0, 4));  // After end row
+        assert!(!range.contains(0, 0)); // Before start row
+        assert!(!range.contains(0, 4)); // After end row
     }
 
     #[test]
@@ -270,34 +270,34 @@ mod tests {
     #[test]
     fn test_selection_manager_workflow() {
         let mut manager = SelectionManager::new();
-        
+
         // No selection initially
         assert!(!manager.has_selection());
-        
+
         // Start selection
         manager.start_selection(0, 0);
         assert!(manager.has_selection());
-        
+
         let selection = manager.get_selection().unwrap();
         assert_eq!(selection.start, (0, 0));
         assert_eq!(selection.end, (0, 0));
-        
+
         // Extend selection
         manager.extend_selection(10, 0);
         let selection = manager.get_selection().unwrap();
         assert_eq!(selection.end, (10, 0));
-        
+
         // Copy text
         manager.copy_selection(b"Selected text");
         assert!(manager.has_clipboard_content());
-        
+
         // Paste
         assert_eq!(manager.paste(), b"Selected text");
-        
+
         // Clear selection
         manager.clear_selection();
         assert!(!manager.has_selection());
-        
+
         // Clipboard persists after selection cleared
         assert!(manager.has_clipboard_content());
         assert_eq!(manager.paste(), b"Selected text");
@@ -306,17 +306,17 @@ mod tests {
     #[test]
     fn test_selection_manager_multiple_selections() {
         let mut manager = SelectionManager::new();
-        
+
         // First selection
         manager.start_selection(0, 0);
         manager.extend_selection(10, 0);
         manager.copy_selection(b"First");
-        
+
         // Second selection (replaces first)
         manager.start_selection(5, 1);
         manager.extend_selection(15, 1);
         manager.copy_selection(b"Second");
-        
+
         // Second text in clipboard
         assert_eq!(manager.paste(), b"Second");
     }

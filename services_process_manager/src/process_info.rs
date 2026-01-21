@@ -116,7 +116,9 @@ impl ProcessList {
     /// Formats the process list as a table
     pub fn format_table(&self) -> String {
         let mut output = String::new();
-        output.push_str("SERVICE ID                           NAME                 STATE           STATUS\n");
+        output.push_str(
+            "SERVICE ID                           NAME                 STATE           STATUS\n",
+        );
         output.push_str("─".repeat(100).as_str());
         output.push('\n');
 
@@ -165,13 +167,19 @@ impl KillSignal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KillResult {
     /// Process was successfully signaled
-    Success { service_id: ServiceId, signal: KillSignal },
+    Success {
+        service_id: ServiceId,
+        signal: KillSignal,
+    },
     /// Process not found
     NotFound { service_id: ServiceId },
     /// Process already stopped
     AlreadyStopped { service_id: ServiceId },
     /// Kill failed with reason
-    Failed { service_id: ServiceId, reason: String },
+    Failed {
+        service_id: ServiceId,
+        reason: String,
+    },
 }
 
 impl fmt::Display for KillResult {
@@ -202,7 +210,7 @@ mod tests {
         let service_id = ServiceId::new();
         let task_id = TaskId::new();
         let handle = ServiceHandle::new(task_id, LifecycleState::Running);
-        
+
         let info = ProcessInfo::new(
             service_id,
             "test-service".to_string(),
@@ -221,7 +229,7 @@ mod tests {
         let service_id = ServiceId::new();
         let task_id = TaskId::new();
         let handle = ServiceHandle::new(task_id, LifecycleState::Running);
-        
+
         let info = ProcessInfo::new(
             service_id,
             "test".to_string(),
@@ -240,7 +248,7 @@ mod tests {
     #[test]
     fn test_process_list_by_state() {
         let mut list = ProcessList::new();
-        
+
         for i in 0..5 {
             let service_id = ServiceId::new();
             let task_id = TaskId::new();
@@ -250,7 +258,7 @@ mod tests {
                 LifecycleState::Stopped
             };
             let handle = ServiceHandle::new(task_id, state);
-            
+
             let info = ProcessInfo::new(
                 service_id,
                 format!("service-{}", i),
@@ -262,7 +270,7 @@ mod tests {
 
         let running = list.list_by_state(LifecycleState::Running);
         let stopped = list.list_by_state(LifecycleState::Stopped);
-        
+
         assert_eq!(running.len(), 3); // 0, 2, 4
         assert_eq!(stopped.len(), 2); // 1, 3
     }
@@ -273,7 +281,7 @@ mod tests {
         let service_id = ServiceId::new();
         let task_id = TaskId::new();
         let handle = ServiceHandle::new(task_id, LifecycleState::Running);
-        
+
         let info = ProcessInfo::new(
             service_id,
             "my-service".to_string(),
@@ -305,7 +313,7 @@ mod tests {
     #[test]
     fn test_kill_result_display() {
         let service_id = ServiceId::new();
-        
+
         let success = KillResult::Success {
             service_id,
             signal: KillSignal::Terminate,
@@ -325,7 +333,7 @@ mod tests {
         let service_id = ServiceId::new();
         let task_id = TaskId::new();
         let handle = ServiceHandle::new(task_id, LifecycleState::Running);
-        
+
         let info = ProcessInfo::new(
             service_id,
             "test".to_string(),

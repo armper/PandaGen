@@ -1,16 +1,12 @@
 //! Integration test for editor end-to-end functionality
 
-use identity::{IdentityKind, IdentityMetadata, TrustDomain};
+use identity::{IdentityKind, TrustDomain};
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
 use pandagend::{HostMode, HostRuntime, HostRuntimeConfig};
 use services_workspace_manager::{ComponentType, LaunchConfig};
 
 fn press_key(code: KeyCode) -> InputEvent {
     InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
-}
-
-fn press_key_shift(code: KeyCode) -> InputEvent {
-    InputEvent::key(KeyEvent::pressed(code, Modifiers::SHIFT))
 }
 
 #[test]

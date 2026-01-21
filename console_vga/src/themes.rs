@@ -9,7 +9,7 @@
 //! - **Editor integration**: Themes apply to editor and CLI
 //! - **Persistent storage**: Theme config survives reboots
 
-use crate::{VgaColor, Style};
+use crate::{Style, VgaColor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -364,8 +364,7 @@ impl ThemeManager {
 
     /// Deserialize from JSON
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let data: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let data: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
 
         let active_name = data["active_theme"]
             .as_str()
@@ -500,9 +499,7 @@ mod tests {
         assert_eq!(manager.active_theme().name, "dark");
         assert!(manager.theme_names().contains(&"dark".to_string()));
         assert!(manager.theme_names().contains(&"light".to_string()));
-        assert!(manager
-            .theme_names()
-            .contains(&"high_contrast".to_string()));
+        assert!(manager.theme_names().contains(&"high_contrast".to_string()));
     }
 
     #[test]
@@ -573,6 +570,9 @@ mod tests {
             manager.active_theme().name,
             deserialized.active_theme().name
         );
-        assert_eq!(manager.theme_names().len(), deserialized.theme_names().len());
+        assert_eq!(
+            manager.theme_names().len(),
+            deserialized.theme_names().len()
+        );
     }
 }

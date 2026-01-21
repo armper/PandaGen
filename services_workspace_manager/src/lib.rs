@@ -525,7 +525,9 @@ impl WorkspaceManager {
             ComponentType::Editor => {
                 let mut editor = Editor::new();
                 // Wire view handles
-                if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
+                if let (Some(main_view), Some(status_view)) =
+                    (&component.main_view, &component.status_view)
+                {
                     editor.set_view_handles(main_view.clone(), status_view.clone());
                 }
                 ComponentInstance::Editor(editor)
@@ -543,7 +545,7 @@ impl WorkspaceManager {
 
         // Store component info
         self.components.insert(component_id, component);
-        
+
         // Store component instance
         self.component_instances.insert(component_id, instance);
 
@@ -798,7 +800,8 @@ impl WorkspaceManager {
         let focused_sub = self.focus_manager.route_event(event).ok()??;
 
         // Find component with matching subscription
-        let component_id = self.components
+        let component_id = self
+            .components
             .values()
             .find(|c| {
                 c.subscription

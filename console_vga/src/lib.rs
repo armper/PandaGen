@@ -27,17 +27,17 @@ use serde::{Deserialize, Serialize};
 pub mod scrollback;
 #[cfg(feature = "alloc")]
 pub mod selection;
-pub mod tiling;
 #[cfg(test)]
 pub mod themes;
+pub mod tiling;
 
 #[cfg(feature = "alloc")]
 pub use scrollback::{VgaLine, VgaScrollback};
 #[cfg(feature = "alloc")]
 pub use selection::{Clipboard, SelectionManager, SelectionRange};
-pub use tiling::{SplitLayout, TileBounds, TileId, TileManager};
 #[cfg(test)]
 pub use themes::{ColorPair, ColorRole, Theme, ThemeManager};
+pub use tiling::{SplitLayout, TileBounds, TileId, TileManager};
 
 /// VGA text mode dimensions
 pub const VGA_WIDTH: usize = 80;
@@ -228,16 +228,20 @@ impl VgaConsole {
     #[cfg(feature = "alloc")]
     pub fn render_scrollback(&mut self, scrollback: &VgaScrollback) {
         // Clear screen first
-        self.clear(scrollback.visible_lines().first()
-            .and_then(|line| line.attrs.first().copied())
-            .unwrap_or(Style::Normal.to_vga_attr()));
+        self.clear(
+            scrollback
+                .visible_lines()
+                .first()
+                .and_then(|line| line.attrs.first().copied())
+                .unwrap_or(Style::Normal.to_vga_attr()),
+        );
 
         // Render visible lines
         for (row, line) in scrollback.visible_lines().iter().enumerate() {
             if row >= VGA_HEIGHT {
                 break;
             }
-            
+
             for (col, (&ch, &attr)) in line.text.iter().zip(line.attrs.iter()).enumerate() {
                 if col >= VGA_WIDTH {
                     break;
@@ -260,7 +264,11 @@ impl VgaConsole {
             }
 
             let col_start = if row == start_row { start_col } else { 0 };
-            let col_end = if row == end_row { end_col.min(VGA_WIDTH - 1) } else { VGA_WIDTH - 1 };
+            let col_end = if row == end_row {
+                end_col.min(VGA_WIDTH - 1)
+            } else {
+                VGA_WIDTH - 1
+            };
 
             for col in col_start..=col_end {
                 let offset = (row * VGA_WIDTH + col) * 2;
@@ -475,17 +483,17 @@ mod tests {
     #[test]
     fn test_render_scrollback() {
         use crate::scrollback::VgaScrollback;
-        
+
         let mut buffer = MockVgaBuffer::new();
         let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
-        
+
         let mut scrollback = VgaScrollback::new(VGA_WIDTH, VGA_HEIGHT, 1000, 0x07);
         scrollback.push_line("Line 1", 0x07);
         scrollback.push_line("Line 2", 0x0A);
         scrollback.push_line("Line 3", 0x0C);
-        
+
         console.render_scrollback(&scrollback);
-        
+
         // Verify lines were rendered
         assert_eq!(buffer.get_char(0, 0), b'L');
         assert_eq!(buffer.get_attr(0, 0), 0x07);
@@ -498,25 +506,25 @@ mod tests {
     #[test]
     fn test_highlight_selection() {
         use crate::selection::SelectionRange;
-        
+
         let mut buffer = MockVgaBuffer::new();
         let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
-        
+
         // Write some text
         console.clear(0x07);
         console.write_str_at(0, 0, "Hello World", 0x07);
-        
+
         // Create selection (characters 0-4 = "Hello")
         let selection = SelectionRange::new((0, 0), (4, 0));
         console.highlight_selection(selection);
-        
+
         // Verify selection is highlighted (attributes inverted)
         // Original: 0x07 (light gray on black)
         // Inverted: 0x70 (black on light gray)
         assert_eq!(buffer.get_attr(0, 0), 0x70);
         assert_eq!(buffer.get_attr(1, 0), 0x70);
         assert_eq!(buffer.get_attr(4, 0), 0x70);
-        
+
         // Character after selection should not be highlighted
         assert_eq!(buffer.get_attr(5, 0), 0x07);
     }

@@ -70,19 +70,19 @@ impl fmt::Display for PrincipalId {
 pub enum CapabilityKind {
     /// Read access: Can read object data
     Read,
-    
+
     /// Write access: Can modify object data (creates new version)
     Write,
-    
+
     /// Execute access: Can invoke/run object (for executable content)
     Execute,
-    
+
     /// Delete access: Can delete object
     Delete,
-    
+
     /// Grant access: Can grant capabilities to others
     Grant,
-    
+
     /// Own access: Full control (implies all other capabilities)
     Own,
 }
@@ -107,13 +107,13 @@ impl fmt::Display for CapabilityKind {
 pub struct Capability {
     /// The object this capability grants access to
     pub object_id: ObjectId,
-    
+
     /// The kind of access granted
     pub kind: CapabilityKind,
-    
+
     /// Who was granted this capability
     pub holder: PrincipalId,
-    
+
     /// Unique identifier for this capability (prevents forgery)
     capability_id: Uuid,
 }
@@ -150,16 +150,16 @@ impl fmt::Display for Capability {
 pub struct Ownership {
     /// Who created this object
     pub owner: PrincipalId,
-    
+
     /// When it was created (Unix timestamp)
     pub created_at: u64,
-    
+
     /// Who last modified it
     pub last_modified_by: PrincipalId,
-    
+
     /// When it was last modified (Unix timestamp)
     pub last_modified_at: u64,
-    
+
     /// Optional human-readable name/description
     pub description: Option<String>,
 }
@@ -198,61 +198,70 @@ pub enum AccessDenialReason {
         object_id: ObjectId,
         principal: PrincipalId,
     },
-    
+
     /// Capability is for wrong object
     WrongObject {
         capability_object: ObjectId,
         requested_object: ObjectId,
     },
-    
+
     /// Capability is for wrong principal
     WrongPrincipal {
         capability_holder: PrincipalId,
         requesting_principal: PrincipalId,
     },
-    
+
     /// Capability has wrong kind
     WrongCapabilityKind {
         capability_kind: CapabilityKind,
         required_kind: CapabilityKind,
     },
-    
+
     /// Object does not exist
-    ObjectNotFound {
-        object_id: ObjectId,
-    },
-    
+    ObjectNotFound { object_id: ObjectId },
+
     /// Version does not exist
-    VersionNotFound {
-        version_id: VersionId,
-    },
+    VersionNotFound { version_id: VersionId },
 }
 
 impl fmt::Display for AccessDenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AccessDenialReason::MissingCapability { required, object_id, principal } => {
+            AccessDenialReason::MissingCapability {
+                required,
+                object_id,
+                principal,
+            } => {
                 write!(
                     f,
                     "Access denied: {} requires {} capability on {}, but none was provided",
                     principal, required, object_id
                 )
             }
-            AccessDenialReason::WrongObject { capability_object, requested_object } => {
+            AccessDenialReason::WrongObject {
+                capability_object,
+                requested_object,
+            } => {
                 write!(
                     f,
                     "Access denied: Capability is for {}, but access to {} was requested",
                     capability_object, requested_object
                 )
             }
-            AccessDenialReason::WrongPrincipal { capability_holder, requesting_principal } => {
+            AccessDenialReason::WrongPrincipal {
+                capability_holder,
+                requesting_principal,
+            } => {
                 write!(
                     f,
                     "Access denied: Capability is held by {}, but {} is requesting access",
                     capability_holder, requesting_principal
                 )
             }
-            AccessDenialReason::WrongCapabilityKind { capability_kind, required_kind } => {
+            AccessDenialReason::WrongCapabilityKind {
+                capability_kind,
+                required_kind,
+            } => {
                 write!(
                     f,
                     "Access denied: Operation requires {} capability, but only {} was provided",
@@ -380,7 +389,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
         let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
-        
+
         assert_eq!(cap.object_id, obj_id);
         assert_eq!(cap.kind, CapabilityKind::Read);
         assert_eq!(cap.holder, principal);
@@ -391,7 +400,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
         let cap = Capability::new(obj_id, CapabilityKind::Write, principal);
-        
+
         let display = format!("{}", cap);
         assert!(display.contains("Write"));
     }
@@ -400,7 +409,7 @@ mod tests {
     fn test_ownership_creation() {
         let owner = PrincipalId::new();
         let ownership = Ownership::new(owner, 1000);
-        
+
         assert_eq!(ownership.owner, owner);
         assert_eq!(ownership.created_at, 1000);
         assert_eq!(ownership.last_modified_by, owner);
@@ -412,9 +421,9 @@ mod tests {
         let owner = PrincipalId::new();
         let modifier = PrincipalId::new();
         let mut ownership = Ownership::new(owner, 1000);
-        
+
         ownership.update(modifier, 2000);
-        
+
         assert_eq!(ownership.owner, owner);
         assert_eq!(ownership.last_modified_by, modifier);
         assert_eq!(ownership.last_modified_at, 2000);
@@ -426,12 +435,12 @@ mod tests {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
         let ownership = Ownership::new(principal, 1000);
-        
+
         checker.register_object(obj_id, ownership);
-        
+
         let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal);
-        
+
         assert!(result.is_ok());
     }
 
@@ -442,12 +451,12 @@ mod tests {
         let obj_id2 = ObjectId::new();
         let principal = PrincipalId::new();
         let ownership = Ownership::new(principal, 1000);
-        
+
         checker.register_object(obj_id2, ownership);
-        
+
         let cap = Capability::new(obj_id1, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id2, CapabilityKind::Read, principal);
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             AccessDenialReason::WrongObject { .. } => {}
@@ -462,12 +471,12 @@ mod tests {
         let principal1 = PrincipalId::new();
         let principal2 = PrincipalId::new();
         let ownership = Ownership::new(principal1, 1000);
-        
+
         checker.register_object(obj_id, ownership);
-        
+
         let cap = Capability::new(obj_id, CapabilityKind::Read, principal1);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal2);
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             AccessDenialReason::WrongPrincipal { .. } => {}
@@ -481,12 +490,12 @@ mod tests {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
         let ownership = Ownership::new(principal, 1000);
-        
+
         checker.register_object(obj_id, ownership);
-        
+
         let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Write, principal);
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             AccessDenialReason::WrongCapabilityKind { .. } => {}
@@ -500,15 +509,21 @@ mod tests {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
         let ownership = Ownership::new(principal, 1000);
-        
+
         checker.register_object(obj_id, ownership);
-        
+
         // Own capability should grant all access
         let cap = Capability::new(obj_id, CapabilityKind::Own, principal);
-        
-        assert!(checker.check_access(&cap, obj_id, CapabilityKind::Read, principal).is_ok());
-        assert!(checker.check_access(&cap, obj_id, CapabilityKind::Write, principal).is_ok());
-        assert!(checker.check_access(&cap, obj_id, CapabilityKind::Execute, principal).is_ok());
+
+        assert!(checker
+            .check_access(&cap, obj_id, CapabilityKind::Read, principal)
+            .is_ok());
+        assert!(checker
+            .check_access(&cap, obj_id, CapabilityKind::Write, principal)
+            .is_ok());
+        assert!(checker
+            .check_access(&cap, obj_id, CapabilityKind::Execute, principal)
+            .is_ok());
     }
 
     #[test]
@@ -516,10 +531,10 @@ mod tests {
         let checker = PermissionChecker::new();
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
-        
+
         let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal);
-        
+
         assert!(result.is_err());
         match result.unwrap_err() {
             AccessDenialReason::ObjectNotFound { .. } => {}
@@ -534,9 +549,9 @@ mod tests {
         let owner = PrincipalId::new();
         let other = PrincipalId::new();
         let ownership = Ownership::new(owner, 1000);
-        
+
         checker.register_object(obj_id, ownership);
-        
+
         assert!(checker.is_owner(obj_id, owner));
         assert!(!checker.is_owner(obj_id, other));
     }
@@ -545,13 +560,13 @@ mod tests {
     fn test_access_denial_reason_display() {
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
-        
+
         let reason = AccessDenialReason::MissingCapability {
             required: CapabilityKind::Write,
             object_id: obj_id,
             principal,
         };
-        
+
         let display = format!("{}", reason);
         assert!(display.contains("Access denied"));
         assert!(display.contains("Write"));
