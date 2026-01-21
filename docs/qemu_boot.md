@@ -156,10 +156,42 @@ Boot complete. Type 'help' for commands.
 
 ### Console Commands (Available in Workspace)
 - `help` - List all commands
+- `open editor` - Launch vi-like text editor (requires pandagend/sim mode)
+- `list` - List active components
 - `halt` - Halt the system
 - `boot` - Display boot information (HHDM, kernel addresses)
 - `mem` - Display memory allocator state
 - `ticks` - Display current kernel tick count
+
+### Using the Editor (Sim Mode Only)
+
+The vi-like editor is available when running in simulation mode (pandagend):
+
+```bash
+# Run in simulation mode
+cargo run --package pandagend
+
+# In the workspace prompt:
+> open editor
+
+# Editor commands:
+# - `i` - Enter INSERT mode to type text
+# - `Escape` - Return to NORMAL mode
+# - `:w` - Save file (when filesystem capability provided)
+# - `:q` - Quit editor
+# - `:q!` - Quit without saving
+
+# Navigate with arrow keys (in NORMAL mode)
+# Type text in INSERT mode
+# Status line shows current mode and file state
+```
+
+**Note**: Full editor functionality with file save/load requires:
+- Simulation mode (pandagend)
+- Filesystem capability (PersistentFilesystem)
+- services_workspace_manager integration
+
+The bare-metal workspace shows a message directing users to pandagend for full editor support.
 
 ## Troubleshooting
 

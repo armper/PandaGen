@@ -34,13 +34,13 @@ impl VgaLine {
     pub fn from_text(text: &str, attr: u8, cols: usize) -> Self {
         let mut line_text = Vec::with_capacity(cols);
         let mut line_attrs = Vec::with_capacity(cols);
-        
+
         for byte in text.bytes().take(cols) {
             line_text.push(byte);
             line_attrs.push(attr);
         }
-        
-        Self { 
+
+        Self {
             text: line_text,
             attrs: line_attrs,
         }

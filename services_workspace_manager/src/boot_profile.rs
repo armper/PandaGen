@@ -155,7 +155,7 @@ impl Default for BootConfig {
 pub struct BootProfileManager {
     /// Current configuration
     config: BootConfig,
-    
+
     /// Whether config has been loaded from storage
     loaded: bool,
 }
@@ -178,7 +178,7 @@ impl BootProfileManager {
         // 2. Deserialize JSON
         // 3. Update self.config
         // 4. Set self.loaded = true
-        
+
         // For now, use default
         self.config = BootConfig::default();
         self.loaded = true;
@@ -191,7 +191,7 @@ impl BootProfileManager {
         // 1. Serialize config to JSON
         // 2. Write to persistent storage
         // 3. Sync to disk
-        
+
         // For now, no-op
         Ok(())
     }
@@ -247,7 +247,10 @@ mod tests {
         );
         assert_eq!(BootProfile::from_str("editor"), Some(BootProfile::Editor));
         assert_eq!(BootProfile::from_str("kiosk"), Some(BootProfile::Kiosk));
-        assert_eq!(BootProfile::from_str("WORKSPACE"), Some(BootProfile::Workspace));
+        assert_eq!(
+            BootProfile::from_str("WORKSPACE"),
+            Some(BootProfile::Workspace)
+        );
         assert_eq!(BootProfile::from_str("invalid"), None);
     }
 
@@ -291,24 +294,23 @@ mod tests {
     fn test_boot_config_with_auto_start() {
         let config = BootConfig::new(BootProfile::Workspace)
             .with_auto_start(vec!["service1".to_string(), "service2".to_string()]);
-        
+
         assert_eq!(config.auto_start.len(), 2);
         assert_eq!(config.auto_start[0], "service1");
     }
 
     #[test]
     fn test_boot_config_with_editor_file() {
-        let config = BootConfig::new(BootProfile::Editor)
-            .with_editor_file("/path/to/file.txt".to_string());
-        
+        let config =
+            BootConfig::new(BootProfile::Editor).with_editor_file("/path/to/file.txt".to_string());
+
         assert_eq!(config.editor_file, Some("/path/to/file.txt".to_string()));
     }
 
     #[test]
     fn test_boot_config_with_kiosk_app() {
-        let config = BootConfig::new(BootProfile::Kiosk)
-            .with_kiosk_app("my-app".to_string());
-        
+        let config = BootConfig::new(BootProfile::Kiosk).with_kiosk_app("my-app".to_string());
+
         assert_eq!(config.kiosk_app, Some("my-app".to_string()));
     }
 
@@ -317,7 +319,7 @@ mod tests {
         let config = BootConfig::new(BootProfile::Workspace)
             .with_extra("key1".to_string(), "value1".to_string())
             .with_extra("key2".to_string(), "value2".to_string());
-        
+
         assert_eq!(config.extra.len(), 2);
         assert_eq!(config.extra.get("key1"), Some(&"value1".to_string()));
     }
@@ -326,10 +328,10 @@ mod tests {
     fn test_boot_config_serialization() {
         let config = BootConfig::workspace();
         let json = config.to_json().unwrap();
-        
+
         assert!(json.contains("Workspace"));
         assert!(json.contains("logger"));
-        
+
         let deserialized = BootConfig::from_json(&json).unwrap();
         assert_eq!(deserialized.profile, BootProfile::Workspace);
         assert!(!deserialized.auto_start.is_empty());
@@ -353,7 +355,7 @@ mod tests {
     fn test_boot_profile_manager_set_config() {
         let mut manager = BootProfileManager::new();
         let config = BootConfig::editor();
-        
+
         manager.set_config(config);
         assert_eq!(manager.profile(), BootProfile::Editor);
     }
@@ -362,7 +364,7 @@ mod tests {
     fn test_boot_profile_manager_set_profile() {
         let mut manager = BootProfileManager::new();
         manager.set_profile(BootProfile::Kiosk);
-        
+
         assert_eq!(manager.profile(), BootProfile::Kiosk);
     }
 }
