@@ -444,3 +444,42 @@ fn test_save_as_with_storage_io() {
     assert!(editor.state().status_message().contains("Saved as"));
 }
 
+#[test]
+fn test_open_nonexistent_file_shows_new_file() {
+    // Test opening a nonexistent file shows [New File] status
+    let storage = JournaledStorage::new();
+
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+
+    let root_id = ObjectId::new();
+    let root = DirectoryView::new(root_id);
+    let fs_view = FileSystemViewService::new();
+
+    let mut editor = Editor::new();
+    let io = Box::new(StorageEditorIo::with_fs_view(storage, fs_view, root));
+    editor.set_io(io);
+
+    // Try to open a nonexistent file
+    let result = editor.open_with(OpenOptions::new().with_path("nonexistent.txt"));
+
+    // Should succeed (creates new file buffer)
+    assert!(result.is_ok());
+
+    // Should show [New File] in status
+    assert!(editor.state().status_message().contains("New File"));
+
+    // Should have the filename as document label
+    assert_eq!(
+        editor.state().document_label(),
+        Some("nonexistent.txt")
+    );
+
+    // Buffer should be empty
+    assert_eq!(editor.get_content(), "");
+
+    // Not dirty yet
+    assert!(!editor.state().is_dirty());
+}
+
+

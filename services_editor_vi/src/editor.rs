@@ -118,9 +118,35 @@ impl Editor {
             .io
             .as_mut()
             .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
-        let result = io.open(options)?;
-        self.load_document(result.content, result.handle);
-        Ok(())
+        
+        match io.open(options.clone()) {
+            Ok(result) => {
+                self.load_document(result.content, result.handle);
+                Ok(())
+            }
+            Err(IoError::NotFound) => {
+                // File not found - create empty buffer with path as target
+                if let Some(path) = options.path {
+                    self.state.set_document_label(Some(path.clone()));
+                    self.state
+                        .set_status_message(format!("[New File] {}", path));
+                    // Don't set a document handle yet - will be created on save
+                } else {
+                    self.state.set_status_message("[New File]");
+                }
+                Ok(())
+            }
+            Err(IoError::PermissionDenied(reason)) => {
+                self.state
+                    .set_status_message(format!("Permission denied: {}", reason));
+                Err(EditorError::Io(IoError::PermissionDenied(reason)))
+            }
+            Err(err) => {
+                self.state
+                    .set_status_message(format!("Error: {}", err));
+                Err(EditorError::Io(err))
+            }
+        }
     }
 
     /// Open a new empty document
