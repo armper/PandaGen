@@ -234,6 +234,7 @@ impl Editor {
                 let pos = self.state.cursor().position();
                 if self.state.buffer_mut().delete_char(pos) {
                     self.state.mark_dirty();
+                    self.state.mark_line_dirty(pos.row);
                 }
                 Ok(EditorAction::Continue)
             }
@@ -242,6 +243,8 @@ impl Editor {
             KeyCode::U if event.modifiers.is_empty() => {
                 if self.state.undo() {
                     self.state.set_status_message("Undo");
+                    // Mark all lines dirty on undo
+                    self.state.mark_all_dirty(100);
                 } else {
                     self.state.set_status_message("Already at oldest change");
                 }
@@ -252,6 +255,8 @@ impl Editor {
             KeyCode::R if event.modifiers.is_ctrl() => {
                 if self.state.redo() {
                     self.state.set_status_message("Redo");
+                    // Mark all lines dirty on redo
+                    self.state.mark_all_dirty(100);
                 } else {
                     self.state.set_status_message("Already at newest change");
                 }
@@ -301,6 +306,9 @@ impl Editor {
                 let pos = self.state.cursor().position();
                 if self.state.buffer_mut().insert_newline(pos) {
                     self.state.mark_dirty();
+                    // Mark current line and all following lines dirty (due to line shift)
+                    let viewport_end = pos.row + 20; // Mark next 20 lines
+                    self.state.mark_lines_dirty(pos.row, viewport_end);
                     let new_pos = Position::new(pos.row + 1, 0);
                     self.state.cursor_mut().set_position(new_pos);
                 }
@@ -312,6 +320,14 @@ impl Editor {
                 let pos = self.state.cursor().position();
                 if let Some(new_pos) = self.state.buffer_mut().backspace(pos) {
                     self.state.mark_dirty();
+                    // If we joined lines, mark current and following lines dirty
+                    if new_pos.row < pos.row {
+                        let viewport_end = new_pos.row + 20;
+                        self.state.mark_lines_dirty(new_pos.row, viewport_end);
+                    } else {
+                        // Just backspaced on same line
+                        self.state.mark_line_dirty(pos.row);
+                    }
                     self.state.cursor_mut().set_position(new_pos);
                 }
                 Ok(EditorAction::Continue)
@@ -323,6 +339,8 @@ impl Editor {
                     let pos = self.state.cursor().position();
                     if self.state.buffer_mut().insert_char(pos, ch) {
                         self.state.mark_dirty();
+                        // Mark current line dirty (text shifted to the right)
+                        self.state.mark_line_dirty(pos.row);
                         let new_pos = Position::new(pos.row, pos.col + 1);
                         self.state.cursor_mut().set_position(new_pos);
                     }

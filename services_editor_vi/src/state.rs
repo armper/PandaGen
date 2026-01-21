@@ -3,6 +3,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
+use alloc::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use core::fmt;
 
@@ -258,6 +259,10 @@ pub struct EditorState {
     search_query: String,
     /// Last search query (for 'n' repeat search)
     last_search: Option<String>,
+    /// Dirty lines tracking (line indices that have changed since last render)
+    dirty_lines: BTreeSet<usize>,
+    /// Cursor position changed flag
+    cursor_dirty: bool,
 }
 
 impl EditorState {
@@ -274,6 +279,8 @@ impl EditorState {
             redo_stack: Vec::new(),
             search_query: String::new(),
             last_search: None,
+            dirty_lines: BTreeSet::new(),
+            cursor_dirty: false,
         }
     }
 
@@ -347,6 +354,7 @@ impl EditorState {
         if self.cursor.position.row > 0 {
             self.cursor.position.row -= 1;
             self.clamp_cursor_col();
+            self.cursor_dirty = true;
         }
     }
 
@@ -354,12 +362,14 @@ impl EditorState {
         if self.cursor.position.row < self.buffer.line_count().saturating_sub(1) {
             self.cursor.position.row += 1;
             self.clamp_cursor_col();
+            self.cursor_dirty = true;
         }
     }
 
     pub fn move_cursor_left(&mut self) {
         if self.cursor.position.col > 0 {
             self.cursor.position.col -= 1;
+            self.cursor_dirty = true;
         }
     }
 
@@ -367,6 +377,7 @@ impl EditorState {
         let line_len = self.buffer.line_length(self.cursor.position.row);
         if self.cursor.position.col < line_len {
             self.cursor.position.col += 1;
+            self.cursor_dirty = true;
         }
     }
 
@@ -535,6 +546,50 @@ impl EditorState {
         } else {
             false
         }
+    }
+
+    /// Mark a specific line as dirty (needs re-rendering)
+    pub fn mark_line_dirty(&mut self, line: usize) {
+        self.dirty_lines.insert(line);
+    }
+
+    /// Mark a range of lines as dirty
+    pub fn mark_lines_dirty(&mut self, start: usize, end: usize) {
+        for line in start..=end.min(self.buffer.line_count().saturating_sub(1)) {
+            self.dirty_lines.insert(line);
+        }
+    }
+
+    /// Mark the cursor as dirty (moved without content change)
+    pub fn mark_cursor_dirty(&mut self) {
+        self.cursor_dirty = true;
+    }
+
+    /// Get dirty lines and clear the dirty set
+    pub fn take_dirty_lines(&mut self) -> Vec<usize> {
+        let lines: Vec<usize> = self.dirty_lines.iter().copied().collect();
+        self.dirty_lines.clear();
+        lines
+    }
+
+    /// Check if cursor is dirty and clear the flag
+    pub fn take_cursor_dirty(&mut self) -> bool {
+        let dirty = self.cursor_dirty;
+        self.cursor_dirty = false;
+        dirty
+    }
+
+    /// Get dirty lines without clearing
+    pub fn get_dirty_lines(&self) -> Vec<usize> {
+        self.dirty_lines.iter().copied().collect()
+    }
+
+    /// Force mark all visible lines as dirty
+    pub fn mark_all_dirty(&mut self, viewport_lines: usize) {
+        for line in 0..viewport_lines.min(self.buffer.line_count()) {
+            self.dirty_lines.insert(line);
+        }
+        self.cursor_dirty = true;
     }
 }
 
@@ -705,5 +760,72 @@ mod tests {
         assert_eq!(state.buffer().line_count(), 2);
         assert_eq!(state.buffer().line(0), Some("test"));
         assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn test_dirty_tracking_insert_char() {
+        let mut state = EditorState::new();
+        state.mark_line_dirty(5);
+        
+        let dirty = state.get_dirty_lines();
+        assert_eq!(dirty, vec![5]);
+        
+        // Take should clear
+        let taken = state.take_dirty_lines();
+        assert_eq!(taken, vec![5]);
+        assert!(state.get_dirty_lines().is_empty());
+    }
+
+    #[test]
+    fn test_dirty_tracking_multiple_lines() {
+        let mut state = EditorState::new();
+        state.load_content("line1\nline2\nline3\nline4\nline5\nline6".to_string());
+        state.mark_lines_dirty(2, 5);
+        
+        let dirty = state.get_dirty_lines();
+        assert_eq!(dirty.len(), 4); // lines 2, 3, 4, 5
+        assert!(dirty.contains(&2));
+        assert!(dirty.contains(&3));
+        assert!(dirty.contains(&4));
+        assert!(dirty.contains(&5));
+    }
+
+    #[test]
+    fn test_cursor_dirty_tracking() {
+        let mut state = EditorState::new();
+        assert!(!state.take_cursor_dirty());
+        
+        state.mark_cursor_dirty();
+        assert!(state.take_cursor_dirty());
+        
+        // Should be cleared after take
+        assert!(!state.take_cursor_dirty());
+    }
+
+    #[test]
+    fn test_cursor_movement_marks_dirty() {
+        let mut state = EditorState::new();
+        state.load_content("hello\nworld".to_string());
+        
+        // Clear any dirty flags from load
+        state.take_cursor_dirty();
+        
+        state.move_cursor_right();
+        assert!(state.take_cursor_dirty());
+        
+        state.move_cursor_down();
+        assert!(state.take_cursor_dirty());
+    }
+
+    #[test]
+    fn test_mark_all_dirty() {
+        let mut state = EditorState::new();
+        state.load_content("line1\nline2\nline3\nline4\nline5".to_string());
+        
+        state.mark_all_dirty(3);
+        let dirty = state.get_dirty_lines();
+        
+        assert!(dirty.len() >= 3);
+        assert!(state.take_cursor_dirty());
     }
 }
