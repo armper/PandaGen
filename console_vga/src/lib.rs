@@ -21,7 +21,9 @@ extern crate alloc;
 use core::ptr;
 
 pub mod scrollback;
+pub mod selection;
 pub use scrollback::{VgaLine, VgaScrollback};
+pub use selection::{Clipboard, SelectionManager, SelectionRange};
 
 /// VGA text mode dimensions
 pub const VGA_WIDTH: usize = 80;
@@ -225,6 +227,32 @@ impl VgaConsole {
                     break;
                 }
                 self.write_at(col, row, ch, attr);
+            }
+        }
+    }
+
+    /// Highlight a selection range by inverting attributes
+    ///
+    /// This visually shows selected text
+    pub fn highlight_selection(&mut self, selection: selection::SelectionRange) {
+        let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
+
+        for row in start_row..=end_row {
+            if row >= VGA_HEIGHT {
+                break;
+            }
+
+            let col_start = if row == start_row { start_col } else { 0 };
+            let col_end = if row == end_row { end_col.min(VGA_WIDTH - 1) } else { VGA_WIDTH - 1 };
+
+            for col in col_start..=col_end {
+                let offset = (row * VGA_WIDTH + col) * 2;
+                unsafe {
+                    // Read current attribute, invert it
+                    let attr = ptr::read_volatile(self.buffer.add(offset + 1));
+                    let inverted_attr = ((attr & 0x0F) << 4) | ((attr & 0xF0) >> 4);
+                    ptr::write_volatile(self.buffer.add(offset + 1), inverted_attr);
+                }
             }
         }
     }
@@ -448,5 +476,31 @@ mod tests {
         assert_eq!(buffer.get_attr(0, 1), 0x0A);
         assert_eq!(buffer.get_char(0, 2), b'L');
         assert_eq!(buffer.get_attr(0, 2), 0x0C);
+    }
+
+    #[test]
+    fn test_highlight_selection() {
+        use crate::selection::SelectionRange;
+        
+        let mut buffer = MockVgaBuffer::new();
+        let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
+        
+        // Write some text
+        console.clear(0x07);
+        console.write_str_at(0, 0, "Hello World", 0x07);
+        
+        // Create selection (characters 0-4 = "Hello")
+        let selection = SelectionRange::new((0, 0), (4, 0));
+        console.highlight_selection(selection);
+        
+        // Verify selection is highlighted (attributes inverted)
+        // Original: 0x07 (light gray on black)
+        // Inverted: 0x70 (black on light gray)
+        assert_eq!(buffer.get_attr(0, 0), 0x70);
+        assert_eq!(buffer.get_attr(1, 0), 0x70);
+        assert_eq!(buffer.get_attr(4, 0), 0x70);
+        
+        // Character after selection should not be highlighted
+        assert_eq!(buffer.get_attr(5, 0), 0x07);
     }
 }
