@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 limine = "0.5.0"
 console_vga = { path = "../console_vga", default-features = false }
+editor_core = { path = "../editor_core" }
 # TODO: Re-enable when dependencies are no_std compatible
 # services_editor_vi = { path = "../services_editor_vi" }
 # input_types = { path = "../input_types" }
