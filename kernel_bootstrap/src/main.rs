@@ -561,9 +561,8 @@ fn workspace_loop(
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
     let mut parser_state = Ps2ParserState::new();
 
-    // Track revision for rate-limited rendering
-    static LAST_REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let mut current_revision = 1u64;
+    let mut input_dirty = true;
+    let mut output_dirty = true;
 
     // Show initial prompt
     workspace.show_prompt(serial);
@@ -602,7 +601,10 @@ fn workspace_loop(
 
                 // Update display on input change
                 if input_progressed {
-                    current_revision += 1;
+                    input_dirty = true;
+                    if ch == b'\n' || ch == b'\r' {
+                        output_dirty = true;
+                    }
                 }
             }
         }
@@ -634,6 +636,7 @@ fn workspace_loop(
                             let _ = serial.write_str(output);
                             let _ = serial.write_str("\r\n");
                             workspace.append_output_text(output);
+                            output_dirty = true;
                         }
                     }
                     CommandStatus::Error(err) => {
@@ -646,65 +649,49 @@ fn workspace_loop(
                             workspace.append_output_text("invalid error");
                         }
                         let _ = serial.write_str("\r\n");
+                        output_dirty = true;
                     }
                 }
                 workspace.show_prompt(serial);
-                current_revision += 1;
+                input_dirty = true;
             }
         }
 
-        // Update display if revision changed (rate-limited)
-        let last_revision = LAST_REVISION.load(core::sync::atomic::Ordering::Relaxed);
-        if current_revision != last_revision {
+        // Update display if needed
+        if input_dirty || output_dirty {
             if let Some(ref mut vga) = vga_console {
                 let normal_attr = console_vga::Style::Normal.to_vga_attr();
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
-
-                // Draw header
-                clear_vga_line(vga, 0, normal_attr);
-                clear_vga_line(vga, 1, normal_attr);
-                vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode", bold_attr);
-                vga.write_str_at(0, 1, "Type 'help' for commands", normal_attr);
-
-                // Draw prompt
-                clear_vga_line(vga, 3, normal_attr);
-                vga.write_str_at(0, 3, "> ", bold_attr);
-
-                // Draw command text
-                let cmd_bytes = workspace.get_command_text();
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
-                    vga.write_str_at(2, 3, cmd_str, normal_attr);
-                }
-
-                // Draw cursor at current position
                 let rows = console_vga::VGA_HEIGHT;
-                let prompt_row = rows.saturating_sub(1);
-
-                // Draw output lines above prompt
-                let output_rows = prompt_row;
+                let cols = console_vga::VGA_WIDTH;
+                let max_output_rows = rows.saturating_sub(1);
                 let total = workspace.output_line_count();
-                let start = total.saturating_sub(output_rows);
-                for row in 0..output_rows {
-                    let line_idx = start + row;
-                    clear_vga_line(vga, row, normal_attr);
-                    if let Some(line) = workspace.output_line(line_idx) {
-                        if let Ok(text) = core::str::from_utf8(line.as_bytes()) {
-                            vga.write_str_at(0, row, text, normal_attr);
+                let output_rows = total.min(max_output_rows);
+                let start = total.saturating_sub(max_output_rows);
+                let prompt_row = output_rows.min(max_output_rows);
+
+                if output_dirty {
+                    for row in 0..output_rows {
+                        let line_idx = start + row;
+                        clear_vga_line(vga, row, normal_attr);
+                        if let Some(line) = workspace.output_line(line_idx) {
+                            let bytes = line.as_bytes();
+                            let len = bytes.len().min(cols);
+                            if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                vga.write_str_at(0, row, text, normal_attr);
+                            }
                         }
                     }
                 }
 
-                // Draw prompt on last row
                 clear_vga_line(vga, prompt_row, normal_attr);
                 vga.write_str_at(0, prompt_row, "> ", bold_attr);
                 let cmd_bytes = workspace.get_command_text();
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                let (cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
                     vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
                 }
-                let cursor_col = workspace.get_cursor_col();
                 vga.draw_cursor(cursor_col, prompt_row, normal_attr);
-
-                LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             } else if let Some(ref mut fb) = fb_console {
                 // Render workspace state to framebuffer
                 let bg = (0x00, 0x20, 0x40);
@@ -712,34 +699,38 @@ fn workspace_loop(
                 let accent = (0x80, 0xFF, 0x80);
                 let rows = fb.rows();
                 let cols = fb.cols();
-                let prompt_row = rows.saturating_sub(1);
-
-                // Draw output lines above prompt
-                let output_rows = prompt_row;
+                let max_output_rows = rows.saturating_sub(1);
                 let total = workspace.output_line_count();
-                let start = total.saturating_sub(output_rows);
-                for row in 0..output_rows {
-                    let line_idx = start + row;
-                    clear_fb_line(fb, row, cols, bg, fg);
-                    if let Some(line) = workspace.output_line(line_idx) {
-                        if let Ok(text) = core::str::from_utf8(line.as_bytes()) {
-                            fb.draw_text_at(0, row, text, fg, bg);
+                let output_rows = total.min(max_output_rows);
+                let start = total.saturating_sub(max_output_rows);
+                let prompt_row = output_rows.min(max_output_rows);
+
+                if output_dirty {
+                    for row in 0..output_rows {
+                        let line_idx = start + row;
+                        clear_fb_line(fb, row, cols, bg, fg);
+                        if let Some(line) = workspace.output_line(line_idx) {
+                            let bytes = line.as_bytes();
+                            let len = bytes.len().min(cols);
+                            if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                fb.draw_text_at(0, row, text, fg, bg);
+                            }
                         }
                     }
                 }
 
-                // Draw prompt on last row
                 clear_fb_line(fb, prompt_row, cols, bg, fg);
                 fb.draw_text_at(0, prompt_row, "> ", accent, bg);
                 let cmd_bytes = workspace.get_command_text();
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                let (cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
                     fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
                 }
-                let cursor_col = workspace.get_cursor_col();
                 fb.draw_cursor(cursor_col, prompt_row, fg, bg);
-
-                LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
+
+            input_dirty = false;
+            output_dirty = false;
         }
 
         if !kernel_progressed && !input_progressed {
