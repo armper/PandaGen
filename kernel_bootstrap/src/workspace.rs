@@ -30,6 +30,10 @@ pub struct WorkspaceSession {
     command_buffer: [u8; COMMAND_MAX],
     /// Command length
     command_len: usize,
+    /// Output log (fixed-size ring buffer)
+    output_lines: [OutputLine; OUTPUT_MAX_LINES],
+    output_head: usize,
+    output_count: usize,
 }
 
 impl WorkspaceSession {
@@ -41,6 +45,9 @@ impl WorkspaceSession {
             in_command_mode: true,
             command_buffer: [0; COMMAND_MAX],
             command_len: 0,
+            output_lines: [OutputLine::empty(); OUTPUT_MAX_LINES],
+            output_head: 0,
+            output_count: 0,
         }
     }
 
@@ -81,70 +88,84 @@ impl WorkspaceSession {
 
     /// Execute the current command
     fn execute_command(&mut self, ctx: &mut KernelContext, serial: &mut SerialPort) {
-        let command = core::str::from_utf8(&self.command_buffer[..self.command_len])
-            .unwrap_or("")
-            .trim();
+        let command_buf = {
+            let command = core::str::from_utf8(&self.command_buffer[..self.command_len])
+                .unwrap_or("")
+                .trim();
 
-        if command.is_empty() {
+            if command.is_empty() {
+                let _ = write!(serial, "> ");
+                return;
+            }
+
+            let mut buffer = [0u8; COMMAND_MAX];
+            let bytes = command.as_bytes();
+            let len = bytes.len().min(COMMAND_MAX);
+            buffer[..len].copy_from_slice(&bytes[..len]);
+            (buffer, len)
+        };
+        let command = core::str::from_utf8(&command_buf.0[..command_buf.1]).unwrap_or("");
+        let mut parts = command.split_whitespace();
+        let cmd = parts.next().unwrap_or("");
+        if cmd.is_empty() {
             let _ = write!(serial, "> ");
             return;
         }
 
         // Parse command
-        let mut parts = command.split_whitespace();
-        let cmd = parts.next().unwrap_or("");
-
+        self.emit_command_line(serial, command.as_bytes());
         match cmd {
             "help" => {
-                let _ = writeln!(
-                    serial,
-                    "Workspace Commands:\r\n\
-                     help           - Show this help\r\n\
-                     open <what>    - Open editor or CLI\r\n\
-                     list           - List components\r\n\
-                     focus <id>     - Focus component\r\n\
-                     quit           - Exit component\r\n\
-                     halt           - Halt system\r\n\
-                     \r\n\
-                     System Commands:\r\n\
-                     boot           - Show boot info\r\n\
-                     mem            - Show memory info\r\n\
-                     ticks          - Show system ticks"
-                );
+                self.emit_line(serial, "Workspace Commands:");
+                self.emit_line(serial, "help           - Show this help");
+                self.emit_line(serial, "open <what>    - Open editor or CLI");
+                self.emit_line(serial, "list           - List components");
+                self.emit_line(serial, "focus <id>     - Focus component");
+                self.emit_line(serial, "quit           - Exit component");
+                self.emit_line(serial, "halt           - Halt system");
+                self.emit_line(serial, "");
+                self.emit_line(serial, "System Commands:");
+                self.emit_line(serial, "boot           - Show boot info");
+                self.emit_line(serial, "mem            - Show memory info");
+                self.emit_line(serial, "ticks          - Show system ticks");
             }
             "open" => {
                 let what = parts.next();
                 match what {
                     Some("editor") => {
                         self.active_component = Some(ComponentType::Editor);
-                        let _ = writeln!(serial, "Opened editor (not yet implemented)");
+                        self.emit_line(serial, "Opened editor (not yet implemented)");
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
-                        let _ = writeln!(serial, "Opened CLI (not yet implemented)");
+                        self.emit_line(serial, "Opened CLI (not yet implemented)");
                     }
                     _ => {
-                        let _ = writeln!(serial, "Usage: open <editor|cli>");
+                        self.emit_line(serial, "Usage: open <editor|cli>");
                     }
                 }
             }
             "list" => {
-                let _ = writeln!(serial, "Active components:");
+                self.emit_line(serial, "Active components:");
                 if let Some(comp) = self.active_component {
-                    let _ = writeln!(serial, "  - {:?}", comp);
+                    match comp {
+                        ComponentType::Editor => self.emit_line(serial, "  - Editor"),
+                        ComponentType::Cli => self.emit_line(serial, "  - Cli"),
+                        ComponentType::Shell => self.emit_line(serial, "  - Shell"),
+                    }
                 } else {
-                    let _ = writeln!(serial, "  (none)");
+                    self.emit_line(serial, "  (none)");
                 }
             }
             "focus" => {
-                let _ = writeln!(serial, "Focus switching not yet implemented");
+                self.emit_line(serial, "Focus switching not yet implemented");
             }
             "quit" => {
                 self.active_component = None;
-                let _ = writeln!(serial, "Closed component");
+                self.emit_line(serial, "Closed component");
             }
             "halt" => {
-                let _ = writeln!(serial, "Halting system...");
+                self.emit_line(serial, "Halting system...");
                 #[cfg(not(test))]
                 crate::halt_loop();
             }
@@ -161,7 +182,7 @@ impl WorkspaceSession {
                 self.delegate_to_command_service(ctx, serial, "ticks");
             }
             _ => {
-                let _ = writeln!(serial, "Unknown command: {}. Type 'help' for help.", cmd);
+                self.emit_unknown_command(serial, cmd);
             }
         }
 
@@ -191,9 +212,9 @@ impl WorkspaceSession {
             {
                 // Wait for response (simplified synchronous handling)
                 // In a real implementation, this would be async
-                let _ = writeln!(serial, "(Delegated to command service)");
+                self.emit_line(serial, "(Delegated to command service)");
             } else {
-                let _ = writeln!(serial, "Error: command queue full");
+                self.emit_line(serial, "Error: command queue full");
             }
         }
     }
@@ -209,12 +230,124 @@ impl WorkspaceSession {
         &self.command_buffer[..self.command_len]
     }
 
-    /// Get the cursor position (col, row) for the current state
-    pub fn get_cursor_position(&self) -> (usize, usize) {
-        // Cursor is at the end of the command on row 3
+    /// Get the cursor column for the current state
+    pub fn get_cursor_col(&self) -> usize {
         // ">" is at column 0-1, command starts at column 2
-        let col = 2 + self.command_len;
-        let row = 3;
-        (col, row)
+        2 + self.command_len
     }
+
+    pub fn output_line_count(&self) -> usize {
+        self.output_count
+    }
+
+    pub fn output_line(&self, index: usize) -> Option<&OutputLine> {
+        if index >= self.output_count {
+            return None;
+        }
+
+        let start = if self.output_head >= self.output_count {
+            self.output_head - self.output_count
+        } else {
+            OUTPUT_MAX_LINES + self.output_head - self.output_count
+        };
+        let idx = (start + index) % OUTPUT_MAX_LINES;
+        Some(&self.output_lines[idx])
+    }
+
+    pub fn append_output_text(&mut self, text: &str) {
+        for line in text.split('\n') {
+            let line = line.trim_end_matches('\r');
+            self.push_output_bytes(line.as_bytes());
+        }
+    }
+
+    fn emit_line(&mut self, serial: &mut SerialPort, text: &str) {
+        let _ = writeln!(serial, "{}", text);
+        self.append_output_text(text);
+    }
+
+    fn emit_unknown_command(&mut self, serial: &mut SerialPort, cmd: &str) {
+        let mut buffer = [0u8; OUTPUT_LINE_MAX];
+        let mut len = 0usize;
+
+        let prefix = b"Unknown command: ";
+        len = append_bytes(&mut buffer, len, prefix);
+        len = append_bytes(&mut buffer, len, cmd.as_bytes());
+        len = append_bytes(&mut buffer, len, b". Type 'help' for help.");
+
+        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("Unknown command.");
+        self.emit_line(serial, line);
+    }
+
+    fn push_output_bytes(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            self.push_output_line(&[]);
+            return;
+        }
+
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let remaining = bytes.len() - offset;
+            let chunk_len = remaining.min(OUTPUT_LINE_MAX);
+            let chunk = &bytes[offset..offset + chunk_len];
+            self.push_output_line(chunk);
+            offset += chunk_len;
+        }
+    }
+
+    fn push_output_line(&mut self, bytes: &[u8]) {
+        let idx = self.output_head;
+        self.output_lines[idx].set_from_bytes(bytes);
+        self.output_head = (self.output_head + 1) % OUTPUT_MAX_LINES;
+        if self.output_count < OUTPUT_MAX_LINES {
+            self.output_count += 1;
+        }
+    }
+
+    fn emit_command_line(&mut self, serial: &mut SerialPort, cmd: &[u8]) {
+        let mut buffer = [0u8; OUTPUT_LINE_MAX];
+        let mut len = 0usize;
+        len = append_bytes(&mut buffer, len, b"> ");
+        len = append_bytes(&mut buffer, len, cmd);
+        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("> ");
+        self.emit_line(serial, line);
+    }
+}
+
+const OUTPUT_MAX_LINES: usize = 20;
+const OUTPUT_LINE_MAX: usize = 80;
+
+#[derive(Copy, Clone)]
+pub struct OutputLine {
+    len: usize,
+    bytes: [u8; OUTPUT_LINE_MAX],
+}
+
+impl OutputLine {
+    const fn empty() -> Self {
+        Self {
+            len: 0,
+            bytes: [0; OUTPUT_LINE_MAX],
+        }
+    }
+
+    fn set_from_bytes(&mut self, bytes: &[u8]) {
+        let len = bytes.len().min(OUTPUT_LINE_MAX);
+        self.bytes[..len].copy_from_slice(&bytes[..len]);
+        self.len = len;
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+fn append_bytes(buffer: &mut [u8], mut len: usize, bytes: &[u8]) -> usize {
+    let space = buffer.len().saturating_sub(len);
+    let count = bytes.len().min(space);
+    if count > 0 {
+        buffer[len..len + count].copy_from_slice(&bytes[..count]);
+        len += count;
+    }
+    len
 }

@@ -568,29 +568,9 @@ fn workspace_loop(
     // Show initial prompt
     workspace.show_prompt(serial);
 
-    // Initial VGA render if available
-    if let Some(ref mut vga) = vga_console {
-        vga.clear(console_vga::Style::Normal.to_vga_attr());
-        vga.write_str_at(
-            0,
-            0,
-            "PandaGen Workspace - VGA Text Mode (80x25)",
-            console_vga::Style::Bold.to_vga_attr(),
-        );
-        vga.write_str_at(
-            0,
-            1,
-            "Type 'help' for commands",
-            console_vga::Style::Normal.to_vga_attr(),
-        );
-        vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
-    } else if let Some(ref mut fb) = fb_console {
-        // Fallback to framebuffer if VGA unavailable
-        let bg = (0x00, 0x20, 0x40);
-        let fg = (0xFF, 0xFF, 0xFF);
-        fb.clear(bg.0, bg.1, bg.2);
-        fb.draw_text_at(0, 0, "PandaGen Workspace - Framebuffer Mode", fg, bg);
-    }
+    // Seed banner into output so it scrolls like a terminal
+    workspace.append_output_text("PandaGen Workspace");
+    workspace.append_output_text("Type 'help' for commands");
 
     loop {
         // Run kernel tasks
@@ -653,14 +633,17 @@ fn workspace_loop(
                         if let Some(output) = response.output_str() {
                             let _ = serial.write_str(output);
                             let _ = serial.write_str("\r\n");
+                            workspace.append_output_text(output);
                         }
                     }
                     CommandStatus::Error(err) => {
                         let _ = serial.write_str("error: ");
                         if let Some(msg) = err.as_str() {
                             let _ = serial.write_str(msg);
+                            workspace.append_output_text(msg);
                         } else {
                             let _ = serial.write_str("invalid error");
+                            workspace.append_output_text("invalid error");
                         }
                         let _ = serial.write_str("\r\n");
                     }
@@ -674,39 +657,52 @@ fn workspace_loop(
         let last_revision = LAST_REVISION.load(core::sync::atomic::Ordering::Relaxed);
         if current_revision != last_revision {
             if let Some(ref mut vga) = vga_console {
-                // Update VGA console with workspace state
-                vga.clear(console_vga::Style::Normal.to_vga_attr());
+                let normal_attr = console_vga::Style::Normal.to_vga_attr();
+                let bold_attr = console_vga::Style::Bold.to_vga_attr();
 
                 // Draw header
-                vga.write_str_at(
-                    0,
-                    0,
-                    "PandaGen Workspace - VGA Text Mode (80x25)",
-                    console_vga::Style::Bold.to_vga_attr(),
-                );
-                vga.write_str_at(
-                    0,
-                    1,
-                    "Type 'help' for commands",
-                    console_vga::Style::Normal.to_vga_attr(),
-                );
+                clear_vga_line(vga, 0, normal_attr);
+                clear_vga_line(vga, 1, normal_attr);
+                vga.write_str_at(0, 0, "PandaGen Workspace - VGA Text Mode", bold_attr);
+                vga.write_str_at(0, 1, "Type 'help' for commands", normal_attr);
 
                 // Draw prompt
-                vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
+                clear_vga_line(vga, 3, normal_attr);
+                vga.write_str_at(0, 3, "> ", bold_attr);
 
                 // Draw command text
                 let cmd_bytes = workspace.get_command_text();
                 if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
-                    vga.write_str_at(2, 3, cmd_str, console_vga::Style::Normal.to_vga_attr());
+                    vga.write_str_at(2, 3, cmd_str, normal_attr);
                 }
 
                 // Draw cursor at current position
-                let cursor_pos = workspace.get_cursor_position();
-                vga.draw_cursor(
-                    cursor_pos.0,
-                    cursor_pos.1,
-                    console_vga::Style::Normal.to_vga_attr(),
-                );
+                let rows = console_vga::VGA_HEIGHT;
+                let prompt_row = rows.saturating_sub(1);
+
+                // Draw output lines above prompt
+                let output_rows = prompt_row;
+                let total = workspace.output_line_count();
+                let start = total.saturating_sub(output_rows);
+                for row in 0..output_rows {
+                    let line_idx = start + row;
+                    clear_vga_line(vga, row, normal_attr);
+                    if let Some(line) = workspace.output_line(line_idx) {
+                        if let Ok(text) = core::str::from_utf8(line.as_bytes()) {
+                            vga.write_str_at(0, row, text, normal_attr);
+                        }
+                    }
+                }
+
+                // Draw prompt on last row
+                clear_vga_line(vga, prompt_row, normal_attr);
+                vga.write_str_at(0, prompt_row, "> ", bold_attr);
+                let cmd_bytes = workspace.get_command_text();
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                    vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
+                }
+                let cursor_col = workspace.get_cursor_col();
+                vga.draw_cursor(cursor_col, prompt_row, normal_attr);
 
                 LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             } else if let Some(ref mut fb) = fb_console {
@@ -714,25 +710,33 @@ fn workspace_loop(
                 let bg = (0x00, 0x20, 0x40);
                 let fg = (0xFF, 0xFF, 0xFF);
                 let accent = (0x80, 0xFF, 0x80);
+                let rows = fb.rows();
+                let cols = fb.cols();
+                let prompt_row = rows.saturating_sub(1);
 
-                fb.clear(bg.0, bg.1, bg.2);
-                fb.draw_text_at(
-                    0,
-                    0,
-                    "PandaGen Workspace - Framebuffer Mode",
-                    fg,
-                    bg,
-                );
-                fb.draw_text_at(0, 1, "Type 'help' for commands", fg, bg);
-                fb.draw_text_at(0, 3, "> ", accent, bg);
-
-                let cmd_bytes = workspace.get_command_text();
-                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
-                    fb.draw_text_at(2, 3, cmd_str, fg, bg);
+                // Draw output lines above prompt
+                let output_rows = prompt_row;
+                let total = workspace.output_line_count();
+                let start = total.saturating_sub(output_rows);
+                for row in 0..output_rows {
+                    let line_idx = start + row;
+                    clear_fb_line(fb, row, cols, bg, fg);
+                    if let Some(line) = workspace.output_line(line_idx) {
+                        if let Ok(text) = core::str::from_utf8(line.as_bytes()) {
+                            fb.draw_text_at(0, row, text, fg, bg);
+                        }
+                    }
                 }
 
-                let cursor_pos = workspace.get_cursor_position();
-                fb.draw_cursor(cursor_pos.0, cursor_pos.1, fg, bg);
+                // Draw prompt on last row
+                clear_fb_line(fb, prompt_row, cols, bg, fg);
+                fb.draw_text_at(0, prompt_row, "> ", accent, bg);
+                let cmd_bytes = workspace.get_command_text();
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                    fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
+                }
+                let cursor_col = workspace.get_cursor_col();
+                fb.draw_cursor(cursor_col, prompt_row, fg, bg);
 
                 LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
@@ -825,6 +829,24 @@ fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
         }
 
         idle_pause();
+    }
+}
+
+fn clear_vga_line(vga: &mut console_vga::VgaConsole, row: usize, attr: u8) {
+    for col in 0..console_vga::VGA_WIDTH {
+        vga.write_at(col, row, b' ', attr);
+    }
+}
+
+fn clear_fb_line(
+    fb: &mut framebuffer::BareMetalFramebuffer,
+    row: usize,
+    cols: usize,
+    bg: (u8, u8, u8),
+    fg: (u8, u8, u8),
+) {
+    for col in 0..cols {
+        fb.draw_char_at(col, row, b' ', fg, bg);
     }
 }
 
