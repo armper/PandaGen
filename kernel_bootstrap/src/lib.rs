@@ -17,3 +17,6 @@ pub mod minimal_editor;
 // Tests are in the test module
 #[cfg(test)]
 mod minimal_editor_tests;
+
+#[cfg(test)]
+mod parity_tests;
