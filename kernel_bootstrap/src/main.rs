@@ -121,6 +121,9 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
 #[cfg(not(test))]
+const KBD_DEBUG_LOG: bool = cfg!(debug_assertions);
+
+#[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
 
 #[cfg(not(test))]
@@ -227,12 +230,24 @@ extern "C" fn timer_irq_handler() {
 #[cfg(not(test))]
 #[no_mangle]
 extern "C" fn keyboard_irq_handler() {
+    if KBD_DEBUG_LOG {
+        let mut serial = serial::SerialPort::new(serial::COM1);
+        let _ = writeln!(serial, "kbd irq fired");
+    }
+
     // Read scancode from PS/2 data port
     unsafe {
         let status = inb(0x64);
         if (status & 0x01) != 0 {
             let scancode = inb(0x60);
             KEYBOARD_EVENT_QUEUE.push(scancode);
+            if KBD_DEBUG_LOG {
+                let mut serial = serial::SerialPort::new(serial::COM1);
+                let _ = writeln!(serial, "kbd scancode={:#x}", scancode);
+            }
+        } else if KBD_DEBUG_LOG {
+            let mut serial = serial::SerialPort::new(serial::COM1);
+            let _ = writeln!(serial, "kbd irq no-data status={:#x}", status);
         }
 
         // Send EOI to PIC
@@ -364,6 +379,137 @@ fn enable_interrupts() {
 }
 
 #[cfg(not(test))]
+fn read_rflags() -> u64 {
+    let flags: u64;
+    unsafe {
+        asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) flags,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    flags
+}
+
+#[cfg(not(test))]
+fn interrupts_enabled() -> bool {
+    (read_rflags() & (1 << 9)) != 0
+}
+
+#[cfg(not(test))]
+fn read_idtr() -> IdtPointer {
+    let mut idtr = IdtPointer { limit: 0, base: 0 };
+    unsafe {
+        asm!("sidt [{}]", in(reg) &mut idtr, options(nomem, nostack, preserves_flags));
+    }
+    idtr
+}
+
+#[cfg(not(test))]
+fn log_interrupt_state(serial: &mut serial::SerialPort) {
+    let idtr = read_idtr();
+    let base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(idtr.base)) };
+    let limit = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(idtr.limit)) };
+    let if_set = interrupts_enabled();
+    let _ = writeln!(
+        serial,
+        "IDT loaded base=0x{:x} limit=0x{:x} IF={}",
+        base,
+        limit,
+        if if_set { "1" } else { "0" }
+    );
+}
+
+#[cfg(not(test))]
+fn log_pic_masks(serial: &mut serial::SerialPort) {
+    unsafe {
+        let master_mask = inb(0x21);
+        let slave_mask = inb(0xA1);
+        let _ = writeln!(
+            serial,
+            "PIC masks: master=0x{:02x} slave=0x{:02x}",
+            master_mask,
+            slave_mask
+        );
+    }
+}
+
+#[cfg(not(test))]
+fn ps2_wait_input_clear() -> bool {
+    const LIMIT: usize = 10000;
+    for _ in 0..LIMIT {
+        let status = unsafe { inb(0x64) };
+        if (status & 0x02) == 0 {
+            return true;
+        }
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+    false
+}
+
+#[cfg(not(test))]
+fn ps2_wait_output_full() -> bool {
+    const LIMIT: usize = 10000;
+    for _ in 0..LIMIT {
+        let status = unsafe { inb(0x64) };
+        if (status & 0x01) != 0 {
+            return true;
+        }
+        unsafe {
+            asm!("pause", options(nomem, nostack, preserves_flags));
+        }
+    }
+    false
+}
+
+#[cfg(not(test))]
+fn enable_ps2_keyboard_irq(serial: &mut serial::SerialPort) {
+    unsafe {
+        if !ps2_wait_input_clear() {
+            let _ = writeln!(serial, "ps2: input buffer stuck (pre-read)");
+            return;
+        }
+
+        // Read controller command byte
+        outb(0x64, 0x20);
+        if !ps2_wait_output_full() {
+            let _ = writeln!(serial, "ps2: no command byte available");
+            return;
+        }
+        let mut cmd = inb(0x60);
+        let original = cmd;
+
+        // Enable keyboard IRQ and ensure keyboard clock not disabled
+        cmd |= 0x01; // IRQ1 enable
+        cmd &= !0x10; // clear keyboard disable bit
+
+        if cmd != original {
+            if !ps2_wait_input_clear() {
+                let _ = writeln!(serial, "ps2: input buffer stuck (pre-write)");
+                return;
+            }
+            outb(0x64, 0x60); // write command byte
+            if !ps2_wait_input_clear() {
+                let _ = writeln!(serial, "ps2: input buffer stuck (cmd write)");
+                return;
+            }
+            outb(0x60, cmd);
+            let _ = writeln!(
+                serial,
+                "ps2: command byte updated {:02x} -> {:02x}",
+                original,
+                cmd
+            );
+        } else {
+            let _ = writeln!(serial, "ps2: command byte already {:02x}", cmd);
+        }
+    }
+}
+
+#[cfg(not(test))]
 fn get_tick_count() -> u64 {
     KERNEL_TICK_COUNTER.load(Ordering::Relaxed)
 }
@@ -441,9 +587,25 @@ pub extern "C" fn rust_main() -> ! {
         "IDT installed at 0x{:x}\r\n",
         core::ptr::addr_of!(IDT) as usize
     );
+    if KBD_DEBUG_LOG {
+        let idt_flags = unsafe { IDT[33].flags };
+        let idt_selector = unsafe { IDT[33].selector };
+        let _ = writeln!(
+            serial,
+            "IDT[33] flags=0x{:02x} selector=0x{:04x}",
+            idt_flags,
+            idt_selector
+        );
+    }
 
     init_pic();
     kprintln!(serial, "PIC remapped to IRQ base 32");
+    if KBD_DEBUG_LOG {
+        log_pic_masks(&mut serial);
+    }
+
+    kprintln!(serial, "PS/2 controller: enabling keyboard IRQ1");
+    enable_ps2_keyboard_irq(&mut serial);
 
     init_pit();
     kprintln!(serial, "PIT configured for 100 Hz");
@@ -451,6 +613,10 @@ pub extern "C" fn rust_main() -> ! {
     unmask_timer_irq();
     unmask_keyboard_irq();
     enable_interrupts();
+    if KBD_DEBUG_LOG {
+        log_pic_masks(&mut serial);
+        log_interrupt_state(&mut serial);
+    }
     kprintln!(
         serial,
         "Interrupts enabled, timer at 100 Hz, keyboard IRQ 1"
@@ -617,6 +783,23 @@ fn workspace_loop(
         let mut input_progressed = false;
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
             if let Some(ch) = parser_state.process_scancode(scancode) {
+                if KBD_DEBUG_LOG {
+                    if ch.is_ascii_graphic() || ch == b' ' {
+                        kprintln!(
+                            serial,
+                            "kbd keyevent scancode={:#x} ch='{}'",
+                            scancode,
+                            ch as char
+                        );
+                    } else {
+                        kprintln!(
+                            serial,
+                            "kbd keyevent scancode={:#x} ch={:#x}",
+                            scancode,
+                            ch
+                        );
+                    }
+                }
                 // Build kernel context
                 let Kernel {
                     boot,
@@ -636,6 +819,14 @@ fn workspace_loop(
                 };
 
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
+
+                if KBD_DEBUG_LOG {
+                    kprintln!(
+                        serial,
+                        "kbd runtime consumed={}",
+                        if input_progressed { "yes" } else { "no" }
+                    );
+                }
 
                 // Update display on input change
                 if input_progressed {
@@ -1193,13 +1384,11 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
 }
 
 /// PS/2 scancode parser state for translating to ASCII
-#[cfg(not(test))]
 struct Ps2ParserState {
     pending_e0: bool,
     shift_pressed: bool,
 }
 
-#[cfg(not(test))]
 impl Ps2ParserState {
     fn new() -> Self {
         Self {
@@ -1527,6 +1716,38 @@ impl Ps2ParserState {
         };
 
         Some(ascii)
+    }
+}
+
+#[cfg(test)]
+mod keyboard_scancode_tests {
+    use super::Ps2ParserState;
+
+    #[test]
+    fn test_scancode_basic_letters() {
+        let mut parser = Ps2ParserState::new();
+        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
+        assert_eq!(parser.process_scancode(0x30), Some(b'b'));
+    }
+
+    #[test]
+    fn test_scancode_shifted_letter() {
+        let mut parser = Ps2ParserState::new();
+        // Left shift down
+        assert_eq!(parser.process_scancode(0x2A), None);
+        assert_eq!(parser.process_scancode(0x1E), Some(b'A'));
+        // Left shift up
+        assert_eq!(parser.process_scancode(0xAA), None);
+        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
+    }
+
+    #[test]
+    fn test_scancode_e0_prefix_ignored() {
+        let mut parser = Ps2ParserState::new();
+        assert_eq!(parser.process_scancode(0xE0), None);
+        assert_eq!(parser.process_scancode(0x48), None);
+        // Next normal key should still work
+        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
     }
 }
 

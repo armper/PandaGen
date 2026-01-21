@@ -34,6 +34,7 @@ This runs:
 
 ```
 qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso \
+  -machine pc \
   -drive file=dist/pandagen.disk,format=raw,if=none,id=hd0 \
   -device virtio-blk-pci,drive=hd0 \
   -serial file:dist/serial.log \
@@ -43,6 +44,19 @@ qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso \
 
 **Phase 78 Update**: The QEMU window now displays a **VGA text console (80x25)**! The workspace and UI
 are visible in the QEMU window, not in the host terminal.
+
+### Machine Type + Keyboard Path
+
+The bare-metal kernel currently uses the **legacy PIC + PS/2 (i8042)** path:
+
+- IRQ routing is via the **8259 PIC** (remapped to vectors 32–47)
+- Keyboard input is **PS/2 only** (ports 0x60/0x64)
+- The i8042 command byte is forced to enable **IRQ1** on boot
+
+This is why the QEMU invocation uses `-machine pc` (i440fx) to keep legacy PIC/PS/2 enabled.
+
+If you switch to **q35** or disable legacy devices, you must add an **IOAPIC/LAPIC** path or provide
+a USB HID keyboard driver. Otherwise IRQ1 will never fire.
 
 ### VGA Text Console Mode
 
@@ -147,6 +161,35 @@ The kernel now initializes a VGA text console at boot:
 - Ensure `-display cocoa` (or `-display gtk`/`-display sdl`) is used
 - Don't use `-nographic` flag
 - Click the QEMU window to capture keyboard focus
+
+### Keyboard IRQ Debugging (Serial Only)
+
+When built with debug assertions, the kernel emits serial logs for the full IRQ pipeline:
+
+- `kbd irq fired`
+- `kbd scancode=0x..`
+- `kbd keyevent scancode=0x.. ch=..`
+- `kbd runtime consumed=yes|no`
+
+This makes it easy to pinpoint the failure stage:
+
+- No `kbd irq fired`: IRQ routing or interrupts disabled
+- `kbd irq fired` but no `kbd scancode`: controller read/status issue
+- `kbd scancode` but no `kbd keyevent`: scancode decoder issue
+- `kbd keyevent` but no UI update: render/overlay wiring issue
+
+### QEMU Smoke Test (Manual)
+
+```
+cargo xtask qemu-smoke
+```
+
+Steps:
+1. Click the QEMU window.
+2. Press any key.
+3. Close QEMU.
+
+The command scans dist/serial.log for `kbd scancode=` and reports PASS/FAIL.
 
 **"Where is the serial output?":**
 - Serial logs are in `dist/serial.log`

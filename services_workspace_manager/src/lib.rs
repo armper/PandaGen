@@ -28,6 +28,7 @@ use boot_profile::{BootConfig, BootProfile, BootProfileManager};
 use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
+use keybindings::{Action, KeyBindingManager};
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use packages::{ComponentLoader, PackageComponentType, PackageManifest};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
@@ -396,6 +397,8 @@ pub struct WorkspaceManager {
     view_host: ViewHost,
     /// View subscriptions for workspace (to receive updates)
     view_subscriptions: HashMap<ViewId, ViewSubscriptionCap>,
+    /// Key binding manager
+    key_binding_manager: KeyBindingManager,
     /// Policy engine (optional)
     policy: Option<Box<dyn PolicyEngine>>,
     /// Audit trail of workspace events
@@ -418,6 +421,7 @@ impl WorkspaceManager {
             focus_manager: FocusManager::new(),
             view_host: ViewHost::new(),
             view_subscriptions: HashMap::new(),
+            key_binding_manager: KeyBindingManager::new(),
             policy: None,
             audit_trail: Vec::new(),
             next_timestamp: 0,
@@ -832,6 +836,28 @@ impl WorkspaceManager {
                 self.key_routing_debug.last_key_event = Some(key_event.clone());
                 self.key_routing_debug.consumed_by_global = false;
             }
+        }
+
+        // Check global keybindings first
+        let global_consumed = if let InputEvent::Key(key_event) = event {
+            if let Some(_action) = self.key_binding_manager.get_action(key_event) {
+                // TODO: Execute action (switch tile, etc)
+                // For now, we just consume it to respect the "consumed" contract
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        #[cfg(debug_assertions)]
+        {
+            self.key_routing_debug.consumed_by_global = global_consumed;
+        }
+
+        if global_consumed {
+            return None;
         }
 
         let focused_sub = self.focus_manager.route_event(event).ok()??;
@@ -1656,9 +1682,31 @@ mod tests {
         
         // Verify event was routed to the editor
         assert_eq!(routed_to2, Some(editor_id), "KeyEvent should be routed to editor");
+    }
 
-        // Get the editor instance and verify it received the events
-        // Note: We can't directly inspect the editor's state from here without exposing more internals,
-        // but route_input returning Some(editor_id) means it was processed
+    #[test]
+    fn test_global_binding_consumption() {
+        use input_types::{KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        // Launch editor to have a focused component
+        let config = LaunchConfig::new(
+            ComponentType::Editor,
+            "test-editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let editor_id = workspace.launch_component(config).unwrap();
+
+        // 1. Test non-bound key ('a') - should be routed to editor
+        let a_event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
+        let routed_to = workspace.route_input(&a_event);
+        assert_eq!(routed_to, Some(editor_id), "'a' should be routed to editor");
+
+        // 2. Test globally bound key (Ctrl+S for Save) - should be consumed globally
+        let save_event = InputEvent::key(KeyEvent::pressed(KeyCode::S, Modifiers::CTRL));
+        let routed_to_save = workspace.route_input(&save_event);
+        assert_eq!(routed_to_save, None, "Ctrl+S should be consumed globally");
     }
 }

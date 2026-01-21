@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.next().as_deref() {
         Some("iso") => cmd_iso(),
         Some("qemu") => cmd_qemu(),
+        Some("qemu-smoke") => cmd_qemu_smoke(),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
@@ -26,6 +27,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("Usage:");
     println!("  cargo xtask iso");
     println!("  cargo xtask qemu");
+    println!("  cargo xtask qemu-smoke");
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::new(ErrorKind::Other, "unknown xtask command").into())
@@ -89,7 +91,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display cocoa -no-reboot",
+        "qemu-system-x86_64 -machine pc -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display cocoa -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display()
@@ -100,6 +102,8 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
+        .arg("-machine")
+        .arg("pc")
         .arg("-m")
         .arg("512M")
         .arg("-cdrom")
@@ -113,6 +117,70 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-display")
         .arg("cocoa") // Can also be "gtk", "sdl" depending on platform
         .arg("-no-reboot"))
+}
+
+fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    let iso = root.join(ISO_OUTPUT);
+    if !iso.exists() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("missing {ISO_OUTPUT}; run cargo xtask iso first"),
+        )
+        .into());
+    }
+
+    // Ensure disk image exists
+    let disk = root.join(DISK_OUTPUT);
+    if !disk.exists() {
+        println!("Disk image not found, creating...");
+        cmd_image()?;
+    }
+
+    // Ensure dist directory exists for serial log
+    let dist = root.join("dist");
+    fs::create_dir_all(&dist)?;
+
+    let serial_log = root.join("dist/serial.log");
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║  PandaGen QEMU Keyboard Smoke Test                       ║");
+    println!("╠═══════════════════════════════════════════════════════════╣");
+    println!("║  • Press any key in QEMU window to emit scancode         ║");
+    println!("║  • Close QEMU window to finish the test                  ║");
+    println!("║  • Serial logs: dist/serial.log                          ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    run(Command::new("qemu-system-x86_64")
+        .current_dir(&root)
+        .arg("-machine")
+        .arg("pc")
+        .arg("-m")
+        .arg("512M")
+        .arg("-cdrom")
+        .arg(&iso)
+        .arg("-drive")
+        .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
+        .arg("-device")
+        .arg("virtio-blk-pci,drive=hd0")
+        .arg("-serial")
+        .arg(format!("file:{}", serial_log.display()))
+        .arg("-display")
+        .arg("cocoa")
+        .arg("-no-reboot"))?;
+
+    let log = fs::read_to_string(&serial_log).unwrap_or_default();
+    if log.contains("kbd scancode=") {
+        println!("QEMU smoke test: PASS (scancode observed)");
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            ErrorKind::Other,
+            "QEMU smoke test: FAIL (no scancode log found)",
+        )
+        .into())
+    }
 }
 
 fn cmd_image() -> Result<(), Box<dyn std::error::Error>> {
