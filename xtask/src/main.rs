@@ -146,7 +146,8 @@ fn build_kernel(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .arg("-p")
         .arg(KERNEL_CRATE)
         .arg("--target")
-        .arg(TARGET))
+        .arg(TARGET)
+        .arg("-Zbuild-std=core,alloc"))
 }
 
 fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
