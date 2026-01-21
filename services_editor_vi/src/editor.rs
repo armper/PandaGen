@@ -5,7 +5,7 @@ use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
 use input_types::{InputEvent, KeyCode, KeyEvent};
-use services_storage::VersionId;
+use services_storage::{ObjectId, VersionId};
 use services_view_host::{ViewHandleCap, ViewHost};
 use thiserror::Error;
 use view_types::{CursorPosition, ViewContent, ViewFrame};
@@ -118,9 +118,34 @@ impl Editor {
             .io
             .as_mut()
             .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
-        let result = io.open(options)?;
-        self.load_document(result.content, result.handle);
-        Ok(())
+
+        match io.open(options.clone()) {
+            Ok(result) => {
+                self.load_document(result.content, result.handle);
+                Ok(())
+            }
+            Err(IoError::NotFound) => {
+                // File not found - create empty buffer with path as target
+                if let Some(path) = options.path {
+                    self.state.set_document_label(Some(path.clone()));
+                    self.state
+                        .set_status_message(format!("[New File] {}", path));
+                    // Don't set a document handle yet - will be created on save
+                } else {
+                    self.state.set_status_message("[New File]");
+                }
+                Ok(())
+            }
+            Err(IoError::PermissionDenied(reason)) => {
+                self.state
+                    .set_status_message(format!("Permission denied: {}", reason));
+                Err(EditorError::Io(IoError::PermissionDenied(reason)))
+            }
+            Err(err) => {
+                self.state.set_status_message(format!("Error: {}", err));
+                Err(EditorError::Io(err))
+            }
+        }
     }
 
     /// Open a new empty document
@@ -151,6 +176,7 @@ impl Editor {
             EditorMode::Normal => self.handle_normal_mode(key_event),
             EditorMode::Insert => self.handle_insert_mode(key_event),
             EditorMode::Command => self.handle_command_mode(key_event),
+            EditorMode::Search => self.handle_search_mode(key_event),
         }
     }
 
@@ -177,6 +203,7 @@ impl Editor {
 
             // Enter insert mode (only without modifiers)
             KeyCode::I if event.modifiers.is_empty() => {
+                self.state.save_undo_snapshot();
                 self.state.set_mode(EditorMode::Insert);
                 self.state.set_status_message("");
                 Ok(EditorAction::Continue)
@@ -184,9 +211,30 @@ impl Editor {
 
             // Delete character under cursor (only without modifiers)
             KeyCode::X if event.modifiers.is_empty() => {
+                self.state.save_undo_snapshot();
                 let pos = self.state.cursor().position();
                 if self.state.buffer_mut().delete_char(pos) {
                     self.state.mark_dirty();
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Undo (only without modifiers)
+            KeyCode::U if event.modifiers.is_empty() => {
+                if self.state.undo() {
+                    self.state.set_status_message("Undo");
+                } else {
+                    self.state.set_status_message("Already at oldest change");
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Redo (Ctrl+R)
+            KeyCode::R if event.modifiers.is_ctrl() => {
+                if self.state.redo() {
+                    self.state.set_status_message("Redo");
+                } else {
+                    self.state.set_status_message("Already at newest change");
                 }
                 Ok(EditorAction::Continue)
             }
@@ -196,6 +244,23 @@ impl Editor {
                 // Shift+; = ':'
                 self.state.set_mode(EditorMode::Command);
                 self.state.set_status_message("");
+                Ok(EditorAction::Continue)
+            }
+
+            // Enter search mode
+            KeyCode::Slash if event.modifiers.is_empty() => {
+                self.state.set_mode(EditorMode::Search);
+                self.state.set_status_message("");
+                Ok(EditorAction::Continue)
+            }
+
+            // Repeat last search
+            KeyCode::N if event.modifiers.is_empty() => {
+                if self.state.find_next(true) {
+                    self.state.set_status_message("Next match");
+                } else {
+                    self.state.set_status_message("Pattern not found");
+                }
                 Ok(EditorAction::Continue)
             }
 
@@ -282,6 +347,45 @@ impl Editor {
         }
     }
 
+    /// Handle search mode key event
+    fn handle_search_mode(&mut self, event: &KeyEvent) -> EditorResult<EditorAction> {
+        match event.code {
+            // Exit search mode
+            KeyCode::Escape => {
+                self.state.set_mode(EditorMode::Normal);
+                self.state.clear_search();
+                Ok(EditorAction::Continue)
+            }
+
+            // Execute search
+            KeyCode::Enter => {
+                // Execute search before changing mode (mode change clears search_query)
+                let found = self.state.find_next(true);
+                self.state.set_mode(EditorMode::Normal);
+                if found {
+                    self.state.set_status_message("Match found");
+                } else {
+                    self.state.set_status_message("Pattern not found");
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Backspace
+            KeyCode::Backspace => {
+                self.state.backspace_search();
+                Ok(EditorAction::Continue)
+            }
+
+            // Build search query
+            _ => {
+                if let Some(ch) = self.key_to_char(event) {
+                    self.state.append_to_search(ch);
+                }
+                Ok(EditorAction::Continue)
+            }
+        }
+    }
+
     /// Execute a parsed command
     fn execute_command(&mut self, cmd_str: &str) -> EditorResult<EditorAction> {
         let command = CommandParser::parse(cmd_str)?;
@@ -289,6 +393,11 @@ impl Editor {
         match command {
             Command::Write => {
                 let new_version = self.save_document()?;
+                Ok(EditorAction::Saved(new_version))
+            }
+
+            Command::WriteAs { path } => {
+                let new_version = self.save_document_as(&path)?;
                 Ok(EditorAction::Saved(new_version))
             }
 
@@ -325,13 +434,48 @@ impl Editor {
             self.state.set_dirty(false);
             self.state.set_status_message(result.message);
             Ok(result.new_version_id)
-        } else {
+        } else if self.document.is_none() && self.io.is_none() {
+            // No document and no I/O - fallback to simple save (for tests)
             let new_version = VersionId::new();
             self.state.set_dirty(false);
             self.state
                 .set_status_message(format!("Saved version {}", new_version));
             Ok(new_version)
+        } else if self.io.is_some() {
+            // Have I/O but no document - suggest Save As
+            self.state
+                .set_status_message("No file name (use :w <filename>)".to_string());
+            Err(EditorError::InvalidState("No file name".to_string()))
+        } else {
+            // Have document but no I/O handler
+            self.state
+                .set_status_message("No I/O handler configured".to_string());
+            Err(EditorError::NotSupported(
+                "No I/O handler configured".to_string(),
+            ))
         }
+    }
+
+    fn save_document_as(&mut self, path: &str) -> EditorResult<VersionId> {
+        let io = self
+            .io
+            .as_mut()
+            .ok_or_else(|| EditorError::NotSupported("No I/O handler configured".to_string()))?;
+
+        let content = self.state.buffer().as_string();
+        let result = io.save_as(path, &content)?;
+
+        // Update document handle with new path
+        let new_handle = DocumentHandle::new(
+            ObjectId::new(), // New object created
+            result.new_version_id,
+            Some(path.to_string()),
+            true, // Can update link since we just created it
+        );
+        self.document = Some(new_handle);
+        self.state.set_dirty(false);
+        self.state.set_status_message(result.message);
+        Ok(result.new_version_id)
     }
 
     /// Convert key event to character (simple mapping)

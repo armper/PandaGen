@@ -20,6 +20,8 @@ pub enum CommandError {
 pub enum Command {
     /// Write (save) the buffer
     Write,
+    /// Write to a specific path (Save As)
+    WriteAs { path: String },
     /// Quit the editor
     Quit,
     /// Force quit (discard changes)
@@ -36,13 +38,30 @@ impl CommandParser {
     pub fn parse(cmd: &str) -> Result<Command, CommandError> {
         let trimmed = cmd.trim();
 
-        match trimmed {
-            "w" | "write" => Ok(Command::Write),
+        // Handle empty command
+        if trimmed.is_empty() {
+            return Err(CommandError::InvalidSyntax("Empty command".to_string()));
+        }
+
+        // Split command and arguments
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let command = parts[0];
+
+        match command {
+            "w" | "write" => {
+                if parts.len() > 1 {
+                    // :w <path> - Save As
+                    let path = parts[1..].join(" ");
+                    Ok(Command::WriteAs { path })
+                } else {
+                    // :w - Save to current file
+                    Ok(Command::Write)
+                }
+            }
             "q" | "quit" => Ok(Command::Quit),
             "q!" | "quit!" => Ok(Command::ForceQuit),
             "wq" | "x" => Ok(Command::WriteQuit),
-            "" => Err(CommandError::InvalidSyntax("Empty command".to_string())),
-            _ => Err(CommandError::UnknownCommand(trimmed.to_string())),
+            _ => Err(CommandError::UnknownCommand(command.to_string())),
         }
     }
 }
@@ -56,6 +75,28 @@ mod tests {
         assert_eq!(CommandParser::parse("w"), Ok(Command::Write));
         assert_eq!(CommandParser::parse("write"), Ok(Command::Write));
         assert_eq!(CommandParser::parse(" w "), Ok(Command::Write));
+    }
+
+    #[test]
+    fn test_parse_write_as() {
+        assert_eq!(
+            CommandParser::parse("w test.txt"),
+            Ok(Command::WriteAs {
+                path: "test.txt".to_string()
+            })
+        );
+        assert_eq!(
+            CommandParser::parse("write myfile.txt"),
+            Ok(Command::WriteAs {
+                path: "myfile.txt".to_string()
+            })
+        );
+        assert_eq!(
+            CommandParser::parse("w path/to/file.txt"),
+            Ok(Command::WriteAs {
+                path: "path/to/file.txt".to_string()
+            })
+        );
     }
 
     #[test]

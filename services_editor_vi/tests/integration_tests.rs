@@ -3,8 +3,8 @@
 //! These tests validate complete editing workflows using simulated keyboard input.
 
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
-use services_editor_vi::{Editor, EditorAction, OpenOptions, StorageEditorIo};
-use services_storage::{JournaledStorage, ObjectId, TransactionalStorage};
+use services_editor_vi::{DocumentHandle, Editor, EditorAction, OpenOptions, StorageEditorIo};
+use services_storage::{JournaledStorage, ObjectId, TransactionalStorage, VersionId};
 
 fn press_key(code: KeyCode) -> InputEvent {
     InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
@@ -350,4 +350,309 @@ fn test_complex_editing_session() {
     editor.process_input(press_key(KeyCode::X)).unwrap(); // Delete
 
     assert_eq!(editor.get_content(), "line1\nline 2");
+}
+
+#[test]
+fn test_write_as_command_without_io() {
+    // Test :w <path> command parsing and execution (without I/O, will fail gracefully)
+    let mut editor = Editor::new();
+
+    // Create some content
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert!(editor.state().is_dirty());
+
+    // Try :w newfile.txt without I/O handler configured
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command(' ');
+    editor.state_mut().append_to_command('n');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command('f');
+    editor.state_mut().append_to_command('i');
+    editor.state_mut().append_to_command('l');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('.');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('x');
+    editor.state_mut().append_to_command('t');
+
+    let result = editor.process_input(press_key(KeyCode::Enter));
+
+    // Should fail gracefully since no I/O handler is configured
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_save_as_with_storage_io() {
+    // Test :w <path> with actual storage I/O
+    // Create storage
+    let storage = JournaledStorage::new();
+
+    // Create filesystem view service and root
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+
+    let root_id = ObjectId::new();
+    let root = DirectoryView::new(root_id);
+    let mut fs_view = FileSystemViewService::new();
+    fs_view.register_directory(root.clone());
+
+    // Create editor with I/O
+    let mut editor = Editor::new();
+    let io = Box::new(StorageEditorIo::with_fs_view(storage, fs_view, root));
+    editor.set_io(io);
+
+    // Create some content
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::E)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert_eq!(editor.get_content(), "hello");
+    assert!(editor.state().is_dirty());
+
+    // Save as test.txt
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command(' ');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('s');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('.');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('x');
+    editor.state_mut().append_to_command('t');
+
+    let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should have saved
+    assert!(matches!(result, EditorAction::Saved(_)));
+    assert!(!editor.state().is_dirty());
+    assert!(editor.state().status_message().contains("Saved as"));
+}
+
+#[test]
+fn test_open_nonexistent_file_shows_new_file() {
+    // Test opening a nonexistent file shows [New File] status
+    let storage = JournaledStorage::new();
+
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+
+    let root_id = ObjectId::new();
+    let root = DirectoryView::new(root_id);
+    let fs_view = FileSystemViewService::new();
+
+    let mut editor = Editor::new();
+    let io = Box::new(StorageEditorIo::with_fs_view(storage, fs_view, root));
+    editor.set_io(io);
+
+    // Try to open a nonexistent file
+    let result = editor.open_with(OpenOptions::new().with_path("nonexistent.txt"));
+
+    // Should succeed (creates new file buffer)
+    assert!(result.is_ok());
+
+    // Should show [New File] in status
+    assert!(editor.state().status_message().contains("New File"));
+
+    // Should have the filename as document label
+    assert_eq!(editor.state().document_label(), Some("nonexistent.txt"));
+
+    // Buffer should be empty
+    assert_eq!(editor.get_content(), "");
+
+    // Not dirty yet
+    assert!(!editor.state().is_dirty());
+}
+
+#[test]
+fn test_undo_redo_insert_mode() {
+    // Test undo/redo of insert mode edits
+    let mut editor = Editor::new();
+
+    // Enter insert mode (this saves undo snapshot)
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+
+    // Type "hello"
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::E)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+
+    // Exit insert mode
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert_eq!(editor.get_content(), "hello");
+
+    // Undo - should remove all of "hello"
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "");
+    assert!(editor.state().status_message().contains("Undo"));
+
+    // Redo - should restore "hello"
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(KeyCode::R, input_types::Modifiers::CTRL));
+    editor.process_input(ctrl_r).unwrap();
+    assert_eq!(editor.get_content(), "hello");
+    assert!(editor.state().status_message().contains("Redo"));
+}
+
+#[test]
+fn test_undo_delete_char() {
+    // Test undo of delete character (x)
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Delete first character
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    assert_eq!(editor.get_content(), "ello");
+
+    // Undo
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "hello");
+}
+
+#[test]
+fn test_undo_redo_multiple_edits() {
+    // Test multiple undo/redo operations
+    let mut editor = Editor::new();
+
+    // First edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::A)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "a");
+
+    // Second edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::B)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+
+    // Third edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::C)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "abc");
+
+    // Undo twice
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "a");
+
+    // Redo once
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(KeyCode::R, input_types::Modifiers::CTRL));
+    editor.process_input(ctrl_r).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+}
+
+#[test]
+fn test_search_basic() {
+    // Test basic search functionality
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello world\nfind this word\nhello again".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Enter search mode
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    assert_eq!(
+        editor.state().mode(),
+        services_editor_vi::EditorMode::Search
+    );
+
+    // Type search query "world"
+    editor.process_input(press_key(KeyCode::W)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::R)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+
+    // Execute search
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should find first "world" on line 0
+    assert_eq!(editor.state().cursor().position().row, 0);
+    assert_eq!(editor.state().cursor().position().col, 6); // "world" starts at col 6 in "hello world"
+}
+
+#[test]
+fn test_search_next() {
+    // Test search next (n command)
+    let mut editor = Editor::new();
+    editor.load_document(
+        "test word one\ntest word two\ntest word three".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Search for "word"
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    editor.process_input(press_key(KeyCode::W)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::R)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should be at first "word" (row 0, col 5)
+    assert_eq!(editor.state().cursor().position().row, 0);
+
+    // Press 'n' to find next
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+
+    // Should be at second "word" (row 1, col 5)
+    assert_eq!(editor.state().cursor().position().row, 1);
+
+    // Press 'n' again
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+
+    // Should be at third "word" (row 2, col 5)
+    assert_eq!(editor.state().cursor().position().row, 2);
+}
+
+#[test]
+fn test_search_not_found() {
+    // Test search for non-existent pattern
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello world".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Search for "notfound"
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::T)).unwrap();
+    editor.process_input(press_key(KeyCode::F)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Cursor should still be at start
+    assert_eq!(editor.state().cursor().position().row, 0);
+    assert_eq!(editor.state().cursor().position().col, 0);
+
+    // Status should indicate not found
+    assert!(editor.state().status_message().contains("not found"));
 }
