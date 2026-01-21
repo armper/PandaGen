@@ -16,7 +16,12 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 use core::ptr;
+
+pub mod scrollback;
+pub use scrollback::{VgaLine, VgaScrollback};
 
 /// VGA text mode dimensions
 pub const VGA_WIDTH: usize = 80;
@@ -196,6 +201,30 @@ impl VgaConsole {
             // If it's a space, make it visible by writing underscore
             if ch == b' ' {
                 ptr::write_volatile(self.buffer.add(offset), b'_');
+            }
+        }
+    }
+
+    /// Render scrollback buffer to VGA display
+    ///
+    /// Displays the visible portion of the scrollback buffer
+    pub fn render_scrollback(&mut self, scrollback: &VgaScrollback) {
+        // Clear screen first
+        self.clear(scrollback.visible_lines().first()
+            .and_then(|line| line.attrs.first().copied())
+            .unwrap_or(Style::Normal.to_vga_attr()));
+
+        // Render visible lines
+        for (row, line) in scrollback.visible_lines().iter().enumerate() {
+            if row >= VGA_HEIGHT {
+                break;
+            }
+            
+            for (col, (&ch, &attr)) in line.text.iter().zip(line.attrs.iter()).enumerate() {
+                if col >= VGA_WIDTH {
+                    break;
+                }
+                self.write_at(col, row, ch, attr);
             }
         }
     }
@@ -396,5 +425,28 @@ mod tests {
         // Attribute should be inverted
         let cursor_attr = buffer.get_attr(5, 5);
         assert_eq!(cursor_attr, 0x70); // Inverted 0x07
+    }
+
+    #[test]
+    fn test_render_scrollback() {
+        use crate::scrollback::VgaScrollback;
+        
+        let mut buffer = MockVgaBuffer::new();
+        let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
+        
+        let mut scrollback = VgaScrollback::new(VGA_WIDTH, VGA_HEIGHT, 1000, 0x07);
+        scrollback.push_line("Line 1", 0x07);
+        scrollback.push_line("Line 2", 0x0A);
+        scrollback.push_line("Line 3", 0x0C);
+        
+        console.render_scrollback(&scrollback);
+        
+        // Verify lines were rendered
+        assert_eq!(buffer.get_char(0, 0), b'L');
+        assert_eq!(buffer.get_attr(0, 0), 0x07);
+        assert_eq!(buffer.get_char(0, 1), b'L');
+        assert_eq!(buffer.get_attr(0, 1), 0x0A);
+        assert_eq!(buffer.get_char(0, 2), b'L');
+        assert_eq!(buffer.get_attr(0, 2), 0x0C);
     }
 }
