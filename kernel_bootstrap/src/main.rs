@@ -121,7 +121,6 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
-#[cfg(not(test))]
 const KBD_DEBUG_LOG: bool = cfg!(debug_assertions);
 
 #[cfg(not(test))]
@@ -241,9 +240,12 @@ extern "C" fn keyboard_irq_handler() {
         let status = inb(0x64);
         if (status & 0x01) != 0 {
             let scancode = inb(0x60);
-            KEYBOARD_EVENT_QUEUE.push(scancode);
+            let dropped = KEYBOARD_EVENT_QUEUE.push(scancode);
             if KBD_DEBUG_LOG {
                 let mut serial = serial::SerialPort::new(serial::COM1);
+                if dropped {
+                    let _ = writeln!(serial, "kbd queue overflow (dropped oldest)");
+                }
                 let _ = writeln!(serial, "kbd scancode={:#x}", scancode);
             }
         } else if KBD_DEBUG_LOG {
@@ -572,8 +574,6 @@ macro_rules! kprintln {
 
 #[cfg(not(test))]
 #[no_mangle]
-#[cfg(not(test))]
-#[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
     serial.init();
@@ -783,7 +783,7 @@ fn workspace_loop(
         // Process keyboard input
         let mut input_progressed = false;
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
-            if let Some(ch) = parser_state.process_scancode(scancode) {
+            if let Some(ch) = parser_state.process_scancode(scancode, serial) {
                 if KBD_DEBUG_LOG {
                     if ch.is_ascii_graphic() || ch == b' ' {
                         kprintln!(
@@ -896,13 +896,13 @@ fn workspace_loop(
                 let mut sink: Option<&mut dyn DisplaySink> = None;
 
                 if let Some(ref mut fb) = fb_console {
-                    sink = Some(fb);
+                    sink = Some(*fb);
                 } else if let Some(ref mut vga) = vga_console {
-                    vga_sink_storage = Some(VgaDisplaySink::new(vga));
+                    vga_sink_storage = Some(VgaDisplaySink::new(*vga));
                     sink = vga_sink_storage.as_mut().map(|s| s as &mut dyn DisplaySink);
                 }
 
-                if let Some(mut sink) = sink {
+                if let Some(sink) = sink {
                     if workspace.is_editor_active() {
                         let normal_attr = console_vga::Style::Normal.to_vga_attr();
                         let bold_attr = console_vga::Style::Bold.to_vga_attr();
@@ -936,8 +936,6 @@ fn workspace_loop(
                             }
                         }
                         rendered_editor = true;
-                        input_dirty = false;
-                        output_dirty = false;
                     }
                 }
             }
@@ -1268,7 +1266,7 @@ fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
         // Drain keyboard queue and process scancodes
         let mut events_processed = 0;
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
-            if let Some(ch) = parser_state.process_scancode(scancode) {
+            if let Some(ch) = parser_state.process_scancode(scancode, serial) {
                 if ch == 0x08 {
                     // Backspace
                     editor.delete_char();
@@ -1459,7 +1457,16 @@ impl Ps2ParserState {
     }
 
     /// Process a scancode byte and return ASCII character if available
-    fn process_scancode(&mut self, scancode: u8) -> Option<u8> {
+    fn process_scancode<W: core::fmt::Write>(&mut self, scancode: u8, serial: &mut W) -> Option<u8> {
+        // Log state before processing
+        if crate::KBD_DEBUG_LOG {
+            let _ = writeln!(
+                serial,
+                "parser: in={:#x} pending_e0={} shift={}",
+                scancode, self.pending_e0, self.shift_pressed
+            );
+        }
+
         // E0 prefix handling
         if scancode == 0xE0 {
             self.pending_e0 = true;
@@ -1479,6 +1486,13 @@ impl Ps2ParserState {
 
         // Ignore E0-prefixed keys and break codes for now
         if self.pending_e0 || is_break {
+            if crate::KBD_DEBUG_LOG {
+                let _ = writeln!(
+                    serial,
+                    "parser: drop reason pending_e0={} is_break={}",
+                    self.pending_e0, is_break
+                );
+            }
             self.pending_e0 = false;
             return None;
         }
@@ -1487,6 +1501,7 @@ impl Ps2ParserState {
 
         // Translate make code to ASCII
         let ascii = match code {
+            0x01 => 0x1B, // Escape
             0x02..=0x0B => {
                 // 1-9, 0
                 let digit = if code == 0x0B { 0 } else { code - 0x01 };
@@ -1783,32 +1798,68 @@ impl Ps2ParserState {
 #[cfg(test)]
 mod keyboard_scancode_tests {
     use super::Ps2ParserState;
+    use core::fmt::{self, Write};
+
+    struct DummyWriter;
+    impl Write for DummyWriter {
+        fn write_str(&mut self, _s: &str) -> fmt::Result { Ok(()) }
+    }
 
     #[test]
     fn test_scancode_basic_letters() {
         let mut parser = Ps2ParserState::new();
-        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
-        assert_eq!(parser.process_scancode(0x30), Some(b'b'));
+        let mut writer = DummyWriter;
+        assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
+        assert_eq!(parser.process_scancode(0x30, &mut writer), Some(b'b'));
+    }
+
+    #[test]
+    fn test_scancode_escape() {
+        let mut parser = Ps2ParserState::new();
+        let mut writer = DummyWriter;
+        // 0x01 is Escape scancode -> 0x1B ASCII
+        assert_eq!(parser.process_scancode(0x01, &mut writer), Some(0x1B));
     }
 
     #[test]
     fn test_scancode_shifted_letter() {
         let mut parser = Ps2ParserState::new();
+        let mut writer = DummyWriter;
         // Left shift down
-        assert_eq!(parser.process_scancode(0x2A), None);
-        assert_eq!(parser.process_scancode(0x1E), Some(b'A'));
+        assert_eq!(parser.process_scancode(0x2A, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'A'));
         // Left shift up
-        assert_eq!(parser.process_scancode(0xAA), None);
-        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
+        assert_eq!(parser.process_scancode(0xAA, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
     }
 
     #[test]
     fn test_scancode_e0_prefix_ignored() {
         let mut parser = Ps2ParserState::new();
-        assert_eq!(parser.process_scancode(0xE0), None);
-        assert_eq!(parser.process_scancode(0x48), None);
+        let mut writer = DummyWriter;
+        assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x48, &mut writer), None);
         // Next normal key should still work
-        assert_eq!(parser.process_scancode(0x1E), Some(b'a'));
+        assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
+    }
+
+    #[test]
+    fn test_unexpected_byte_resets_prefix() {
+        let mut parser = Ps2ParserState::new();
+        let mut writer = DummyWriter;
+        
+        // 1. Send E0 (pending_e0 becomes true)
+        assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+        assert!(parser.pending_e0);
+
+        // 2. Send unexpected normal byte (e.g. 's' 0x1f) which simulates a dropped E0-sequence byte
+        // It should be consumed (dropped) to reset state
+        assert_eq!(parser.process_scancode(0x1F, &mut writer), None);
+        assert!(!parser.pending_e0); // Prefix should be cleared
+
+        // 3. Send valid byte (e.g. 'a' 0x1E)
+        // It should be accepted
+        assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
     }
 }
 
@@ -2056,7 +2107,7 @@ const RESPONSE_MAX: usize = 256;
 const ERROR_MAX: usize = 96;
 const MAX_TASKS: usize = 8;
 const MAX_CHANNELS: usize = 16;
-const KEYBOARD_QUEUE_SIZE: usize = 64;
+const KEYBOARD_QUEUE_SIZE: usize = 256;
 
 /// Bounded lock-free ring buffer for keyboard scancodes
 ///
@@ -2065,8 +2116,8 @@ const KEYBOARD_QUEUE_SIZE: usize = 64;
 #[cfg(not(test))]
 struct KeyboardEventQueue {
     buffer: [AtomicU8; KEYBOARD_QUEUE_SIZE],
-    write_pos: AtomicU8,
-    read_pos: AtomicU8,
+    write_pos: AtomicU64,
+    read_pos: AtomicU64,
 }
 
 #[cfg(not(test))]
@@ -2076,15 +2127,16 @@ impl KeyboardEventQueue {
         const ZERO: AtomicU8 = AtomicU8::new(0);
         Self {
             buffer: [ZERO; KEYBOARD_QUEUE_SIZE],
-            write_pos: AtomicU8::new(0),
-            read_pos: AtomicU8::new(0),
+            write_pos: AtomicU64::new(0),
+            read_pos: AtomicU64::new(0),
         }
     }
 
     /// Pushes a scancode from IRQ context.
     /// If queue is full, overwrites oldest entry (DropOldest policy).
-    fn push(&self, scancode: u8) {
-        let write_idx = self.write_pos.load(Ordering::Relaxed) as usize % KEYBOARD_QUEUE_SIZE;
+    /// Returns true if an entry was dropped.
+    fn push(&self, scancode: u8) -> bool {
+        let write_idx = (self.write_pos.load(Ordering::Relaxed) % KEYBOARD_QUEUE_SIZE as u64) as usize;
         self.buffer[write_idx].store(scancode, Ordering::Release);
 
         let new_write = self.write_pos.load(Ordering::Relaxed).wrapping_add(1);
@@ -2092,8 +2144,11 @@ impl KeyboardEventQueue {
 
         // If we've caught up to read position, advance it (drop oldest)
         let read = self.read_pos.load(Ordering::Acquire);
-        if new_write.wrapping_sub(read) >= KEYBOARD_QUEUE_SIZE as u8 {
+        if new_write.wrapping_sub(read) >= KEYBOARD_QUEUE_SIZE as u64 {
             self.read_pos.store(read.wrapping_add(1), Ordering::Release);
+            true
+        } else {
+            false
         }
     }
 
@@ -2107,7 +2162,7 @@ impl KeyboardEventQueue {
             return None; // Empty
         }
 
-        let read_idx = read as usize % KEYBOARD_QUEUE_SIZE;
+        let read_idx = (read % KEYBOARD_QUEUE_SIZE as u64) as usize;
         let scancode = self.buffer[read_idx].load(Ordering::Acquire);
         self.read_pos.store(read.wrapping_add(1), Ordering::Release);
 
