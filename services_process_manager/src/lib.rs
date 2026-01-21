@@ -13,7 +13,9 @@
 pub mod descriptor;
 pub mod lifecycle;
 pub mod manager;
+pub mod process_info;
 
 pub use descriptor::{RestartPolicy, ServiceDescriptor};
-pub use lifecycle::{LifecycleState, ServiceHandle};
+pub use lifecycle::{CrashReason, LifecycleState, ServiceHandle};
 pub use manager::{ExitNotificationSource, ProcessManager, ProcessManagerError};
+pub use process_info::{KillResult, KillSignal, ProcessInfo, ProcessList};
