@@ -6,8 +6,12 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# No external dependencies - pure Rust implementation
+# No external runtime dependencies - pure Rust implementation
 
 [features]
 default = ["alloc"]
 alloc = []
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
