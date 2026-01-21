@@ -25,10 +25,12 @@ use serde::{Deserialize, Serialize};
 pub mod scrollback;
 pub mod selection;
 pub mod tiling;
+#[cfg(test)]
 pub mod themes;
 pub use scrollback::{VgaLine, VgaScrollback};
 pub use selection::{Clipboard, SelectionManager, SelectionRange};
 pub use tiling::{SplitLayout, TileBounds, TileId, TileManager};
+#[cfg(test)]
 pub use themes::{ColorPair, ColorRole, Theme, ThemeManager};
 
 /// VGA text mode dimensions
