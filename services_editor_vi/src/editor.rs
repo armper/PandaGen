@@ -203,6 +203,7 @@ impl Editor {
 
             // Enter insert mode (only without modifiers)
             KeyCode::I if event.modifiers.is_empty() => {
+                self.state.save_undo_snapshot();
                 self.state.set_mode(EditorMode::Insert);
                 self.state.set_status_message("");
                 Ok(EditorAction::Continue)
@@ -210,9 +211,30 @@ impl Editor {
 
             // Delete character under cursor (only without modifiers)
             KeyCode::X if event.modifiers.is_empty() => {
+                self.state.save_undo_snapshot();
                 let pos = self.state.cursor().position();
                 if self.state.buffer_mut().delete_char(pos) {
                     self.state.mark_dirty();
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Undo (only without modifiers)
+            KeyCode::U if event.modifiers.is_empty() => {
+                if self.state.undo() {
+                    self.state.set_status_message("Undo");
+                } else {
+                    self.state.set_status_message("Already at oldest change");
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Redo (Ctrl+R)
+            KeyCode::R if event.modifiers.is_ctrl() => {
+                if self.state.redo() {
+                    self.state.set_status_message("Redo");
+                } else {
+                    self.state.set_status_message("Already at newest change");
                 }
                 Ok(EditorAction::Continue)
             }

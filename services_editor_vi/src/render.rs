@@ -67,15 +67,16 @@ impl EditorView {
         status.push_str(state.mode().as_str());
         status.push(' ');
 
-        // Dirty indicator
-        if state.is_dirty() {
-            status.push_str("[+] ");
-        }
-
-        // Document label
+        // Document label with dirty indicator
         if let Some(label) = state.document_label() {
             status.push_str(label);
+            if state.is_dirty() {
+                status.push('*');
+            }
             status.push(' ');
+        } else if state.is_dirty() {
+            // No filename but dirty
+            status.push_str("[No Name]* ");
         }
 
         // Command buffer in command mode
@@ -179,7 +180,18 @@ mod tests {
         state.mark_dirty();
 
         let status = view.render_status(&state);
-        assert!(status.contains("[+]"));
+        assert!(status.contains("[No Name]*"));
+    }
+
+    #[test]
+    fn test_render_status_dirty_with_filename() {
+        let view = EditorView::new(3);
+        let mut state = EditorState::new();
+        state.set_document_label(Some("test.txt".to_string()));
+        state.mark_dirty();
+
+        let status = view.render_status(&state);
+        assert!(status.contains("test.txt*"));
     }
 
     #[test]

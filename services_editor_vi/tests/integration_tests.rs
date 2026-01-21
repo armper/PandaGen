@@ -3,8 +3,8 @@
 //! These tests validate complete editing workflows using simulated keyboard input.
 
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
-use services_editor_vi::{Editor, EditorAction, OpenOptions, StorageEditorIo};
-use services_storage::{JournaledStorage, ObjectId, TransactionalStorage};
+use services_editor_vi::{DocumentHandle, Editor, EditorAction, OpenOptions, StorageEditorIo};
+use services_storage::{JournaledStorage, ObjectId, TransactionalStorage, VersionId};
 
 fn press_key(code: KeyCode) -> InputEvent {
     InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
@@ -393,7 +393,7 @@ fn test_write_as_command_without_io() {
 fn test_save_as_with_storage_io() {
     // Test :w <path> with actual storage I/O
     // Create storage
-    let mut storage = JournaledStorage::new();
+    let storage = JournaledStorage::new();
 
     // Create filesystem view service and root
     use fs_view::DirectoryView;
@@ -481,5 +481,97 @@ fn test_open_nonexistent_file_shows_new_file() {
     // Not dirty yet
     assert!(!editor.state().is_dirty());
 }
+
+#[test]
+fn test_undo_redo_insert_mode() {
+    // Test undo/redo of insert mode edits
+    let mut editor = Editor::new();
+
+    // Enter insert mode (this saves undo snapshot)
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+
+    // Type "hello"
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::E)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+
+    // Exit insert mode
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert_eq!(editor.get_content(), "hello");
+
+    // Undo - should remove all of "hello"
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "");
+    assert!(editor.state().status_message().contains("Undo"));
+
+    // Redo - should restore "hello"
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(
+        KeyCode::R,
+        input_types::Modifiers::CTRL,
+    ));
+    editor.process_input(ctrl_r).unwrap();
+    assert_eq!(editor.get_content(), "hello");
+    assert!(editor.state().status_message().contains("Redo"));
+}
+
+#[test]
+fn test_undo_delete_char() {
+    // Test undo of delete character (x)
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Delete first character
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    assert_eq!(editor.get_content(), "ello");
+
+    // Undo
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "hello");
+}
+
+#[test]
+fn test_undo_redo_multiple_edits() {
+    // Test multiple undo/redo operations
+    let mut editor = Editor::new();
+
+    // First edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::A)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "a");
+
+    // Second edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::B)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+
+    // Third edit
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::C)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+    assert_eq!(editor.get_content(), "abc");
+
+    // Undo twice
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "a");
+
+    // Redo once
+    let ctrl_r = InputEvent::key(KeyEvent::pressed(
+        KeyCode::R,
+        input_types::Modifiers::CTRL,
+    ));
+    editor.process_input(ctrl_r).unwrap();
+    assert_eq!(editor.get_content(), "ab");
+}
+
 
 

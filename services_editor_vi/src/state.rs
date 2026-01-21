@@ -227,6 +227,13 @@ impl fmt::Display for TextBuffer {
     }
 }
 
+/// Editor state snapshot for undo/redo
+#[derive(Debug, Clone)]
+struct EditorSnapshot {
+    buffer: TextBuffer,
+    cursor: Cursor,
+}
+
 /// Editor state
 #[derive(Debug, Clone)]
 pub struct EditorState {
@@ -237,6 +244,10 @@ pub struct EditorState {
     command_buffer: String,
     status_message: String,
     document_label: Option<String>,
+    /// Undo history (stack of previous states)
+    undo_stack: Vec<EditorSnapshot>,
+    /// Redo history (stack of undone states)
+    redo_stack: Vec<EditorSnapshot>,
 }
 
 impl EditorState {
@@ -249,6 +260,8 @@ impl EditorState {
             command_buffer: String::new(),
             status_message: String::new(),
             document_label: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -361,6 +374,63 @@ impl EditorState {
         self.buffer = TextBuffer::from_string(content);
         self.cursor = Cursor::new();
         self.dirty = false;
+    }
+
+    /// Save current state for undo
+    pub fn save_undo_snapshot(&mut self) {
+        let snapshot = EditorSnapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor.clone(),
+        };
+        self.undo_stack.push(snapshot);
+        // Clear redo stack when making a new edit
+        self.redo_stack.clear();
+        
+        // Limit undo stack size to prevent unbounded growth
+        const MAX_UNDO_STACK: usize = 100;
+        if self.undo_stack.len() > MAX_UNDO_STACK {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Undo last edit
+    pub fn undo(&mut self) -> bool {
+        if let Some(snapshot) = self.undo_stack.pop() {
+            // Save current state to redo stack
+            let current = EditorSnapshot {
+                buffer: self.buffer.clone(),
+                cursor: self.cursor.clone(),
+            };
+            self.redo_stack.push(current);
+            
+            // Restore snapshot
+            self.buffer = snapshot.buffer;
+            self.cursor = snapshot.cursor;
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo previously undone edit
+    pub fn redo(&mut self) -> bool {
+        if let Some(snapshot) = self.redo_stack.pop() {
+            // Save current state to undo stack
+            let current = EditorSnapshot {
+                buffer: self.buffer.clone(),
+                cursor: self.cursor.clone(),
+            };
+            self.undo_stack.push(current);
+            
+            // Restore snapshot
+            self.buffer = snapshot.buffer;
+            self.cursor = snapshot.cursor;
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
     }
 }
 
