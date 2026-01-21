@@ -841,6 +841,33 @@ fn clear_fb_line(
     }
 }
 
+fn prompt_view(cmd: &[u8], cols: usize) -> (&[u8], usize) {
+    if cols < 2 {
+        return (&[], 0);
+    }
+    let available = cols.saturating_sub(2);
+    if available == 0 {
+        return (&[], cols.saturating_sub(1));
+    }
+
+    if cmd.len() > available {
+        let start = cmd.len() - available;
+        let slice = &cmd[start..];
+        let mut cursor = 2 + available;
+        if cursor >= cols {
+            cursor = cols - 1;
+        }
+        (slice, cursor)
+    } else {
+        let slice = cmd;
+        let mut cursor = 2 + cmd.len();
+        if cursor >= cols {
+            cursor = cols - 1;
+        }
+        (slice, cursor)
+    }
+}
+
 /// Renders editor state to serial using structured view output
 ///
 /// Phase 60: This now uses the unified output model instead of direct printing.
