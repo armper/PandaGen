@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-limine-protocol = "0.5.0"
-console_vga = { path = "../console_vga" }
+limine = "0.5.0"
+console_vga = { path = "../console_vga", default-features = false }
 
 [[bin]]
 name = "kernel_bootstrap"

@@ -27,10 +27,9 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
-use limine_protocol::structures::memory_map_entry::EntryType;
-use limine_protocol::{
-    FramebufferRequest, HHDMRequest, KernelAddressRequest, MemoryMapRequest, Request,
-};
+use limine::memory_map::EntryType;
+use limine::request::{ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest};
+use limine::BaseRevision;
 
 #[cfg(not(test))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -457,31 +456,26 @@ pub extern "C" fn rust_main() -> ! {
         )
     };
 
-    // Phase 78: Boot with VGA text console for QEMU window UI
+    // Phase 78: Boot with display console for QEMU window UI
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
 
-    // Initialize VGA text console (primary UI for QEMU window)
-    let mut vga_console = unsafe { vga::init_vga_console(&kernel.boot) };
+    // Prefer framebuffer if available (QEMU typically boots in graphics mode)
+    let mut fb_console = unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) };
+    let mut vga_console = None;
 
-    if vga_console.is_some() {
-        kprintln!(serial, "VGA text console initialized (80x25)");
+    if fb_console.is_some() {
+        kprintln!(serial, "Framebuffer console initialized (primary)");
         kprintln!(serial, "Main UI in QEMU window, serial logs here");
     } else {
-        kprintln!(serial, "VGA unavailable - trying framebuffer fallback");
-    }
+        kprintln!(serial, "Framebuffer unavailable - trying VGA text console");
+        vga_console = unsafe { vga::init_vga_console(&kernel.boot) };
 
-    // Try to initialize framebuffer console as fallback
-    let mut fb_console = if vga_console.is_none() {
-        unsafe { framebuffer::BareMetalFramebuffer::from_boot_info(&kernel.boot) }
-    } else {
-        None
-    };
-
-    if fb_console.is_some() && vga_console.is_none() {
-        kprintln!(serial, "Framebuffer console initialized (fallback)");
-        kprintln!(serial, "Display output enabled on QEMU window");
-    } else if vga_console.is_none() && fb_console.is_none() {
-        kprintln!(serial, "No display available - serial-only mode");
+        if vga_console.is_some() {
+            kprintln!(serial, "VGA text console initialized (80x25)");
+            kprintln!(serial, "Main UI in QEMU window, serial logs here");
+        } else {
+            kprintln!(serial, "No display available - serial-only mode");
+        }
     }
 
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
@@ -592,7 +586,10 @@ fn workspace_loop(
         vga.write_str_at(0, 3, "> ", console_vga::Style::Bold.to_vga_attr());
     } else if let Some(ref mut fb) = fb_console {
         // Fallback to framebuffer if VGA unavailable
-        fb.draw_text("PandaGen Workspace - Framebuffer Active");
+        let bg = (0x00, 0x20, 0x40);
+        let fg = (0xFF, 0xFF, 0xFF);
+        fb.clear(bg.0, bg.1, bg.2);
+        fb.draw_text_at(0, 0, "PandaGen Workspace - Framebuffer Mode", fg, bg);
     }
 
     loop {
@@ -713,8 +710,30 @@ fn workspace_loop(
 
                 LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             } else if let Some(ref mut fb) = fb_console {
-                // Fallback to framebuffer
-                fb.draw_text("PandaGen Workspace Active");
+                // Render workspace state to framebuffer
+                let bg = (0x00, 0x20, 0x40);
+                let fg = (0xFF, 0xFF, 0xFF);
+                let accent = (0x80, 0xFF, 0x80);
+
+                fb.clear(bg.0, bg.1, bg.2);
+                fb.draw_text_at(
+                    0,
+                    0,
+                    "PandaGen Workspace - Framebuffer Mode",
+                    fg,
+                    bg,
+                );
+                fb.draw_text_at(0, 1, "Type 'help' for commands", fg, bg);
+                fb.draw_text_at(0, 3, "> ", accent, bg);
+
+                let cmd_bytes = workspace.get_command_text();
+                if let Ok(cmd_str) = core::str::from_utf8(cmd_bytes) {
+                    fb.draw_text_at(2, 3, cmd_str, fg, bg);
+                }
+
+                let cursor_pos = workspace.get_cursor_position();
+                fb.draw_cursor(cursor_pos.0, cursor_pos.1, fg, bg);
+
                 LAST_REVISION.store(current_revision, core::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -1262,17 +1281,17 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     unsafe {
         match HHDM_REQUEST.get_response() {
             Some(resp) => {
-                info.hhdm_offset = Some(resp.offset as u64);
+                info.hhdm_offset = Some(resp.offset());
             }
             None => {
                 info.hhdm_offset = None;
             }
         }
 
-        match KERNEL_ADDRESS_REQUEST.get_response() {
+        match EXECUTABLE_ADDRESS_REQUEST.get_response() {
             Some(resp) => {
-                info.kernel_phys = Some(resp.physical_base);
-                info.kernel_virt = Some(resp.virtual_base);
+                info.kernel_phys = Some(resp.physical_base());
+                info.kernel_virt = Some(resp.virtual_base());
             }
             None => {
                 info.kernel_phys = None;
@@ -1280,15 +1299,13 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
             }
         }
 
-        if let Some(map) = MEMORY_MAP_REQUEST
-            .get_response()
-            .and_then(|resp| resp.get_memory_map())
-        {
+        if let Some(resp) = MEMORY_MAP_REQUEST.get_response() {
+            let map = resp.entries();
             let mut usable = 0u64;
             let mut total = 0u64;
             for entry in map {
                 total = total.saturating_add(entry.length);
-                if entry.kind == EntryType::Usable {
+                if entry.entry_type == EntryType::USABLE {
                     usable = usable.saturating_add(entry.length);
                 }
             }
@@ -1300,27 +1317,38 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
         // Request framebuffer from Limine
         match FRAMEBUFFER_REQUEST.get_response() {
             Some(fb_resp) => {
-                if let Some(framebuffers) = fb_resp.get_framebuffers() {
-                    if !framebuffers.is_empty() {
-                        let fb = framebuffers[0];
-                        info.framebuffer_addr = Some(fb.address);
-                        info.framebuffer_width = fb.width;
-                        info.framebuffer_height = fb.height;
-                        info.framebuffer_pitch = fb.pitch;
-                        info.framebuffer_bpp = fb.bpp;
+                if let Some(fb) = fb_resp.framebuffers().next() {
+                    let width = fb.width();
+                    let height = fb.height();
+                    let pitch = fb.pitch();
+                    let bpp = fb.bpp();
+
+                    if width == 0 || height == 0 || pitch == 0 || bpp == 0 {
+                        kprintln!(
+                            serial,
+                            "framebuffer: invalid ({}x{} @ 0x{:x}, {} bpp)",
+                            width,
+                            height,
+                            fb.addr() as usize,
+                            bpp
+                        );
+                    } else {
+                        info.framebuffer_addr = Some(fb.addr());
+                        info.framebuffer_width = width;
+                        info.framebuffer_height = height;
+                        info.framebuffer_pitch = pitch;
+                        info.framebuffer_bpp = bpp;
                         kprintln!(
                             serial,
                             "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
-                            fb.width,
-                            fb.height,
-                            fb.address as usize,
-                            fb.bpp
+                            width,
+                            height,
+                            fb.addr() as usize,
+                            bpp
                         );
-                    } else {
-                        kprintln!(serial, "framebuffer: no framebuffer devices available");
                     }
                 } else {
-                    kprintln!(serial, "framebuffer: unavailable (failed to get list)");
+                    kprintln!(serial, "framebuffer: no framebuffer devices available");
                 }
             }
             None => {
@@ -1369,20 +1397,17 @@ fn init_memory(
     serial: &mut serial::SerialPort,
     boot: &BootInfo,
 ) -> (Option<FrameAllocator>, Option<BumpHeap>) {
-    let Some(map) = (unsafe {
-        MEMORY_MAP_REQUEST
-            .get_response()
-            .and_then(|resp| resp.get_memory_map())
-    }) else {
+    let Some(resp) = MEMORY_MAP_REQUEST.get_response() else {
         let _ = writeln!(serial, "allocator: unavailable (no memory map)");
         return (None, None);
     };
+    let map = resp.entries();
 
     let mut allocator = FrameAllocator::new();
     for entry in map {
-        match entry.kind {
-            EntryType::Usable => allocator.add_range(entry.base, entry.length),
-            EntryType::BootloaderReclaimable | EntryType::KernelAndModules => {
+        match entry.entry_type {
+            EntryType::USABLE => allocator.add_range(entry.base, entry.length),
+            EntryType::BOOTLOADER_RECLAIMABLE | EntryType::EXECUTABLE_AND_MODULES => {
                 allocator.add_reserved_range(entry.base, entry.length)
             }
             _ => {}
@@ -1431,22 +1456,27 @@ fn init_heap(
 #[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
-static HHDM_REQUEST: Request<HHDMRequest> = HHDMRequest::new().into();
+static BASE_REVISION: BaseRevision = BaseRevision::new();
 
 #[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
-static MEMORY_MAP_REQUEST: Request<MemoryMapRequest> = MemoryMapRequest::new().into();
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
-static KERNEL_ADDRESS_REQUEST: Request<KernelAddressRequest> = KernelAddressRequest::new().into();
+static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 
 #[cfg(not(test))]
 #[used]
 #[link_section = ".limine_requests"]
-static FRAMEBUFFER_REQUEST: Request<FramebufferRequest> = FramebufferRequest::new().into();
+static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+#[cfg(not(test))]
+#[used]
+#[link_section = ".limine_requests"]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[cfg(not(test))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
@@ -1526,9 +1556,9 @@ struct BootInfo {
     mem_total_kib: u64,
     mem_usable_kib: u64,
     framebuffer_addr: Option<*mut u8>,
-    framebuffer_width: u16,
-    framebuffer_height: u16,
-    framebuffer_pitch: u16,
+    framebuffer_width: u64,
+    framebuffer_height: u64,
+    framebuffer_pitch: u64,
     framebuffer_bpp: u16,
 }
 
@@ -2705,6 +2735,7 @@ impl KernelAllocator for BumpHeap {
         }
     }
 }
+
 
 const fn align_up(value: u64, align: u64) -> u64 {
     if align == 0 {

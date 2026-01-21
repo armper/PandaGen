@@ -16,13 +16,18 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 use core::ptr;
 
+#[cfg(feature = "alloc")]
 pub mod scrollback;
+#[cfg(feature = "alloc")]
 pub mod selection;
+#[cfg(feature = "alloc")]
 pub use scrollback::{VgaLine, VgaScrollback};
+#[cfg(feature = "alloc")]
 pub use selection::{Clipboard, SelectionManager, SelectionRange};
 
 /// VGA text mode dimensions
@@ -210,6 +215,7 @@ impl VgaConsole {
     /// Render scrollback buffer to VGA display
     ///
     /// Displays the visible portion of the scrollback buffer
+    #[cfg(feature = "alloc")]
     pub fn render_scrollback(&mut self, scrollback: &VgaScrollback) {
         // Clear screen first
         self.clear(scrollback.visible_lines().first()
@@ -234,6 +240,7 @@ impl VgaConsole {
     /// Highlight a selection range by inverting attributes
     ///
     /// This visually shows selected text
+    #[cfg(feature = "alloc")]
     pub fn highlight_selection(&mut self, selection: selection::SelectionRange) {
         let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
 

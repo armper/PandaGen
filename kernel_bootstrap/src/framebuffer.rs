@@ -5,6 +5,11 @@
 
 use crate::BootInfo;
 
+/// Font character width in pixels
+const FONT_WIDTH: usize = 8;
+/// Font character height in pixels
+const FONT_HEIGHT: usize = 16;
+
 /// Pixel format for the framebuffer
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -79,6 +84,13 @@ impl BareMetalFramebuffer {
     /// Returns None if no framebuffer is available in BootInfo.
     pub unsafe fn from_boot_info(boot_info: &BootInfo) -> Option<Self> {
         let addr = boot_info.framebuffer_addr?;
+        if boot_info.framebuffer_width == 0
+            || boot_info.framebuffer_height == 0
+            || boot_info.framebuffer_pitch == 0
+            || boot_info.framebuffer_bpp == 0
+        {
+            return None;
+        }
 
         // Determine pixel format based on bpp and mask info
         // For now, assume RGB32 for 32bpp (most common)
@@ -102,6 +114,16 @@ impl BareMetalFramebuffer {
         Some(Self { info, buffer })
     }
 
+    /// Returns the number of text columns based on the font width
+    pub fn cols(&self) -> usize {
+        self.info.width / FONT_WIDTH
+    }
+
+    /// Returns the number of text rows based on the font height
+    pub fn rows(&self) -> usize {
+        self.info.height / FONT_HEIGHT
+    }
+
     /// Returns framebuffer information
     pub fn info(&self) -> FramebufferInfo {
         self.info
@@ -121,17 +143,122 @@ impl BareMetalFramebuffer {
         for y in 0..info.height {
             for x in 0..info.width {
                 let offset = info.offset(x, y);
-                if offset + 4 <= self.buffer.len() {
-                    self.buffer[offset..offset + 4].copy_from_slice(&bg_bytes);
-                }
+                write_pixel(self.buffer, offset, bg_bytes);
             }
         }
     }
 
-    /// Draw a simple text message (for demonstration)
-    pub fn draw_text(&mut self, _text: &str) {
-        // For now, just clear to show something is working
-        // A full implementation would need a font renderer
-        self.clear(0, 0x40, 0x80); // Blue background to show it's active
+    /// Draw a single character at (col, row) with foreground/background colors
+    pub fn draw_char_at(
+        &mut self,
+        col: usize,
+        row: usize,
+        ch: u8,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) -> bool {
+        if col >= self.cols() || row >= self.rows() {
+            return false;
+        }
+
+        let bitmap = get_char_bitmap(ch);
+        let info = self.info();
+        let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
+        let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+
+        let x_offset = col * FONT_WIDTH;
+        let y_offset = row * FONT_HEIGHT;
+
+        for (row_idx, &row_data) in bitmap.iter().enumerate() {
+            let y = y_offset + row_idx;
+            if y >= info.height {
+                break;
+            }
+
+            for col_idx in 0..FONT_WIDTH {
+                let x = x_offset + col_idx;
+                if x >= info.width {
+                    break;
+                }
+
+                let bit = (row_data >> (7 - col_idx)) & 1;
+                let color = if bit == 1 { &fg_bytes } else { &bg_bytes };
+                let offset = info.offset(x, y);
+                write_pixel(self.buffer, offset, *color);
+            }
+        }
+
+        true
+    }
+
+    /// Draw text starting at (col, row)
+    pub fn draw_text_at(
+        &mut self,
+        mut col: usize,
+        mut row: usize,
+        text: &str,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) -> usize {
+        let mut drawn = 0;
+
+        for byte in text.bytes() {
+            if byte == b'\n' {
+                row += 1;
+                col = 0;
+                if row >= self.rows() {
+                    break;
+                }
+                continue;
+            }
+
+            if col >= self.cols() {
+                col = 0;
+                row += 1;
+            }
+
+            if row >= self.rows() {
+                break;
+            }
+
+            if self.draw_char_at(col, row, byte, fg, bg) {
+                drawn += 1;
+            }
+
+            col += 1;
+        }
+
+        drawn
+    }
+
+    /// Draw a cursor at (col, row) by inverting colors
+    pub fn draw_cursor(&mut self, col: usize, row: usize, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+        let _ = self.draw_char_at(col, row, b'_', fg, bg);
+    }
+}
+
+/// Get bitmap data for a character (8x16 font)
+fn get_char_bitmap(ch: u8) -> &'static [u8; 16] {
+    let index = ch as usize;
+    if index < FONT_DATA.len() {
+        &FONT_DATA[index]
+    } else {
+        &FONT_DATA[0x3F] // '?' for unknown characters
+    }
+}
+
+/// Simplified 8x16 font data (ASCII 0x00-0x7F)
+static FONT_DATA: [[u8; 16]; 128] = include!("font_data_8x16.in");
+
+fn write_pixel(buffer: &mut [u8], offset: usize, bytes: [u8; 4]) {
+    if offset + 4 > buffer.len() {
+        return;
+    }
+    unsafe {
+        let ptr = buffer.as_mut_ptr().add(offset);
+        core::ptr::write_volatile(ptr, bytes[0]);
+        core::ptr::write_volatile(ptr.add(1), bytes[1]);
+        core::ptr::write_volatile(ptr.add(2), bytes[2]);
+        core::ptr::write_volatile(ptr.add(3), bytes[3]);
     }
 }
