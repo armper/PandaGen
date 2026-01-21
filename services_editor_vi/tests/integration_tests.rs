@@ -351,3 +351,96 @@ fn test_complex_editing_session() {
 
     assert_eq!(editor.get_content(), "line1\nline 2");
 }
+
+#[test]
+fn test_write_as_command_without_io() {
+    // Test :w <path> command parsing and execution (without I/O, will fail gracefully)
+    let mut editor = Editor::new();
+
+    // Create some content
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert!(editor.state().is_dirty());
+
+    // Try :w newfile.txt without I/O handler configured
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command(' ');
+    editor.state_mut().append_to_command('n');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command('f');
+    editor.state_mut().append_to_command('i');
+    editor.state_mut().append_to_command('l');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('.');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('x');
+    editor.state_mut().append_to_command('t');
+
+    let result = editor.process_input(press_key(KeyCode::Enter));
+
+    // Should fail gracefully since no I/O handler is configured
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_save_as_with_storage_io() {
+    // Test :w <path> with actual storage I/O
+    // Create storage
+    let mut storage = JournaledStorage::new();
+
+    // Create filesystem view service and root
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+
+    let root_id = ObjectId::new();
+    let root = DirectoryView::new(root_id);
+    let mut fs_view = FileSystemViewService::new();
+    fs_view.register_directory(root.clone());
+
+    // Create editor with I/O
+    let mut editor = Editor::new();
+    let io = Box::new(StorageEditorIo::with_fs_view(storage, fs_view, root));
+    editor.set_io(io);
+
+    // Create some content
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::H)).unwrap();
+    editor.process_input(press_key(KeyCode::E)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    assert_eq!(editor.get_content(), "hello");
+    assert!(editor.state().is_dirty());
+
+    // Save as test.txt
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    editor.state_mut().append_to_command(' ');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('e');
+    editor.state_mut().append_to_command('s');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('.');
+    editor.state_mut().append_to_command('t');
+    editor.state_mut().append_to_command('x');
+    editor.state_mut().append_to_command('t');
+
+    let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should have saved
+    assert!(matches!(result, EditorAction::Saved(_)));
+    assert!(!editor.state().is_dirty());
+    assert!(editor.state().status_message().contains("Saved as"));
+}
+

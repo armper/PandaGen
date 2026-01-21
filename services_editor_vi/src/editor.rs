@@ -5,7 +5,7 @@ use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
 use input_types::{InputEvent, KeyCode, KeyEvent};
-use services_storage::VersionId;
+use services_storage::{ObjectId, VersionId};
 use services_view_host::{ViewHandleCap, ViewHost};
 use thiserror::Error;
 use view_types::{CursorPosition, ViewContent, ViewFrame};
@@ -292,6 +292,11 @@ impl Editor {
                 Ok(EditorAction::Saved(new_version))
             }
 
+            Command::WriteAs { path } => {
+                let new_version = self.save_document_as(&path)?;
+                Ok(EditorAction::Saved(new_version))
+            }
+
             Command::Quit => {
                 if self.state.is_dirty() {
                     self.state
@@ -325,13 +330,47 @@ impl Editor {
             self.state.set_dirty(false);
             self.state.set_status_message(result.message);
             Ok(result.new_version_id)
-        } else {
+        } else if self.document.is_none() && self.io.is_none() {
+            // No document and no I/O - fallback to simple save (for tests)
             let new_version = VersionId::new();
             self.state.set_dirty(false);
             self.state
                 .set_status_message(format!("Saved version {}", new_version));
             Ok(new_version)
+        } else if self.io.is_some() {
+            // Have I/O but no document - suggest Save As
+            self.state
+                .set_status_message("No file name (use :w <filename>)".to_string());
+            Err(EditorError::InvalidState("No file name".to_string()))
+        } else {
+            // Have document but no I/O handler
+            self.state
+                .set_status_message("No I/O handler configured".to_string());
+            Err(EditorError::NotSupported(
+                "No I/O handler configured".to_string(),
+            ))
         }
+    }
+
+    fn save_document_as(&mut self, path: &str) -> EditorResult<VersionId> {
+        let io = self.io.as_mut().ok_or_else(|| {
+            EditorError::NotSupported("No I/O handler configured".to_string())
+        })?;
+
+        let content = self.state.buffer().as_string();
+        let result = io.save_as(path, &content)?;
+
+        // Update document handle with new path
+        let new_handle = DocumentHandle::new(
+            ObjectId::new(), // New object created
+            result.new_version_id,
+            Some(path.to_string()),
+            true, // Can update link since we just created it
+        );
+        self.document = Some(new_handle);
+        self.state.set_dirty(false);
+        self.state.set_status_message(result.message);
+        Ok(result.new_version_id)
     }
 
     /// Convert key event to character (simple mapping)

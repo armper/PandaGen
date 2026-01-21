@@ -113,6 +113,8 @@ pub struct OpenResult {
 pub trait EditorIo {
     fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError>;
     fn save(&mut self, handle: &DocumentHandle, content: &str) -> Result<SaveResult, IoError>;
+    /// Save to a new path (Save As)
+    fn save_as(&mut self, path: &str, content: &str) -> Result<SaveResult, IoError>;
 }
 
 /// Storage-backed editor I/O using JournaledStorage and optional fs_view.
@@ -221,6 +223,46 @@ impl EditorIo for StorageEditorIo {
         self.storage.commit(&mut tx).map_err(Self::map_tx_error)?;
 
         Ok(SaveResult::new(new_version_id, false, "Saved successfully"))
+    }
+
+    fn save_as(&mut self, path: &str, content: &str) -> Result<SaveResult, IoError> {
+        let fs = self
+            .fs_view
+            .as_mut()
+            .ok_or_else(|| IoError::PermissionDenied("No fs_view available".to_string()))?;
+        let root = self
+            .root
+            .as_mut()
+            .ok_or_else(|| IoError::PermissionDenied("No root directory".to_string()))?;
+
+        // Create new object
+        let mut tx = self
+            .storage
+            .begin_transaction()
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+
+        let object_id = ObjectId::new();
+        let version_id = self
+            .storage
+            .write(&mut tx, object_id, content.as_bytes())
+            .map_err(Self::map_tx_error)?;
+        self.storage.commit(&mut tx).map_err(Self::map_tx_error)?;
+
+        // Link to filesystem (simplified - assumes path is just a name in current dir)
+        // In a full implementation, this would parse the path and create directories as needed
+        let name = path.split('/').last().unwrap_or(path);
+        if let Err(err) = fs.link(root, name, object_id, services_storage::ObjectKind::Blob) {
+            return Err(IoError::StorageError(format!(
+                "Failed to link file: {}",
+                err
+            )));
+        }
+
+        Ok(SaveResult::new(
+            version_id,
+            true,
+            format!("Saved as: {}", path),
+        ))
     }
 }
 
