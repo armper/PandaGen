@@ -230,6 +230,8 @@ mod tests {
             status_view: None,
             component_count: 0,
             running_count: 0,
+            #[cfg(debug_assertions)]
+            debug_info: None,
         };
 
         let frame1 = host.push_snapshot(snapshot.clone(), 10).unwrap();
@@ -257,6 +259,8 @@ mod tests {
                 status_view: None,
                 component_count: 0,
                 running_count: 0,
+                #[cfg(debug_assertions)]
+                debug_info: None,
             },
         };
 
