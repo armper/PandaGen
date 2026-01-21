@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), feature(alloc_error_handler))]
 // Allow unused code - this is infrastructure for future phases
 #![allow(dead_code)]
 // Allow manual div_ceil - explicit for readability in no_std
@@ -12,7 +13,13 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(not(test))]
+extern crate alloc;
+
 mod framebuffer;
+mod minimal_editor;
+#[cfg(test)]
+mod minimal_editor_tests;
 mod output;
 mod vga;
 mod workspace;
@@ -482,6 +489,27 @@ pub extern "C" fn rust_main() -> ! {
 
     kprintln!(serial, "Boot complete. Type 'help' for commands.\r\n");
 
+    // Test that global allocator works
+    {
+        extern crate alloc;
+        use alloc::string::String;
+        use alloc::vec::Vec;
+
+        let mut test_vec: Vec<u32> = Vec::new();
+        test_vec.push(1);
+        test_vec.push(2);
+        test_vec.push(3);
+
+        let test_string = String::from("Alloc works!");
+
+        kprintln!(
+            serial,
+            "Alloc test: vec={:?}, string={}",
+            test_vec,
+            test_string
+        );
+    }
+
     workspace_loop(
         &mut serial,
         kernel,
@@ -674,6 +702,49 @@ fn workspace_loop(
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
                 let rows = console_vga::VGA_HEIGHT;
                 let cols = console_vga::VGA_WIDTH;
+
+                // Check if editor is active
+                if workspace.is_editor_active() {
+                    // Render editor to VGA
+                    if let Some(editor) = workspace.editor() {
+                        // Clear screen on first render or mode change
+                        if output_dirty {
+                            for row in 0..rows {
+                                clear_vga_line(vga, row, normal_attr);
+                            }
+                        }
+
+                        // Render editor viewport (rows 0..rows-1)
+                        let viewport_rows = (rows - 1).min(editor.viewport_rows());
+                        for viewport_row in 0..viewport_rows {
+                            if let Some(line) = editor.get_viewport_line(viewport_row) {
+                                let len = line.len().min(cols);
+                                vga.write_str_at(0, viewport_row, &line[..len], normal_attr);
+                            }
+                        }
+
+                        // Render status line (last row)
+                        let status_row = rows - 1;
+                        clear_vga_line(vga, status_row, bold_attr);
+                        let status = editor.status_line();
+                        let status_len = status.len().min(cols);
+                        vga.write_str_at(0, status_row, &status[..status_len], bold_attr);
+
+                        // Set cursor position
+                        if let Some(cursor_pos) = editor.get_viewport_cursor() {
+                            vga.draw_cursor(cursor_pos.col, cursor_pos.row, normal_attr);
+                        } else {
+                            // Cursor off-screen, hide it
+                            vga.draw_cursor(0, status_row, bold_attr);
+                        }
+
+                        input_dirty = false;
+                        output_dirty = false;
+                        continue; // Skip normal workspace rendering
+                    }
+                }
+
+                // Normal workspace rendering (when editor not active)
                 let max_output_rows = rows.saturating_sub(1);
                 let total = workspace.output_line_count();
                 let output_rows = total.min(max_output_rows);
@@ -1632,6 +1703,18 @@ fn init_heap(
     let virt_base = (hhdm_offset + phys_base) as usize;
     let size = (HEAP_PAGES * PAGE_SIZE) as usize;
 
+    // Initialize the global allocator
+    unsafe {
+        let heap_ptr = &GLOBAL_HEAP as *const BumpHeap as *mut BumpHeap;
+        core::ptr::write((*heap_ptr).next.get(), virt_base);
+        core::ptr::write((*heap_ptr).allocations.get(), 0);
+        core::ptr::write(&mut (*heap_ptr).start as *mut usize, virt_base);
+        core::ptr::write(
+            &mut (*heap_ptr).end as *mut usize,
+            virt_base.saturating_add(size),
+        );
+    }
+
     let heap = BumpHeap::new(virt_base, size);
     let _ = writeln!(serial, "heap: base=0x{:x} size={} bytes", virt_base, size);
     Some(heap)
@@ -1664,6 +1747,25 @@ static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[cfg(not(test))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
+
+#[cfg(not(test))]
+#[global_allocator]
+static GLOBAL_HEAP: BumpHeap = BumpHeap::new(0, 0);
+
+#[cfg(not(test))]
+#[alloc_error_handler]
+fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    let mut serial = serial::SerialPort::new(serial::COM1);
+    let _ = core::fmt::write(
+        &mut serial,
+        format_args!(
+            "\r\n\r\nALLOCATION ERROR: size={} align={}\r\n",
+            layout.size(),
+            layout.align()
+        ),
+    );
+    halt_loop()
+}
 
 const PAGE_SIZE: u64 = 4096;
 const CHANNEL_CAPACITY: usize = 8;
@@ -2874,17 +2976,21 @@ trait KernelAllocator {
 struct BumpHeap {
     start: usize,
     end: usize,
-    next: usize,
-    allocations: usize,
+    next: core::cell::UnsafeCell<usize>,
+    allocations: core::cell::UnsafeCell<usize>,
 }
 
+// SAFETY: BumpHeap uses interior mutability but is safe for concurrent use
+// because we only run on a single CPU in kernel_bootstrap (no SMP yet).
+unsafe impl Sync for BumpHeap {}
+
 impl BumpHeap {
-    fn new(start: usize, size: usize) -> Self {
+    const fn new(start: usize, size: usize) -> Self {
         Self {
             start,
             end: start.saturating_add(size),
-            next: start,
-            allocations: 0,
+            next: core::cell::UnsafeCell::new(start),
+            allocations: core::cell::UnsafeCell::new(0),
         }
     }
 }
@@ -2896,27 +3002,57 @@ impl KernelAllocator for BumpHeap {
         align: usize,
         lifetime: AllocationLifetime,
     ) -> Option<AllocationRecord> {
-        let aligned = align_up_usize(self.next, align);
-        let end = aligned.saturating_add(size);
-        if end > self.end {
-            return None;
+        // SAFETY: &mut self ensures exclusive access
+        unsafe {
+            let next = *self.next.get();
+            let aligned = align_up_usize(next, align);
+            let end = aligned.saturating_add(size);
+            if end > self.end {
+                return None;
+            }
+            *self.next.get() = end;
+            *self.allocations.get() += 1;
+            Some(AllocationRecord {
+                start: aligned,
+                size,
+                lifetime,
+            })
         }
-        self.next = end;
-        self.allocations += 1;
-        Some(AllocationRecord {
-            start: aligned,
-            size,
-            lifetime,
-        })
     }
 
     fn stats(&self) -> AllocationStats {
-        AllocationStats {
-            used: self.next.saturating_sub(self.start),
-            free: self.end.saturating_sub(self.next),
-            total: self.end.saturating_sub(self.start),
-            allocations: self.allocations,
+        // SAFETY: read-only access is safe
+        unsafe {
+            let next = *self.next.get();
+            let allocations = *self.allocations.get();
+            AllocationStats {
+                used: next.saturating_sub(self.start),
+                free: self.end.saturating_sub(next),
+                total: self.end.saturating_sub(self.start),
+                allocations,
+            }
         }
+    }
+}
+
+#[cfg(not(test))]
+unsafe impl core::alloc::GlobalAlloc for BumpHeap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let next = *self.next.get();
+        let aligned = align_up_usize(next, layout.align());
+        let end = aligned.saturating_add(layout.size());
+
+        if end > self.end {
+            return core::ptr::null_mut();
+        }
+
+        *self.next.get() = end;
+        *self.allocations.get() += 1;
+        aligned as *mut u8
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
+        // Bump allocator doesn't support deallocation
     }
 }
 

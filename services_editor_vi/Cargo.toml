@@ -16,7 +16,7 @@ services_fs_view = { workspace = true }
 fs_view = { workspace = true }
 view_types = { workspace = true }
 services_view_host = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

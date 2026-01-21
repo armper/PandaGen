@@ -1,5 +1,7 @@
 //! Editor rendering and output
 
+use alloc::string::{String, ToString};
+use alloc::format;
 use crate::state::{EditorMode, EditorState};
 
 /// Editor view for rendering

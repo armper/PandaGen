@@ -1,3 +1,5 @@
+#![no_std]
+
 //! # View Types
 //!
 //! This crate defines stable, versionable view schemas for PandaGen OS.
@@ -17,8 +19,12 @@
 //! - A full UI toolkit
 //! - stdout/stderr replacement
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use core::fmt;
 use uuid::Uuid;
 
 /// Unique identifier for a view

@@ -1,3 +1,7 @@
+#![no_std]
+
+#![no_std]
+
 //! # VI-like Editor Service
 //!
 //! This crate implements a modal text editor for PandaGen OS.
@@ -24,6 +28,8 @@
 //! - Input arrives as structured KeyEvent messages
 //! - Saves create new object versions
 //! - Directory link updates are separate operations requiring write authority
+
+extern crate alloc;
 
 pub mod commands;
 pub mod editor;

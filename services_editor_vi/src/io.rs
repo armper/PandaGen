@@ -1,26 +1,32 @@
 //! Document I/O operations
 
+use alloc::string::{String, ToString};
+use alloc::format;
+use core::fmt;
 use fs_view::DirectoryView;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
 use services_storage::{
     JournaledStorage, ObjectId, TransactionError, TransactionalStorage, VersionId,
 };
-use thiserror::Error;
 
 /// Document I/O error
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum IoError {
-    #[error("Document not found")]
     NotFound,
-
-    #[error("Permission denied: {0}")]
     PermissionDenied(String),
-
-    #[error("Storage error: {0}")]
     StorageError(String),
-
-    #[error("Invalid UTF-8 content")]
     InvalidUtf8,
+}
+
+impl fmt::Display for IoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoError::NotFound => write!(f, "Document not found"),
+            IoError::PermissionDenied(s) => write!(f, "Permission denied: {}", s),
+            IoError::StorageError(s) => write!(f, "Storage error: {}", s),
+            IoError::InvalidUtf8 => write!(f, "Invalid UTF-8 content"),
+        }
+    }
 }
 
 /// Document handle

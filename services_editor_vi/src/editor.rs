@@ -1,5 +1,10 @@
 //! Main editor implementation
 
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use alloc::format;
+use core::fmt;
 use crate::commands::{Command, CommandError, CommandParser};
 use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
@@ -7,26 +12,40 @@ use crate::state::{EditorMode, EditorState, Position};
 use input_types::{InputEvent, KeyCode, KeyEvent};
 use services_storage::{ObjectId, VersionId};
 use services_view_host::{ViewHandleCap, ViewHost};
-use thiserror::Error;
 use view_types::{CursorPosition, ViewContent, ViewFrame};
 
 /// Editor error
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum EditorError {
-    #[error("I/O error: {0}")]
-    Io(#[from] IoError),
-
-    #[error("Command error: {0}")]
-    Command(#[from] CommandError),
-
-    #[error("Not supported: {0}")]
+    Io(IoError),
+    Command(CommandError),
     NotSupported(String),
-
-    #[error("Invalid state: {0}")]
     InvalidState(String),
-
-    #[error("View error: {0}")]
     ViewError(String),
+}
+
+impl fmt::Display for EditorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EditorError::Io(e) => write!(f, "I/O error: {}", e),
+            EditorError::Command(e) => write!(f, "Command error: {}", e),
+            EditorError::NotSupported(s) => write!(f, "Not supported: {}", s),
+            EditorError::InvalidState(s) => write!(f, "Invalid state: {}", s),
+            EditorError::ViewError(s) => write!(f, "View error: {}", s),
+        }
+    }
+}
+
+impl From<IoError> for EditorError {
+    fn from(e: IoError) -> Self {
+        EditorError::Io(e)
+    }
+}
+
+impl From<CommandError> for EditorError {
+    fn from(e: CommandError) -> Self {
+        EditorError::Command(e)
+    }
 }
 
 /// Editor result
