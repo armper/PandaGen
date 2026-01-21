@@ -44,6 +44,7 @@ members = [
     "resources",
     "input_types",
     "view_types",
+    "editor_core",
     "cli_console",
     "tests_resilience",
     "tests_pipelines",
