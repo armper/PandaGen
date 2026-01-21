@@ -33,6 +33,7 @@ use packages::{ComponentLoader, PackageComponentType, PackageManifest};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
+use services_editor_vi::Editor;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
@@ -347,6 +348,16 @@ impl LaunchConfig {
     }
 }
 
+/// Component instance holder
+///
+/// Stores the actual running component instance
+enum ComponentInstance {
+    /// Editor component
+    Editor(Editor),
+    /// No instance (placeholder for components not yet implemented)
+    None,
+}
+
 /// Workspace Manager
 ///
 /// Manages component lifecycle, focus, and orchestration.
@@ -354,6 +365,8 @@ impl LaunchConfig {
 pub struct WorkspaceManager {
     /// Component registry
     components: HashMap<ComponentId, ComponentInfo>,
+    /// Component instances (actual running components)
+    component_instances: HashMap<ComponentId, ComponentInstance>,
     /// Focus manager
     focus_manager: FocusManager,
     /// View host for managing component views
@@ -375,6 +388,7 @@ impl WorkspaceManager {
     pub fn new(workspace_identity: IdentityMetadata) -> Self {
         Self {
             components: HashMap::new(),
+            component_instances: HashMap::new(),
             focus_manager: FocusManager::new(),
             view_host: ViewHost::new(),
             view_subscriptions: HashMap::new(),
@@ -506,6 +520,19 @@ impl WorkspaceManager {
 
         let component_id = component.id;
 
+        // Create component instance
+        let instance = match config.component_type {
+            ComponentType::Editor => {
+                let mut editor = Editor::new();
+                // Wire view handles
+                if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
+                    editor.set_view_handles(main_view.clone(), status_view.clone());
+                }
+                ComponentInstance::Editor(editor)
+            }
+            _ => ComponentInstance::None,
+        };
+
         // Record event
         self.audit_trail.push(WorkspaceEvent::ComponentLaunched {
             component_id,
@@ -514,8 +541,11 @@ impl WorkspaceManager {
             timestamp_ns: timestamp,
         });
 
-        // Store component
+        // Store component info
         self.components.insert(component_id, component);
+        
+        // Store component instance
+        self.component_instances.insert(component_id, instance);
 
         // Grant focus if focusable and no other component has focus
         if config.focusable {
@@ -723,6 +753,9 @@ impl WorkspaceManager {
             self.view_subscriptions.remove(&status_view.view_id);
         }
 
+        // Clean up component instance
+        self.component_instances.remove(&component_id);
+
         // Record event
         let timestamp = self.next_timestamp();
         self.audit_trail.push(WorkspaceEvent::ComponentTerminated {
@@ -760,12 +793,12 @@ impl WorkspaceManager {
             .map(|c| c.id)
     }
 
-    /// Routes an input event to the focused component
-    pub fn route_input(&self, event: &InputEvent) -> Option<ComponentId> {
+    /// Routes an input event to the focused component and processes it
+    pub fn route_input(&mut self, event: &InputEvent) -> Option<ComponentId> {
         let focused_sub = self.focus_manager.route_event(event).ok()??;
 
         // Find component with matching subscription
-        self.components
+        let component_id = self.components
             .values()
             .find(|c| {
                 c.subscription
@@ -773,7 +806,33 @@ impl WorkspaceManager {
                     .map(|s| s.id == focused_sub.id)
                     .unwrap_or(false)
             })
-            .map(|c| c.id)
+            .map(|c| c.id)?;
+
+        // Get timestamp before borrowing instances mutably
+        let timestamp = self.next_timestamp();
+
+        // Process input in the component instance
+        if let Some(instance) = self.component_instances.get_mut(&component_id) {
+            match instance {
+                ComponentInstance::Editor(editor) => {
+                    // Process input
+                    match editor.process_input(event.clone()) {
+                        Ok(_action) => {
+                            // Publish updated views
+                            let _ = editor.publish_views(&mut self.view_host, timestamp);
+                        }
+                        Err(_e) => {
+                            // Error processing input - could log here
+                        }
+                    }
+                }
+                ComponentInstance::None => {
+                    // No instance to process
+                }
+            }
+        }
+
+        Some(component_id)
     }
 
     /// Returns the audit trail

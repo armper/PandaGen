@@ -15,6 +15,7 @@ policy = { workspace = true }
 resources = { workspace = true }
 packages = { workspace = true }
 services_focus_manager = { workspace = true }
+services_editor_vi = { workspace = true }
 input_types = { workspace = true }
 services_input = { workspace = true }
 view_types = { workspace = true }
