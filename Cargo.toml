@@ -75,6 +75,7 @@ hal = { path = "hal" }
 hal_x86_64 = { path = "hal_x86_64" }
 console_fb = { path = "console_fb" }
 console_vga = { path = "console_vga" }
+editor_core = { path = "editor_core" }
 
 # Service crates
 services_registry = { path = "services_registry" }
