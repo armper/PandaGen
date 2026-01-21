@@ -31,16 +31,61 @@
 //! This is presentation, not authority.
 
 use view_types::{CursorPosition, ViewContent, ViewFrame};
+use std::collections::HashMap;
 
 /// Default separator width for status line
 /// This could be made configurable in the future based on terminal width
 const SEPARATOR_WIDTH: usize = 80;
+
+/// Cache of rendered content for incremental updates
+#[derive(Debug, Clone)]
+struct ViewCache {
+    /// Cached lines (line index -> rendered text)
+    lines: HashMap<usize, String>,
+    /// Last cursor position rendered
+    last_cursor: Option<CursorPosition>,
+}
+
+impl ViewCache {
+    fn new() -> Self {
+        Self {
+            lines: HashMap::new(),
+            last_cursor: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.last_cursor = None;
+    }
+
+    fn get_line(&self, line_idx: usize) -> Option<&str> {
+        self.lines.get(&line_idx).map(|s| s.as_str())
+    }
+
+    fn set_line(&mut self, line_idx: usize, content: String) {
+        self.lines.insert(line_idx, content);
+    }
+}
+
+/// Rendering statistics for performance monitoring
+#[derive(Debug, Default, Clone)]
+pub struct RenderStats {
+    /// Number of characters written in the last frame
+    pub chars_written_per_frame: usize,
+    /// Number of lines redrawn in the last frame
+    pub lines_redrawn_per_frame: usize,
+}
 
 /// Text renderer that converts ViewFrames to text output
 pub struct TextRenderer {
     /// Last rendered revision (to detect changes)
     last_main_revision: Option<u64>,
     last_status_revision: Option<u64>,
+    /// Cache of rendered view content
+    view_cache: ViewCache,
+    /// Rendering statistics
+    stats: RenderStats,
 }
 
 impl TextRenderer {
@@ -49,7 +94,14 @@ impl TextRenderer {
         Self {
             last_main_revision: None,
             last_status_revision: None,
+            view_cache: ViewCache::new(),
+            stats: RenderStats::default(),
         }
+    }
+
+    /// Get the latest rendering statistics
+    pub fn stats(&self) -> &RenderStats {
+        &self.stats
     }
 
     /// Checks if a redraw is needed based on revision changes
@@ -72,6 +124,10 @@ impl TextRenderer {
         main_view: Option<&ViewFrame>,
         status_view: Option<&ViewFrame>,
     ) -> String {
+        // Reset stats for new frame
+        self.stats.chars_written_per_frame = 0;
+        self.stats.lines_redrawn_per_frame = 0;
+
         let mut output = String::new();
 
         // Full redraw - just render content (no ANSI codes)
@@ -82,6 +138,7 @@ impl TextRenderer {
         } else {
             output.push_str("(no view)\n");
             self.last_main_revision = None;
+            self.view_cache.clear();
         }
 
         // Separator line
@@ -98,7 +155,136 @@ impl TextRenderer {
             self.last_status_revision = None;
         }
 
+        // Update stats
+        self.stats.chars_written_per_frame = output.len();
+
         output
+    }
+
+    /// Renders only the changed lines of a text buffer (incremental rendering)
+    ///
+    /// Returns a description of changed lines (for debugging/testing).
+    /// In a real system, this would write directly to a framebuffer.
+    pub fn render_incremental(
+        &mut self,
+        main_view: Option<&ViewFrame>,
+        status_view: Option<&ViewFrame>,
+    ) -> String {
+        // Reset stats for new frame
+        self.stats.chars_written_per_frame = 0;
+        self.stats.lines_redrawn_per_frame = 0;
+
+        let mut output = String::new();
+
+        // Incremental rendering for main view
+        if let Some(frame) = main_view {
+            let changes = self.render_view_incremental(frame);
+            output.push_str(&changes);
+            self.last_main_revision = Some(frame.revision);
+        } else {
+            // No view - clear cache
+            if !self.view_cache.lines.is_empty() {
+                output.push_str("(view cleared)\n");
+                self.view_cache.clear();
+            }
+            self.last_main_revision = None;
+        }
+
+        // For now, always render status (it's just one line)
+        if let Some(frame) = status_view {
+            if status_view.map(|f| f.revision) != self.last_status_revision {
+                output.push_str(&format!("[STATUS] {}\n", self.render_status_line(frame).trim()));
+                self.stats.chars_written_per_frame += self.render_status_line(frame).len();
+            }
+            self.last_status_revision = Some(frame.revision);
+        } else {
+            self.last_status_revision = None;
+        }
+
+        output
+    }
+
+    /// Renders a view frame incrementally, returning only changes
+    fn render_view_incremental(&mut self, frame: &ViewFrame) -> String {
+        match &frame.content {
+            ViewContent::TextBuffer { lines } => {
+                self.render_text_buffer_incremental(lines, frame.cursor.as_ref())
+            }
+            _ => {
+                // For non-text buffers, fall back to full render
+                self.render_view_frame(frame)
+            }
+        }
+    }
+
+    /// Renders text buffer incrementally by diffing against cache
+    fn render_text_buffer_incremental(
+        &mut self,
+        lines: &[String],
+        cursor: Option<&CursorPosition>,
+    ) -> String {
+        let mut output = String::new();
+        let mut lines_changed = 0;
+        let mut chars_written = 0;
+
+        // Check each line against cache
+        for (line_idx, line) in lines.iter().enumerate() {
+            let rendered_line = if let Some(cursor_pos) = cursor {
+                if cursor_pos.line == line_idx {
+                    self.render_line_with_cursor(line, cursor_pos.column)
+                } else {
+                    line.clone()
+                }
+            } else {
+                line.clone()
+            };
+
+            // Check if this line changed
+            let line_changed = match self.view_cache.get_line(line_idx) {
+                Some(cached) => cached != rendered_line,
+                None => true, // New line
+            };
+
+            if line_changed {
+                // Write only changed line
+                output.push_str(&format!("[L{}] {}\n", line_idx, rendered_line));
+                self.view_cache.set_line(line_idx, rendered_line.clone());
+                lines_changed += 1;
+                chars_written += rendered_line.len();
+            }
+        }
+
+        // Handle cursor-only changes (cursor moved but content didn't change)
+        let cursor_moved = cursor != self.view_cache.last_cursor.as_ref();
+        if cursor_moved && lines_changed == 0 {
+            if let Some(cursor_pos) = cursor {
+                output.push_str(&format!("[CURSOR] {}:{}\n", cursor_pos.line, cursor_pos.column));
+                chars_written += 10; // Approximate cursor update cost
+            }
+        }
+
+        self.view_cache.last_cursor = cursor.copied();
+        self.stats.lines_redrawn_per_frame = lines_changed;
+        self.stats.chars_written_per_frame = chars_written;
+
+        if output.is_empty() {
+            output.push_str("(no changes)\n");
+        }
+
+        output
+    }
+
+    /// Helper to render a line with cursor marker
+    fn render_line_with_cursor(&self, line: &str, col: usize) -> String {
+        let chars: Vec<char> = line.chars().collect();
+        if col <= chars.len() {
+            let before: String = chars.iter().take(col).collect();
+            let after: String = chars.iter().skip(col).collect();
+            format!("{}|{}", before, after)
+        } else {
+            let padding = (col.saturating_sub(chars.len())).min(1000);
+            format!("{}{}|", line, " ".repeat(padding))
+        }
     }
 
     /// Renders a single view frame
@@ -346,5 +532,87 @@ mod tests {
         renderer.render_snapshot(Some(&main), Some(&status));
         assert_eq!(renderer.last_main_revision, Some(5));
         assert_eq!(renderer.last_status_revision, Some(10));
+    }
+
+    #[test]
+    fn test_incremental_render_first_frame() {
+        let mut renderer = TextRenderer::new();
+        let lines = vec!["Hello".to_string(), "World".to_string()];
+        let frame = create_text_buffer_frame(lines, None, 1);
+        
+        let output = renderer.render_incremental(Some(&frame), None);
+        
+        // First render should update all lines
+        assert!(output.contains("[L0] Hello"));
+        assert!(output.contains("[L1] World"));
+        assert_eq!(renderer.stats().lines_redrawn_per_frame, 2);
+    }
+
+    #[test]
+    fn test_incremental_render_no_changes() {
+        let mut renderer = TextRenderer::new();
+        let lines = vec!["Hello".to_string()];
+        let frame1 = create_text_buffer_frame(lines.clone(), None, 1);
+        
+        // First render
+        renderer.render_incremental(Some(&frame1), None);
+        
+        // Second render with same content but different revision
+        let frame2 = create_text_buffer_frame(lines, None, 2);
+        let output = renderer.render_incremental(Some(&frame2), None);
+        
+        // Should report no changes
+        assert!(output.contains("(no changes)"));
+        assert_eq!(renderer.stats().lines_redrawn_per_frame, 0);
+    }
+
+    #[test]
+    fn test_incremental_render_line_change() {
+        let mut renderer = TextRenderer::new();
+        
+        // First render
+        let lines1 = vec!["Hello".to_string(), "World".to_string()];
+        let frame1 = create_text_buffer_frame(lines1, None, 1);
+        renderer.render_incremental(Some(&frame1), None);
+        
+        // Second render with one line changed
+        let lines2 = vec!["Hello".to_string(), "Rust".to_string()];
+        let frame2 = create_text_buffer_frame(lines2, None, 2);
+        let output = renderer.render_incremental(Some(&frame2), None);
+        
+        // Should only update changed line
+        assert!(!output.contains("[L0]")); // Line 0 unchanged
+        assert!(output.contains("[L1] Rust")); // Line 1 changed
+        assert_eq!(renderer.stats().lines_redrawn_per_frame, 1);
+    }
+
+    #[test]
+    fn test_incremental_render_cursor_only_move() {
+        let mut renderer = TextRenderer::new();
+        
+        // First render with cursor at 0,0
+        let lines = vec!["Hello".to_string()];
+        let frame1 = create_text_buffer_frame(lines.clone(), Some(CursorPosition::new(0, 0)), 1);
+        renderer.render_incremental(Some(&frame1), None);
+        
+        // Second render with cursor moved to 0,2
+        let frame2 = create_text_buffer_frame(lines, Some(CursorPosition::new(0, 2)), 2);
+        let output = renderer.render_incremental(Some(&frame2), None);
+        
+        // Should detect cursor movement
+        assert!(output.contains("[CURSOR]") || output.contains("[L0]"));
+    }
+
+    #[test]
+    fn test_render_stats() {
+        let mut renderer = TextRenderer::new();
+        let lines = vec!["Test line".to_string()];
+        let frame = create_text_buffer_frame(lines, None, 1);
+        
+        renderer.render_incremental(Some(&frame), None);
+        
+        let stats = renderer.stats();
+        assert!(stats.chars_written_per_frame > 0);
+        assert_eq!(stats.lines_redrawn_per_frame, 1);
     }
 }
