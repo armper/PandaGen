@@ -18,6 +18,8 @@ extern crate alloc;
 
 mod framebuffer;
 mod minimal_editor;
+#[cfg(test)]
+mod minimal_editor_tests;
 mod output;
 mod vga;
 mod workspace;

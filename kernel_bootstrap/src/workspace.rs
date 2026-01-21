@@ -3,14 +3,11 @@
 //! This provides a workspace-like experience in the bare-metal kernel without
 //! requiring the full std-based services_workspace_manager.
 
-#![cfg_attr(not(test), allow(unused_imports))]
-
 use core::fmt::Write;
 
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-#[cfg(not(test))]
 use crate::minimal_editor::MinimalEditor;
 
 /// Component type in the workspace
@@ -26,7 +23,6 @@ pub struct WorkspaceSession {
     /// Active component type
     active_component: Option<ComponentType>,
     /// Editor instance (bare-metal)
-    #[cfg(not(test))]
     editor: Option<MinimalEditor>,
     /// Command channel for component communication
     command_channel: ChannelId,
@@ -49,7 +45,6 @@ impl WorkspaceSession {
     pub fn new(command_channel: ChannelId, response_channel: ChannelId) -> Self {
         Self {
             active_component: None,
-            #[cfg(not(test))]
             editor: None,
             command_channel,
             response_channel,
@@ -212,21 +207,13 @@ impl WorkspaceSession {
                 let what = parts.next();
                 match what {
                     Some("editor") => {
-                        #[cfg(not(test))]
-                        {
-                            // Create editor with viewport size (e.g., 23 rows for VGA 80x25 minus status line)
-                            let editor = MinimalEditor::new(23);
-                            self.editor = Some(editor);
-                            self.active_component = Some(ComponentType::Editor);
-                            self.emit_line(serial, "Editor opened");
-                            self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force");
-                            self.emit_line(serial, "Note: Filesystem unavailable (in-memory editing only)");
-                        }
-                        #[cfg(test)]
-                        {
-                            self.active_component = Some(ComponentType::Editor);
-                            self.emit_line(serial, "Editor component registered");
-                        }
+                        // Create editor with viewport size (e.g., 23 rows for VGA 80x25 minus status line)
+                        let editor = MinimalEditor::new(23);
+                        self.editor = Some(editor);
+                        self.active_component = Some(ComponentType::Editor);
+                        self.emit_line(serial, "Editor opened");
+                        self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force");
+                        self.emit_line(serial, "Note: Filesystem unavailable (in-memory editing only)");
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
@@ -364,13 +351,11 @@ impl WorkspaceSession {
     }
 
     /// Check if editor is active
-    #[cfg(not(test))]
     pub fn is_editor_active(&self) -> bool {
         self.active_component == Some(ComponentType::Editor) && self.editor.is_some()
     }
 
     /// Get reference to the editor
-    #[cfg(not(test))]
     pub fn editor(&self) -> Option<&MinimalEditor> {
         self.editor.as_ref()
     }

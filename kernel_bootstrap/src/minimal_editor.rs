@@ -4,11 +4,18 @@
 //! environment without std dependencies. It shares the same modal editing philosophy
 //! but renders directly to VGA without going through services_view_host.
 
-#![cfg(not(test))]
-
+#[cfg(not(test))]
 extern crate alloc;
+
+#[cfg(not(test))]
 use alloc::string::String;
+#[cfg(not(test))]
 use alloc::vec::Vec;
+
+#[cfg(test)]
+use std::string::String;
+#[cfg(test)]
+use std::vec::Vec;
 
 /// Editor mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
