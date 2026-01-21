@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::permissions::Ownership;
+
 /// Unique identifier for a storage object
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectId(Uuid);
@@ -124,6 +126,8 @@ pub struct Object {
     pub migration_lineage: Option<core_types::MigrationLineage>,
     /// Metadata (tags, timestamps, etc.)
     pub metadata: Vec<(String, String)>,
+    /// Ownership information
+    pub ownership: Option<Ownership>,
 }
 
 impl Object {
@@ -137,6 +141,7 @@ impl Object {
             schema_version: None,
             migration_lineage: None,
             metadata: Vec::new(),
+            ownership: None,
         }
     }
 
@@ -160,6 +165,12 @@ impl Object {
     /// Adds metadata to the object
     pub fn with_metadata(mut self, key: String, value: String) -> Self {
         self.metadata.push((key, value));
+        self
+    }
+
+    /// Sets ownership for this object
+    pub fn with_ownership(mut self, ownership: Ownership) -> Self {
+        self.ownership = Some(ownership);
         self
     }
 }

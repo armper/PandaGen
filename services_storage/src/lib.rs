@@ -27,6 +27,7 @@ pub mod failing_device;
 pub mod journaled_storage;
 pub mod migration;
 pub mod object;
+pub mod permissions;
 pub mod persistent_fs;
 pub mod transaction;
 
@@ -37,6 +38,9 @@ pub use journaled_storage::{
 };
 pub use migration::{create_lineage, MigrationError, Migrator, SequentialMigrator};
 pub use object::{Object, ObjectId, ObjectKind, VersionId};
+pub use permissions::{
+    AccessDenialReason, Capability, CapabilityKind, Ownership, PermissionChecker, PrincipalId,
+};
 pub use persistent_fs::{DirectoryMetadata, PersistentDirectory, PersistentFilesystem};
 pub use transaction::{
     Transaction, TransactionError, TransactionId, TransactionState, TransactionalStorage,
