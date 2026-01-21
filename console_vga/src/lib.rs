@@ -19,17 +19,24 @@
 extern crate alloc;
 
 use core::ptr;
+#[cfg(test)]
+use serde::{Deserialize, Serialize};
 
 pub mod scrollback;
 pub mod selection;
+pub mod tiling;
+pub mod themes;
 pub use scrollback::{VgaLine, VgaScrollback};
 pub use selection::{Clipboard, SelectionManager, SelectionRange};
+pub use tiling::{SplitLayout, TileBounds, TileId, TileManager};
+pub use themes::{ColorPair, ColorRole, Theme, ThemeManager};
 
 /// VGA text mode dimensions
 pub const VGA_WIDTH: usize = 80;
 pub const VGA_HEIGHT: usize = 25;
 
 /// VGA color codes
+#[cfg_attr(test, derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VgaColor {

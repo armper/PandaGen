@@ -21,6 +21,7 @@
 
 pub mod boot_profile;
 pub mod commands;
+pub mod keybindings;
 
 use boot_profile::{BootConfig, BootProfile, BootProfileManager};
 

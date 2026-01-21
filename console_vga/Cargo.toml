@@ -6,4 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# No external dependencies - pure Rust implementation
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
