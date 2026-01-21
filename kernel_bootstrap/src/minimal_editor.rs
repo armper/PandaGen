@@ -12,7 +12,10 @@ use alloc::string::String;
 #[cfg(test)]
 use std::string::String;
 
-use editor_core::{CoreOutcome, EditorCore, EditorMode, Key, Position};
+use editor_core::{CoreOutcome, EditorCore, Key};
+
+// Re-export types from editor_core for test compatibility
+pub use editor_core::{EditorMode, Position};
 
 /// Minimal editor - thin wrapper around EditorCore with viewport management
 pub struct MinimalEditor {
