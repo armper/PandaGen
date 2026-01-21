@@ -257,6 +257,108 @@ impl EditorCore {
                     CoreOutcome::Continue
                 }
             }
+            // Handle dedicated key variants as their character equivalents in insert mode
+            // This allows typing 'i', 'a', 'h', etc. in insert mode
+            Key::I => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'i') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::A => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'a') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::H => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'h') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::J => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'j') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::K => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'k') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::L => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'l') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::X => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'x') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::D => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'd') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::U => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'u') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
+            Key::N => {
+                self.save_undo_snapshot();
+                if self.buffer.insert_char(self.cursor, 'n') {
+                    self.cursor.col += 1;
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
             Key::Space => {
                 self.save_undo_snapshot();
                 if self.buffer.insert_char(self.cursor, ' ') {
@@ -600,6 +702,33 @@ mod tests {
         assert!(editor.dirty());
         assert_eq!(editor.buffer().line(0), Some("h"));
         assert_eq!(editor.cursor(), Position::new(0, 1));
+    }
+
+    #[test]
+    fn test_insert_vi_command_letters_in_insert_mode() {
+        // Bug fix test: Ensure that vi command letters (i, a, h, j, k, l, etc.)
+        // can be typed normally in INSERT mode
+        let mut editor = EditorCore::new();
+        
+        // Enter insert mode
+        editor.apply_key(Key::I);
+        assert_eq!(editor.mode(), EditorMode::Insert);
+        
+        // Type the letters that are also vi commands
+        editor.apply_key(Key::I); // Should type 'i', not enter insert mode again
+        editor.apply_key(Key::A); // Should type 'a', not append mode
+        editor.apply_key(Key::H); // Should type 'h', not move left
+        editor.apply_key(Key::J); // Should type 'j', not move down
+        editor.apply_key(Key::K); // Should type 'k', not move up
+        editor.apply_key(Key::L); // Should type 'l', not move right
+        editor.apply_key(Key::X); // Should type 'x', not delete
+        editor.apply_key(Key::D); // Should type 'd', not delete line
+        editor.apply_key(Key::U); // Should type 'u', not undo
+        editor.apply_key(Key::N); // Should type 'n', not repeat search
+        
+        // Verify all letters were typed
+        assert_eq!(editor.buffer().as_string(), "iahjklxdun");
+        assert_eq!(editor.mode(), EditorMode::Insert);
     }
 
     #[test]

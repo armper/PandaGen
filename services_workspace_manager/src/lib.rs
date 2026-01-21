@@ -1549,4 +1549,42 @@ mod tests {
         );
         assert_eq!(component.metadata.get("mode"), Some(&"edit".to_string()));
     }
+
+    #[test]
+    fn test_editor_receives_keyevents_after_launch() {
+        use input_types::{KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        // Launch editor
+        let config = LaunchConfig::new(
+            ComponentType::Editor,
+            "test-editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let editor_id = workspace.launch_component(config).unwrap();
+
+        // Verify editor has focus
+        assert_eq!(workspace.get_focused_component(), Some(editor_id));
+
+        // Send 'i' key to enter insert mode
+        let i_event = InputEvent::key(KeyEvent::pressed(KeyCode::I, Modifiers::none()));
+        let routed_to = workspace.route_input(&i_event);
+        
+        // Verify event was routed to the editor
+        assert_eq!(routed_to, Some(editor_id), "KeyEvent should be routed to editor");
+
+        // Send 'a' key to type character
+        let a_event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
+        let routed_to2 = workspace.route_input(&a_event);
+        
+        // Verify event was routed to the editor
+        assert_eq!(routed_to2, Some(editor_id), "KeyEvent should be routed to editor");
+
+        // Get the editor instance and verify it received the events
+        // Note: We can't directly inspect the editor's state from here without exposing more internals,
+        // but route_input returning Some(editor_id) means it was processed
+    }
 }
