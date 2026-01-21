@@ -10,6 +10,9 @@ use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage
 
 use crate::minimal_editor::MinimalEditor;
 
+#[cfg(feature = "console_vga")]
+use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
+
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ComponentType {
@@ -24,6 +27,9 @@ pub struct WorkspaceSession {
     active_component: Option<ComponentType>,
     /// Editor instance (bare-metal)
     editor: Option<MinimalEditor>,
+    /// Tile manager for layout and focus
+    #[cfg(feature = "console_vga")]
+tile_manager: TileManager,
     /// Command channel for component communication
     command_channel: ChannelId,
     /// Response channel for replies
@@ -46,6 +52,8 @@ impl WorkspaceSession {
         Self {
             active_component: None,
             editor: None,
+            #[cfg(feature = "console_vga")]
+tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VGA_HEIGHT - 5)), // Editor gets most space
             command_channel,
             response_channel,
             in_command_mode: true,
@@ -65,11 +73,33 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
+        #[cfg(feature = "console_vga")]
+        let focused_tile = self.tile_manager.focused_tile();
+        #[cfg(not(feature = "console_vga"))]
+        let focused_tile = "Unavailable";
+
+        let _ = writeln!(serial, "route_input:");
+        let _ = writeln!(serial, "  key={{byte={:#x}}}", byte);
+        let _ = writeln!(serial, "  focus_tile={{{:?}}}", focused_tile);
+
+        // Check tile focus before delivering to component
+        #[cfg(feature = "console_vga")]
+        {
+            // Editor lives in Top tile. If Bottom is focused, Editor shouldn't get input.
+            if self.active_component == Some(ComponentType::Editor) && focused_tile != TileId::Top {
+                 let _ = writeln!(serial, "  consumed_by=none (focus mismatch)");
+                 return false;
+            }
+        }
+
         // If editor is active, route input to it
         #[cfg(not(test))]
         if self.active_component == Some(ComponentType::Editor) {
             if let Some(ref mut editor) = self.editor {
+                let _ = writeln!(serial, "  action=process_byte_start cursor={:?}", editor.cursor());
                 let should_quit = editor.process_byte(byte);
+                let _ = writeln!(serial, "  action=process_byte_end cursor={:?} dirty={}", editor.cursor(), editor.is_dirty());
+                
                 if should_quit {
                     self.active_component = None;
                     self.editor = None;
@@ -247,7 +277,18 @@ impl WorkspaceSession {
                 }
             }
             "focus" => {
-                self.emit_line(serial, "Focus switching not yet implemented");
+                #[cfg(feature = "console_vga")]
+                {
+                    self.tile_manager.focus_next();
+                    let focused = self.tile_manager.focused_tile();
+                    let msg = match focused {
+                        TileId::Top => "Focused: Top",
+                        TileId::Bottom => "Focused: Bottom",
+                    };
+                    self.emit_line(serial, msg);
+                }
+                #[cfg(not(feature = "console_vga"))]
+                self.emit_line(serial, "Focus switching unavailable (no console_vga)");
             }
             "quit" => {
                 self.active_component = None;

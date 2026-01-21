@@ -288,3 +288,40 @@ fn test_open_editor_from_cli() {
         }
     }
 }
+
+#[test]
+fn test_editor_escape_routing() {
+    // Test that Escape is routed to Editor and not consumed globally
+    let config = HostRuntimeConfig {
+        mode: HostMode::Sim,
+        script: None,
+        max_steps: 0,
+        exit_on_idle: false,
+    };
+
+    let mut runtime = HostRuntime::new(config).unwrap();
+
+    // Launch editor
+    let editor_config = LaunchConfig::new(
+        ComponentType::Editor,
+        "test-editor",
+        IdentityKind::Component,
+        TrustDomain::user(),
+    );
+    let editor_id = runtime.workspace_mut().launch_component(editor_config).unwrap();
+
+    // Verify initial focus
+    assert_eq!(runtime.workspace().get_focused_component(), Some(editor_id));
+
+    // Send Escape
+    let esc_event = press_key(KeyCode::Escape);
+    let routed_to = runtime.workspace_mut().route_input(&esc_event);
+
+    // Should be routed to editor
+    assert_eq!(
+        routed_to,
+        Some(editor_id),
+        "Escape should be routed to editor, but was routed to {:?} (None means global consumption)",
+        routed_to
+    );
+}

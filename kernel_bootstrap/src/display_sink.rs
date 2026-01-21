@@ -14,6 +14,9 @@ use console_vga::VgaConsole;
 
 /// Trait for display output (VGA or in-memory buffer)
 pub trait DisplaySink {
+    /// Get display dimensions (cols, rows)
+    fn dims(&self) -> (usize, usize);
+
     /// Clear the display with the given attribute
     fn clear(&mut self, attr: u8);
 
@@ -22,23 +25,30 @@ pub trait DisplaySink {
 
     /// Write a string at the given position
     fn write_str_at(&mut self, col: usize, row: usize, text: &str, attr: u8) -> usize;
+
+    /// Draw a cursor at the given position (usually by inverting attributes)
+    fn draw_cursor(&mut self, col: usize, row: usize, attr: u8);
 }
 
 /// VGA display sink for real hardware
 #[cfg(feature = "console_vga")]
-pub struct VgaDisplaySink {
-    console: VgaConsole,
+pub struct VgaDisplaySink<'a> {
+    console: &'a mut VgaConsole,
 }
 
 #[cfg(feature = "console_vga")]
-impl VgaDisplaySink {
-    pub fn new(console: VgaConsole) -> Self {
+impl<'a> VgaDisplaySink<'a> {
+    pub fn new(console: &'a mut VgaConsole) -> Self {
         Self { console }
     }
 }
 
 #[cfg(feature = "console_vga")]
-impl DisplaySink for VgaDisplaySink {
+impl<'a> DisplaySink for VgaDisplaySink<'a> {
+    fn dims(&self) -> (usize, usize) {
+        (console_vga::VGA_WIDTH, console_vga::VGA_HEIGHT)
+    }
+
     fn clear(&mut self, attr: u8) {
         self.console.clear(attr);
     }
@@ -49,6 +59,10 @@ impl DisplaySink for VgaDisplaySink {
 
     fn write_str_at(&mut self, col: usize, row: usize, text: &str, attr: u8) -> usize {
         self.console.write_str_at(col, row, text, attr)
+    }
+
+    fn draw_cursor(&mut self, col: usize, row: usize, attr: u8) {
+        self.console.draw_cursor(col, row, attr);
     }
 }
 
@@ -116,6 +130,10 @@ impl TestDisplaySink {
 
 #[cfg(test)]
 impl DisplaySink for TestDisplaySink {
+    fn dims(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
     fn clear(&mut self, attr: u8) {
         for row in 0..self.height {
             for col in 0..self.width {
@@ -167,6 +185,11 @@ impl DisplaySink for TestDisplaySink {
         }
 
         written
+    }
+
+    fn draw_cursor(&mut self, _col: usize, _row: usize, _attr: u8) {
+        // No-op for test sink? Or simulated?
+        // For now no-op is fine for tests unless we assert cursor position.
     }
 }
 

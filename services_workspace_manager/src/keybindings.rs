@@ -211,11 +211,13 @@ impl KeyBindingProfile {
             Action::FocusBottom,
         );
 
-        // Escape for command mode
+        /*
+        // Escape for command mode - REMOVED to allow editor to use Escape
         profile.bind(
             KeyCombo::new(KeyCode::Escape, Modifiers::NONE),
             Action::CommandMode,
         );
+        */
 
         profile
     }

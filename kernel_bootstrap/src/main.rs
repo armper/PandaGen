@@ -21,6 +21,7 @@ mod minimal_editor;
 mod output;
 mod vga;
 mod workspace;
+mod display_sink;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -888,7 +889,61 @@ fn workspace_loop(
 
         // Update display if needed
         if input_dirty || output_dirty {
-            if let Some(ref mut vga) = vga_console {
+            let mut rendered_editor = false;
+            {
+                use crate::display_sink::{DisplaySink, VgaDisplaySink};
+                let mut vga_sink_storage: Option<VgaDisplaySink> = None;
+                let mut sink: Option<&mut dyn DisplaySink> = None;
+
+                if let Some(ref mut fb) = fb_console {
+                    sink = Some(fb);
+                } else if let Some(ref mut vga) = vga_console {
+                    vga_sink_storage = Some(VgaDisplaySink::new(vga));
+                    sink = vga_sink_storage.as_mut().map(|s| s as &mut dyn DisplaySink);
+                }
+
+                if let Some(mut sink) = sink {
+                    if workspace.is_editor_active() {
+                        let normal_attr = console_vga::Style::Normal.to_vga_attr();
+                        let bold_attr = console_vga::Style::Bold.to_vga_attr();
+                        let (cols, rows) = sink.dims();
+
+                        if let Some(editor) = workspace.editor() {
+                            if output_dirty {
+                                sink.clear(normal_attr);
+                            }
+                            let viewport_rows = (rows - 1).min(editor.viewport_rows());
+                            for viewport_row in 0..viewport_rows {
+                                for col in 0..cols {
+                                    sink.write_at(col, viewport_row, b' ', normal_attr);
+                                }
+                                if let Some(line) = editor.get_viewport_line(viewport_row) {
+                                    let len = line.len().min(cols);
+                                    sink.write_str_at(0, viewport_row, &line[..len], normal_attr);
+                                }
+                            }
+                            let status_row = rows - 1;
+                            for col in 0..cols {
+                                sink.write_at(col, status_row, b' ', bold_attr);
+                            }
+                            let status = editor.status_line();
+                            let status_len = status.len().min(cols);
+                            sink.write_str_at(0, status_row, &status[..status_len], bold_attr);
+                            if let Some(cursor_pos) = editor.get_viewport_cursor() {
+                                sink.draw_cursor(cursor_pos.col, cursor_pos.row, normal_attr);
+                            } else {
+                                sink.draw_cursor(0, status_row, bold_attr);
+                            }
+                        }
+                        rendered_editor = true;
+                        input_dirty = false;
+                        output_dirty = false;
+                    }
+                }
+            }
+
+            if !rendered_editor {
+                if let Some(ref mut vga) = vga_console {
                 let normal_attr = console_vga::Style::Normal.to_vga_attr();
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
                 let rows = console_vga::VGA_HEIGHT;
@@ -896,7 +951,8 @@ fn workspace_loop(
 
                 // Check if editor is active
                 if workspace.is_editor_active() {
-                    // Render editor to VGA
+                    let _ = writeln!(serial, "render_editor: cols={} rows={}", cols, rows);
+                    // Render editor to sink
                     if let Some(editor) = workspace.editor() {
                         // Clear screen on first render or mode change
                         if output_dirty {
@@ -908,6 +964,9 @@ fn workspace_loop(
                         // Render editor viewport (rows 0..rows-1)
                         let viewport_rows = (rows - 1).min(editor.viewport_rows());
                         for viewport_row in 0..viewport_rows {
+                            // Clear line to prevent artifacts from previous content
+                            clear_vga_line(vga, viewport_row, normal_attr);
+
                             if let Some(line) = editor.get_viewport_line(viewport_row) {
                                 let len = line.len().min(cols);
                                 vga.write_str_at(0, viewport_row, &line[..len], normal_attr);
@@ -936,6 +995,7 @@ fn workspace_loop(
                 }
 
                 // Normal workspace rendering (when editor not active)
+
                 let max_output_rows = rows.saturating_sub(1);
                 let total = workspace.output_line_count();
                 let output_rows = total.min(max_output_rows);
@@ -1134,6 +1194,7 @@ fn workspace_loop(
                 last_view_len = view_len;
                 last_cursor_col = cursor_col;
             }
+            } // End !rendered_editor
 
             input_dirty = false;
             output_dirty = false;

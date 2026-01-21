@@ -856,6 +856,50 @@ impl WorkspaceManager {
             self.key_routing_debug.consumed_by_global = global_consumed;
         }
 
+        // --- Logging ---
+        if let InputEvent::Key(key_event) = event {
+            if key_event.state == input_types::KeyState::Pressed {
+                let focus_comp_id = self.get_focused_component();
+                let focus_comp = focus_comp_id.and_then(|id| self.components.get(&id));
+
+                let focus_comp_str = if let Some(c) = focus_comp {
+                    format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name)
+                } else {
+                    "None".to_string()
+                };
+
+                let delivered_to = if global_consumed {
+                    "None".to_string()
+                } else if let Ok(Some(focused_sub)) = self.focus_manager.route_event(event) {
+                     self.components.values().find(|c| {
+                        c.subscription.as_ref().map(|s| s.id == focused_sub.id).unwrap_or(false)
+                    }).map(|c| format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name))
+                    .unwrap_or("None".to_string())
+                } else {
+                    "None".to_string()
+                };
+
+                let consumed_by = if global_consumed {
+                    "global"
+                } else if delivered_to != "None" {
+                    "component"
+                } else {
+                    "none"
+                };
+
+                println!("route_input:\n  key={{code={:?}, mods={:?}, state={:?}}}\n  focus_tile={{TODO}}\n  focus_component={}\n  global_consumed={}\n  delivered_to={}\n  consumed_by={}",
+                    key_event.code,
+                    key_event.modifiers,
+                    key_event.state,
+                    focus_comp_str,
+                    global_consumed,
+                    delivered_to,
+                    consumed_by
+                );
+            }
+        }
+        // --- End Logging ---
+
         if global_consumed {
             return None;
         }

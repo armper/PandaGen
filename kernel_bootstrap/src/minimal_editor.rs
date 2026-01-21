@@ -166,3 +166,47 @@ impl MinimalEditor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_minimal_editor_input_flow() {
+        // Create editor with 10 rows viewport
+        let mut editor = MinimalEditor::new(10);
+        
+        // Initial state
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert_eq!(editor.cursor().row, 0);
+        assert_eq!(editor.cursor().col, 0);
+        
+        // Press 'i' to enter insert mode
+        editor.process_byte(b'i');
+        assert_eq!(editor.mode(), EditorMode::Insert, "Should enter INSERT mode after 'i'");
+        
+        // Press 'a' to insert character
+        editor.process_byte(b'a');
+        editor.process_byte(b' ');
+        editor.process_byte(b'j');
+        
+        // Verify content
+        // Note: MinimalEditor wraps EditorCore but doesn't expose get_text() directly in pub API.
+        // We can check viewport line 0
+        let line = editor.get_viewport_line(0);
+        assert!(line.is_some(), "Line 0 should exist");
+        assert_eq!(line.unwrap(), "a j", "Line 0 should contain 'a j'");
+        
+        // Verify cursor moved
+        assert_eq!(editor.cursor().col, 3, "Cursor should move after typing");
+        
+        // Press Escape to exit insert mode
+        editor.process_byte(0x1B); // Escape
+        assert_eq!(editor.mode(), EditorMode::Normal, "Should return to NORMAL mode after Escape");
+        
+        // Check status line reflects mode (approximately, MinimalEditor logic might vary)
+        // In Normal mode it should say "-- NORMAL --" or similar
+        let status = editor.status_line();
+        assert!(status.contains("NORMAL"), "Status line should indicate NORMAL mode");
+    }
+}

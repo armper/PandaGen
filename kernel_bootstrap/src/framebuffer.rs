@@ -4,6 +4,7 @@
 //! to avoid pulling in external dependencies with std requirements.
 
 use crate::BootInfo;
+use crate::display_sink::DisplaySink;
 
 /// Font character width in pixels
 const FONT_WIDTH: usize = 8;
@@ -296,5 +297,59 @@ fn write_pixel(buffer: &mut [u8], offset: usize, bytes: [u8; 4]) {
         core::ptr::write_volatile(ptr.add(1), bytes[1]);
         core::ptr::write_volatile(ptr.add(2), bytes[2]);
         core::ptr::write_volatile(ptr.add(3), bytes[3]);
+    }
+}
+
+impl DisplaySink for BareMetalFramebuffer {
+    fn dims(&self) -> (usize, usize) {
+        (self.cols(), self.rows())
+    }
+
+    fn clear(&mut self, attr: u8) {
+        let (_, bg) = attr_to_rgb(attr);
+        self.clear(bg.0, bg.1, bg.2);
+    }
+
+    fn write_at(&mut self, col: usize, row: usize, ch: u8, attr: u8) -> bool {
+        let (fg, bg) = attr_to_rgb(attr);
+        self.draw_char_at(col, row, ch, fg, bg)
+    }
+
+    fn write_str_at(&mut self, col: usize, row: usize, text: &str, attr: u8) -> usize {
+        let (fg, bg) = attr_to_rgb(attr);
+        self.draw_text_at(col, row, text, fg, bg)
+    }
+
+    fn draw_cursor(&mut self, col: usize, row: usize, attr: u8) {
+        let (fg, bg) = attr_to_rgb(attr);
+        self.draw_cursor(col, row, fg, bg);
+    }
+}
+
+fn attr_to_rgb(attr: u8) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let fg_idx = attr & 0x0F;
+    let bg_idx = (attr >> 4) & 0x0F;
+    (vga_color(fg_idx), vga_color(bg_idx))
+}
+
+fn vga_color(idx: u8) -> (u8, u8, u8) {
+    match idx {
+        0 => (0x00, 0x00, 0x00), // Black
+        1 => (0x00, 0x00, 0xAA), // Blue
+        2 => (0x00, 0xAA, 0x00), // Green
+        3 => (0x00, 0xAA, 0xAA), // Cyan
+        4 => (0xAA, 0x00, 0x00), // Red
+        5 => (0xAA, 0x00, 0xAA), // Magenta
+        6 => (0xAA, 0x55, 0x00), // Brown
+        7 => (0xAA, 0xAA, 0xAA), // Light Gray
+        8 => (0x55, 0x55, 0x55), // Dark Gray
+        9 => (0x55, 0x55, 0xFF), // Light Blue
+        10 => (0x55, 0xFF, 0x55), // Light Green
+        11 => (0x55, 0xFF, 0xFF), // Light Cyan
+        12 => (0xFF, 0x55, 0x55), // Light Red
+        13 => (0xFF, 0x55, 0xFF), // Pink
+        14 => (0xFF, 0xFF, 0x55), // Yellow
+        15 => (0xFF, 0xFF, 0xFF), // White
+        _ => (0xAA, 0xAA, 0xAA), // Default
     }
 }
