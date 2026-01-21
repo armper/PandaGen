@@ -34,6 +34,7 @@ pub struct WorkspaceSession {
     output_lines: [OutputLine; OUTPUT_MAX_LINES],
     output_head: usize,
     output_count: usize,
+    output_seq: u64,
 }
 
 impl WorkspaceSession {
@@ -48,6 +49,7 @@ impl WorkspaceSession {
             output_lines: [OutputLine::empty(); OUTPUT_MAX_LINES],
             output_head: 0,
             output_count: 0,
+            output_seq: 0,
         }
     }
 
@@ -240,6 +242,11 @@ impl WorkspaceSession {
         self.output_count
     }
 
+    /// Monotonic sequence number for output lines
+    pub fn output_sequence(&self) -> u64 {
+        self.output_seq
+    }
+
     pub fn output_line(&self, index: usize) -> Option<&OutputLine> {
         if index >= self.output_count {
             return None;
@@ -302,6 +309,7 @@ impl WorkspaceSession {
         if self.output_count < OUTPUT_MAX_LINES {
             self.output_count += 1;
         }
+        self.output_seq = self.output_seq.wrapping_add(1);
     }
 
     fn emit_command_line(&mut self, serial: &mut SerialPort, cmd: &[u8]) {
@@ -314,7 +322,7 @@ impl WorkspaceSession {
     }
 }
 
-const OUTPUT_MAX_LINES: usize = 20;
+const OUTPUT_MAX_LINES: usize = 64;
 const OUTPUT_LINE_MAX: usize = 80;
 
 #[derive(Copy, Clone)]

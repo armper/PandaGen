@@ -235,6 +235,42 @@ impl BareMetalFramebuffer {
     pub fn draw_cursor(&mut self, col: usize, row: usize, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         let _ = self.draw_char_at(col, row, b'_', fg, bg);
     }
+
+    /// Scroll the framebuffer up by the given number of text rows.
+    ///
+    /// This moves pixel rows up by `lines * FONT_HEIGHT` and clears the bottom
+    /// area with the background color.
+    pub fn scroll_up_text_lines(&mut self, lines: usize, bg: (u8, u8, u8)) {
+        if lines == 0 {
+            return;
+        }
+
+        let info = self.info();
+        let pixel_rows = lines.saturating_mul(FONT_HEIGHT);
+        if pixel_rows >= info.height {
+            self.clear(bg.0, bg.1, bg.2);
+            return;
+        }
+
+        let bytes_per_row = info.stride_pixels * info.format.bytes_per_pixel();
+        let total_bytes = info.height * bytes_per_row;
+        let offset = pixel_rows * bytes_per_row;
+
+        unsafe {
+            let ptr = self.buffer.as_mut_ptr();
+            core::ptr::copy(ptr.add(offset), ptr, total_bytes - offset);
+        }
+
+        // Clear the bottom pixel rows.
+        let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+        let start_row = info.height - pixel_rows;
+        for y in start_row..info.height {
+            for x in 0..info.width {
+                let offset = info.offset(x, y);
+                write_pixel(self.buffer, offset, bg_bytes);
+            }
+        }
+    }
 }
 
 /// Get bitmap data for a character (8x16 font)

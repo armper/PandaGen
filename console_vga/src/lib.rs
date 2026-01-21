@@ -222,6 +222,37 @@ impl VgaConsole {
         }
     }
 
+    /// Scroll the entire VGA text buffer up by the given number of rows.
+    ///
+    /// Lines that scroll off the top are discarded; new lines at the bottom
+    /// are cleared with spaces using the provided attribute.
+    pub fn scroll_up(&mut self, lines: usize, attr: u8) {
+        if lines == 0 {
+            return;
+        }
+
+        if lines >= VGA_HEIGHT {
+            self.clear(attr);
+            return;
+        }
+
+        let row_bytes = VGA_WIDTH * 2;
+        let total_bytes = VGA_HEIGHT * row_bytes;
+        let offset = lines * row_bytes;
+
+        unsafe {
+            // Move visible rows up in-place.
+            ptr::copy(self.buffer.add(offset), self.buffer, total_bytes - offset);
+        }
+
+        // Clear the bottom rows.
+        for row in (VGA_HEIGHT - lines)..VGA_HEIGHT {
+            for col in 0..VGA_WIDTH {
+                self.write_at(col, row, b' ', attr);
+            }
+        }
+    }
+
     /// Render scrollback buffer to VGA display
     ///
     /// Displays the visible portion of the scrollback buffer
@@ -519,5 +550,27 @@ mod tests {
         
         // Character after selection should not be highlighted
         assert_eq!(buffer.get_attr(5, 0), 0x07);
+    }
+
+    #[test]
+    fn test_scroll_up() {
+        let mut buffer = MockVgaBuffer::new();
+        let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
+
+        // Fill first two rows with distinct characters.
+        for col in 0..VGA_WIDTH {
+            console.write_at(col, 0, b'A', 0x07);
+            console.write_at(col, 1, b'B', 0x07);
+        }
+
+        console.scroll_up(1, 0x07);
+
+        // Row 0 should now contain original row 1.
+        assert_eq!(buffer.get_char(0, 0), b'B');
+        assert_eq!(buffer.get_char(VGA_WIDTH - 1, 0), b'B');
+
+        // Bottom row should be cleared.
+        assert_eq!(buffer.get_char(0, VGA_HEIGHT - 1), b' ');
+        assert_eq!(buffer.get_char(VGA_WIDTH - 1, VGA_HEIGHT - 1), b' ');
     }
 }

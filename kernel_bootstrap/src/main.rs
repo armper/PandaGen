@@ -563,6 +563,9 @@ fn workspace_loop(
 
     let mut input_dirty = true;
     let mut output_dirty = true;
+    let mut output_initialized = false;
+    let mut last_output_seq = 0u64;
+    let mut last_output_rows = 0usize;
 
     // Show initial prompt
     workspace.show_prompt(serial);
@@ -669,19 +672,47 @@ fn workspace_loop(
                 let output_rows = total.min(max_output_rows);
                 let start = total.saturating_sub(max_output_rows);
                 let prompt_row = output_rows.min(max_output_rows);
+                let output_seq = workspace.output_sequence();
+                let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
+                let can_scroll = output_initialized
+                    && output_rows == max_output_rows
+                    && last_output_rows == max_output_rows
+                    && delta_lines > 0
+                    && delta_lines < max_output_rows;
 
                 if output_dirty {
-                    for row in 0..output_rows {
-                        let line_idx = start + row;
-                        clear_vga_line(vga, row, normal_attr);
-                        if let Some(line) = workspace.output_line(line_idx) {
-                            let bytes = line.as_bytes();
-                            let len = bytes.len().min(cols);
-                            if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                vga.write_str_at(0, row, text, normal_attr);
+                    if can_scroll {
+                        vga.scroll_up(delta_lines, normal_attr);
+                        let first_row = max_output_rows - delta_lines;
+                        let first_line = total.saturating_sub(delta_lines);
+                        for i in 0..delta_lines {
+                            let row = first_row + i;
+                            let line_idx = first_line + i;
+                            clear_vga_line(vga, row, normal_attr);
+                            if let Some(line) = workspace.output_line(line_idx) {
+                                let bytes = line.as_bytes();
+                                let len = bytes.len().min(cols);
+                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                    vga.write_str_at(0, row, text, normal_attr);
+                                }
+                            }
+                        }
+                    } else {
+                        for row in 0..output_rows {
+                            let line_idx = start + row;
+                            clear_vga_line(vga, row, normal_attr);
+                            if let Some(line) = workspace.output_line(line_idx) {
+                                let bytes = line.as_bytes();
+                                let len = bytes.len().min(cols);
+                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                    vga.write_str_at(0, row, text, normal_attr);
+                                }
                             }
                         }
                     }
+                    output_initialized = true;
+                    last_output_rows = output_rows;
+                    last_output_seq = output_seq;
                 }
 
                 clear_vga_line(vga, prompt_row, normal_attr);
@@ -704,19 +735,47 @@ fn workspace_loop(
                 let output_rows = total.min(max_output_rows);
                 let start = total.saturating_sub(max_output_rows);
                 let prompt_row = output_rows.min(max_output_rows);
+                let output_seq = workspace.output_sequence();
+                let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
+                let can_scroll = output_initialized
+                    && output_rows == max_output_rows
+                    && last_output_rows == max_output_rows
+                    && delta_lines > 0
+                    && delta_lines < max_output_rows;
 
                 if output_dirty {
-                    for row in 0..output_rows {
-                        let line_idx = start + row;
-                        clear_fb_line(fb, row, cols, bg, fg);
-                        if let Some(line) = workspace.output_line(line_idx) {
-                            let bytes = line.as_bytes();
-                            let len = bytes.len().min(cols);
-                            if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                fb.draw_text_at(0, row, text, fg, bg);
+                    if can_scroll {
+                        fb.scroll_up_text_lines(delta_lines, bg);
+                        let first_row = max_output_rows - delta_lines;
+                        let first_line = total.saturating_sub(delta_lines);
+                        for i in 0..delta_lines {
+                            let row = first_row + i;
+                            let line_idx = first_line + i;
+                            clear_fb_line(fb, row, cols, bg, fg);
+                            if let Some(line) = workspace.output_line(line_idx) {
+                                let bytes = line.as_bytes();
+                                let len = bytes.len().min(cols);
+                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                    fb.draw_text_at(0, row, text, fg, bg);
+                                }
+                            }
+                        }
+                    } else {
+                        for row in 0..output_rows {
+                            let line_idx = start + row;
+                            clear_fb_line(fb, row, cols, bg, fg);
+                            if let Some(line) = workspace.output_line(line_idx) {
+                                let bytes = line.as_bytes();
+                                let len = bytes.len().min(cols);
+                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                    fb.draw_text_at(0, row, text, fg, bg);
+                                }
                             }
                         }
                     }
+                    output_initialized = true;
+                    last_output_rows = output_rows;
+                    last_output_seq = output_seq;
                 }
 
                 clear_fb_line(fb, prompt_row, cols, bg, fg);
