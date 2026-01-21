@@ -573,5 +573,96 @@ fn test_undo_redo_multiple_edits() {
     assert_eq!(editor.get_content(), "ab");
 }
 
+#[test]
+fn test_search_basic() {
+    // Test basic search functionality
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello world\nfind this word\nhello again".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Enter search mode
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    assert_eq!(editor.state().mode(), services_editor_vi::EditorMode::Search);
+
+    // Type search query "world"
+    editor.process_input(press_key(KeyCode::W)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::R)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+
+    // Execute search
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should find first "world" on line 0
+    assert_eq!(editor.state().cursor().position().row, 0);
+    assert_eq!(editor.state().cursor().position().col, 6); // "world" starts at col 6 in "hello world"
+}
+
+#[test]
+fn test_search_next() {
+    // Test search next (n command)
+    let mut editor = Editor::new();
+    editor.load_document(
+        "test word one\ntest word two\ntest word three".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Search for "word"
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    editor.process_input(press_key(KeyCode::W)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::R)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Should be at first "word" (row 0, col 5)
+    assert_eq!(editor.state().cursor().position().row, 0);
+
+    // Press 'n' to find next
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+
+    // Should be at second "word" (row 1, col 5)
+    assert_eq!(editor.state().cursor().position().row, 1);
+
+    // Press 'n' again
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+
+    // Should be at third "word" (row 2, col 5)
+    assert_eq!(editor.state().cursor().position().row, 2);
+}
+
+#[test]
+fn test_search_not_found() {
+    // Test search for non-existent pattern
+    let mut editor = Editor::new();
+    editor.load_document(
+        "hello world".to_string(),
+        DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
+    );
+
+    // Search for "notfound"
+    editor.process_input(press_key(KeyCode::Slash)).unwrap();
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::T)).unwrap();
+    editor.process_input(press_key(KeyCode::F)).unwrap();
+    editor.process_input(press_key(KeyCode::O)).unwrap();
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    editor.process_input(press_key(KeyCode::N)).unwrap();
+    editor.process_input(press_key(KeyCode::D)).unwrap();
+    editor.process_input(press_key(KeyCode::Enter)).unwrap();
+
+    // Cursor should still be at start
+    assert_eq!(editor.state().cursor().position().row, 0);
+    assert_eq!(editor.state().cursor().position().col, 0);
+
+    // Status should indicate not found
+    assert!(editor.state().status_message().contains("not found"));
+}
+
+
 
 

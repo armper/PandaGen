@@ -12,6 +12,8 @@ pub enum EditorMode {
     Insert,
     /// Command mode (ex commands)
     Command,
+    /// Search mode (search prompt)
+    Search,
 }
 
 impl EditorMode {
@@ -20,6 +22,7 @@ impl EditorMode {
             EditorMode::Normal => "NORMAL",
             EditorMode::Insert => "INSERT",
             EditorMode::Command => "COMMAND",
+            EditorMode::Search => "SEARCH",
         }
     }
 }
@@ -248,6 +251,10 @@ pub struct EditorState {
     undo_stack: Vec<EditorSnapshot>,
     /// Redo history (stack of undone states)
     redo_stack: Vec<EditorSnapshot>,
+    /// Current search query
+    search_query: String,
+    /// Last search query (for 'n' repeat search)
+    last_search: Option<String>,
 }
 
 impl EditorState {
@@ -262,6 +269,8 @@ impl EditorState {
             document_label: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            search_query: String::new(),
+            last_search: None,
         }
     }
 
@@ -273,6 +282,9 @@ impl EditorState {
         self.mode = mode;
         if mode != EditorMode::Command {
             self.command_buffer.clear();
+        }
+        if mode != EditorMode::Search {
+            self.search_query.clear();
         }
     }
 
@@ -374,6 +386,95 @@ impl EditorState {
         self.buffer = TextBuffer::from_string(content);
         self.cursor = Cursor::new();
         self.dirty = false;
+    }
+
+    /// Get current search query
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Append character to search query
+    pub fn append_to_search(&mut self, ch: char) {
+        self.search_query.push(ch);
+    }
+
+    /// Backspace in search query
+    pub fn backspace_search(&mut self) {
+        self.search_query.pop();
+    }
+
+    /// Clear search query
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+    }
+
+    /// Execute search: find next occurrence of query from current position
+    pub fn find_next(&mut self, forward: bool) -> bool {
+        let query = if !self.search_query.is_empty() {
+            self.last_search = Some(self.search_query.clone());
+            &self.search_query
+        } else if let Some(ref last) = self.last_search {
+            last
+        } else {
+            return false;
+        };
+
+        if query.is_empty() {
+            return false;
+        }
+
+        let start_pos = self.cursor.position();
+        let line_count = self.buffer.line_count();
+
+        // For first search (when search_query not empty), start from current position
+        // For repeat search (n), start from next position
+        let start_col = if !self.search_query.is_empty() {
+            start_pos.col
+        } else {
+            start_pos.col + 1
+        };
+
+        // Search from start position
+        if forward {
+            let mut row = start_pos.row;
+            let mut col = start_col;
+
+            while row < line_count {
+                if let Some(line) = self.buffer.line(row) {
+                    if col < line.len() {
+                        if let Some(pos) = line[col..].find(query) {
+                            self.cursor.set_position(Position::new(row, col + pos));
+                            return true;
+                        }
+                    }
+                }
+                row += 1;
+                col = 0;
+            }
+
+            // Wrap around to beginning
+            for row in 0..start_pos.row {
+                if let Some(line) = self.buffer.line(row) {
+                    if let Some(pos) = line.find(query) {
+                        self.cursor.set_position(Position::new(row, pos));
+                        return true;
+                    }
+                }
+            }
+
+            // Check start row up to start column (only for repeat search)
+            if self.search_query.is_empty() && start_pos.row < line_count {
+                if let Some(line) = self.buffer.line(start_pos.row) {
+                    let end_col = start_pos.col.min(line.len());
+                    if let Some(pos) = line[..end_col].find(query) {
+                        self.cursor.set_position(Position::new(start_pos.row, pos));
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Save current state for undo

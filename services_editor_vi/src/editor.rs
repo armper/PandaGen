@@ -177,6 +177,7 @@ impl Editor {
             EditorMode::Normal => self.handle_normal_mode(key_event),
             EditorMode::Insert => self.handle_insert_mode(key_event),
             EditorMode::Command => self.handle_command_mode(key_event),
+            EditorMode::Search => self.handle_search_mode(key_event),
         }
     }
 
@@ -244,6 +245,23 @@ impl Editor {
                 // Shift+; = ':'
                 self.state.set_mode(EditorMode::Command);
                 self.state.set_status_message("");
+                Ok(EditorAction::Continue)
+            }
+
+            // Enter search mode
+            KeyCode::Slash if event.modifiers.is_empty() => {
+                self.state.set_mode(EditorMode::Search);
+                self.state.set_status_message("");
+                Ok(EditorAction::Continue)
+            }
+
+            // Repeat last search
+            KeyCode::N if event.modifiers.is_empty() => {
+                if self.state.find_next(true) {
+                    self.state.set_status_message("Next match");
+                } else {
+                    self.state.set_status_message("Pattern not found");
+                }
                 Ok(EditorAction::Continue)
             }
 
@@ -324,6 +342,45 @@ impl Editor {
             _ => {
                 if let Some(ch) = self.key_to_char(event) {
                     self.state.append_to_command(ch);
+                }
+                Ok(EditorAction::Continue)
+            }
+        }
+    }
+
+    /// Handle search mode key event
+    fn handle_search_mode(&mut self, event: &KeyEvent) -> EditorResult<EditorAction> {
+        match event.code {
+            // Exit search mode
+            KeyCode::Escape => {
+                self.state.set_mode(EditorMode::Normal);
+                self.state.clear_search();
+                Ok(EditorAction::Continue)
+            }
+
+            // Execute search
+            KeyCode::Enter => {
+                // Execute search before changing mode (mode change clears search_query)
+                let found = self.state.find_next(true);
+                self.state.set_mode(EditorMode::Normal);
+                if found {
+                    self.state.set_status_message("Match found");
+                } else {
+                    self.state.set_status_message("Pattern not found");
+                }
+                Ok(EditorAction::Continue)
+            }
+
+            // Backspace
+            KeyCode::Backspace => {
+                self.state.backspace_search();
+                Ok(EditorAction::Continue)
+            }
+
+            // Build search query
+            _ => {
+                if let Some(ch) = self.key_to_char(event) {
+                    self.state.append_to_search(ch);
                 }
                 Ok(EditorAction::Continue)
             }

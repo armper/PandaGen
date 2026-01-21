@@ -85,6 +85,12 @@ impl EditorView {
             status.push_str(state.command_buffer());
         }
 
+        // Search query in search mode
+        if state.mode() == EditorMode::Search {
+            status.push('/');
+            status.push_str(state.search_query());
+        }
+
         // Status message
         if !state.status_message().is_empty() {
             status.push_str(" | ");
