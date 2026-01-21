@@ -118,6 +118,7 @@ impl Default for EditorView {
 mod tests {
     use super::*;
     use crate::state::{EditorState, Position};
+    use alloc::vec::Vec;
 
     #[test]
     fn test_render_empty_buffer() {

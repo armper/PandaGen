@@ -18,8 +18,6 @@ extern crate alloc;
 
 mod framebuffer;
 mod minimal_editor;
-#[cfg(test)]
-mod minimal_editor_tests;
 mod output;
 mod vga;
 mod workspace;
@@ -425,6 +423,8 @@ macro_rules! kprintln {
     };
 }
 
+#[cfg(not(test))]
+#[no_mangle]
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
