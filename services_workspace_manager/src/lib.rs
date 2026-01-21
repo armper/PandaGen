@@ -19,7 +19,10 @@
 //! - A terminal multiplexer
 //! - A monolithic "god shell"
 
+pub mod boot_profile;
 pub mod commands;
+
+use boot_profile::{BootConfig, BootProfile, BootProfileManager};
 
 use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};

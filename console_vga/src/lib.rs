@@ -16,7 +16,14 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 use core::ptr;
+
+pub mod scrollback;
+pub mod selection;
+pub use scrollback::{VgaLine, VgaScrollback};
+pub use selection::{Clipboard, SelectionManager, SelectionRange};
 
 /// VGA text mode dimensions
 pub const VGA_WIDTH: usize = 80;
@@ -196,6 +203,56 @@ impl VgaConsole {
             // If it's a space, make it visible by writing underscore
             if ch == b' ' {
                 ptr::write_volatile(self.buffer.add(offset), b'_');
+            }
+        }
+    }
+
+    /// Render scrollback buffer to VGA display
+    ///
+    /// Displays the visible portion of the scrollback buffer
+    pub fn render_scrollback(&mut self, scrollback: &VgaScrollback) {
+        // Clear screen first
+        self.clear(scrollback.visible_lines().first()
+            .and_then(|line| line.attrs.first().copied())
+            .unwrap_or(Style::Normal.to_vga_attr()));
+
+        // Render visible lines
+        for (row, line) in scrollback.visible_lines().iter().enumerate() {
+            if row >= VGA_HEIGHT {
+                break;
+            }
+            
+            for (col, (&ch, &attr)) in line.text.iter().zip(line.attrs.iter()).enumerate() {
+                if col >= VGA_WIDTH {
+                    break;
+                }
+                self.write_at(col, row, ch, attr);
+            }
+        }
+    }
+
+    /// Highlight a selection range by inverting attributes
+    ///
+    /// This visually shows selected text
+    pub fn highlight_selection(&mut self, selection: selection::SelectionRange) {
+        let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
+
+        for row in start_row..=end_row {
+            if row >= VGA_HEIGHT {
+                break;
+            }
+
+            let col_start = if row == start_row { start_col } else { 0 };
+            let col_end = if row == end_row { end_col.min(VGA_WIDTH - 1) } else { VGA_WIDTH - 1 };
+
+            for col in col_start..=col_end {
+                let offset = (row * VGA_WIDTH + col) * 2;
+                unsafe {
+                    // Read current attribute, invert it
+                    let attr = ptr::read_volatile(self.buffer.add(offset + 1));
+                    let inverted_attr = ((attr & 0x0F) << 4) | ((attr & 0xF0) >> 4);
+                    ptr::write_volatile(self.buffer.add(offset + 1), inverted_attr);
+                }
             }
         }
     }
@@ -396,5 +453,54 @@ mod tests {
         // Attribute should be inverted
         let cursor_attr = buffer.get_attr(5, 5);
         assert_eq!(cursor_attr, 0x70); // Inverted 0x07
+    }
+
+    #[test]
+    fn test_render_scrollback() {
+        use crate::scrollback::VgaScrollback;
+        
+        let mut buffer = MockVgaBuffer::new();
+        let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
+        
+        let mut scrollback = VgaScrollback::new(VGA_WIDTH, VGA_HEIGHT, 1000, 0x07);
+        scrollback.push_line("Line 1", 0x07);
+        scrollback.push_line("Line 2", 0x0A);
+        scrollback.push_line("Line 3", 0x0C);
+        
+        console.render_scrollback(&scrollback);
+        
+        // Verify lines were rendered
+        assert_eq!(buffer.get_char(0, 0), b'L');
+        assert_eq!(buffer.get_attr(0, 0), 0x07);
+        assert_eq!(buffer.get_char(0, 1), b'L');
+        assert_eq!(buffer.get_attr(0, 1), 0x0A);
+        assert_eq!(buffer.get_char(0, 2), b'L');
+        assert_eq!(buffer.get_attr(0, 2), 0x0C);
+    }
+
+    #[test]
+    fn test_highlight_selection() {
+        use crate::selection::SelectionRange;
+        
+        let mut buffer = MockVgaBuffer::new();
+        let mut console = unsafe { VgaConsole::new(buffer.as_ptr() as usize) };
+        
+        // Write some text
+        console.clear(0x07);
+        console.write_str_at(0, 0, "Hello World", 0x07);
+        
+        // Create selection (characters 0-4 = "Hello")
+        let selection = SelectionRange::new((0, 0), (4, 0));
+        console.highlight_selection(selection);
+        
+        // Verify selection is highlighted (attributes inverted)
+        // Original: 0x07 (light gray on black)
+        // Inverted: 0x70 (black on light gray)
+        assert_eq!(buffer.get_attr(0, 0), 0x70);
+        assert_eq!(buffer.get_attr(1, 0), 0x70);
+        assert_eq!(buffer.get_attr(4, 0), 0x70);
+        
+        // Character after selection should not be highlighted
+        assert_eq!(buffer.get_attr(5, 0), 0x07);
     }
 }
