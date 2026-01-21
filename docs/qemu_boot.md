@@ -33,41 +33,73 @@ cargo xtask qemu
 This runs:
 
 ```
-qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso -serial stdio -display cocoa -no-reboot
+qemu-system-x86_64 -m 512M -cdrom dist/pandagen.iso \
+  -drive file=dist/pandagen.disk,format=raw,if=none,id=hd0 \
+  -device virtio-blk-pci,drive=hd0 \
+  -serial file:dist/serial.log \
+  -display cocoa \
+  -no-reboot
 ```
 
-**Phase 69 Update**: The QEMU window now displays framebuffer output! The workspace and console
-are visible on-screen, not just on the serial console.
+**Phase 78 Update**: The QEMU window now displays a **VGA text console (80x25)**! The workspace and UI
+are visible in the QEMU window, not in the host terminal.
+
+### VGA Text Console Mode
+
+- **Main UI**: VGA text mode in QEMU window (80x25 characters)
+- **Serial Logs**: Output goes to `dist/serial.log` for debugging
+- **Interaction**: Click QEMU window to capture keyboard input
+- **Fallback**: If VGA unavailable, falls back to framebuffer console
 
 ## Expected Behavior
 
 - Limine menu appears.
-- Selecting the entry boots the stub kernel.
-- Boot diagnostics are printed (HHDM offset, kernel addresses, memory map summary).
-- Interrupt initialization messages appear.
-- A serial prompt appears in the terminal (`PandaGen: kernel_bootstrap online`).
-- **NEW in Phase 57**: Keyboard input is now IRQ-driven - typing on keyboard generates visible characters.
-- **NEW in Phase 69**: The QEMU window shows a **framebuffer console** with a blue background, indicating the framebuffer is active.
-- **Editor mode**: The kernel now runs in editor mode, displaying typed characters in a simple text editor.
-- Timer ticks are shown as dots (. printed every second at 100 Hz) in the old console mode.
+- Selecting the entry boots the kernel.
+- Boot diagnostics are printed to serial log.
+- **Phase 78**: The QEMU window shows **VGA text console with workspace prompt**
+- Keyboard input is visible in the QEMU window, not the host terminal
+- Serial logs written to `dist/serial.log`
+- Workspace prompt: `> ` with command history and editing
 
-## Framebuffer Console (Phase 69)
+## VGA Text Console (Phase 78)
 
-The kernel now initializes a framebuffer console at boot:
+The kernel now initializes a VGA text console at boot:
 
-- **Limine Framebuffer Request**: The kernel requests a framebuffer from Limine bootloader
-- **Blue Screen Indicator**: If the framebuffer is available, the QEMU window displays a blue background
-- **Fallback**: If no framebuffer is available, the kernel continues in serial-only mode
-- **Serial Logging**: Serial output is always available for debugging, regardless of framebuffer status
+- **Physical Address**: 0xB8000 (standard VGA text buffer)
+- **Virtual Mapping**: Uses HHDM offset to map physical VGA memory
+- **Resolution**: 80 columns × 25 rows
+- **Colors**: 
+  - Normal text: Light gray on black (0x07)
+  - Prompts: Bright green on black
+  - Errors: Bright red on black
+  - Banners: Bright cyan on black
+- **Serial Logging**: Always available in `dist/serial.log` for debugging
 
-### Framebuffer Details
+### VGA Details
 
-- Resolution: Determined by QEMU/firmware (typically 1024x768 or 800x600)
-- Format: 32-bit RGB (most common)
-- The blue background confirms that:
-  1. Limine provided a valid framebuffer
-  2. The kernel successfully mapped and accessed video memory
-  3. Pixel writes are working correctly
+- Each character cell is 2 bytes: ASCII byte + attribute byte
+- Attribute byte: `(bg_color << 4) | fg_color`
+- Direct memory writes using volatile operations
+- No ANSI codes, no terminal emulation
+- Deterministic: same input → same display
+
+### Troubleshooting VGA Mode
+
+**"I don't see anything in the QEMU window":**
+- Make sure you're running `cargo xtask qemu`, not manually running QEMU
+- Ensure `-display cocoa` (or `-display gtk`/`-display sdl`) is used
+- Don't use `-nographic` flag
+- Click the QEMU window to capture keyboard focus
+
+**"Where is the serial output?":**
+- Serial logs are in `dist/serial.log`
+- Use `tail -f dist/serial.log` to monitor logs in real-time
+- Serial is for debugging only; UI is in QEMU window
+
+**"VGA console says 'unavailable'":**
+- Check serial log: `cat dist/serial.log | grep VGA`
+- System will fall back to framebuffer console if available
+- In worst case, falls back to serial-only mode
 
 ## Expected Serial Output
 
@@ -83,20 +115,22 @@ IDT installed at 0x...
 PIC remapped to IRQ base 32
 PIT configured for 100 Hz
 Interrupts enabled, timer at 100 Hz, keyboard IRQ 1
-Type to see keyboard input (editor mode)...
 
---- Editor State ---
-Text: hello world
-Cursor: 11 | Length: 11
--------------------
-
---- Editor State ---
-Text: hello world\n
-Cursor: 12 | Length: 12
--------------------
+=== PandaGen Workspace ===
+VGA text console initialized (80x25)
+Main UI in QEMU window, serial logs here
+Boot complete. Type 'help' for commands.
 ```
 
 ## Kernel Features Demonstrated
+
+### VGA Text Console (Phase 78)
+- **Direct Hardware Access**: Writes to VGA text buffer at 0xB8000
+- **HHDM Mapping**: Uses Higher Half Direct Mapping to access physical memory
+- **Color Attributes**: Style-based color mapping (normal, bold, error, success)
+- **Cursor Rendering**: Visible cursor with attribute inversion
+- **No Allocations**: Stack-only implementation, no heap usage
+- **Testable**: 11 pure unit tests validate VGA console logic
 
 ### Bare-Metal Interrupt Infrastructure
 - **IDT (Interrupt Descriptor Table)**: 256-entry x86_64 IDT with proper gate descriptors
@@ -112,8 +146,7 @@ Cursor: 12 | Length: 12
 - **Bounded Queue**: 64-entry lock-free ring buffer for scancode buffering
 - **Drop Policy**: DropOldest - overwrites oldest scancode when queue is full
 - **Scancode Translation**: PS/2 Set 1 scancodes to ASCII with shift modifier support
-- **Editor State**: Simple text buffer (1024 bytes) with cursor tracking
-- **Rate-Limited Rendering**: Updates displayed every 100ms when content changes
+- **Workspace Integration**: Full line editing with history in VGA window
 
 ### Supported Keys
 - **Letters**: A-Z (with shift for uppercase)
@@ -121,20 +154,11 @@ Cursor: 12 | Length: 12
 - **Special Keys**: Space, Enter, Backspace
 - **Modifiers**: Left/Right Shift (tracked for uppercase/symbols)
 
-### User Space Simulation (Old Console Mode - Not Active in Phase 57)
-- **Syscall Infrastructure**: sys_yield, sys_sleep, sys_send, sys_recv implemented
-- **User Tasks**: CommandService demonstrates syscalls by alternating yield/sleep
-- **IPC**: Channel-based message passing between console and command services
-- **Time Slicing**: Cooperative scheduling with quantum-based task switching
-
-### Console Commands (Not Available in Editor Mode)
+### Console Commands (Available in Workspace)
 - `help` - List all commands
 - `halt` - Halt the system
 - `boot` - Display boot information (HHDM, kernel addresses)
 - `mem` - Display memory allocator state
-- `alloc` - Allocate a single physical frame
-- `heap` - Display heap statistics
-- `heap-alloc` - Allocate 64 bytes from heap
 - `ticks` - Display current kernel tick count
 
 ## Troubleshooting
@@ -146,3 +170,13 @@ If the ISO doesn't build:
 If QEMU doesn't boot:
 - The ISO is UEFI-only (BIOS boot requires a native limine-deploy binary)
 - Try running with `-d int` for interrupt debugging
+
+If VGA console doesn't appear:
+- Check that you're using `-display cocoa` (or gtk/sdl), not `-nographic`
+- Verify serial log shows "VGA text console initialized"
+- Click QEMU window to capture keyboard
+
+If keyboard doesn't work:
+- Click inside the QEMU window to capture input
+- Check serial log for keyboard IRQ messages
+- Ensure PS/2 keyboard emulation is enabled in QEMU

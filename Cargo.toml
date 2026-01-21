@@ -49,7 +49,7 @@ members = [
     "tests_pipelines",
     "contract_tests",
     "pandagend",
-    "xtask",
+    "xtask", "console_vga",
 ]
 
 [workspace.package]
@@ -73,6 +73,7 @@ sim_kernel = { path = "sim_kernel" }
 hal = { path = "hal" }
 hal_x86_64 = { path = "hal_x86_64" }
 console_fb = { path = "console_fb" }
+console_vga = { path = "console_vga" }
 
 # Service crates
 services_registry = { path = "services_registry" }

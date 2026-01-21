@@ -1,0 +1,9 @@
+[package]
+name = "console_vga"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# No external dependencies - pure Rust implementation
