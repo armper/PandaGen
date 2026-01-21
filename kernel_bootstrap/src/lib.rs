@@ -8,6 +8,10 @@
 #[cfg(not(test))]
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
+pub mod display_sink;
 pub mod minimal_editor;
 
 // Tests are in the test module

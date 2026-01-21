@@ -8,12 +8,14 @@ name = "kernel_bootstrap_lib"
 path = "src/lib.rs"
 
 [dependencies]
-limine = "0.5.0"
 editor_core = { path = "../editor_core", default-features = false }
+limine = { version = "0.5.0", optional = true }
+console_vga = { path = "../console_vga", default-features = false, optional = true }
 
-[target.'cfg(not(test))'.dependencies]
-console_vga = { path = "../console_vga", default-features = false }
+[features]
+default = ["console_vga", "limine"]
 
 [[bin]]
 name = "kernel_bootstrap"
 path = "src/main.rs"
+required-features = ["console_vga", "limine"]
