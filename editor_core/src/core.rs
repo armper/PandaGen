@@ -133,6 +133,18 @@ impl EditorCore {
 
     // Private mode handlers
 
+    /// Helper to insert a character in insert mode
+    fn insert_char_in_insert_mode(&mut self, ch: char) -> CoreOutcome {
+        self.save_undo_snapshot();
+        if self.buffer.insert_char(self.cursor, ch) {
+            self.cursor.col += 1;
+            self.dirty = true;
+            CoreOutcome::Changed
+        } else {
+            CoreOutcome::Continue
+        }
+    }
+
     fn handle_normal_mode(&mut self, key: Key) -> CoreOutcome {
         match key {
             // Enter insert mode
@@ -247,128 +259,20 @@ impl EditorCore {
                 self.clamp_cursor();
                 CoreOutcome::Changed
             }
-            Key::Char(ch) => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, ch) {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
+            Key::Char(ch) => self.insert_char_in_insert_mode(ch),
             // Handle dedicated key variants as their character equivalents in insert mode
             // This allows typing 'i', 'a', 'h', etc. in insert mode
-            Key::I => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'i') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::A => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'a') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::H => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'h') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::J => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'j') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::K => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'k') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::L => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'l') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::X => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'x') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::D => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'd') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::U => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'u') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::N => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, 'n') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
-            Key::Space => {
-                self.save_undo_snapshot();
-                if self.buffer.insert_char(self.cursor, ' ') {
-                    self.cursor.col += 1;
-                    self.dirty = true;
-                    CoreOutcome::Changed
-                } else {
-                    CoreOutcome::Continue
-                }
-            }
+            Key::I => self.insert_char_in_insert_mode('i'),
+            Key::A => self.insert_char_in_insert_mode('a'),
+            Key::H => self.insert_char_in_insert_mode('h'),
+            Key::J => self.insert_char_in_insert_mode('j'),
+            Key::K => self.insert_char_in_insert_mode('k'),
+            Key::L => self.insert_char_in_insert_mode('l'),
+            Key::X => self.insert_char_in_insert_mode('x'),
+            Key::D => self.insert_char_in_insert_mode('d'),
+            Key::U => self.insert_char_in_insert_mode('u'),
+            Key::N => self.insert_char_in_insert_mode('n'),
+            Key::Space => self.insert_char_in_insert_mode(' '),
             Key::Enter => {
                 self.save_undo_snapshot();
                 if self.buffer.insert_newline(self.cursor) {
