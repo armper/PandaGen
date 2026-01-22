@@ -57,7 +57,11 @@ impl MinimalEditor {
     pub fn set_editor_io(&mut self, io: BareMetalEditorIo, handle: DocumentHandle) {
         self.editor_io = Some(io);
         self.document = Some(handle);
+        // Note: handle.object_id indicates existing file (file_cap)
+        // handle.path without object_id indicates new file intent (dir_cap)
+        // Neither indicates empty buffer
     }
+
     
     /// Load content into the editor
     #[cfg(not(test))]
