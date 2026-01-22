@@ -57,9 +57,11 @@ impl MinimalEditor {
     pub fn set_editor_io(&mut self, io: BareMetalEditorIo, handle: DocumentHandle) {
         self.editor_io = Some(io);
         self.document = Some(handle);
-        // Note: handle.object_id indicates existing file (file_cap)
-        // handle.path without object_id indicates new file intent (dir_cap)
-        // Neither indicates empty buffer
+        // Note: In future capability model:
+        // - handle.object_id would indicate existing file (FileCap for READ/WRITE)
+        // - handle.path without object_id would indicate new file intent (DirCap for create)
+        // - Neither would indicate empty buffer
+        // Current simplified model uses ObjectId directly.
     }
 
     
