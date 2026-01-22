@@ -16,6 +16,12 @@ pub mod minimal_editor;
 pub mod optimized_render;
 pub mod render_stats;
 
+#[cfg(not(test))]
+pub mod bare_metal_storage;
+
+#[cfg(not(test))]
+pub mod bare_metal_editor_io;
+
 // Tests are in the test module
 #[cfg(test)]
 mod minimal_editor_tests;
