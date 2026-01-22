@@ -189,6 +189,7 @@ impl BareMetalFramebuffer {
     }
 
     /// Draw a single character at (col, row) with foreground/background colors
+    /// Optimized: writes 8 pixels per scan line at once instead of pixel-by-pixel
     pub fn draw_char_at(
         &mut self,
         col: usize,
@@ -208,6 +209,8 @@ impl BareMetalFramebuffer {
 
         let x_offset = col * FONT_WIDTH;
         let y_offset = row * FONT_HEIGHT;
+        let bpp = info.format.bytes_per_pixel();
+        let stride = info.stride_pixels * bpp;
 
         for (row_idx, &row_data) in bitmap.iter().enumerate() {
             let y = y_offset + row_idx;
@@ -215,24 +218,97 @@ impl BareMetalFramebuffer {
                 break;
             }
 
+            // Calculate base offset for this scan line
+            let row_base = y * stride + x_offset * bpp;
+            
+            // Build 8 pixels worth of data (32 bytes for 4 bpp)
+            let mut scanline: [u8; 32] = [0; 32];
             for col_idx in 0..FONT_WIDTH {
-                let x = x_offset + col_idx;
-                if x >= info.width {
-                    break;
-                }
-
                 let bit = (row_data >> (7 - col_idx)) & 1;
-                let color = if bit == 1 { &fg_bytes } else { &bg_bytes };
-                let offset = info.offset(x, y);
-                write_pixel(self.buffer, offset, *color);
+                let color = if bit == 1 { fg_bytes } else { bg_bytes };
+                let off = col_idx * 4;
+                scanline[off] = color[0];
+                scanline[off + 1] = color[1];
+                scanline[off + 2] = color[2];
+                scanline[off + 3] = color[3];
+            }
+            
+            // Write all 8 pixels at once
+            if row_base + 32 <= self.buffer.len() {
+                self.buffer[row_base..row_base + 32].copy_from_slice(&scanline);
             }
         }
 
         true
     }
 
-    /// Draw text starting at (col, row)
+    /// Draw text starting at (col, row) - optimized to write full scanlines
+    /// For a row of text, this builds complete pixel rows and writes them at once
     pub fn draw_text_at(
+        &mut self,
+        col: usize,
+        row: usize,
+        text: &str,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) -> usize {
+        // For short text or text with newlines, fall back to per-character
+        if text.len() < 4 || text.bytes().any(|b| b == b'\n') {
+            return self.draw_text_at_slow(col, row, text, fg, bg);
+        }
+        
+        if row >= self.rows() || col >= self.cols() {
+            return 0;
+        }
+
+        let info = self.info();
+        let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
+        let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+        let bpp = info.format.bytes_per_pixel();
+        let stride = info.stride_pixels * bpp;
+        
+        let text_bytes = text.as_bytes();
+        let max_chars = (self.cols() - col).min(text_bytes.len());
+        let x_start = col * FONT_WIDTH;
+        let y_start = row * FONT_HEIGHT;
+        
+        // For each scanline of the font (16 lines)
+        for scanline_idx in 0..FONT_HEIGHT {
+            let y = y_start + scanline_idx;
+            if y >= info.height {
+                break;
+            }
+            
+            let row_base = y * stride + x_start * bpp;
+            
+            // Write each character's scanline
+            for (char_idx, &ch) in text_bytes[..max_chars].iter().enumerate() {
+                let bitmap = get_char_bitmap(ch);
+                let row_data = bitmap[scanline_idx];
+                
+                // Build 8 pixels for this character's scanline
+                let char_offset = row_base + char_idx * FONT_WIDTH * bpp;
+                if char_offset + 32 > self.buffer.len() {
+                    break;
+                }
+                
+                for bit_idx in 0..FONT_WIDTH {
+                    let bit = (row_data >> (7 - bit_idx)) & 1;
+                    let color = if bit == 1 { fg_bytes } else { bg_bytes };
+                    let off = char_offset + bit_idx * 4;
+                    self.buffer[off] = color[0];
+                    self.buffer[off + 1] = color[1];
+                    self.buffer[off + 2] = color[2];
+                    self.buffer[off + 3] = color[3];
+                }
+            }
+        }
+        
+        max_chars
+    }
+    
+    /// Fallback for text with newlines or very short text
+    fn draw_text_at_slow(
         &mut self,
         mut col: usize,
         mut row: usize,
