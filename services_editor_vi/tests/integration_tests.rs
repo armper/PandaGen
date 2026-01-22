@@ -3,8 +3,75 @@
 //! These tests validate complete editing workflows using simulated keyboard input.
 
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
-use services_editor_vi::{DocumentHandle, Editor, EditorAction, OpenOptions, StorageEditorIo};
+use services_editor_vi::{
+    DocumentHandle, Editor, EditorAction, EditorIo, OpenOptions, OpenResult, SaveResult,
+    StorageEditorIo,
+};
+use services_editor_vi::io::IoError;
 use services_storage::{JournaledStorage, ObjectId, TransactionalStorage, VersionId};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+struct SharedStorageIo {
+    storage: Rc<RefCell<JournaledStorage>>,
+}
+
+impl SharedStorageIo {
+    fn new(storage: Rc<RefCell<JournaledStorage>>) -> Self {
+        Self { storage }
+    }
+}
+
+impl EditorIo for SharedStorageIo {
+    fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError> {
+        let object_id = options
+            .object_id
+            .ok_or(IoError::NotFound)?;
+
+        let mut storage = self.storage.borrow_mut();
+        let mut tx = storage
+            .begin_transaction()
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+        let version_id = storage
+            .read(&tx, object_id)
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+        let data = storage
+            .read_data(&tx, object_id)
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+        let _ = storage.rollback(&mut tx);
+
+        let content = String::from_utf8(data).map_err(|_| IoError::InvalidUtf8)?;
+        let handle = DocumentHandle::new(object_id, version_id, options.path, false);
+
+        Ok(OpenResult { content, handle })
+    }
+
+    fn save(&mut self, handle: &DocumentHandle, content: &str) -> Result<SaveResult, IoError> {
+        let mut storage = self.storage.borrow_mut();
+        let mut tx = storage
+            .begin_transaction()
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+        let new_version_id = storage
+            .write(&mut tx, handle.object_id, content.as_bytes())
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+        storage
+            .commit(&mut tx)
+            .map_err(|err| IoError::StorageError(err.to_string()))?;
+
+        Ok(SaveResult::new(
+            new_version_id,
+            false,
+            "Saved successfully",
+            Some(handle.object_id),
+        ))
+    }
+
+    fn save_as(&mut self, _path: &str, _content: &str) -> Result<SaveResult, IoError> {
+        Err(IoError::PermissionDenied(
+            "No directory capability".to_string(),
+        ))
+    }
+}
 
 fn press_key(code: KeyCode) -> InputEvent {
     InputEvent::key(KeyEvent::pressed(code, Modifiers::none()))
@@ -477,6 +544,53 @@ fn test_open_nonexistent_file_shows_new_file() {
 
     // Not dirty yet
     assert!(!editor.state().is_dirty());
+}
+
+#[test]
+fn test_editor_persistence_across_reboot() {
+    let storage = Rc::new(RefCell::new(JournaledStorage::new()));
+    let object_id = ObjectId::new();
+
+    // Seed initial content
+    {
+        let mut storage_mut = storage.borrow_mut();
+        let mut tx = storage_mut.begin_transaction().unwrap();
+        storage_mut
+            .write(&mut tx, object_id, b"hello")
+            .unwrap();
+        storage_mut.commit(&mut tx).unwrap();
+    }
+
+    // Open in editor, modify, save
+    let mut editor = Editor::new();
+    editor.set_io(Box::new(SharedStorageIo::new(storage.clone())));
+    editor
+        .open_with(OpenOptions::new().with_object(object_id))
+        .unwrap();
+
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    editor
+        .process_input(press_key_shift(KeyCode::Semicolon))
+        .unwrap();
+    editor.state_mut().append_to_command('w');
+    let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+    assert!(matches!(result, EditorAction::Saved(_)));
+
+    // Simulate reboot: recover from journal snapshot
+    let journal = storage.borrow().journal_clone();
+    let rebooted = JournaledStorage::from_journal(journal);
+    let storage2 = Rc::new(RefCell::new(rebooted));
+
+    let mut editor2 = Editor::new();
+    editor2.set_io(Box::new(SharedStorageIo::new(storage2.clone())));
+    editor2
+        .open_with(OpenOptions::new().with_object(object_id))
+        .unwrap();
+
+    assert_eq!(editor2.get_content(), "xhello");
 }
 
 #[test]

@@ -727,6 +727,82 @@ mod tests {
     }
 
     #[test]
+    fn test_crash_after_data_write_before_commit_record() {
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing_disk = FailingBlockDevice::new(disk, FailurePolicy::Never);
+
+        let mut storage = BlockStorage::format(failing_disk).unwrap();
+
+        // First commit succeeds
+        let obj1 = ObjectId::new();
+        let mut tx1 = storage.begin_transaction().unwrap();
+        storage.write(&mut tx1, obj1, b"stable data").unwrap();
+        storage.commit(&mut tx1).unwrap();
+
+        // Fail on commit record block to simulate crash before commit marker
+        let next_seq = storage.superblock.commit_sequence + 1;
+        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let commit_block_idx = storage.superblock.commit_log_start + log_slot;
+        storage
+            .device
+            .set_policy(FailurePolicy::OnBlocks(vec![commit_block_idx]));
+
+        let obj2 = ObjectId::new();
+        let mut tx2 = storage.begin_transaction().unwrap();
+        storage.write(&mut tx2, obj2, b"should not commit").unwrap();
+        let result = storage.commit(&mut tx2);
+        assert!(result.is_err());
+
+        // Recover
+        storage.device.set_policy(FailurePolicy::Never);
+        let device = storage.device;
+        let mut recovered = BlockStorage::open(device).unwrap();
+
+        let tx3 = recovered.begin_transaction().unwrap();
+        assert!(recovered.read(&tx3, obj1).is_ok());
+        assert!(recovered.read(&tx3, obj2).is_err());
+    }
+
+    #[test]
+    fn test_crash_after_commit_record_before_superblock_update() {
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing_disk = FailingBlockDevice::new(disk, FailurePolicy::Never);
+
+        let mut storage = BlockStorage::format(failing_disk).unwrap();
+
+        // Seed a baseline commit
+        let obj1 = ObjectId::new();
+        let mut tx1 = storage.begin_transaction().unwrap();
+        storage.write(&mut tx1, obj1, b"baseline").unwrap();
+        storage.commit(&mut tx1).unwrap();
+
+        // Fail on superblock write (block 0) to simulate crash mid-metadata update
+        storage.device.set_policy(FailurePolicy::OnBlocks(vec![0]));
+
+        let obj2 = ObjectId::new();
+        let mut tx2 = storage.begin_transaction().unwrap();
+        storage.write(&mut tx2, obj2, b"new data").unwrap();
+        let result = storage.commit(&mut tx2);
+        assert!(result.is_err());
+
+        // Recover
+        storage.device.set_policy(FailurePolicy::Never);
+        let device = storage.device;
+        let mut recovered = BlockStorage::open(device).unwrap();
+
+        let tx3 = recovered.begin_transaction().unwrap();
+        assert!(recovered.read(&tx3, obj1).is_ok());
+
+        // Commit record may have landed before the superblock update; either outcome is valid
+        let obj2_visible = recovered.read(&tx3, obj2).is_ok();
+        if obj2_visible {
+            let version = recovered.read(&tx3, obj2).unwrap();
+            let data = recovered.read_object_data(obj2, version).unwrap();
+            assert_eq!(data, b"new data");
+        }
+    }
+
+    #[test]
     fn test_checksum_validation() {
         // Create a commit record with invalid checksum
         let alloc = AllocationEntry {

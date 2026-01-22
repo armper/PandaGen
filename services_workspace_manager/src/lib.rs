@@ -23,18 +23,20 @@ pub mod boot_profile;
 pub mod commands;
 pub mod keybindings;
 
-use boot_profile::{BootConfig, BootProfile, BootProfileManager};
 
 use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
-use keybindings::{Action, KeyBindingManager};
+use keybindings::KeyBindingManager;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use packages::{ComponentLoader, PackageComponentType, PackageManifest};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
-use services_editor_vi::Editor;
+use fs_view::DirectoryView;
+use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
+use services_fs_view::FileSystemViewService;
+use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
@@ -87,6 +89,36 @@ pub enum ComponentType {
     PipelineExecutor,
     /// Custom component
     Custom,
+}
+
+/// Editor I/O context for capability-scoped storage access
+#[derive(Debug, Clone)]
+pub struct EditorIoContext {
+    pub storage: JournaledStorage,
+    pub fs_view: Option<FileSystemViewService>,
+    pub root: Option<DirectoryView>,
+}
+
+impl EditorIoContext {
+    pub fn new(storage: JournaledStorage) -> Self {
+        Self {
+            storage,
+            fs_view: None,
+            root: None,
+        }
+    }
+
+    pub fn with_fs_view(
+        storage: JournaledStorage,
+        fs_view: FileSystemViewService,
+        root: DirectoryView,
+    ) -> Self {
+        Self {
+            storage,
+            fs_view: Some(fs_view),
+            root: Some(root),
+        }
+    }
 }
 
 impl std::fmt::Display for ComponentType {
@@ -407,6 +439,8 @@ pub struct WorkspaceManager {
     next_timestamp: u64,
     /// Workspace identity (for policy evaluation)
     workspace_identity: IdentityMetadata,
+    /// Optional editor I/O context for capability-scoped storage
+    editor_io_context: Option<EditorIoContext>,
     /// Debug info for keyboard routing (gated behind debug_assertions)
     #[cfg(debug_assertions)]
     key_routing_debug: KeyRoutingDebug,
@@ -426,9 +460,15 @@ impl WorkspaceManager {
             audit_trail: Vec::new(),
             next_timestamp: 0,
             workspace_identity,
+            editor_io_context: None,
             #[cfg(debug_assertions)]
             key_routing_debug: KeyRoutingDebug::new(),
         }
+    }
+
+    /// Sets the editor I/O context used to configure new editor components.
+    pub fn set_editor_io_context(&mut self, context: EditorIoContext) {
+        self.editor_io_context = Some(context);
     }
 
     /// Sets the policy engine
@@ -561,6 +601,29 @@ impl WorkspaceManager {
                     (&component.main_view, &component.status_view)
                 {
                     editor.set_view_handles(main_view.clone(), status_view.clone());
+                }
+                // Configure editor I/O context if available
+                if let Some(context) = &self.editor_io_context {
+                    let io = match (&context.fs_view, &context.root) {
+                        (Some(fs_view), Some(root)) => StorageEditorIo::with_fs_view(
+                            context.storage.clone(),
+                            fs_view.clone(),
+                            root.clone(),
+                        ),
+                        _ => StorageEditorIo::new(context.storage.clone()),
+                    };
+                    editor.set_io(Box::new(io));
+
+                    // Open requested path if present
+                    let path = component
+                        .metadata
+                        .get("path")
+                        .or_else(|| component.metadata.get("arg0"));
+                    if let Some(path) = path {
+                        if !path.is_empty() {
+                            let _ = editor.open_with(OpenOptions::new().with_path(path.clone()));
+                        }
+                    }
                 }
                 ComponentInstance::Editor(editor)
             }
@@ -829,24 +892,24 @@ impl WorkspaceManager {
 
     /// Routes an input event to the focused component and processes it
     pub fn route_input(&mut self, event: &InputEvent) -> Option<ComponentId> {
+        let key_event = match event.as_key() {
+            Some(key_event) => key_event,
+            None => return None,
+        };
+
         // Track debug info (only in debug builds)
         #[cfg(debug_assertions)]
         {
-            if let InputEvent::Key(key_event) = event {
-                self.key_routing_debug.last_key_event = Some(key_event.clone());
-                self.key_routing_debug.consumed_by_global = false;
-            }
+            self.key_routing_debug.last_key_event = Some(key_event.clone());
+            self.key_routing_debug.consumed_by_global = false;
         }
 
         // Check global keybindings first
-        let global_consumed = if let InputEvent::Key(key_event) = event {
-            if let Some(_action) = self.key_binding_manager.get_action(key_event) {
-                // TODO: Execute action (switch tile, etc)
-                // For now, we just consume it to respect the "consumed" contract
-                true
-            } else {
-                false
-            }
+        let global_consumed = if let Some(_action) = self.key_binding_manager.get_action(key_event)
+        {
+            // TODO: Execute action (switch tile, etc)
+            // For now, we just consume it to respect the "consumed" contract
+            true
         } else {
             false
         };
@@ -857,46 +920,50 @@ impl WorkspaceManager {
         }
 
         // --- Logging ---
-        if let InputEvent::Key(key_event) = event {
-            if key_event.state == input_types::KeyState::Pressed {
-                let focus_comp_id = self.get_focused_component();
-                let focus_comp = focus_comp_id.and_then(|id| self.components.get(&id));
+        if key_event.state == input_types::KeyState::Pressed {
+            let focus_comp_id = self.get_focused_component();
+            let focus_comp = focus_comp_id.and_then(|id| self.components.get(&id));
 
-                let focus_comp_str = if let Some(c) = focus_comp {
-                    format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name)
-                } else {
-                    "None".to_string()
-                };
+            let focus_comp_str = if let Some(c) = focus_comp {
+                format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name)
+            } else {
+                "None".to_string()
+            };
 
-                let delivered_to = if global_consumed {
-                    "None".to_string()
-                } else if let Ok(Some(focused_sub)) = self.focus_manager.route_event(event) {
-                     self.components.values().find(|c| {
-                        c.subscription.as_ref().map(|s| s.id == focused_sub.id).unwrap_or(false)
-                    }).map(|c| format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name))
+            let delivered_to = if global_consumed {
+                "None".to_string()
+            } else if let Ok(Some(focused_sub)) = self.focus_manager.route_event(event) {
+                self.components
+                    .values()
+                    .find(|c| {
+                        c.subscription
+                            .as_ref()
+                            .map(|s| s.id == focused_sub.id)
+                            .unwrap_or(false)
+                    })
+                    .map(|c| format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name))
                     .unwrap_or("None".to_string())
-                } else {
-                    "None".to_string()
-                };
+            } else {
+                "None".to_string()
+            };
 
-                let consumed_by = if global_consumed {
-                    "global"
-                } else if delivered_to != "None" {
-                    "component"
-                } else {
-                    "none"
-                };
+            let consumed_by = if global_consumed {
+                "global"
+            } else if delivered_to != "None" {
+                "component"
+            } else {
+                "none"
+            };
 
-                println!("route_input:\n  key={{code={:?}, mods={:?}, state={:?}}}\n  focus_tile={{TODO}}\n  focus_component={}\n  global_consumed={}\n  delivered_to={}\n  consumed_by={}",
-                    key_event.code,
-                    key_event.modifiers,
-                    key_event.state,
-                    focus_comp_str,
-                    global_consumed,
-                    delivered_to,
-                    consumed_by
-                );
-            }
+            println!("route_input:\n  key={{code={:?}, mods={:?}, state={:?}}}\n  focus_tile={{TODO}}\n  focus_component={}\n  global_consumed={}\n  delivered_to={}\n  consumed_by={} ",
+                key_event.code,
+                key_event.modifiers,
+                key_event.state,
+                focus_comp_str,
+                global_consumed,
+                delivered_to,
+                consumed_by,
+            );
         }
         // --- End Logging ---
 

@@ -39,6 +39,7 @@ struct PendingWrite {
 }
 
 /// In-memory journaled storage backend.
+#[derive(Debug, Clone)]
 pub struct JournaledStorage {
     objects: BTreeMap<ObjectId, Vec<VersionEntry>>,
     journal: Vec<JournalEntry>,
@@ -57,6 +58,26 @@ impl JournaledStorage {
     /// Returns the journal entries (for testing).
     pub fn journal_entries(&self) -> &[JournalEntry] {
         &self.journal
+    }
+
+    /// Returns a clone of the journal entries.
+    ///
+    /// This is intended for deterministic tests and snapshotting.
+    pub fn journal_clone(&self) -> Vec<JournalEntry> {
+        self.journal.clone()
+    }
+
+    /// Reconstructs storage state from a journal snapshot.
+    ///
+    /// This simulates a reboot where journal entries are persisted externally.
+    pub fn from_journal(entries: Vec<JournalEntry>) -> Self {
+        let mut storage = Self {
+            objects: BTreeMap::new(),
+            journal: entries,
+            pending: BTreeMap::new(),
+        };
+        storage.recover();
+        storage
     }
 
     /// Reads the latest data for an object (including pending writes).

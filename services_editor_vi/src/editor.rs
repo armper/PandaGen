@@ -438,6 +438,18 @@ impl Editor {
                 Ok(EditorAction::Saved(new_version))
             }
 
+            Command::Edit { path, force } => {
+                if self.state.is_dirty() && !force {
+                    self.state.set_status_message(
+                        "No write since last change (use :w or :e! to discard)",
+                    );
+                    Ok(EditorAction::Continue)
+                } else {
+                    self.open_with(OpenOptions::new().with_path(path))?;
+                    Ok(EditorAction::Continue)
+                }
+            }
+
             Command::Quit => {
                 if self.state.is_dirty() {
                     self.state
@@ -462,7 +474,7 @@ impl Editor {
             let content = self.state.buffer().as_string();
             let result = io.save(&handle, &content)?;
             let new_handle = DocumentHandle::new(
-                handle.object_id,
+                result.object_id.unwrap_or(handle.object_id),
                 result.new_version_id,
                 handle.path_label.clone(),
                 handle.can_update_link,
@@ -504,7 +516,9 @@ impl Editor {
 
         // Update document handle with new path
         let new_handle = DocumentHandle::new(
-            ObjectId::new(), // New object created
+            result
+                .object_id
+                .unwrap_or_else(ObjectId::new),
             result.new_version_id,
             Some(path.to_string()),
             true, // Can update link since we just created it

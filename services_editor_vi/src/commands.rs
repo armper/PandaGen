@@ -31,6 +31,8 @@ pub enum Command {
     Write,
     /// Write to a specific path (Save As)
     WriteAs { path: String },
+    /// Edit/open a file
+    Edit { path: String, force: bool },
     /// Quit the editor
     Quit,
     /// Force quit (discard changes)
@@ -65,6 +67,26 @@ impl CommandParser {
                 } else {
                     // :w - Save to current file
                     Ok(Command::Write)
+                }
+            }
+            "e" | "edit" => {
+                if parts.len() > 1 {
+                    let path = parts[1..].join(" ");
+                    Ok(Command::Edit { path, force: false })
+                } else {
+                    Err(CommandError::InvalidSyntax(
+                        "Usage: :e <path>".to_string(),
+                    ))
+                }
+            }
+            "e!" | "edit!" => {
+                if parts.len() > 1 {
+                    let path = parts[1..].join(" ");
+                    Ok(Command::Edit { path, force: true })
+                } else {
+                    Err(CommandError::InvalidSyntax(
+                        "Usage: :e! <path>".to_string(),
+                    ))
                 }
             }
             "q" | "quit" => Ok(Command::Quit),
@@ -104,6 +126,42 @@ mod tests {
             CommandParser::parse("w path/to/file.txt"),
             Ok(Command::WriteAs {
                 path: "path/to/file.txt".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_edit() {
+        assert_eq!(
+            CommandParser::parse("e notes.txt"),
+            Ok(Command::Edit {
+                path: "notes.txt".to_string(),
+                force: false
+            })
+        );
+        assert_eq!(
+            CommandParser::parse("edit path/to/file.txt"),
+            Ok(Command::Edit {
+                path: "path/to/file.txt".to_string(),
+                force: false
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_edit_force() {
+        assert_eq!(
+            CommandParser::parse("e! notes.txt"),
+            Ok(Command::Edit {
+                path: "notes.txt".to_string(),
+                force: true
+            })
+        );
+        assert_eq!(
+            CommandParser::parse("edit! path/to/file.txt"),
+            Ok(Command::Edit {
+                path: "path/to/file.txt".to_string(),
+                force: true
             })
         );
     }

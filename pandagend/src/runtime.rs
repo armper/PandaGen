@@ -8,8 +8,12 @@ use identity::{ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use policy::NoOpPolicy;
 use services_workspace_manager::{
-    ComponentType, LaunchConfig, WorkspaceError, WorkspaceManager, WorkspaceRenderSnapshot,
+    ComponentType, EditorIoContext, LaunchConfig, WorkspaceError, WorkspaceManager,
+    WorkspaceRenderSnapshot,
 };
+use services_fs_view::FileSystemViewService;
+use services_storage::{JournaledStorage, ObjectId};
+use fs_view::DirectoryView;
 use sim_kernel::SimulatedKernel;
 use text_renderer_host::TextRenderer;
 use thiserror::Error;
@@ -112,7 +116,18 @@ impl HostRuntime {
         );
 
         // Create workspace with policy
-        let workspace = WorkspaceManager::new(workspace_identity);
+        let mut workspace = WorkspaceManager::new(workspace_identity);
+
+        // Provision a default editor I/O context (capability-scoped root)
+        let root_id = ObjectId::new();
+        let root = DirectoryView::new(root_id);
+        let mut fs_view = FileSystemViewService::new();
+        fs_view.register_directory(root.clone());
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            fs_view,
+            root,
+        ));
 
         // Create renderer
         let renderer = TextRenderer::new();

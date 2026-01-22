@@ -106,6 +106,8 @@ pub struct SaveResult {
     pub link_updated: bool,
     /// Status message
     pub message: String,
+    /// Object ID for the saved document (if known)
+    pub object_id: Option<ObjectId>,
 }
 
 /// Open result containing document content and handle.
@@ -228,7 +230,12 @@ impl EditorIo for StorageEditorIo {
             .map_err(Self::map_tx_error)?;
         self.storage.commit(&mut tx).map_err(Self::map_tx_error)?;
 
-        Ok(SaveResult::new(new_version_id, false, "Saved successfully"))
+        Ok(SaveResult::new(
+            new_version_id,
+            false,
+            "Saved successfully",
+            Some(handle.object_id),
+        ))
     }
 
     fn save_as(&mut self, path: &str, content: &str) -> Result<SaveResult, IoError> {
@@ -268,16 +275,23 @@ impl EditorIo for StorageEditorIo {
             version_id,
             true,
             format!("Saved as: {}", path),
+            Some(object_id),
         ))
     }
 }
 
 impl SaveResult {
-    pub fn new(new_version_id: VersionId, link_updated: bool, message: impl Into<String>) -> Self {
+    pub fn new(
+        new_version_id: VersionId,
+        link_updated: bool,
+        message: impl Into<String>,
+        object_id: Option<ObjectId>,
+    ) -> Self {
         Self {
             new_version_id,
             link_updated,
             message: message.into(),
+            object_id,
         }
     }
 }
@@ -319,10 +333,12 @@ mod tests {
     #[test]
     fn test_save_result() {
         let ver_id = VersionId::new();
-        let result = SaveResult::new(ver_id, true, "Saved successfully");
+        let obj_id = ObjectId::new();
+        let result = SaveResult::new(ver_id, true, "Saved successfully", Some(obj_id));
 
         assert_eq!(result.new_version_id, ver_id);
         assert!(result.link_updated);
         assert_eq!(result.message, "Saved successfully");
+        assert_eq!(result.object_id, Some(obj_id));
     }
 }

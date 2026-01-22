@@ -20,6 +20,9 @@ input_types = { workspace = true }
 services_input = { workspace = true }
 view_types = { workspace = true }
 services_view_host = { workspace = true }
+services_fs_view = { workspace = true }
+services_storage = { workspace = true }
+fs_view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

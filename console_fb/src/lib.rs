@@ -36,6 +36,51 @@ pub use styling::{Banner, RedrawManager, Style, StyledText};
 #[cfg(feature = "editor-integration")]
 pub use combined_view::{CombinedView, ViewMode};
 
+#[cfg(any(debug_assertions, feature = "perf_debug"))]
+#[derive(Debug, Default, Clone)]
+pub struct RenderPerfStats {
+    /// Timestamp at frame start (tick count or monotonic units from caller)
+    pub frame_start_ticks: Option<u64>,
+    /// Duration of the last frame in ticks
+    pub last_frame_ticks: Option<u64>,
+    /// Number of glyph draw calls
+    pub glyph_draws: usize,
+    /// Number of framebuffer pixel writes
+    pub pixel_writes: usize,
+    /// Number of screen clears
+    pub clear_calls: usize,
+    /// Number of draw_text_at calls
+    pub text_draw_calls: usize,
+    /// Number of cursor draws
+    pub cursor_draws: usize,
+    /// Number of status line redraws
+    pub status_redraws: usize,
+    /// Number of allocations performed during rendering (approximate)
+    pub allocations: usize,
+    /// Number of flushes/blits (if any)
+    pub flushes: usize,
+    /// Dirty lines updated this frame
+    pub dirty_lines: usize,
+    /// Dirty spans updated this frame
+    pub dirty_spans: usize,
+}
+
+#[cfg(any(debug_assertions, feature = "perf_debug"))]
+impl RenderPerfStats {
+    fn reset_frame(&mut self) {
+        self.glyph_draws = 0;
+        self.pixel_writes = 0;
+        self.clear_calls = 0;
+        self.text_draw_calls = 0;
+        self.cursor_draws = 0;
+        self.status_redraws = 0;
+        self.allocations = 0;
+        self.flushes = 0;
+        self.dirty_lines = 0;
+        self.dirty_spans = 0;
+    }
+}
+
 /// Foreground color (white)
 const FG_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
 
@@ -51,6 +96,8 @@ pub struct ConsoleFb<F: Framebuffer> {
     cols: usize,
     rows: usize,
     scrollback: Option<ScrollbackBuffer>,
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    perf: RenderPerfStats,
 }
 
 impl<F: Framebuffer> ConsoleFb<F> {
@@ -64,6 +111,8 @@ impl<F: Framebuffer> ConsoleFb<F> {
             cols,
             rows,
             scrollback: None,
+            #[cfg(any(debug_assertions, feature = "perf_debug"))]
+            perf: RenderPerfStats::default(),
         }
     }
 
@@ -78,7 +127,41 @@ impl<F: Framebuffer> ConsoleFb<F> {
             cols,
             rows,
             scrollback: Some(scrollback),
+            #[cfg(any(debug_assertions, feature = "perf_debug"))]
+            perf: RenderPerfStats::default(),
         }
+    }
+
+    /// Returns the latest performance stats (gated)
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    pub fn perf_stats(&self) -> &RenderPerfStats {
+        &self.perf
+    }
+
+    /// Returns mutable access to performance stats (gated)
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    pub fn perf_stats_mut(&mut self) -> &mut RenderPerfStats {
+        &mut self.perf
+    }
+
+    /// Mark the start of a frame (gated)
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    pub fn perf_frame_start(&mut self, timestamp_ticks: u64) {
+        self.perf.frame_start_ticks = Some(timestamp_ticks);
+    }
+
+    /// Mark the end of a frame (gated)
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    pub fn perf_frame_end(&mut self, timestamp_ticks: u64) {
+        if let Some(start) = self.perf.frame_start_ticks {
+            self.perf.last_frame_ticks = Some(timestamp_ticks.saturating_sub(start));
+        }
+    }
+
+    /// Reset per-frame counters (gated)
+    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+    pub fn perf_reset_frame(&mut self) {
+        self.perf.reset_frame();
     }
 
     /// Returns the number of text columns
@@ -97,12 +180,21 @@ impl<F: Framebuffer> ConsoleFb<F> {
         let bg_bytes = info.format.to_bytes(BG_COLOR.0, BG_COLOR.1, BG_COLOR.2);
         let buffer = self.framebuffer.buffer_mut();
 
+        #[cfg(any(debug_assertions, feature = "perf_debug"))]
+        {
+            self.perf.clear_calls += 1;
+        }
+
         // Fill with background color
         for y in 0..info.height {
             for x in 0..info.width {
                 let offset = info.offset(x, y);
                 if offset + 4 <= buffer.len() {
                     buffer[offset..offset + 4].copy_from_slice(&bg_bytes);
+                    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+                    {
+                        self.perf.pixel_writes += 1;
+                    }
                 }
             }
         }
@@ -114,6 +206,11 @@ impl<F: Framebuffer> ConsoleFb<F> {
     pub fn draw_char_at(&mut self, col: usize, row: usize, ch: u8) -> bool {
         if col >= self.cols || row >= self.rows {
             return false;
+        }
+
+        #[cfg(any(debug_assertions, feature = "perf_debug"))]
+        {
+            self.perf.glyph_draws += 1;
         }
 
         let bitmap = get_char_bitmap(ch);
@@ -144,6 +241,10 @@ impl<F: Framebuffer> ConsoleFb<F> {
                 let offset = info.offset(x, y);
                 if offset + 4 <= buffer.len() {
                     buffer[offset..offset + 4].copy_from_slice(color);
+                    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+                    {
+                        self.perf.pixel_writes += 1;
+                    }
                 }
             }
         }
@@ -156,6 +257,10 @@ impl<F: Framebuffer> ConsoleFb<F> {
     /// Text wraps to next row if it exceeds column width.
     /// Returns the number of characters actually drawn.
     pub fn draw_text_at(&mut self, mut col: usize, mut row: usize, text: &str) -> usize {
+        #[cfg(any(debug_assertions, feature = "perf_debug"))]
+        {
+            self.perf.text_draw_calls += 1;
+        }
         let mut drawn = 0;
 
         for byte in text.bytes() {
@@ -193,6 +298,11 @@ impl<F: Framebuffer> ConsoleFb<F> {
             return;
         }
 
+        #[cfg(any(debug_assertions, feature = "perf_debug"))]
+        {
+            self.perf.cursor_draws += 1;
+        }
+
         let info = self.framebuffer.info();
         let buffer = self.framebuffer.buffer_mut();
         let cursor_bytes = info
@@ -218,6 +328,10 @@ impl<F: Framebuffer> ConsoleFb<F> {
                 let offset = info.offset(x, y);
                 if offset + 4 <= buffer.len() {
                     buffer[offset..offset + 4].copy_from_slice(&cursor_bytes);
+                    #[cfg(any(debug_assertions, feature = "perf_debug"))]
+                    {
+                        self.perf.pixel_writes += 1;
+                    }
                 }
             }
         }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 ///
 /// Maintains a view of the directory hierarchy and provides operations
 /// to manipulate it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileSystemViewService {
     /// All directories in the system, indexed by ObjectId
     directories: HashMap<ObjectId, DirectoryView>,
