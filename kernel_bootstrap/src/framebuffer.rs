@@ -146,27 +146,38 @@ impl BareMetalFramebuffer {
         }
     }
     
-    /// Fill a single pixel row with a color (fast path)
+    /// Fill a single pixel row with a color (ultra-fast using u64 writes)
     fn fill_pixel_row(&mut self, y: usize, color: [u8; 4]) {
         let info = self.info();
         if y >= info.height {
             return;
         }
         
-        let bpp = info.format.bytes_per_pixel();
-        let row_start = y * info.stride_pixels * bpp;
+        let row_start = y * info.stride_pixels * 4;
         let row_pixels = info.width;
         
-        // Fast fill: write 4-byte color pattern directly
-        // This is much faster than individual pixel writes
-        for x in 0..row_pixels {
-            let offset = row_start + x * bpp;
-            if offset + 4 <= self.buffer.len() {
-                // Direct memory write (no volatile needed for filling)
-                self.buffer[offset] = color[0];
-                self.buffer[offset + 1] = color[1];
-                self.buffer[offset + 2] = color[2];
-                self.buffer[offset + 3] = color[3];
+        if row_start >= self.buffer.len() {
+            return;
+        }
+        
+        // Pack single pixel and double pixel for fast writes
+        let pixel = u32::from_le_bytes(color);
+        let double_pixel = ((pixel as u64) << 32) | (pixel as u64);
+        
+        unsafe {
+            let ptr = self.buffer.as_mut_ptr().add(row_start);
+            let ptr64 = ptr as *mut u64;
+            let pairs = row_pixels / 2;
+            
+            // Write 2 pixels at a time (8 bytes)
+            for i in 0..pairs {
+                ptr64.add(i).write(double_pixel);
+            }
+            
+            // Handle odd pixel if width is odd
+            if row_pixels % 2 == 1 {
+                let ptr32 = ptr as *mut u32;
+                ptr32.add(row_pixels - 1).write(pixel);
             }
         }
     }
@@ -348,7 +359,7 @@ impl BareMetalFramebuffer {
     }
     
     /// Draw text on a line and clear the rest with background color in ONE PASS
-    /// This is more efficient than clear_line + draw_text (avoids double writes)
+    /// Ultra-optimized: uses u64 writes for 2 pixels at once
     pub fn draw_line(&mut self, row: usize, text: &str, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         if row >= self.rows() {
             return;
@@ -357,13 +368,18 @@ impl BareMetalFramebuffer {
         let info = self.info();
         let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
-        let bpp = info.format.bytes_per_pixel();
-        let stride = info.stride_pixels * bpp;
+        let stride = info.stride_pixels * 4; // bytes per row
         let cols = self.cols();
         let y_start = row * FONT_HEIGHT;
         
         let text_bytes = text.as_bytes();
         let text_len = text_bytes.len().min(cols);
+        
+        // Pre-compute u32 pixel values for fg and bg
+        let fg_pixel = u32::from_le_bytes(fg_bytes);
+        let bg_pixel = u32::from_le_bytes(bg_bytes);
+        // Two bg pixels packed into u64 for fast clearing
+        let bg_double = ((bg_pixel as u64) << 32) | (bg_pixel as u64);
         
         // For each scanline of the font (16 lines)
         for scanline_idx in 0..FONT_HEIGHT {
@@ -374,41 +390,50 @@ impl BareMetalFramebuffer {
             
             let row_base = y * stride;
             
-            // Draw text characters
+            // Draw text characters using u32 writes
             for (char_idx, &ch) in text_bytes[..text_len].iter().enumerate() {
                 let bitmap = get_char_bitmap(ch);
                 let row_data = bitmap[scanline_idx];
-                let char_offset = row_base + char_idx * FONT_WIDTH * bpp;
+                let char_offset = row_base + char_idx * FONT_WIDTH * 4;
                 
                 if char_offset + 32 > self.buffer.len() {
                     break;
                 }
                 
-                for bit_idx in 0..FONT_WIDTH {
-                    let bit = (row_data >> (7 - bit_idx)) & 1;
-                    let color = if bit == 1 { fg_bytes } else { bg_bytes };
-                    let off = char_offset + bit_idx * 4;
-                    self.buffer[off] = color[0];
-                    self.buffer[off + 1] = color[1];
-                    self.buffer[off + 2] = color[2];
-                    self.buffer[off + 3] = color[3];
+                // Write 8 pixels (one character width) using u32 writes
+                unsafe {
+                    let ptr = self.buffer.as_mut_ptr().add(char_offset) as *mut u32;
+                    for bit_idx in 0..FONT_WIDTH {
+                        let bit = (row_data >> (7 - bit_idx)) & 1;
+                        let pixel = if bit == 1 { fg_pixel } else { bg_pixel };
+                        ptr.add(bit_idx).write(pixel);
+                    }
                 }
             }
             
-            // Clear rest of line with background (after text ends)
+            // Clear rest of line with background using u64 writes (2 pixels at a time)
             let clear_start_x = text_len * FONT_WIDTH;
-            let clear_start = row_base + clear_start_x * bpp;
-            let row_end = row_base + info.width * bpp;
+            let clear_start = row_base + clear_start_x * 4;
+            let row_end = row_base + info.width * 4;
             
             if clear_start < row_end && clear_start < self.buffer.len() {
                 let end = row_end.min(self.buffer.len());
-                // Fill remaining pixels with background
-                for x in (clear_start..end).step_by(4) {
-                    if x + 4 <= self.buffer.len() {
-                        self.buffer[x] = bg_bytes[0];
-                        self.buffer[x + 1] = bg_bytes[1];
-                        self.buffer[x + 2] = bg_bytes[2];
-                        self.buffer[x + 3] = bg_bytes[3];
+                let pixels_to_clear = (end - clear_start) / 4;
+                
+                unsafe {
+                    let ptr = self.buffer.as_mut_ptr().add(clear_start);
+                    let ptr64 = ptr as *mut u64;
+                    let pairs = pixels_to_clear / 2;
+                    
+                    // Write 2 pixels at a time
+                    for i in 0..pairs {
+                        ptr64.add(i).write(bg_double);
+                    }
+                    
+                    // Handle odd pixel if any
+                    if pixels_to_clear % 2 == 1 {
+                        let ptr32 = ptr as *mut u32;
+                        ptr32.add(pixels_to_clear - 1).write(bg_pixel);
                     }
                 }
             }
