@@ -49,6 +49,11 @@ impl BareMetalEditorIo {
         Self { fs }
     }
     
+    /// Extract the filesystem (for returning to workspace)
+    pub fn into_filesystem(self) -> BareMetalFilesystem {
+        self.fs
+    }
+    
     /// Open a file by path
     pub fn open(&mut self, path: &str) -> Result<(String, DocumentHandle), EditorIoError> {
         let content = self.fs.read_file_by_name(path)?;
