@@ -20,9 +20,9 @@ pub struct BareMetalFilesystem {
 impl BareMetalFilesystem {
     /// Create a new filesystem with an in-memory disk
     pub fn new() -> Result<Self, TransactionError> {
-        // Create a 10 MB RAM disk for now
+        // Create a small RAM disk for now (fits within the early heap)
         // TODO: Replace with VirtioBlkDevice when initialization is ready
-        let disk = RamDisk::with_capacity_mb(10);
+        let disk = RamDisk::new(32);
         
         let fs = PersistentFilesystem::format(disk, "system")?;
         let root_id = fs.root_dir_id();

@@ -17,6 +17,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::fmt;
 use serde::{Deserialize, Serialize};
+use core_types::new_uuid;
 use uuid::Uuid;
 
 use crate::{ObjectId, VersionId};
@@ -28,7 +29,7 @@ pub struct PrincipalId(Uuid);
 impl PrincipalId {
     /// Creates a new random principal ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a principal ID from a UUID
@@ -126,7 +127,7 @@ impl Capability {
             object_id,
             kind,
             holder,
-            capability_id: Uuid::new_v4(),
+            capability_id: new_uuid(),
         }
     }
 

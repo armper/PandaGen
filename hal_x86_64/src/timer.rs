@@ -13,6 +13,9 @@
 //! - Monotonicity is enforced
 //! - Minimal unsafe code, isolated to port I/O
 
+use alloc::vec::Vec;
+use core::prelude::v1::*;
+
 use hal::{TimerDevice, TimerInterrupt};
 
 /// Fake timer device for testing

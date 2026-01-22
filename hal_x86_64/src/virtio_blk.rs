@@ -9,6 +9,8 @@
 //! - Single virtqueue for requests
 //! - Polling-based completion (no interrupts required)
 
+use core::prelude::v1::*;
+
 use super::virtio::{
     VirtioMmioDevice, VirtqDesc, Virtqueue, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_STATUS_ACKNOWLEDGE,
     VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK, VIRTQ_DESC_F_NEXT,

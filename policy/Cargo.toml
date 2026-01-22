@@ -9,9 +9,13 @@ license.workspace = true
 core_types = { workspace = true }
 identity = { workspace = true }
 pipeline = { workspace = true }
-serde = { workspace = true }
-uuid = { workspace = true }
-thiserror = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["serde"] }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use serde::{Deserialize, Serialize};
+use core_types::new_uuid;
 use uuid::Uuid;
 
 use crate::permissions::Ownership;
@@ -15,7 +16,7 @@ pub struct ObjectId(Uuid);
 impl ObjectId {
     /// Creates a new random object ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates an object ID from a UUID
@@ -51,7 +52,7 @@ pub struct VersionId(Uuid);
 impl VersionId {
     /// Creates a new random version ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a version ID from a UUID

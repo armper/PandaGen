@@ -1,8 +1,10 @@
 //! Message types and envelope structure
 
-use core_types::{ServiceId, TaskId};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+use core_types::{new_uuid, ServiceId, TaskId};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
 
 /// Unique identifier for a message
@@ -12,7 +14,7 @@ pub struct MessageId(Uuid);
 impl MessageId {
     /// Creates a new random message ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a message ID from a UUID
@@ -190,7 +192,7 @@ impl fmt::Display for SchemaMismatchError {
     }
 }
 
-impl std::error::Error for SchemaMismatchError {}
+impl core::error::Error for SchemaMismatchError {}
 
 impl SchemaMismatchError {
     /// Creates an upgrade required error

@@ -1,7 +1,7 @@
 //! Time abstractions
 
 use serde::{Deserialize, Serialize};
-use std::ops::{Add, Sub};
+use core::ops::{Add, Sub};
 
 /// A point in time
 ///

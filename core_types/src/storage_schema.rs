@@ -2,8 +2,9 @@
 //!
 //! These types enable disciplined evolution of storage object schemas.
 
+use alloc::string::{String, ToString};
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Identifier for a storage object schema type
 ///

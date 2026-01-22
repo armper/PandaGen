@@ -24,6 +24,10 @@
 //! - A syscall interface (though it could be implemented that way)
 //! - A specific transport (trait can be implemented many ways)
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
 pub mod error;
 pub mod kernel;
 pub mod syscalls;

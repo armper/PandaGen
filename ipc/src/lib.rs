@@ -21,6 +21,10 @@
 //! Unlike traditional IPC (pipes, sockets, signals), messages are structured
 //! and self-describing.
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
 pub mod channel;
 pub mod message;
 pub mod typed;

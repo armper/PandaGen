@@ -1,8 +1,10 @@
 //! Unique identifiers for system entities
 
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
+
+use crate::new_uuid;
 
 /// Unique identifier for a service
 ///
@@ -14,7 +16,7 @@ pub struct ServiceId(Uuid);
 impl ServiceId {
     /// Creates a new random service ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a service ID from a UUID
@@ -56,7 +58,7 @@ pub struct TaskId(Uuid);
 impl TaskId {
     /// Creates a new random task ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a task ID from a UUID

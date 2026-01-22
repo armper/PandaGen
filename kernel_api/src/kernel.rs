@@ -1,5 +1,7 @@
 //! Kernel API trait and task management types
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::{Duration, Instant, KernelError};
 use core_types::{Cap, ServiceId, TaskId};
 use ipc::{ChannelId, MessageEnvelope};

@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-thiserror.workspace = true
 input_types.workspace = true
 
 [features]

@@ -4,6 +4,8 @@
 //! relies on typed IDs and explicit capability transfer. It is designed to
 //! bootstrap user-task scaffolding and service IPC without ambient authority.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::{Duration, KernelError};
 use core_types::{Cap, TaskId};
 use ipc::ChannelId;

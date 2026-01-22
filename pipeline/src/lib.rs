@@ -16,9 +16,15 @@
 //! - `StageResult`: Success, Failure, or Retryable
 //! - `RetryPolicy`: Bounded retry behavior with backoff
 
-use core_types::ServiceId;
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+use core_types::{new_uuid, ServiceId};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
 /// Unique identifier for a pipeline
@@ -28,7 +34,7 @@ pub struct PipelineId(Uuid);
 impl PipelineId {
     /// Creates a new random pipeline ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 
@@ -38,8 +44,8 @@ impl Default for PipelineId {
     }
 }
 
-impl std::fmt::Display for PipelineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PipelineId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -51,7 +57,7 @@ pub struct StageId(Uuid);
 impl StageId {
     /// Creates a new random stage ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 
@@ -183,7 +189,10 @@ impl RetryPolicy {
         if attempt == 0 {
             0 // First attempt has no backoff
         } else {
-            let multiplier = self.backoff_multiplier.powi((attempt - 1) as i32);
+            let mut multiplier = 1.0;
+            for _ in 0..(attempt - 1) {
+                multiplier *= self.backoff_multiplier;
+            }
             (self.initial_backoff_ms as f64 * multiplier) as u64
         }
     }
@@ -354,27 +363,50 @@ impl PipelineSpec {
 }
 
 /// Errors that can occur in pipeline operations
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum PipelineError {
-    #[error("Pipeline has no stages")]
     EmptyPipeline,
 
-    #[error("Schema mismatch in stage '{stage_name}': expected {expected:?}, got {actual:?}")]
     SchemaMismatch {
         stage_name: String,
         expected: PayloadSchemaId,
         actual: PayloadSchemaId,
     },
 
-    #[error("Stage execution failed: {0}")]
     StageExecutionFailed(String),
 
-    #[error("Missing required capability: {0}")]
     MissingCapability(u64),
 
-    #[error("Invalid payload schema: {0}")]
     InvalidSchema(String),
 }
+
+impl fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PipelineError::EmptyPipeline => write!(f, "Pipeline has no stages"),
+            PipelineError::SchemaMismatch {
+                stage_name,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Schema mismatch in stage '{}': expected {:?}, got {:?}",
+                stage_name, expected, actual
+            ),
+            PipelineError::StageExecutionFailed(err) => {
+                write!(f, "Stage execution failed: {}", err)
+            }
+            PipelineError::MissingCapability(cap) => {
+                write!(f, "Missing required capability: {}", cap)
+            }
+            PipelineError::InvalidSchema(schema) => {
+                write!(f, "Invalid payload schema: {}", schema)
+            }
+        }
+    }
+}
+
+impl core::error::Error for PipelineError {}
 
 /// Execution trace entry for a stage
 #[derive(Debug, Clone, Serialize, Deserialize)]

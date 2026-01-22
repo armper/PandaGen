@@ -3,6 +3,8 @@
 //! Provides a small abstraction for choosing PIT/HPET as the periodic
 //! tick source and a deterministic tick counter for scheduler plumbing.
 
+use core::prelude::v1::*;
+
 use crate::port_io::PortIo;
 use crate::timer::{HpetTimer, PitTimer};
 use hal::{TimerDevice, TimerInterrupt};

@@ -1,3 +1,5 @@
+#![no_std]
+
 //! # x86_64 Hardware Abstraction Layer
 //!
 //! This crate implements the HAL traits for x86_64 architecture.
@@ -6,6 +8,11 @@
 //!
 //! This is a skeleton implementation. Real hardware operations are stubbed.
 //! In a complete system, this would use actual x86_64 instructions.
+
+#[macro_use]
+extern crate alloc;
+
+use core::prelude::v1::*;
 
 use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};

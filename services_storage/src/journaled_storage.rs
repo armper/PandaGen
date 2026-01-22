@@ -232,6 +232,7 @@ pub trait StorageBudget {
     ) -> Result<(), KernelError>;
 }
 
+#[cfg(not(target_os = "none"))]
 impl StorageBudget for sim_kernel::SimulatedKernel {
     fn consume_storage_op(
         &mut self,

@@ -28,9 +28,15 @@
 //!
 //! Everything must run under SimKernel, be deterministic, and be auditable.
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use thiserror::Error;
 
 /// CPU ticks (simulated execution steps)
 ///
@@ -806,20 +812,38 @@ impl fmt::Display for ResourceDelta {
 }
 
 /// Resource-related errors
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ResourceError {
-    #[error("Resource budget exceeded: {0}")]
     BudgetExceeded(ResourceExceeded),
 
-    #[error("Resource budget missing: required for {operation}")]
     BudgetMissing { operation: String },
 
-    #[error("Invalid budget derivation: {reason}")]
     InvalidBudgetDerivation { reason: String },
 
-    #[error("Budget inheritance violation: child budget exceeds parent")]
     BudgetInheritanceViolation,
 }
+
+impl fmt::Display for ResourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResourceError::BudgetExceeded(exceeded) => {
+                write!(f, "Resource budget exceeded: {}", exceeded)
+            }
+            ResourceError::BudgetMissing { operation } => {
+                write!(f, "Resource budget missing: required for {}", operation)
+            }
+            ResourceError::InvalidBudgetDerivation { reason } => {
+                write!(f, "Invalid budget derivation: {}", reason)
+            }
+            ResourceError::BudgetInheritanceViolation => write!(
+                f,
+                "Budget inheritance violation: child budget exceeds parent"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ResourceError {}
 
 #[cfg(test)]
 mod tests {

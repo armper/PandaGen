@@ -4,6 +4,7 @@ use crate::{ObjectId, VersionId};
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+use core_types::new_uuid;
 use uuid::Uuid;
 
 /// Unique identifier for a transaction
@@ -12,7 +13,7 @@ pub struct TransactionId(Uuid);
 
 impl TransactionId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     pub fn as_uuid(&self) -> Uuid {

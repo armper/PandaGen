@@ -17,10 +17,12 @@
 //! - [`MemoryRegion`]: Represents a memory region with permissions and backing
 //! - [`MemoryPerms`]: Permission flags for memory regions (Read, Write, Execute)
 
+use alloc::vec::Vec;
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use thiserror::Error;
 use uuid::Uuid;
+
+use crate::new_uuid;
 
 /// Unique identifier for an address space
 ///
@@ -32,7 +34,7 @@ pub struct AddressSpaceId(Uuid);
 impl AddressSpaceId {
     /// Creates a new unique address space ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Returns the inner UUID value
@@ -60,7 +62,7 @@ pub struct MemoryRegionId(Uuid);
 impl MemoryRegionId {
     /// Creates a new unique memory region ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Returns the inner UUID value
@@ -353,40 +355,78 @@ impl Default for AddressSpace {
 }
 
 /// Memory-related errors
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum MemoryError {
-    #[error("Address space not found: {0}")]
     AddressSpaceNotFound(AddressSpaceId),
 
-    #[error("Memory region not found: {0}")]
     RegionNotFound(MemoryRegionId),
 
-    #[error("Permission denied: attempted {access_type} on region {region_id} with permissions {permissions}")]
     PermissionDenied {
         region_id: MemoryRegionId,
         access_type: MemoryAccessType,
         permissions: MemoryPerms,
     },
 
-    #[error("Invalid region size: {0} bytes (must be > 0)")]
     InvalidRegionSize(u64),
 
-    #[error("Region overlap detected")]
     RegionOverlap,
 
-    #[error("Memory budget exhausted: attempted to allocate {requested} bytes, {available} bytes remaining")]
     BudgetExhausted { requested: u64, available: u64 },
 
-    #[error("Cross-address-space access denied: region {region_id} belongs to address space {owner_space}, not {accessor_space}")]
     CrossSpaceAccess {
         region_id: MemoryRegionId,
         owner_space: AddressSpaceId,
         accessor_space: AddressSpaceId,
     },
 
-    #[error("No capability for region: {0}")]
     NoCapability(MemoryRegionId),
 }
+
+impl fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryError::AddressSpaceNotFound(id) => {
+                write!(f, "Address space not found: {}", id)
+            }
+            MemoryError::RegionNotFound(id) => write!(f, "Memory region not found: {}", id),
+            MemoryError::PermissionDenied {
+                region_id,
+                access_type,
+                permissions,
+            } => write!(
+                f,
+                "Permission denied: attempted {} on region {} with permissions {}",
+                access_type, region_id, permissions
+            ),
+            MemoryError::InvalidRegionSize(size) => {
+                write!(f, "Invalid region size: {} bytes (must be > 0)", size)
+            }
+            MemoryError::RegionOverlap => write!(f, "Region overlap detected"),
+            MemoryError::BudgetExhausted {
+                requested,
+                available,
+            } => write!(
+                f,
+                "Memory budget exhausted: attempted to allocate {} bytes, {} bytes remaining",
+                requested, available
+            ),
+            MemoryError::CrossSpaceAccess {
+                region_id,
+                owner_space,
+                accessor_space,
+            } => write!(
+                f,
+                "Cross-address-space access denied: region {} belongs to address space {}, not {}",
+                region_id, owner_space, accessor_space
+            ),
+            MemoryError::NoCapability(region_id) => {
+                write!(f, "No capability for region: {}", region_id)
+            }
+        }
+    }
+}
+
+impl core::error::Error for MemoryError {}
 
 /// Capability for an address space
 ///

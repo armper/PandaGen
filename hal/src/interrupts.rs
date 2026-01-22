@@ -1,5 +1,7 @@
 //! Interrupt handling abstraction
 
+use alloc::collections::BTreeMap;
+
 /// Interrupt handler trait
 ///
 /// This trait abstracts interrupt handling. Different architectures
@@ -36,14 +38,14 @@ pub enum InterruptError {
 /// allows systems to inspect installed handlers without touching the IDT.
 #[derive(Debug, Clone)]
 pub struct InterruptRegistry {
-    handlers: std::collections::HashMap<u8, fn()>,
+    handlers: BTreeMap<u8, fn()>,
 }
 
 impl InterruptRegistry {
     /// Creates a new empty registry.
     pub fn new() -> Self {
         Self {
-            handlers: std::collections::HashMap::new(),
+            handlers: BTreeMap::new(),
         }
     }
 

@@ -16,6 +16,7 @@
 //! - Data Port (0x60): Read/write data
 
 use crate::port_io::PortIo;
+use core::prelude::v1::*;
 use hal::keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
 
 /// PS/2 controller port addresses

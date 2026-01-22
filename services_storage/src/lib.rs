@@ -22,9 +22,8 @@
 //! - **Schema Evolution**: Objects have schema identity and version
 //! - **Migration**: Deterministic, testable data transformations
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
-#[cfg(feature = "alloc")]
 extern crate alloc;
 
 pub mod block_storage;

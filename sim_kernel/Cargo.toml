@@ -9,7 +9,7 @@ license.workspace = true
 kernel_api.workspace = true
 core_types.workspace = true
 ipc.workspace = true
-serde.workspace = true
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 identity.workspace = true
 policy.workspace = true
 resources.workspace = true

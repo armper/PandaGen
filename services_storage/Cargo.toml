@@ -14,9 +14,14 @@ core_types.workspace = true
 identity.workspace = true
 kernel_api.workspace = true
 ipc.workspace = true
-uuid = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
-sim_kernel.workspace = true
 hal = { path = "../hal", features = ["alloc"] }
 crc32fast = { version = "1.4", default-features = false }
+
+[target.'cfg(target_os = "none")'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["serde"] }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+sim_kernel.workspace = true
+uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }

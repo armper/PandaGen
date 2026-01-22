@@ -24,11 +24,15 @@
 //! - Access control lists (ACLs)
 //! - Global policy engine
 
-use core_types::TaskId;
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::string::{String, ToString};
+use core::fmt;
+use core_types::{new_uuid, TaskId};
 use resources::{ResourceBudget, ResourceUsage};
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use thiserror::Error;
 use uuid::Uuid;
 
 /// Unique identifier for an execution context
@@ -41,7 +45,7 @@ pub struct ExecutionId(Uuid);
 impl ExecutionId {
     /// Creates a new unique execution ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Returns the inner UUID value
@@ -289,26 +293,41 @@ pub struct ExitNotification {
 }
 
 /// Identity-related errors
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum IdentityError {
-    #[error("Identity not found: {0}")]
     NotFound(ExecutionId),
 
-    #[error("Identity already exists: {0}")]
     AlreadyExists(ExecutionId),
 
-    #[error("Parent identity not found: {0}")]
     ParentNotFound(ExecutionId),
 
-    #[error("Supervisor mismatch: {child} is not supervised by {supervisor}")]
     SupervisorMismatch {
         child: ExecutionId,
         supervisor: ExecutionId,
     },
 
-    #[error("Cannot control unrelated identity: {0}")]
     UnrelatedIdentity(ExecutionId),
 }
+
+impl fmt::Display for IdentityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IdentityError::NotFound(id) => write!(f, "Identity not found: {}", id),
+            IdentityError::AlreadyExists(id) => write!(f, "Identity already exists: {}", id),
+            IdentityError::ParentNotFound(id) => write!(f, "Parent identity not found: {}", id),
+            IdentityError::SupervisorMismatch { child, supervisor } => write!(
+                f,
+                "Supervisor mismatch: {} is not supervised by {}",
+                child, supervisor
+            ),
+            IdentityError::UnrelatedIdentity(id) => {
+                write!(f, "Cannot control unrelated identity: {}", id)
+            }
+        }
+    }
+}
+
+impl core::error::Error for IdentityError {}
 
 #[cfg(test)]
 mod tests {

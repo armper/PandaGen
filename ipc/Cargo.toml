@@ -7,7 +7,11 @@ license.workspace = true
 
 [dependencies]
 core_types.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
-thiserror.workspace = true
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["serde"] }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }

@@ -7,6 +7,8 @@
 //! All unsafe code is isolated to MMIO register access and ring pointer operations.
 //! Higher-level APIs are safe Rust.
 
+use core::prelude::v1::*;
+
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU16, Ordering};
 

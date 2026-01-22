@@ -1,3 +1,5 @@
+#![no_std]
+
 //! # Hardware Abstraction Layer (HAL)
 //!
 //! This crate defines hardware abstraction traits.
@@ -15,6 +17,8 @@
 //! 2. **Trait-based**: All hardware operations go through traits
 //! 3. **Minimal unsafe**: Hardware access requires unsafe, but keep it isolated
 //! 4. **Testable**: HAL can be mocked for testing
+
+extern crate alloc;
 
 pub mod block_device;
 pub mod cpu;

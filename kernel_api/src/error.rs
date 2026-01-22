@@ -1,52 +1,41 @@
 //! Kernel error types
 
-use thiserror::Error;
+use alloc::string::String;
 
 /// Errors that can occur when interacting with the kernel
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum KernelError {
     /// Task spawn failed
-    #[error("Failed to spawn task: {0}")]
     SpawnFailed(String),
 
     /// Channel operation failed
-    #[error("Channel error: {0}")]
     ChannelError(String),
 
     /// Message send failed
-    #[error("Failed to send message: {0}")]
     SendFailed(String),
 
     /// Message receive failed
-    #[error("Failed to receive message: {0}")]
     ReceiveFailed(String),
 
     /// Timeout occurred
-    #[error("Operation timed out")]
     Timeout,
 
     /// Service not found
-    #[error("Service not found: {0}")]
     ServiceNotFound(String),
 
     /// Service already registered
-    #[error("Service already registered: {0}")]
     ServiceAlreadyRegistered(String),
 
     /// Insufficient authority
-    #[error("Insufficient authority: {0}")]
     InsufficientAuthority(String),
 
     /// Invalid capability
-    #[error("Invalid capability: {0}")]
     InvalidCapability(String),
 
     /// Resource exhausted (legacy - use ResourceBudgetExhausted for detailed errors)
-    #[error("Resource exhausted: {0}")]
     ResourceExhausted(String),
 
     /// Resource budget exceeded (pre-exhaustion warning)
-    #[error("Resource budget exceeded: {resource_type} limit={limit}, usage={usage}, identity={identity}, operation={operation}")]
     ResourceBudgetExceeded {
         resource_type: String,
         limit: u64,
@@ -56,7 +45,6 @@ pub enum KernelError {
     },
 
     /// Resource budget exhausted (hard limit reached)
-    #[error("Resource budget exhausted: {resource_type} limit={limit}, usage={usage}, identity={identity}, operation={operation}")]
     ResourceBudgetExhausted {
         resource_type: String,
         limit: u64,
@@ -65,3 +53,48 @@ pub enum KernelError {
         operation: String,
     },
 }
+
+impl core::fmt::Display for KernelError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            KernelError::SpawnFailed(msg) => write!(f, "Failed to spawn task: {}", msg),
+            KernelError::ChannelError(msg) => write!(f, "Channel error: {}", msg),
+            KernelError::SendFailed(msg) => write!(f, "Failed to send message: {}", msg),
+            KernelError::ReceiveFailed(msg) => write!(f, "Failed to receive message: {}", msg),
+            KernelError::Timeout => write!(f, "Operation timed out"),
+            KernelError::ServiceNotFound(msg) => write!(f, "Service not found: {}", msg),
+            KernelError::ServiceAlreadyRegistered(msg) => {
+                write!(f, "Service already registered: {}", msg)
+            }
+            KernelError::InsufficientAuthority(msg) => {
+                write!(f, "Insufficient authority: {}", msg)
+            }
+            KernelError::InvalidCapability(msg) => write!(f, "Invalid capability: {}", msg),
+            KernelError::ResourceExhausted(msg) => write!(f, "Resource exhausted: {}", msg),
+            KernelError::ResourceBudgetExceeded {
+                resource_type,
+                limit,
+                usage,
+                identity,
+                operation,
+            } => write!(
+                f,
+                "Resource budget exceeded: {} limit={}, usage={}, identity={}, operation={}",
+                resource_type, limit, usage, identity, operation
+            ),
+            KernelError::ResourceBudgetExhausted {
+                resource_type,
+                limit,
+                usage,
+                identity,
+                operation,
+            } => write!(
+                f,
+                "Resource budget exhausted: {} limit={}, usage={}, identity={}, operation={}",
+                resource_type, limit, usage, identity, operation
+            ),
+        }
+    }
+}
+
+impl core::error::Error for KernelError {}

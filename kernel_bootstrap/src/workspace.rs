@@ -8,6 +8,11 @@ extern crate alloc;
 
 use core::fmt::Write;
 
+#[cfg(not(test))]
+use alloc::string::{String, ToString};
+#[cfg(test)]
+use std::string::{String, ToString};
+
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
@@ -279,21 +284,35 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                             let path = parts.next();
                             let mut editor = MinimalEditor::new(23);
                             
-                            if let (Some(path), Some(ref mut fs)) = (path, self.filesystem.as_mut()) {
+                            let mut open_message: Option<String> = None;
+                            let mut open_secondary: Option<String> = None;
+                            let mut opened_handle = None;
+
+                            if let (Some(path), Some(fs)) = (path, self.filesystem.as_mut()) {
                                 // Try to load file content
                                 let mut io = BareMetalEditorIo::new(core::mem::take(fs));
                                 match io.open(path) {
                                     Ok((content, handle)) => {
                                         editor.load_content(&content);
-                                        self.current_document = Some(handle);
-                                        self.emit_line(serial, &alloc::format!("Opened: {}", path));
+                                        opened_handle = Some(handle);
+                                        open_message = Some(alloc::format!("Opened: {}", path));
                                     }
                                     Err(_) => {
-                                        self.emit_line(serial, &alloc::format!("File not found: {}", path));
-                                        self.emit_line(serial, "Starting with empty buffer");
+                                        open_message = Some(alloc::format!("File not found: {}", path));
+                                        open_secondary = Some("Starting with empty buffer".to_string());
                                     }
                                 }
                                 *fs = io.into_filesystem();
+                            }
+
+                            if let Some(handle) = opened_handle {
+                                self.current_document = Some(handle);
+                            }
+                            if let Some(message) = open_message {
+                                self.emit_line(serial, &message);
+                            }
+                            if let Some(message) = open_secondary {
+                                self.emit_line(serial, &message);
                             }
                             
                             self.editor = Some(editor);

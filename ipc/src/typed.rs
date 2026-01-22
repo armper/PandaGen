@@ -4,6 +4,7 @@
 //! and structured responses with explicit error details.
 
 use crate::{MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
+use alloc::string::{String, ToString};
 use core_types::ServiceId;
 use serde::{Deserialize, Serialize};
 

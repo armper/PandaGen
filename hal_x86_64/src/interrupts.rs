@@ -4,6 +4,8 @@
 //! without touching real hardware. It wires IDT registration, safe
 //! handler registration, and PIC/APIC acknowledge paths.
 
+use core::prelude::v1::*;
+
 use crate::idt::{Idt, IdtError};
 use hal::interrupts::{InterruptError, InterruptRegistry};
 

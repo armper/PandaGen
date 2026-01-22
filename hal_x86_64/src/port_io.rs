@@ -13,6 +13,9 @@
 //!
 //! The `RealPortIo` implementation isolates all unsafe code to small, auditable functions.
 
+use alloc::vec::Vec;
+use core::prelude::v1::*;
+
 /// Port I/O trait
 ///
 /// Abstracts x86 I/O port operations to allow test doubles.

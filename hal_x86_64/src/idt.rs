@@ -3,6 +3,8 @@
 //! This is a safe, testable placeholder for interrupt registration.
 //! It does not install a real IDT in hardware.
 
+use core::prelude::v1::*;
+
 /// IDT registration errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdtError {

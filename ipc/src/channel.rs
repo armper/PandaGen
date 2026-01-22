@@ -1,7 +1,8 @@
 //! Channel abstraction for message passing
 
+use core::fmt;
+use core_types::new_uuid;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
 
 /// Unique identifier for a communication channel
@@ -11,7 +12,7 @@ pub struct ChannelId(Uuid);
 impl ChannelId {
     /// Creates a new random channel ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a channel ID from a UUID

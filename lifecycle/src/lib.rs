@@ -17,11 +17,16 @@
 //! - `Deadline`: Point in time when operation should timeout
 //! - `Timeout`: Duration-based timeout with start time
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::rc::Rc;
+use alloc::string::String;
+use core::cell::RefCell;
+use core::fmt;
 use kernel_api::Instant;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
-use std::rc::Rc;
-use thiserror::Error;
 
 /// Reason for cancellation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,8 +43,8 @@ pub enum CancellationReason {
     Custom(String),
 }
 
-impl std::fmt::Display for CancellationReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CancellationReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CancellationReason::UserCancel => write!(f, "user cancelled"),
             CancellationReason::Timeout => write!(f, "timeout"),
@@ -273,14 +278,25 @@ impl Timeout {
 }
 
 /// Errors related to lifecycle operations
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum LifecycleError {
-    #[error("Operation was cancelled: {reason}")]
     Cancelled { reason: CancellationReason },
 
-    #[error("Operation timed out")]
     Timeout,
 }
+
+impl fmt::Display for LifecycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LifecycleError::Cancelled { reason } => {
+                write!(f, "Operation was cancelled: {}", reason)
+            }
+            LifecycleError::Timeout => write!(f, "Operation timed out"),
+        }
+    }
+}
+
+impl core::error::Error for LifecycleError {}
 
 #[cfg(test)]
 mod tests {

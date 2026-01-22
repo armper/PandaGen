@@ -17,11 +17,16 @@
 //! - [`ObjectSchemaId`]: Identifier for storage object schema types
 //! - [`ObjectSchemaVersion`]: Version number for storage object schemas
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
 pub mod capability;
 pub mod ids;
 pub mod memory;
 pub mod service_ids;
 pub mod storage_schema;
+pub mod uuid_tools;
 
 pub use capability::{
     Cap, CapabilityError, CapabilityEvent, CapabilityGrant, CapabilityInvalidReason,
@@ -34,3 +39,4 @@ pub use memory::{
 };
 pub use service_ids::{command_service_id, console_service_id, input_service_id, timer_service_id};
 pub use storage_schema::{MigrationLineage, ObjectSchemaId, ObjectSchemaVersion};
+pub use uuid_tools::new_uuid;

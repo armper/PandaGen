@@ -27,10 +27,10 @@
 //! ```
 
 use crate::TaskId;
+use alloc::string::String;
+use core::fmt;
+use core::marker::PhantomData;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::marker::PhantomData;
-use thiserror::Error;
 
 /// A strongly-typed capability handle
 ///
@@ -88,23 +88,34 @@ impl<T> Eq for Cap<T> {}
 
 impl<T> fmt::Display for Cap<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cap<{}>({})", std::any::type_name::<T>(), self.id)
+        write!(f, "Cap<{}>({})", core::any::type_name::<T>(), self.id)
     }
 }
 
 /// Errors related to capability operations
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CapabilityError {
     /// Attempted to cast a capability to an incompatible type
-    #[error("Invalid capability cast")]
     InvalidCast,
     /// Attempted to use a capability that has been revoked
-    #[error("Capability has been revoked")]
     Revoked,
     /// Attempted to grant a capability without authority
-    #[error("Insufficient authority to grant capability")]
     InsufficientAuthority,
 }
+
+impl fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CapabilityError::InvalidCast => write!(f, "Invalid capability cast"),
+            CapabilityError::Revoked => write!(f, "Capability has been revoked"),
+            CapabilityError::InsufficientAuthority => {
+                write!(f, "Insufficient authority to grant capability")
+            }
+        }
+    }
+}
+
+impl core::error::Error for CapabilityError {}
 
 /// Represents a capability grant operation
 ///

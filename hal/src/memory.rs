@@ -1,22 +1,33 @@
 //! Memory management abstraction
 
-use thiserror::Error;
+use core::fmt;
 
 /// Errors that can occur during memory operations
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryError {
     /// Invalid address
-    #[error("Invalid address: {0:#x}")]
     InvalidAddress(usize),
 
     /// Out of memory
-    #[error("Out of memory")]
     OutOfMemory,
 
     /// Permission denied
-    #[error("Permission denied")]
     PermissionDenied,
 }
+
+impl fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryError::InvalidAddress(address) => {
+                write!(f, "Invalid address: {address:#x}")
+            }
+            MemoryError::OutOfMemory => write!(f, "Out of memory"),
+            MemoryError::PermissionDenied => write!(f, "Permission denied"),
+        }
+    }
+}
+
+impl core::error::Error for MemoryError {}
 
 /// Memory management operations
 ///

@@ -27,11 +27,20 @@
 //!
 //! Policy provides governance, not control. Authority comes from capabilities.
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 use identity::{IdentityKind, IdentityMetadata, TrustDomain};
 use pipeline::{PipelineId, StageId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fmt;
 
 // ============================================================================
 // Phase 10: Capability Set and Derived Authority Types
@@ -44,14 +53,14 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySet {
     /// Set of capability IDs
-    pub capabilities: HashSet<u64>,
+    pub capabilities: BTreeSet<u64>,
 }
 
 impl CapabilitySet {
     /// Creates a new empty capability set
     pub fn new() -> Self {
         Self {
-            capabilities: HashSet::new(),
+            capabilities: BTreeSet::new(),
         }
     }
 
