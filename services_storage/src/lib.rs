@@ -22,6 +22,11 @@
 //! - **Schema Evolution**: Objects have schema identity and version
 //! - **Migration**: Deterministic, testable data transformations
 
+#![no_std]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 pub mod block_storage;
 pub mod failing_device;
 pub mod journaled_storage;

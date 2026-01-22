@@ -12,9 +12,14 @@
 use crate::{
     ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId,
 };
+use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 
 /// Superblock - stored in block 0
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,13 +121,13 @@ pub struct BlockStorage<D: BlockDevice> {
     device: D,
     superblock: Superblock,
     /// Map object versions to their block locations
-    allocations: HashMap<(ObjectId, VersionId), AllocationEntry>,
+    allocations: BTreeMap<(ObjectId, VersionId), AllocationEntry>,
     /// Track the latest version for each object
-    latest_versions: HashMap<ObjectId, VersionId>,
+    latest_versions: BTreeMap<ObjectId, VersionId>,
     /// Free blocks
-    free_blocks: HashSet<u64>,
+    free_blocks: BTreeSet<u64>,
     /// Pending writes for active transactions
-    pending: HashMap<TransactionId, Vec<PendingWrite>>,
+    pending: BTreeMap<TransactionId, Vec<PendingWrite>>,
     /// Recovery report (if opened from existing storage)
     recovery_report: Option<StorageRecoveryReport>,
 }
@@ -210,15 +215,15 @@ impl<D: BlockDevice> BlockStorage<D> {
         device.flush()?;
 
         // Initialize free blocks (all data blocks are free)
-        let free_blocks: HashSet<u64> = (data_start..total_blocks).collect();
+        let free_blocks: BTreeSet<u64> = (data_start..total_blocks).collect();
 
         Ok(Self {
             device,
             superblock,
-            allocations: HashMap::new(),
-            latest_versions: HashMap::new(),
+            allocations: BTreeMap::new(),
+            latest_versions: BTreeMap::new(),
             free_blocks,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             recovery_report: None,
         })
     }
@@ -239,15 +244,15 @@ impl<D: BlockDevice> BlockStorage<D> {
         }
 
         // Create storage instance
-        let free_blocks: HashSet<u64> = (superblock.data_start..superblock.total_blocks).collect();
+        let free_blocks: BTreeSet<u64> = (superblock.data_start..superblock.total_blocks).collect();
 
         let mut storage = Self {
             device,
             superblock,
-            allocations: HashMap::new(),
-            latest_versions: HashMap::new(),
+            allocations: BTreeMap::new(),
+            latest_versions: BTreeMap::new(),
             free_blocks,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             recovery_report: None,
         };
 
@@ -564,6 +569,8 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::vec;
     use hal::RamDisk;
 
     #[test]

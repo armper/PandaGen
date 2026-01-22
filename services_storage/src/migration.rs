@@ -3,8 +3,11 @@
 //! This module provides the mechanism for migrating storage objects
 //! from one schema version to another.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 use core_types::{MigrationLineage, ObjectSchemaVersion};
-use std::fmt;
 
 /// Error that can occur during migration
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +42,6 @@ impl fmt::Display for MigrationError {
         }
     }
 }
-
-impl std::error::Error for MigrationError {}
 
 /// Trait for migrating storage object data between schema versions
 ///
@@ -215,23 +216,26 @@ pub fn create_lineage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
+    use core::str;
 
     // Simple test migrations that transform JSON strings
     fn migrate_v1_to_v2(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
         let s =
-            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v2", s).into_bytes())
     }
 
     fn migrate_v2_to_v3(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
         let s =
-            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v3", s).into_bytes())
     }
 
     fn migrate_v3_to_v4(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
         let s =
-            std::str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v4", s).into_bytes())
     }
 

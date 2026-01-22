@@ -13,15 +13,16 @@
 //! 3. **Clear error messages**: Explain WHY access failed, not just "no"
 //! 4. **Typed access**: Read/Write/Execute are distinct capabilities
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt;
 use uuid::Uuid;
 
 use crate::{ObjectId, VersionId};
 
 /// Unique identifier for a principal (component, user, or service)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PrincipalId(Uuid);
 
 impl PrincipalId {
@@ -278,19 +279,17 @@ impl fmt::Display for AccessDenialReason {
     }
 }
 
-impl std::error::Error for AccessDenialReason {}
-
 /// Permission checker for validating capabilities
 pub struct PermissionChecker {
     /// Map of object ID to ownership
-    ownership: HashMap<ObjectId, Ownership>,
+    ownership: BTreeMap<ObjectId, Ownership>,
 }
 
 impl PermissionChecker {
     /// Creates a new permission checker
     pub fn new() -> Self {
         Self {
-            ownership: HashMap::new(),
+            ownership: BTreeMap::new(),
         }
     }
 
@@ -368,6 +367,7 @@ impl Default for PermissionChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     #[test]
     fn test_principal_id_creation() {

@@ -3,6 +3,8 @@
 //! A BlockDevice wrapper that can simulate failures for testing crash-safe storage.
 //! Useful for testing recovery scenarios without requiring actual power loss.
 
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use hal::{BlockDevice, BlockError};
 
 /// Policy for when failures should occur
@@ -23,7 +25,7 @@ pub struct FailingBlockDevice<D: BlockDevice> {
     inner: D,
     policy: FailurePolicy,
     write_count: usize,
-    block_write_counts: std::collections::HashMap<u64, usize>,
+    block_write_counts: BTreeMap<u64, usize>,
 }
 
 impl<D: BlockDevice> FailingBlockDevice<D> {
@@ -33,7 +35,7 @@ impl<D: BlockDevice> FailingBlockDevice<D> {
             inner,
             policy,
             write_count: 0,
-            block_write_counts: std::collections::HashMap::new(),
+            block_write_counts: BTreeMap::new(),
         }
     }
 
@@ -113,6 +115,7 @@ impl<D: BlockDevice> BlockDevice for FailingBlockDevice<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use hal::{RamDisk, BLOCK_SIZE};
 
     #[test]
