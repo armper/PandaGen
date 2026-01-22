@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Performance debugging instrumentation (zero-cost in release, minimal cost in debug)
+perf_debug = []
+
 [dependencies]
 view_types = { workspace = true }
 services_workspace_manager = { workspace = true }

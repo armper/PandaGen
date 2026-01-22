@@ -29,9 +29,19 @@
 //! - Generate input events
 //!
 //! This is presentation, not authority.
+//!
+//! ## Performance Debugging
+//!
+//! Enable the `perf_debug` feature flag to get detailed performance metrics:
+//! ```bash
+//! cargo build --features perf_debug
+//! ```
 
 use view_types::{CursorPosition, ViewContent, ViewFrame};
 use std::collections::HashMap;
+
+#[cfg(feature = "perf_debug")]
+use std::time::Instant;
 
 /// Default separator width for status line
 /// This could be made configurable in the future based on terminal width
@@ -75,6 +85,106 @@ pub struct RenderStats {
     pub chars_written_per_frame: usize,
     /// Number of lines redrawn in the last frame
     pub lines_redrawn_per_frame: usize,
+    
+    #[cfg(feature = "perf_debug")]
+    /// Total number of glyph draw calls
+    pub glyph_draws: usize,
+    #[cfg(feature = "perf_debug")]
+    /// Total number of clear operations (viewport or line clears)
+    pub clear_operations: usize,
+    #[cfg(feature = "perf_debug")]
+    /// Total number of flush/blit operations
+    pub flush_operations: usize,
+    #[cfg(feature = "perf_debug")]
+    /// Number of status line redraws
+    pub status_line_redraws: usize,
+    #[cfg(feature = "perf_debug")]
+    /// Frame render time in microseconds
+    pub frame_time_us: u64,
+}
+
+impl RenderStats {
+    /// Reset all stats to zero (called at frame begin)
+    fn reset(&mut self) {
+        self.chars_written_per_frame = 0;
+        self.lines_redrawn_per_frame = 0;
+        
+        #[cfg(feature = "perf_debug")]
+        {
+            self.glyph_draws = 0;
+            self.clear_operations = 0;
+            self.flush_operations = 0;
+            self.status_line_redraws = 0;
+            self.frame_time_us = 0;
+        }
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Record a glyph draw operation
+    fn record_glyph_draw(&mut self, count: usize) {
+        self.glyph_draws += count;
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Record a clear operation
+    fn record_clear(&mut self) {
+        self.clear_operations += 1;
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Record a flush/blit operation
+    fn record_flush(&mut self) {
+        self.flush_operations += 1;
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Record a status line redraw
+    fn record_status_redraw(&mut self) {
+        self.status_line_redraws += 1;
+    }
+}
+
+/// Performance overlay that can be displayed on screen (when perf_debug enabled)
+#[cfg(feature = "perf_debug")]
+pub struct PerfOverlay {
+    /// Whether the overlay is visible
+    pub visible: bool,
+}
+
+#[cfg(feature = "perf_debug")]
+impl PerfOverlay {
+    pub fn new() -> Self {
+        Self { visible: false }
+    }
+    
+    pub fn toggle(&mut self) {
+        self.visible = !self.visible;
+    }
+    
+    pub fn render(&self, stats: &RenderStats) -> String {
+        if !self.visible {
+            return String::new();
+        }
+        
+        format!(
+            "╔════ PERF ════╗\n\
+             ║ Frame: {:>4}µs║\n\
+             ║ Chars: {:>6}║\n\
+             ║ Lines: {:>6}║\n\
+             ║ Glyphs:{:>6}║\n\
+             ║ Clears:{:>6}║\n\
+             ║ Flush: {:>6}║\n\
+             ║ Status:{:>6}║\n\
+             ╚══════════════╝",
+            stats.frame_time_us,
+            stats.chars_written_per_frame,
+            stats.lines_redrawn_per_frame,
+            stats.glyph_draws,
+            stats.clear_operations,
+            stats.flush_operations,
+            stats.status_line_redraws,
+        )
+    }
 }
 
 /// Text renderer that converts ViewFrames to text output
@@ -86,6 +196,14 @@ pub struct TextRenderer {
     view_cache: ViewCache,
     /// Rendering statistics
     stats: RenderStats,
+    
+    #[cfg(feature = "perf_debug")]
+    /// Performance overlay
+    perf_overlay: PerfOverlay,
+    
+    #[cfg(feature = "perf_debug")]
+    /// Frame start time for timing measurements
+    frame_start: Option<Instant>,
 }
 
 impl TextRenderer {
@@ -96,8 +214,36 @@ impl TextRenderer {
             last_status_revision: None,
             view_cache: ViewCache::new(),
             stats: RenderStats::default(),
+            
+            #[cfg(feature = "perf_debug")]
+            perf_overlay: PerfOverlay::new(),
+            
+            #[cfg(feature = "perf_debug")]
+            frame_start: None,
         }
     }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Toggle performance overlay visibility
+    pub fn toggle_perf_overlay(&mut self) {
+        self.perf_overlay.toggle();
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// Begin frame timing
+    fn frame_begin(&mut self) {
+        self.frame_start = Some(Instant::now());
+    }
+    
+    #[cfg(feature = "perf_debug")]
+    /// End frame timing and record duration
+    fn frame_end(&mut self) {
+        if let Some(start) = self.frame_start {
+            self.stats.frame_time_us = start.elapsed().as_micros() as u64;
+            self.frame_start = None;
+        }
+    }
+
 
     /// Get the latest rendering statistics
     pub fn stats(&self) -> &RenderStats {
@@ -124,9 +270,12 @@ impl TextRenderer {
         main_view: Option<&ViewFrame>,
         status_view: Option<&ViewFrame>,
     ) -> String {
+        // Begin frame timing
+        #[cfg(feature = "perf_debug")]
+        self.frame_begin();
+        
         // Reset stats for new frame
-        self.stats.chars_written_per_frame = 0;
-        self.stats.lines_redrawn_per_frame = 0;
+        self.stats.reset();
 
         let mut output = String::new();
 
@@ -139,6 +288,9 @@ impl TextRenderer {
             output.push_str("(no view)\n");
             self.last_main_revision = None;
             self.view_cache.clear();
+            
+            #[cfg(feature = "perf_debug")]
+            self.stats.record_clear();
         }
 
         // Separator line
@@ -150,6 +302,9 @@ impl TextRenderer {
         if let Some(frame) = status_view {
             output.push_str(&self.render_status_line(frame));
             self.last_status_revision = Some(frame.revision);
+            
+            #[cfg(feature = "perf_debug")]
+            self.stats.record_status_redraw();
         } else {
             output.push_str("(no status)\n");
             self.last_status_revision = None;
@@ -157,6 +312,18 @@ impl TextRenderer {
 
         // Update stats
         self.stats.chars_written_per_frame = output.len();
+        
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.record_flush();
+            self.frame_end();
+            
+            // Append perf overlay if visible
+            if self.perf_overlay.visible {
+                output.push('\n');
+                output.push_str(&self.perf_overlay.render(&self.stats));
+            }
+        }
 
         output
     }
@@ -170,9 +337,12 @@ impl TextRenderer {
         main_view: Option<&ViewFrame>,
         status_view: Option<&ViewFrame>,
     ) -> String {
+        // Begin frame timing
+        #[cfg(feature = "perf_debug")]
+        self.frame_begin();
+        
         // Reset stats for new frame
-        self.stats.chars_written_per_frame = 0;
-        self.stats.lines_redrawn_per_frame = 0;
+        self.stats.reset();
 
         let mut output = String::new();
 
@@ -186,6 +356,9 @@ impl TextRenderer {
             if !self.view_cache.lines.is_empty() {
                 output.push_str("(view cleared)\n");
                 self.view_cache.clear();
+                
+                #[cfg(feature = "perf_debug")]
+                self.stats.record_clear();
             }
             self.last_main_revision = None;
         }
@@ -195,10 +368,25 @@ impl TextRenderer {
             if status_view.map(|f| f.revision) != self.last_status_revision {
                 output.push_str(&format!("[STATUS] {}\n", self.render_status_line(frame).trim()));
                 self.stats.chars_written_per_frame += self.render_status_line(frame).len();
+                
+                #[cfg(feature = "perf_debug")]
+                self.stats.record_status_redraw();
             }
             self.last_status_revision = Some(frame.revision);
         } else {
             self.last_status_revision = None;
+        }
+        
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.record_flush();
+            self.frame_end();
+            
+            // Append perf overlay if visible
+            if self.perf_overlay.visible {
+                output.push('\n');
+                output.push_str(&self.perf_overlay.render(&self.stats));
+            }
         }
 
         output
@@ -244,6 +432,10 @@ impl TextRenderer {
                 if line_changed {
                     output.push_str(&format!("[L{}] {}\n", line_idx, rendered_line));
                     chars_written += rendered_line.len();
+                    
+                    #[cfg(feature = "perf_debug")]
+                    self.stats.record_glyph_draw(rendered_line.chars().count());
+                    
                     self.view_cache.set_line(line_idx, rendered_line);
                     lines_changed += 1;
                 }
@@ -257,6 +449,10 @@ impl TextRenderer {
                 if line_changed {
                     output.push_str(&format!("[L{}] {}\n", line_idx, line));
                     chars_written += line.len();
+                    
+                    #[cfg(feature = "perf_debug")]
+                    self.stats.record_glyph_draw(line.chars().count());
+                    
                     self.view_cache.set_line(line_idx, line.clone());
                     lines_changed += 1;
                 }
@@ -634,5 +830,86 @@ mod tests {
         let stats = renderer.stats();
         assert!(stats.chars_written_per_frame > 0);
         assert_eq!(stats.lines_redrawn_per_frame, 1);
+    }
+    
+    #[test]
+    #[cfg(feature = "perf_debug")]
+    fn test_perf_debug_instrumentation() {
+        let mut renderer = TextRenderer::new();
+        let lines = vec!["Test line".to_string(), "Another line".to_string()];
+        let frame = create_text_buffer_frame(lines, None, 1);
+        
+        renderer.render_incremental(Some(&frame), None);
+        
+        let stats = renderer.stats();
+        // With perf_debug, glyph draws should be counted
+        assert!(stats.glyph_draws > 0);
+        assert_eq!(stats.flush_operations, 1);
+        assert!(stats.frame_time_us > 0);
+    }
+    
+    #[test]
+    #[cfg(feature = "perf_debug")]
+    fn test_perf_overlay_toggle() {
+        let mut renderer = TextRenderer::new();
+        
+        // Initially hidden
+        assert!(!renderer.perf_overlay.visible);
+        
+        // Toggle to show
+        renderer.toggle_perf_overlay();
+        assert!(renderer.perf_overlay.visible);
+        
+        // Toggle to hide
+        renderer.toggle_perf_overlay();
+        assert!(!renderer.perf_overlay.visible);
+    }
+    
+    #[test]
+    #[cfg(feature = "perf_debug")]
+    fn test_perf_overlay_in_output() {
+        let mut renderer = TextRenderer::new();
+        let lines = vec!["Test".to_string()];
+        let frame = create_text_buffer_frame(lines, None, 1);
+        
+        // Enable overlay
+        renderer.toggle_perf_overlay();
+        
+        let output = renderer.render_incremental(Some(&frame), None);
+        
+        // Output should contain performance overlay
+        assert!(output.contains("PERF"));
+        assert!(output.contains("Frame:"));
+        assert!(output.contains("Chars:"));
+        assert!(output.contains("Glyphs:"));
+    }
+    
+    #[test]
+    #[cfg(feature = "perf_debug")]
+    fn test_clear_operations_counted() {
+        let mut renderer = TextRenderer::new();
+        
+        // First render with content
+        let lines = vec!["Test".to_string()];
+        let frame1 = create_text_buffer_frame(lines, None, 1);
+        renderer.render_incremental(Some(&frame1), None);
+        
+        // Clear view
+        renderer.render_incremental(None, None);
+        
+        let stats = renderer.stats();
+        assert_eq!(stats.clear_operations, 1);
+    }
+    
+    #[test]
+    #[cfg(feature = "perf_debug")]
+    fn test_status_line_redraws_counted() {
+        let mut renderer = TextRenderer::new();
+        let status1 = create_status_frame("Status 1".to_string(), 1);
+        
+        renderer.render_incremental(None, Some(&status1));
+        
+        let stats = renderer.stats();
+        assert_eq!(stats.status_line_redraws, 1);
     }
 }
