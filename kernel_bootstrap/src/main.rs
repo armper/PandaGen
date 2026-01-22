@@ -18,7 +18,9 @@ extern crate alloc;
 
 mod framebuffer;
 mod minimal_editor;
+mod optimized_render;
 mod output;
+mod render_stats;
 mod vga;
 mod workspace;
 mod display_sink;
@@ -766,6 +768,9 @@ fn workspace_loop(
     let mut prompt_initialized = false;
     let mut last_prompt_row = 0usize;
     let mut last_view_start = 0usize;
+    
+    // Editor render cache for incremental updates (Phase 96 optimization)
+    let mut editor_render_cache = optimized_render::EditorRenderCache::new();
     let mut last_view_len = 0usize;
     let mut last_cursor_col = 0usize;
 
@@ -906,33 +911,23 @@ fn workspace_loop(
                     if workspace.is_editor_active() {
                         let normal_attr = console_vga::Style::Normal.to_vga_attr();
                         let bold_attr = console_vga::Style::Bold.to_vga_attr();
-                        let (cols, rows) = sink.dims();
 
                         if let Some(editor) = workspace.editor() {
-                            if output_dirty {
-                                sink.clear(normal_attr);
-                            }
-                            let viewport_rows = (rows - 1).min(editor.viewport_rows());
-                            for viewport_row in 0..viewport_rows {
-                                for col in 0..cols {
-                                    sink.write_at(col, viewport_row, b' ', normal_attr);
-                                }
-                                if let Some(line) = editor.get_viewport_line(viewport_row) {
-                                    let len = line.len().min(cols);
-                                    sink.write_str_at(0, viewport_row, &line[..len], normal_attr);
-                                }
-                            }
-                            let status_row = rows - 1;
-                            for col in 0..cols {
-                                sink.write_at(col, status_row, b' ', bold_attr);
-                            }
-                            let status = editor.status_line();
-                            let status_len = status.len().min(cols);
-                            sink.write_str_at(0, status_row, &status[..status_len], bold_attr);
-                            if let Some(cursor_pos) = editor.get_viewport_cursor() {
-                                sink.draw_cursor(cursor_pos.col, cursor_pos.row, normal_attr);
-                            } else {
-                                sink.draw_cursor(0, status_row, bold_attr);
+                            // Phase 96: Use optimized incremental renderer
+                            // force_full only on initial entry to editor (output_dirty true on first frame)
+                            let force_full = !editor_render_cache.valid || output_dirty;
+                            let _stats = optimized_render::render_editor_optimized(
+                                sink,
+                                editor,
+                                &mut editor_render_cache,
+                                normal_attr,
+                                bold_attr,
+                                force_full,
+                            );
+                            
+                            #[cfg(debug_assertions)]
+                            if _stats.full_clear {
+                                let _ = writeln!(serial, "editor render: full, cells={}", _stats.cells_written);
                             }
                         }
                         rendered_editor = true;
@@ -941,6 +936,9 @@ fn workspace_loop(
             }
 
             if !rendered_editor {
+                // Invalidate editor cache when not rendering editor
+                editor_render_cache.invalidate();
+                
                 if let Some(ref mut vga) = vga_console {
                 let normal_attr = console_vga::Style::Normal.to_vga_attr();
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
@@ -949,47 +947,30 @@ fn workspace_loop(
 
                 // Check if editor is active
                 if workspace.is_editor_active() {
-                    let _ = writeln!(serial, "render_editor: cols={} rows={}", cols, rows);
-                    // Render editor to sink
+                    // Phase 96: Use optimized renderer via VGA sink wrapper
+                    use crate::display_sink::{DisplaySink, VgaDisplaySink};
+                    let mut vga_sink = VgaDisplaySink::new(vga);
+                    
                     if let Some(editor) = workspace.editor() {
-                        // Clear screen on first render or mode change
-                        if output_dirty {
-                            for row in 0..rows {
-                                clear_vga_line(vga, row, normal_attr);
-                            }
+                        let force_full = !editor_render_cache.is_valid() || output_dirty;
+                        let _stats = optimized_render::render_editor_optimized(
+                            &mut vga_sink,
+                            editor,
+                            &mut editor_render_cache,
+                            normal_attr,
+                            bold_attr,
+                            force_full,
+                        );
+                        
+                        #[cfg(debug_assertions)]
+                        if _stats.full_clear {
+                            let _ = writeln!(serial, "vga editor render: full, cells={}", _stats.cells_written);
                         }
-
-                        // Render editor viewport (rows 0..rows-1)
-                        let viewport_rows = (rows - 1).min(editor.viewport_rows());
-                        for viewport_row in 0..viewport_rows {
-                            // Clear line to prevent artifacts from previous content
-                            clear_vga_line(vga, viewport_row, normal_attr);
-
-                            if let Some(line) = editor.get_viewport_line(viewport_row) {
-                                let len = line.len().min(cols);
-                                vga.write_str_at(0, viewport_row, &line[..len], normal_attr);
-                            }
-                        }
-
-                        // Render status line (last row)
-                        let status_row = rows - 1;
-                        clear_vga_line(vga, status_row, bold_attr);
-                        let status = editor.status_line();
-                        let status_len = status.len().min(cols);
-                        vga.write_str_at(0, status_row, &status[..status_len], bold_attr);
-
-                        // Set cursor position
-                        if let Some(cursor_pos) = editor.get_viewport_cursor() {
-                            vga.draw_cursor(cursor_pos.col, cursor_pos.row, normal_attr);
-                        } else {
-                            // Cursor off-screen, hide it
-                            vga.draw_cursor(0, status_row, bold_attr);
-                        }
-
-                        input_dirty = false;
-                        output_dirty = false;
-                        continue; // Skip normal workspace rendering
                     }
+
+                    input_dirty = false;
+                    output_dirty = false;
+                    continue; // Skip normal workspace rendering
                 }
 
                 // Normal workspace rendering (when editor not active)

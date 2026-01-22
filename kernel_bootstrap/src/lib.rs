@@ -13,6 +13,8 @@ extern crate std;
 
 pub mod display_sink;
 pub mod minimal_editor;
+pub mod optimized_render;
+pub mod render_stats;
 
 // Tests are in the test module
 #[cfg(test)]
