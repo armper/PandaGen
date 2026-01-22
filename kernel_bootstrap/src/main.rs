@@ -1085,22 +1085,37 @@ fn workspace_loop(
                 let output_seq = workspace.output_sequence();
                 let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
                 
-                // Determine rendering strategy:
-                // - scroll: screen was full, is full, shift content up
-                // - append: screen not full, just add new lines at bottom  
-                // - full: first render or major change
-                let can_scroll = output_initialized
-                    && output_rows == max_output_rows
-                    && last_output_rows == max_output_rows
-                    && delta_lines > 0
-                    && delta_lines < max_output_rows;
+                // Determine rendering strategy - prefer incremental over full redraw
+                // 
+                // Fast paths (only draw changed content):
+                // - scroll: screen was full, is full, new lines added
+                // - append: screen not full, add new lines at bottom
+                // - fill_scroll: screen just became full, scroll + draw new
+                //
+                // Slow path:
+                // - full: first render or complex state change
                 
-                // Can append: screen not full yet, just drawing new lines
+                let screen_is_full = output_rows == max_output_rows;
+                let screen_was_full = last_output_rows == max_output_rows;
+                let reasonable_delta = delta_lines > 0 && delta_lines < max_output_rows;
+                
+                let can_scroll = output_initialized
+                    && screen_is_full
+                    && screen_was_full
+                    && reasonable_delta;
+                
+                // Screen just became full - scroll by overflow amount
+                let can_fill_scroll = output_initialized
+                    && screen_is_full
+                    && !screen_was_full
+                    && last_output_rows > 0
+                    && reasonable_delta;
+                
+                // Screen not full yet, just append
                 let can_append = output_initialized
-                    && output_rows <= max_output_rows
+                    && !screen_is_full
                     && delta_lines > 0
-                    && delta_lines <= output_rows
-                    && start == 0;  // haven't started scrolling yet
+                    && delta_lines <= output_rows;
 
                 if output_dirty {
                     if can_scroll {
@@ -1121,13 +1136,35 @@ fn workspace_loop(
                                 fb.draw_line(row, "", fg, bg);
                             }
                         }
+                    } else if can_fill_scroll {
+                        // Screen just became full - scroll the overflow and draw new lines
+                        let overflow = total.saturating_sub(max_output_rows);
+                        if overflow > 0 {
+                            fb.scroll_up_text_lines(overflow, bg);
+                        }
+                        // Draw only the new lines at bottom
+                        let lines_to_draw = delta_lines.min(max_output_rows);
+                        let first_row = max_output_rows - lines_to_draw;
+                        let first_line = total.saturating_sub(lines_to_draw);
+                        for i in 0..lines_to_draw {
+                            let row = first_row + i;
+                            let line_idx = first_line + i;
+                            if let Some(line) = workspace.output_line(line_idx) {
+                                let bytes = line.as_bytes();
+                                let len = bytes.len().min(cols);
+                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                    fb.draw_line(row, text, fg, bg);
+                                }
+                            } else {
+                                fb.draw_line(row, "", fg, bg);
+                            }
+                        }
                     } else if can_append {
                         // Just draw new lines at bottom (no scroll needed)
                         let first_row = output_rows.saturating_sub(delta_lines);
                         for i in 0..delta_lines {
                             let row = first_row + i;
-                            let line_idx = row;  // start is 0, so line_idx == row
-                            if let Some(line) = workspace.output_line(line_idx) {
+                            if let Some(line) = workspace.output_line(row) {
                                 let bytes = line.as_bytes();
                                 let len = bytes.len().min(cols);
                                 if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
