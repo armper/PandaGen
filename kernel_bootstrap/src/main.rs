@@ -1278,13 +1278,12 @@ fn clear_vga_line(vga: &mut console_vga::VgaConsole, row: usize, attr: u8) {
 fn clear_fb_line(
     fb: &mut framebuffer::BareMetalFramebuffer,
     row: usize,
-    cols: usize,
+    _cols: usize,
     bg: (u8, u8, u8),
-    fg: (u8, u8, u8),
+    _fg: (u8, u8, u8),
 ) {
-    for col in 0..cols {
-        fb.draw_char_at(col, row, b' ', fg, bg);
-    }
+    // Optimized: use fast row fill instead of drawing space characters
+    fb.clear_text_row(row, bg);
 }
 
 fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {

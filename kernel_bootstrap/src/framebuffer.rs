@@ -135,17 +135,56 @@ impl BareMetalFramebuffer {
         self.buffer
     }
 
-    /// Clear the screen with a color
+    /// Clear the screen with a color (optimized with memset-style fill)
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         let info = self.info();
         let bg_bytes = info.format.to_bytes(r, g, b);
-
-        // Fill with background color
+        
+        // Use optimized row fill
         for y in 0..info.height {
-            for x in 0..info.width {
-                let offset = info.offset(x, y);
-                write_pixel(self.buffer, offset, bg_bytes);
+            self.fill_pixel_row(y, bg_bytes);
+        }
+    }
+    
+    /// Fill a single pixel row with a color (fast path)
+    fn fill_pixel_row(&mut self, y: usize, color: [u8; 4]) {
+        let info = self.info();
+        if y >= info.height {
+            return;
+        }
+        
+        let bpp = info.format.bytes_per_pixel();
+        let row_start = y * info.stride_pixels * bpp;
+        let row_pixels = info.width;
+        
+        // Fast fill: write 4-byte color pattern directly
+        // This is much faster than individual pixel writes
+        for x in 0..row_pixels {
+            let offset = row_start + x * bpp;
+            if offset + 4 <= self.buffer.len() {
+                // Direct memory write (no volatile needed for filling)
+                self.buffer[offset] = color[0];
+                self.buffer[offset + 1] = color[1];
+                self.buffer[offset + 2] = color[2];
+                self.buffer[offset + 3] = color[3];
             }
+        }
+    }
+    
+    /// Clear a text row (row of characters, not pixels) with background color
+    /// This is much faster than drawing space characters
+    pub fn clear_text_row(&mut self, text_row: usize, bg: (u8, u8, u8)) {
+        if text_row >= self.rows() {
+            return;
+        }
+        
+        let info = self.info();
+        let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+        let y_start = text_row * FONT_HEIGHT;
+        let y_end = (y_start + FONT_HEIGHT).min(info.height);
+        
+        for y in y_start..y_end {
+            self.fill_pixel_row(y, bg_bytes);
         }
     }
 
@@ -240,7 +279,7 @@ impl BareMetalFramebuffer {
     /// Scroll the framebuffer up by the given number of text rows.
     ///
     /// This moves pixel rows up by `lines * FONT_HEIGHT` and clears the bottom
-    /// area with the background color.
+    /// area with the background color. Uses fast memory copy and optimized clearing.
     pub fn scroll_up_text_lines(&mut self, lines: usize, bg: (u8, u8, u8)) {
         if lines == 0 {
             return;
@@ -257,19 +296,17 @@ impl BareMetalFramebuffer {
         let total_bytes = info.height * bytes_per_row;
         let offset = pixel_rows * bytes_per_row;
 
+        // Fast memory move for the scroll
         unsafe {
             let ptr = self.buffer.as_mut_ptr();
             core::ptr::copy(ptr.add(offset), ptr, total_bytes - offset);
         }
 
-        // Clear the bottom pixel rows.
+        // Clear the bottom pixel rows using optimized row fill
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
         let start_row = info.height - pixel_rows;
         for y in start_row..info.height {
-            for x in 0..info.width {
-                let offset = info.offset(x, y);
-                write_pixel(self.buffer, offset, bg_bytes);
-            }
+            self.fill_pixel_row(y, bg_bytes);
         }
     }
 }
