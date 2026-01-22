@@ -61,9 +61,6 @@ tile_manager: TileManager,
     /// Filesystem storage (optional)
     #[cfg(not(test))]
     filesystem: Option<BareMetalFilesystem>,
-    /// Current document path when editor is open
-    #[cfg(not(test))]
-    current_document: Option<crate::bare_metal_editor_io::DocumentHandle>,
 }
 
 impl WorkspaceSession {
@@ -84,8 +81,6 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
             output_seq: 0,
             #[cfg(not(test))]
             filesystem: None,
-            #[cfg(not(test))]
-            current_document: None,
         }
     }
     
@@ -286,28 +281,38 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                             
                             let mut open_message: Option<String> = None;
                             let mut open_secondary: Option<String> = None;
-                            let mut opened_handle = None;
 
-                            if let (Some(path), Some(fs)) = (path, self.filesystem.as_mut()) {
-                                // Try to load file content
-                                let mut io = BareMetalEditorIo::new(core::mem::take(fs));
-                                match io.open(path) {
-                                    Ok((content, handle)) => {
-                                        editor.load_content(&content);
-                                        opened_handle = Some(handle);
-                                        open_message = Some(alloc::format!("Opened: {}", path));
+                            // If we have a filesystem, create an IO adapter and keep it with the editor
+                            if let Some(fs) = self.filesystem.take() {
+                                let mut io = BareMetalEditorIo::new(fs);
+                                
+                                // Try to open the file if a path was provided
+                                if let Some(path) = path {
+                                    match io.open(path) {
+                                        Ok((content, handle)) => {
+                                            editor.load_content(&content);
+                                            editor.set_editor_io(io, handle);
+                                            open_message = Some(alloc::format!("Opened: {} [filesystem available]", path));
+                                        }
+                                        Err(_) => {
+                                            // File not found - create new buffer with IO for save-as
+                                            let handle = io.new_buffer(Some(path.to_string()));
+                                            editor.set_editor_io(io, handle);
+                                            open_message = Some(alloc::format!("File not found: {}", path));
+                                            open_secondary = Some("Starting with empty buffer [filesystem available]".to_string());
+                                        }
                                     }
-                                    Err(_) => {
-                                        open_message = Some(alloc::format!("File not found: {}", path));
-                                        open_secondary = Some("Starting with empty buffer".to_string());
-                                    }
+                                } else {
+                                    // No path provided - new buffer with no default path
+                                    let handle = io.new_buffer(None);
+                                    editor.set_editor_io(io, handle);
+                                    open_message = Some("New buffer [filesystem available]".to_string());
                                 }
-                                *fs = io.into_filesystem();
+                            } else {
+                                // No filesystem available
+                                open_message = Some("Warning: No filesystem - :w will not work".to_string());
                             }
 
-                            if let Some(handle) = opened_handle {
-                                self.current_document = Some(handle);
-                            }
                             if let Some(message) = open_message {
                                 self.emit_line(serial, &message);
                             }
