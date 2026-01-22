@@ -454,6 +454,20 @@ impl Editor {
                 let _ = self.save_document()?;
                 Ok(EditorAction::Quit)
             }
+
+            Command::Edit { path } => {
+                // For now, set a status message that :e is not yet fully implemented
+                // In a full implementation, this would:
+                // 1. Check if current buffer is dirty and prompt if needed
+                // 2. Request a file capability for the new path
+                // 3. Load the new file content
+                // 4. Replace the current buffer
+                self.state.set_status_message(format!(
+                    ":e not yet fully implemented (would open {})",
+                    path
+                ));
+                Ok(EditorAction::Continue)
+            }
         }
     }
 

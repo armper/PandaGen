@@ -37,6 +37,8 @@ pub enum Command {
     ForceQuit,
     /// Write and quit
     WriteQuit,
+    /// Edit another file
+    Edit { path: String },
 }
 
 /// Command parser
@@ -65,6 +67,17 @@ impl CommandParser {
                 } else {
                     // :w - Save to current file
                     Ok(Command::Write)
+                }
+            }
+            "e" | "edit" => {
+                if parts.len() > 1 {
+                    // :e <path> - Edit another file
+                    let path = parts[1..].join(" ");
+                    Ok(Command::Edit { path })
+                } else {
+                    Err(CommandError::InvalidSyntax(
+                        ":e requires a file path".to_string(),
+                    ))
                 }
             }
             "q" | "quit" => Ok(Command::Quit),
@@ -131,6 +144,32 @@ mod tests {
         assert_eq!(
             CommandParser::parse(""),
             Err(CommandError::InvalidSyntax("Empty command".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_edit() {
+        assert_eq!(
+            CommandParser::parse("e test.txt"),
+            Ok(Command::Edit {
+                path: "test.txt".to_string()
+            })
+        );
+        assert_eq!(
+            CommandParser::parse("edit myfile.txt"),
+            Ok(Command::Edit {
+                path: "myfile.txt".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_edit_no_path() {
+        assert_eq!(
+            CommandParser::parse("e"),
+            Err(CommandError::InvalidSyntax(
+                ":e requires a file path".to_string()
+            ))
         );
     }
 

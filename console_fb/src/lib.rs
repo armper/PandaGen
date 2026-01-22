@@ -334,6 +334,44 @@ impl<F: Framebuffer> ConsoleFb<F> {
     pub fn scrollback(&self) -> Option<&ScrollbackBuffer> {
         self.scrollback.as_ref()
     }
+
+    /// Draw a run of text at a specific position in a single batch operation
+    ///
+    /// This is more efficient than calling draw_char_at repeatedly
+    /// as it minimizes per-character overhead.
+    #[cfg(feature = "perf_debug")]
+    pub fn draw_text_run(&mut self, col: usize, row: usize, text: &str) -> usize {
+        if row >= self.rows {
+            return 0;
+        }
+
+        let mut drawn = 0;
+        let mut current_col = col;
+
+        for byte in text.bytes() {
+            if current_col >= self.cols {
+                break;
+            }
+
+            if self.draw_char_at(current_col, row, byte) {
+                drawn += 1;
+            }
+            current_col += 1;
+        }
+
+        drawn
+    }
+
+    /// Draw only specific cells that have changed (dirty-cell rendering)
+    ///
+    /// Takes a list of (col, row, char) tuples and draws only those cells.
+    /// This avoids clearing and redrawing the entire screen.
+    #[cfg(feature = "perf_debug")]
+    pub fn draw_dirty_cells(&mut self, cells: &[(usize, usize, u8)]) {
+        for &(col, row, ch) in cells {
+            self.draw_char_at(col, row, ch);
+        }
+    }
 }
 
 /// Calculate text dimensions (cols, rows) for a framebuffer
