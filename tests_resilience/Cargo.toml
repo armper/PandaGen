@@ -13,6 +13,7 @@ ipc.workspace = true
 services_registry.workspace = true
 services_process_manager.workspace = true
 services_storage.workspace = true
+services_editor_vi.workspace = true
 cli_console.workspace = true
 identity.workspace = true
 resources.workspace = true
