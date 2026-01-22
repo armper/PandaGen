@@ -37,6 +37,8 @@ pub enum Command {
     ForceQuit,
     /// Write and quit
     WriteQuit,
+    /// Edit another file (with optional path)
+    Edit { path: Option<String> },
 }
 
 /// Command parser
@@ -65,6 +67,16 @@ impl CommandParser {
                 } else {
                     // :w - Save to current file
                     Ok(Command::Write)
+                }
+            }
+            "e" | "edit" => {
+                if parts.len() > 1 {
+                    // :e <path> - Edit file
+                    let path = parts[1..].join(" ");
+                    Ok(Command::Edit { path: Some(path) })
+                } else {
+                    // :e - Reload current file
+                    Ok(Command::Edit { path: None })
                 }
             }
             "q" | "quit" => Ok(Command::Quit),
