@@ -23,8 +23,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use serde::{Deserialize, Serialize};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a view

@@ -30,8 +30,11 @@
 //!
 //! This is presentation, not authority.
 
-use view_types::{CursorPosition, ViewContent, ViewFrame};
 use std::collections::HashMap;
+use view_types::{CursorPosition, ViewContent, ViewFrame};
+
+#[cfg(feature = "perf_debug")]
+use std::time::Instant;
 
 /// Default separator width for status line
 /// This could be made configurable in the future based on terminal width
@@ -75,6 +78,18 @@ pub struct RenderStats {
     pub chars_written_per_frame: usize,
     /// Number of lines redrawn in the last frame
     pub lines_redrawn_per_frame: usize,
+    /// Number of glyph draws (if tracked)
+    #[cfg(feature = "perf_debug")]
+    pub glyph_draws: usize,
+    /// Number of clear operations
+    #[cfg(feature = "perf_debug")]
+    pub clear_operations: usize,
+    /// Number of flush/blit operations
+    #[cfg(feature = "perf_debug")]
+    pub flush_operations: usize,
+    /// Total render time in microseconds
+    #[cfg(feature = "perf_debug")]
+    pub render_time_us: u64,
 }
 
 /// Text renderer that converts ViewFrames to text output
@@ -124,9 +139,18 @@ impl TextRenderer {
         main_view: Option<&ViewFrame>,
         status_view: Option<&ViewFrame>,
     ) -> String {
+        #[cfg(feature = "perf_debug")]
+        let start = Instant::now();
+
         // Reset stats for new frame
         self.stats.chars_written_per_frame = 0;
         self.stats.lines_redrawn_per_frame = 0;
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.glyph_draws = 0;
+            self.stats.clear_operations = 1; // Full redraw = one clear
+            self.stats.flush_operations = 0;
+        }
 
         let mut output = String::new();
 
@@ -158,6 +182,12 @@ impl TextRenderer {
         // Update stats
         self.stats.chars_written_per_frame = output.len();
 
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.render_time_us = start.elapsed().as_micros() as u64;
+            self.stats.flush_operations = 1; // One flush at end
+        }
+
         output
     }
 
@@ -170,9 +200,18 @@ impl TextRenderer {
         main_view: Option<&ViewFrame>,
         status_view: Option<&ViewFrame>,
     ) -> String {
+        #[cfg(feature = "perf_debug")]
+        let start = Instant::now();
+
         // Reset stats for new frame
         self.stats.chars_written_per_frame = 0;
         self.stats.lines_redrawn_per_frame = 0;
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.glyph_draws = 0;
+            self.stats.clear_operations = 0; // Incremental = no clear
+            self.stats.flush_operations = 0;
+        }
 
         let mut output = String::new();
 
@@ -193,12 +232,25 @@ impl TextRenderer {
         // For now, always render status (it's just one line)
         if let Some(frame) = status_view {
             if status_view.map(|f| f.revision) != self.last_status_revision {
-                output.push_str(&format!("[STATUS] {}\n", self.render_status_line(frame).trim()));
+                output.push_str(&format!(
+                    "[STATUS] {}\n",
+                    self.render_status_line(frame).trim()
+                ));
                 self.stats.chars_written_per_frame += self.render_status_line(frame).len();
             }
             self.last_status_revision = Some(frame.revision);
         } else {
             self.last_status_revision = None;
+        }
+
+        #[cfg(feature = "perf_debug")]
+        {
+            self.stats.render_time_us = start.elapsed().as_micros() as u64;
+            self.stats.flush_operations = if self.stats.lines_redrawn_per_frame > 0 {
+                1
+            } else {
+                0
+            };
         }
 
         output
@@ -235,7 +287,7 @@ impl TextRenderer {
                 // Cursor is on this line - must render with cursor
                 let col = cursor.unwrap().column;
                 let rendered_line = self.render_line_with_cursor(line, col);
-                
+
                 let line_changed = match self.view_cache.get_line(line_idx) {
                     Some(cached) => cached != &rendered_line,
                     None => true,
@@ -267,7 +319,10 @@ impl TextRenderer {
         let cursor_moved = cursor != self.view_cache.last_cursor.as_ref();
         if cursor_moved && lines_changed == 0 {
             if let Some(cursor_pos) = cursor {
-                output.push_str(&format!("[CURSOR] {}:{}\n", cursor_pos.line, cursor_pos.column));
+                output.push_str(&format!(
+                    "[CURSOR] {}:{}\n",
+                    cursor_pos.line, cursor_pos.column
+                ));
                 chars_written += 10; // Approximate cursor update cost
             }
         }
@@ -374,6 +429,30 @@ impl TextRenderer {
             ViewContent::StatusLine { text } => format!("{}\n", text),
             _ => "(invalid status view)\n".to_string(),
         }
+    }
+
+    /// Renders a performance overlay (gated by perf_debug feature)
+    ///
+    /// Returns a multi-line string with performance metrics suitable for display
+    /// in the corner of the screen or as a debug overlay.
+    #[cfg(feature = "perf_debug")]
+    pub fn render_perf_overlay(&self) -> String {
+        format!(
+            "┌─ Performance ─┐\n\
+             │ Render: {:>5}μs │\n\
+             │ Chars:  {:>6} │\n\
+             │ Lines:  {:>6} │\n\
+             │ Glyphs: {:>6} │\n\
+             │ Clears: {:>6} │\n\
+             │ Flushes:{:>6} │\n\
+             └───────────────┘",
+            self.stats.render_time_us,
+            self.stats.chars_written_per_frame,
+            self.stats.lines_redrawn_per_frame,
+            self.stats.glyph_draws,
+            self.stats.clear_operations,
+            self.stats.flush_operations
+        )
     }
 }
 
@@ -559,9 +638,9 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let lines = vec!["Hello".to_string(), "World".to_string()];
         let frame = create_text_buffer_frame(lines, None, 1);
-        
+
         let output = renderer.render_incremental(Some(&frame), None);
-        
+
         // First render should update all lines
         assert!(output.contains("[L0] Hello"));
         assert!(output.contains("[L1] World"));
@@ -573,14 +652,14 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let lines = vec!["Hello".to_string()];
         let frame1 = create_text_buffer_frame(lines.clone(), None, 1);
-        
+
         // First render
         renderer.render_incremental(Some(&frame1), None);
-        
+
         // Second render with same content but different revision
         let frame2 = create_text_buffer_frame(lines, None, 2);
         let output = renderer.render_incremental(Some(&frame2), None);
-        
+
         // Should report no changes
         assert!(output.contains("(no changes)"));
         assert_eq!(renderer.stats().lines_redrawn_per_frame, 0);
@@ -589,17 +668,17 @@ mod tests {
     #[test]
     fn test_incremental_render_line_change() {
         let mut renderer = TextRenderer::new();
-        
+
         // First render
         let lines1 = vec!["Hello".to_string(), "World".to_string()];
         let frame1 = create_text_buffer_frame(lines1, None, 1);
         renderer.render_incremental(Some(&frame1), None);
-        
+
         // Second render with one line changed
         let lines2 = vec!["Hello".to_string(), "Rust".to_string()];
         let frame2 = create_text_buffer_frame(lines2, None, 2);
         let output = renderer.render_incremental(Some(&frame2), None);
-        
+
         // Should only update changed line
         assert!(!output.contains("[L0]")); // Line 0 unchanged
         assert!(output.contains("[L1] Rust")); // Line 1 changed
@@ -609,16 +688,16 @@ mod tests {
     #[test]
     fn test_incremental_render_cursor_only_move() {
         let mut renderer = TextRenderer::new();
-        
+
         // First render with cursor at 0,0
         let lines = vec!["Hello".to_string()];
         let frame1 = create_text_buffer_frame(lines.clone(), Some(CursorPosition::new(0, 0)), 1);
         renderer.render_incremental(Some(&frame1), None);
-        
+
         // Second render with cursor moved to 0,2
         let frame2 = create_text_buffer_frame(lines, Some(CursorPosition::new(0, 2)), 2);
         let output = renderer.render_incremental(Some(&frame2), None);
-        
+
         // Should detect cursor movement
         assert!(output.contains("[CURSOR]") || output.contains("[L0]"));
     }
@@ -628,9 +707,9 @@ mod tests {
         let mut renderer = TextRenderer::new();
         let lines = vec!["Test line".to_string()];
         let frame = create_text_buffer_frame(lines, None, 1);
-        
+
         renderer.render_incremental(Some(&frame), None);
-        
+
         let stats = renderer.stats();
         assert!(stats.chars_written_per_frame > 0);
         assert_eq!(stats.lines_redrawn_per_frame, 1);

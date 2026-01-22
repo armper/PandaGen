@@ -122,8 +122,8 @@ text_renderer_host = { path = "text_renderer_host" }
 cli_console = { path = "cli_console" }
 
 # External dependencies
-serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc", "std"] }
 uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 thiserror = { version = "1.0", default-features = false }
 tempfile = "3"

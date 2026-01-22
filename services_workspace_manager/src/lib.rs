@@ -871,10 +871,18 @@ impl WorkspaceManager {
                 let delivered_to = if global_consumed {
                     "None".to_string()
                 } else if let Ok(Some(focused_sub)) = self.focus_manager.route_event(event) {
-                     self.components.values().find(|c| {
-                        c.subscription.as_ref().map(|s| s.id == focused_sub.id).unwrap_or(false)
-                    }).map(|c| format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name))
-                    .unwrap_or("None".to_string())
+                    self.components
+                        .values()
+                        .find(|c| {
+                            c.subscription
+                                .as_ref()
+                                .map(|s| s.id == focused_sub.id)
+                                .unwrap_or(false)
+                        })
+                        .map(|c| {
+                            format!("{{id={},type={},name={}}}", c.id, c.component_type, c.name)
+                        })
+                        .unwrap_or("None".to_string())
                 } else {
                     "None".to_string()
                 };
@@ -1716,16 +1724,24 @@ mod tests {
         // Send 'i' key to enter insert mode
         let i_event = InputEvent::key(KeyEvent::pressed(KeyCode::I, Modifiers::none()));
         let routed_to = workspace.route_input(&i_event);
-        
+
         // Verify event was routed to the editor
-        assert_eq!(routed_to, Some(editor_id), "KeyEvent should be routed to editor");
+        assert_eq!(
+            routed_to,
+            Some(editor_id),
+            "KeyEvent should be routed to editor"
+        );
 
         // Send 'a' key to type character
         let a_event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
         let routed_to2 = workspace.route_input(&a_event);
-        
+
         // Verify event was routed to the editor
-        assert_eq!(routed_to2, Some(editor_id), "KeyEvent should be routed to editor");
+        assert_eq!(
+            routed_to2,
+            Some(editor_id),
+            "KeyEvent should be routed to editor"
+        );
     }
 
     #[test]

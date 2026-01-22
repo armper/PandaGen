@@ -222,20 +222,17 @@ mod tests {
 
     // Simple test migrations that transform JSON strings
     fn migrate_v1_to_v2(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s =
-            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s = str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v2", s).into_bytes())
     }
 
     fn migrate_v2_to_v3(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s =
-            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s = str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v3", s).into_bytes())
     }
 
     fn migrate_v3_to_v4(data: &[u8]) -> Result<Vec<u8>, MigrationError> {
-        let s =
-            str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
+        let s = str::from_utf8(data).map_err(|e| MigrationError::InvalidData(e.to_string()))?;
         Ok(format!("{}_v4", s).into_bytes())
     }
 

@@ -613,11 +613,11 @@ mod tests {
         // Bug fix test: Ensure that vi command letters (i, a, h, j, k, l, etc.)
         // can be typed normally in INSERT mode
         let mut editor = EditorCore::new();
-        
+
         // Enter insert mode
         editor.apply_key(Key::I);
         assert_eq!(editor.mode(), EditorMode::Insert);
-        
+
         // Type the letters that are also vi commands
         editor.apply_key(Key::I); // Should type 'i', not enter insert mode again
         editor.apply_key(Key::A); // Should type 'a', not append mode
@@ -629,7 +629,7 @@ mod tests {
         editor.apply_key(Key::D); // Should type 'd', not delete line
         editor.apply_key(Key::U); // Should type 'u', not undo
         editor.apply_key(Key::N); // Should type 'n', not repeat search
-        
+
         // Verify all letters were typed
         assert_eq!(editor.buffer().as_string(), "iahjklxdun");
         assert_eq!(editor.mode(), EditorMode::Insert);
@@ -795,10 +795,7 @@ mod tests {
         editor.apply_key(Key::Char('w'));
         editor.apply_key(Key::Char('q'));
         let outcome = editor.apply_key(Key::Enter);
-        assert_eq!(
-            outcome,
-            CoreOutcome::RequestIo(CoreIoRequest::SaveAndQuit)
-        );
+        assert_eq!(outcome, CoreOutcome::RequestIo(CoreIoRequest::SaveAndQuit));
     }
 
     #[test]
@@ -854,7 +851,7 @@ mod tests {
 
         // Move past the last "foo"
         editor.apply_key(Key::J); // Move to line 1
-        // Move to end of line 1
+                                  // Move to end of line 1
         for _ in 0..7 {
             editor.apply_key(Key::L);
         }

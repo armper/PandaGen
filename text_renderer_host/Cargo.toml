@@ -21,3 +21,7 @@ resources = { workspace = true }
 hal = { workspace = true }
 
 [dev-dependencies]
+
+[features]
+default = []
+perf_debug = []

@@ -1,14 +1,14 @@
 //! Main editor implementation
 
-use alloc::boxed::Box;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::format;
-use core::fmt;
 use crate::commands::{Command, CommandError, CommandParser};
 use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 use input_types::{InputEvent, KeyCode, KeyEvent};
 use services_storage::{ObjectId, VersionId};
 use services_view_host::{ViewHandleCap, ViewHost};

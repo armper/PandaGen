@@ -454,10 +454,7 @@ impl HostRuntime {
                         .as_deref()
                         .unwrap_or("(no key events yet)")
                 ));
-                output.push_str(&format!(
-                    "║ Routed To: {:?}\n",
-                    debug_info.last_routed_to
-                ));
+                output.push_str(&format!("║ Routed To: {:?}\n", debug_info.last_routed_to));
                 output.push_str(&format!(
                     "║ Global Keybinding: {}\n",
                     if debug_info.consumed_by_global {

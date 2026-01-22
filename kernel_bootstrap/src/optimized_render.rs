@@ -33,8 +33,11 @@ struct Cell {
 }
 
 impl Cell {
-    const EMPTY: Cell = Cell { ch: b' ', attr: 0x07 };
-    
+    const EMPTY: Cell = Cell {
+        ch: b' ',
+        attr: 0x07,
+    };
+
     fn new(ch: u8, attr: u8) -> Self {
         Self { ch, attr }
     }
@@ -69,12 +72,12 @@ impl EditorRenderCache {
             scroll_offset: 0,
         }
     }
-    
+
     /// Check if cache is valid
     pub fn is_valid(&self) -> bool {
         self.valid
     }
-    
+
     /// Ensure cache matches screen dimensions
     fn ensure_size(&mut self, cols: usize, rows: usize) {
         if self.cols != cols || self.rows != rows {
@@ -87,7 +90,7 @@ impl EditorRenderCache {
             self.status_line.clear();
         }
     }
-    
+
     /// Get cell at position
     fn get(&self, col: usize, row: usize) -> Cell {
         if col < self.cols && row < self.rows {
@@ -96,14 +99,14 @@ impl EditorRenderCache {
             Cell::EMPTY
         }
     }
-    
+
     /// Set cell at position
     fn set(&mut self, col: usize, row: usize, cell: Cell) {
         if col < self.cols && row < self.rows {
             self.cells[row * self.cols + col] = cell;
         }
     }
-    
+
     /// Invalidate entire cache (forces full redraw)
     pub fn invalidate(&mut self) {
         self.valid = false;
@@ -138,34 +141,32 @@ pub fn render_editor_optimized(
 ) -> FrameRenderStats {
     let (cols, rows) = sink.dims();
     cache.ensure_size(cols, rows);
-    
+
     #[cfg(debug_assertions)]
     render_stats::frame_begin(0); // TODO: pass actual tick
-    
+
     let mut stats = FrameRenderStats::default();
-    
+
     // Calculate viewport
     let viewport_rows = rows.saturating_sub(1);
     let current_scroll = editor.scroll_offset();
-    
+
     // Check if we need a full redraw
-    let need_full_redraw = force_full 
-        || !cache.valid 
-        || cache.scroll_offset != current_scroll;
-    
+    let need_full_redraw = force_full || !cache.valid || cache.scroll_offset != current_scroll;
+
     if need_full_redraw {
         stats.full_clear = true;
         #[cfg(debug_assertions)]
         render_stats::record_full_clear();
-        
+
         // Full redraw of all content lines
         for viewport_row in 0..viewport_rows {
             render_line_full(
-                sink, 
-                editor, 
-                cache, 
-                viewport_row, 
-                cols, 
+                sink,
+                editor,
+                cache,
+                viewport_row,
+                cols,
                 normal_attr,
                 &mut stats,
             );
@@ -186,7 +187,7 @@ pub fn render_editor_optimized(
                 render_stats::record_char_draw();
             }
         }
-        
+
         // Now check which lines need updating by comparing content
         for viewport_row in 0..viewport_rows {
             if line_needs_update(editor, cache, viewport_row, cols, normal_attr) {
@@ -202,7 +203,7 @@ pub fn render_editor_optimized(
             }
         }
     }
-    
+
     // Always update status line if changed
     let status = editor.status_line();
     let status_row = rows.saturating_sub(1);
@@ -211,12 +212,12 @@ pub fn render_editor_optimized(
         cache.status_line.clear();
         cache.status_line.push_str(status);
     }
-    
+
     // Draw cursor at new position
     if let Some(cursor_pos) = editor.get_viewport_cursor() {
         let cursor_col = cursor_pos.col.min(cols.saturating_sub(1));
         let cursor_row = cursor_pos.row.min(viewport_rows.saturating_sub(1));
-        
+
         // Draw cursor (inverted or underscore)
         sink.draw_cursor(cursor_col, cursor_row, normal_attr);
         cache.cursor_pos = Some((cursor_col, cursor_row));
@@ -226,12 +227,12 @@ pub fn render_editor_optimized(
     } else {
         cache.cursor_pos = None;
     }
-    
+
     #[cfg(debug_assertions)]
     {
         let _frame_stats = render_stats::frame_end(0);
     }
-    
+
     stats
 }
 
@@ -245,7 +246,7 @@ fn line_needs_update(
 ) -> bool {
     let line = editor.get_viewport_line(viewport_row);
     let line_bytes = line.map(|s| s.as_bytes()).unwrap_or(&[]);
-    
+
     // Compare each cell
     for col in 0..cols {
         let ch = line_bytes.get(col).copied().unwrap_or(b' ');
@@ -270,7 +271,7 @@ fn render_line_full(
     let line = editor.get_viewport_line(viewport_row);
     let line_bytes = line.map(|s| s.as_bytes()).unwrap_or(&[]);
     let line_len = line_bytes.len().min(cols);
-    
+
     // Write line content
     if line_len > 0 {
         if let Some(line_str) = line {
@@ -281,19 +282,19 @@ fn render_line_full(
             render_stats::record_pixel_writes((write_len * 128) as u64);
         }
     }
-    
+
     // Clear remaining cells on line
     for col in line_len..cols {
         sink.write_at(col, viewport_row, b' ', attr);
         cache.set(col, viewport_row, Cell::new(b' ', attr));
     }
     stats.cells_written += cols - line_len;
-    
+
     // Update cache for written content
     for (col, &byte) in line_bytes.iter().enumerate().take(cols) {
         cache.set(col, viewport_row, Cell::new(byte, attr));
     }
-    
+
     stats.lines_redrawn += 1;
     #[cfg(debug_assertions)]
     render_stats::record_line_clear();
@@ -311,16 +312,16 @@ fn render_line_incremental(
 ) {
     let line = editor.get_viewport_line(viewport_row);
     let line_bytes = line.map(|s| s.as_bytes()).unwrap_or(&[]);
-    
+
     // Find the span of changed cells and batch update
     let mut span_start: Option<usize> = None;
     let mut span_end = 0usize;
-    
+
     for col in 0..cols {
         let ch = line_bytes.get(col).copied().unwrap_or(b' ');
         let new_cell = Cell::new(ch, attr);
         let old_cell = cache.get(col, viewport_row);
-        
+
         if new_cell != old_cell {
             if span_start.is_none() {
                 span_start = Some(col);
@@ -329,7 +330,7 @@ fn render_line_incremental(
             cache.set(col, viewport_row, new_cell);
         }
     }
-    
+
     // Write the changed span
     if let Some(start) = span_start {
         // For efficiency, write the entire changed span as a string if possible
@@ -342,7 +343,7 @@ fn render_line_incremental(
                 render_stats::record_pixel_writes(((write_end - start) * 128) as u64);
             }
         }
-        
+
         // Write any trailing spaces
         let line_len = line_bytes.len();
         for col in line_len.max(start)..span_end {
@@ -351,7 +352,7 @@ fn render_line_incremental(
             #[cfg(debug_assertions)]
             render_stats::record_char_draw();
         }
-        
+
         stats.lines_redrawn += 1;
     }
 }
@@ -368,32 +369,32 @@ fn render_status_line(
 ) {
     let status_bytes = status.as_bytes();
     let status_len = status_bytes.len().min(cols);
-    
+
     // Write status text
     sink.write_str_at(0, row, &status[..status_len], attr);
     stats.cells_written += status_len;
     #[cfg(debug_assertions)]
     render_stats::record_pixel_writes((status_len * 128) as u64);
-    
+
     // Clear remaining cells
     for col in status_len..cols {
         sink.write_at(col, row, b' ', attr);
         cache.set(col, row, Cell::new(b' ', attr));
     }
     stats.cells_written += cols - status_len;
-    
+
     // Update cache
     for (col, &byte) in status_bytes.iter().enumerate().take(cols) {
         cache.set(col, row, Cell::new(byte, attr));
     }
-    
+
     stats.lines_redrawn += 1;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     /// Test display sink for verification
     struct TestSink {
         cells: Vec<Vec<(u8, u8)>>,
@@ -402,7 +403,7 @@ mod tests {
         rows: usize,
         write_count: usize,
     }
-    
+
     impl TestSink {
         fn new(cols: usize, rows: usize) -> Self {
             Self {
@@ -413,7 +414,7 @@ mod tests {
                 write_count: 0,
             }
         }
-        
+
         fn get_line(&self, row: usize) -> String {
             self.cells[row]
                 .iter()
@@ -423,12 +424,12 @@ mod tests {
                 .to_string()
         }
     }
-    
+
     impl DisplaySink for TestSink {
         fn dims(&self) -> (usize, usize) {
             (self.cols, self.rows)
         }
-        
+
         fn clear(&mut self, attr: u8) {
             for row in &mut self.cells {
                 for cell in row {
@@ -437,7 +438,7 @@ mod tests {
             }
             self.write_count += self.cols * self.rows;
         }
-        
+
         fn write_at(&mut self, col: usize, row: usize, ch: u8, attr: u8) -> bool {
             if col < self.cols && row < self.rows {
                 self.cells[row][col] = (ch, attr);
@@ -447,7 +448,7 @@ mod tests {
                 false
             }
         }
-        
+
         fn write_str_at(&mut self, col: usize, row: usize, text: &str, attr: u8) -> usize {
             let mut written = 0;
             for (i, byte) in text.bytes().enumerate() {
@@ -457,46 +458,42 @@ mod tests {
             }
             written
         }
-        
+
         fn draw_cursor(&mut self, col: usize, row: usize, _attr: u8) {
             self.cursor = Some((col, row));
         }
     }
-    
+
     #[test]
     fn test_cache_initialization() {
         let mut cache = EditorRenderCache::new();
         assert!(!cache.valid);
-        
+
         cache.ensure_size(80, 25);
         assert_eq!(cache.cols, 80);
         assert_eq!(cache.rows, 25);
         assert_eq!(cache.cells.len(), 80 * 25);
     }
-    
+
     #[test]
     fn test_incremental_vs_full_writes() {
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let editor = MinimalEditor::new(24);
-        
+
         // First render should be full
-        let stats1 = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let stats1 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         assert!(stats1.full_clear);
         let writes_full = sink.write_count;
-        
+
         // Reset counter
         sink.write_count = 0;
-        
+
         // Second render with no changes should be minimal
-        let stats2 = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let stats2 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         assert!(!stats2.full_clear);
         let writes_incremental = sink.write_count;
-        
+
         // Incremental should write far fewer cells
         assert!(
             writes_incremental < writes_full / 10,
@@ -505,13 +502,13 @@ mod tests {
             writes_full
         );
     }
-    
+
     #[test]
     fn test_cursor_only_change_minimal_writes() {
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let mut editor = MinimalEditor::new(24);
-        
+
         // Enter insert mode and type some text
         editor.process_byte(b'i');
         editor.process_byte(b'H');
@@ -519,21 +516,17 @@ mod tests {
         editor.process_byte(b'l');
         editor.process_byte(b'l');
         editor.process_byte(b'o');
-        
+
         // First render
-        let _ = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         sink.write_count = 0;
-        
+
         // Move cursor (Escape to normal, then 'h' to move left)
         editor.process_byte(0x1B); // Escape
-        
+
         // Render after mode change - should update status line + minimal
-        let stats = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
-        
+        let stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+
         // Should have minimal writes (cursor restore + new cursor + status)
         assert!(
             stats.cells_written < 200,
@@ -541,7 +534,7 @@ mod tests {
             stats.cells_written
         );
     }
-    
+
     #[test]
     fn test_typing_50_characters_performance() {
         // Simulate typing 50 characters and measure total cell writes
@@ -550,32 +543,26 @@ mod tests {
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let mut editor = MinimalEditor::new(24);
-        
+
         // Initial render
-        let _ = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         sink.write_count = 0;
-        
+
         // Enter insert mode
         editor.process_byte(b'i');
-        let _ = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         sink.write_count = 0;
-        
+
         // Type 50 characters, render after each
         let mut total_writes = 0usize;
         for i in 0..50 {
             let ch = b'a' + (i % 26) as u8;
             editor.process_byte(ch);
-            let _stats = render_editor_optimized(
-                &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-            );
+            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
             total_writes += sink.write_count;
             sink.write_count = 0;
         }
-        
+
         // Should be much less than full redraws would require
         // Full redraw per keystroke: 80*25 = 2000 cells * 50 = 100,000
         // Optimized: ~50 chars * avg 80 cells = ~4000 (just the line changes)
@@ -586,7 +573,7 @@ mod tests {
             total_writes,
             full_redraw_cost
         );
-        
+
         // More specifically, should be around 5-10k writes
         assert!(
             total_writes < 15000,
@@ -594,14 +581,14 @@ mod tests {
             total_writes
         );
     }
-    
+
     #[test]
     fn test_hjkl_movement_performance() {
         // Test that cursor movement is very cheap
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let mut editor = MinimalEditor::new(24);
-        
+
         // Set up some content
         editor.process_byte(b'i');
         for _ in 0..10 {
@@ -612,27 +599,25 @@ mod tests {
             editor.process_byte(b'y');
         }
         editor.process_byte(0x1B); // Escape to normal mode
-        
+
         // Initial render
-        let _ = render_editor_optimized(
-            &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-        );
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
         sink.write_count = 0;
-        
+
         // Move cursor 20 times with h/j/k/l and measure writes
-        let moves = [b'h', b'j', b'k', b'l', b'h', b'h', b'j', b'k', b'l', b'l',
-                     b'h', b'j', b'k', b'l', b'h', b'h', b'j', b'k', b'l', b'l'];
+        let moves = [
+            b'h', b'j', b'k', b'l', b'h', b'h', b'j', b'k', b'l', b'l', b'h', b'j', b'k', b'l',
+            b'h', b'h', b'j', b'k', b'l', b'l',
+        ];
         let mut total_writes = 0usize;
-        
+
         for &movement in &moves {
             editor.process_byte(movement);
-            let _stats = render_editor_optimized(
-                &mut sink, &editor, &mut cache, 0x07, 0x0F, false
-            );
+            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
             total_writes += sink.write_count;
             sink.write_count = 0;
         }
-        
+
         // Each cursor move should only write ~2 cells (old cursor restore + new cursor)
         // Plus minimal line changes. Should be well under 100 writes per move.
         let writes_per_move = total_writes / moves.len();

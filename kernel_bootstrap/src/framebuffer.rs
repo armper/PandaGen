@@ -3,8 +3,8 @@
 //! This module provides a minimal inline framebuffer implementation
 //! to avoid pulling in external dependencies with std requirements.
 
-use crate::BootInfo;
 use crate::display_sink::DisplaySink;
+use crate::BootInfo;
 
 /// Font character width in pixels
 const FONT_WIDTH: usize = 8;
@@ -139,41 +139,41 @@ impl BareMetalFramebuffer {
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         let info = self.info();
         let bg_bytes = info.format.to_bytes(r, g, b);
-        
+
         // Use optimized row fill
         for y in 0..info.height {
             self.fill_pixel_row(y, bg_bytes);
         }
     }
-    
+
     /// Fill a single pixel row with a color (ultra-fast using u64 writes)
     fn fill_pixel_row(&mut self, y: usize, color: [u8; 4]) {
         let info = self.info();
         if y >= info.height {
             return;
         }
-        
+
         let row_start = y * info.stride_pixels * 4;
         let row_pixels = info.width;
-        
+
         if row_start >= self.buffer.len() {
             return;
         }
-        
+
         // Pack single pixel and double pixel for fast writes
         let pixel = u32::from_le_bytes(color);
         let double_pixel = ((pixel as u64) << 32) | (pixel as u64);
-        
+
         unsafe {
             let ptr = self.buffer.as_mut_ptr().add(row_start);
             let ptr64 = ptr as *mut u64;
             let pairs = row_pixels / 2;
-            
+
             // Write 2 pixels at a time (8 bytes)
             for i in 0..pairs {
                 ptr64.add(i).write(double_pixel);
             }
-            
+
             // Handle odd pixel if width is odd
             if row_pixels % 2 == 1 {
                 let ptr32 = ptr as *mut u32;
@@ -181,19 +181,19 @@ impl BareMetalFramebuffer {
             }
         }
     }
-    
+
     /// Clear a text row (row of characters, not pixels) with background color
     /// This is much faster than drawing space characters
     pub fn clear_text_row(&mut self, text_row: usize, bg: (u8, u8, u8)) {
         if text_row >= self.rows() {
             return;
         }
-        
+
         let info = self.info();
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
         let y_start = text_row * FONT_HEIGHT;
         let y_end = (y_start + FONT_HEIGHT).min(info.height);
-        
+
         for y in y_start..y_end {
             self.fill_pixel_row(y, bg_bytes);
         }
@@ -231,7 +231,7 @@ impl BareMetalFramebuffer {
 
             // Calculate base offset for this scan line
             let row_base = y * stride + x_offset * bpp;
-            
+
             // Build 8 pixels worth of data (32 bytes for 4 bpp)
             let mut scanline: [u8; 32] = [0; 32];
             for col_idx in 0..FONT_WIDTH {
@@ -243,7 +243,7 @@ impl BareMetalFramebuffer {
                 scanline[off + 2] = color[2];
                 scanline[off + 3] = color[3];
             }
-            
+
             // Write all 8 pixels at once
             if row_base + 32 <= self.buffer.len() {
                 self.buffer[row_base..row_base + 32].copy_from_slice(&scanline);
@@ -267,7 +267,7 @@ impl BareMetalFramebuffer {
         if text.len() < 4 || text.bytes().any(|b| b == b'\n') {
             return self.draw_text_at_slow(col, row, text, fg, bg);
         }
-        
+
         if row >= self.rows() || col >= self.cols() {
             return 0;
         }
@@ -277,32 +277,32 @@ impl BareMetalFramebuffer {
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
         let bpp = info.format.bytes_per_pixel();
         let stride = info.stride_pixels * bpp;
-        
+
         let text_bytes = text.as_bytes();
         let max_chars = (self.cols() - col).min(text_bytes.len());
         let x_start = col * FONT_WIDTH;
         let y_start = row * FONT_HEIGHT;
-        
+
         // For each scanline of the font (16 lines)
         for scanline_idx in 0..FONT_HEIGHT {
             let y = y_start + scanline_idx;
             if y >= info.height {
                 break;
             }
-            
+
             let row_base = y * stride + x_start * bpp;
-            
+
             // Write each character's scanline
             for (char_idx, &ch) in text_bytes[..max_chars].iter().enumerate() {
                 let bitmap = get_char_bitmap(ch);
                 let row_data = bitmap[scanline_idx];
-                
+
                 // Build 8 pixels for this character's scanline
                 let char_offset = row_base + char_idx * FONT_WIDTH * bpp;
                 if char_offset + 32 > self.buffer.len() {
                     break;
                 }
-                
+
                 for bit_idx in 0..FONT_WIDTH {
                     let bit = (row_data >> (7 - bit_idx)) & 1;
                     let color = if bit == 1 { fg_bytes } else { bg_bytes };
@@ -314,10 +314,10 @@ impl BareMetalFramebuffer {
                 }
             }
         }
-        
+
         max_chars
     }
-    
+
     /// Fallback for text with newlines or very short text
     fn draw_text_at_slow(
         &mut self,
@@ -357,49 +357,49 @@ impl BareMetalFramebuffer {
 
         drawn
     }
-    
+
     /// Draw text on a line and clear the rest with background color in ONE PASS
     /// Ultra-optimized: uses u64 writes for 2 pixels at once
     pub fn draw_line(&mut self, row: usize, text: &str, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         if row >= self.rows() {
             return;
         }
-        
+
         let info = self.info();
         let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
         let stride = info.stride_pixels * 4; // bytes per row
         let cols = self.cols();
         let y_start = row * FONT_HEIGHT;
-        
+
         let text_bytes = text.as_bytes();
         let text_len = text_bytes.len().min(cols);
-        
+
         // Pre-compute u32 pixel values for fg and bg
         let fg_pixel = u32::from_le_bytes(fg_bytes);
         let bg_pixel = u32::from_le_bytes(bg_bytes);
         // Two bg pixels packed into u64 for fast clearing
         let bg_double = ((bg_pixel as u64) << 32) | (bg_pixel as u64);
-        
+
         // For each scanline of the font (16 lines)
         for scanline_idx in 0..FONT_HEIGHT {
             let y = y_start + scanline_idx;
             if y >= info.height {
                 break;
             }
-            
+
             let row_base = y * stride;
-            
+
             // Draw text characters using u32 writes
             for (char_idx, &ch) in text_bytes[..text_len].iter().enumerate() {
                 let bitmap = get_char_bitmap(ch);
                 let row_data = bitmap[scanline_idx];
                 let char_offset = row_base + char_idx * FONT_WIDTH * 4;
-                
+
                 if char_offset + 32 > self.buffer.len() {
                     break;
                 }
-                
+
                 // Write 8 pixels (one character width) using u32 writes
                 unsafe {
                     let ptr = self.buffer.as_mut_ptr().add(char_offset) as *mut u32;
@@ -410,26 +410,26 @@ impl BareMetalFramebuffer {
                     }
                 }
             }
-            
+
             // Clear rest of line with background using u64 writes (2 pixels at a time)
             let clear_start_x = text_len * FONT_WIDTH;
             let clear_start = row_base + clear_start_x * 4;
             let row_end = row_base + info.width * 4;
-            
+
             if clear_start < row_end && clear_start < self.buffer.len() {
                 let end = row_end.min(self.buffer.len());
                 let pixels_to_clear = (end - clear_start) / 4;
-                
+
                 unsafe {
                     let ptr = self.buffer.as_mut_ptr().add(clear_start);
                     let ptr64 = ptr as *mut u64;
                     let pairs = pixels_to_clear / 2;
-                    
+
                     // Write 2 pixels at a time
                     for i in 0..pairs {
                         ptr64.add(i).write(bg_double);
                     }
-                    
+
                     // Handle odd pixel if any
                     if pixels_to_clear % 2 == 1 {
                         let ptr32 = ptr as *mut u32;
@@ -540,22 +540,22 @@ fn attr_to_rgb(attr: u8) -> ((u8, u8, u8), (u8, u8, u8)) {
 
 fn vga_color(idx: u8) -> (u8, u8, u8) {
     match idx {
-        0 => (0x00, 0x00, 0x00), // Black
-        1 => (0x00, 0x00, 0xAA), // Blue
-        2 => (0x00, 0xAA, 0x00), // Green
-        3 => (0x00, 0xAA, 0xAA), // Cyan
-        4 => (0xAA, 0x00, 0x00), // Red
-        5 => (0xAA, 0x00, 0xAA), // Magenta
-        6 => (0xAA, 0x55, 0x00), // Brown
-        7 => (0xAA, 0xAA, 0xAA), // Light Gray
-        8 => (0x55, 0x55, 0x55), // Dark Gray
-        9 => (0x55, 0x55, 0xFF), // Light Blue
+        0 => (0x00, 0x00, 0x00),  // Black
+        1 => (0x00, 0x00, 0xAA),  // Blue
+        2 => (0x00, 0xAA, 0x00),  // Green
+        3 => (0x00, 0xAA, 0xAA),  // Cyan
+        4 => (0xAA, 0x00, 0x00),  // Red
+        5 => (0xAA, 0x00, 0xAA),  // Magenta
+        6 => (0xAA, 0x55, 0x00),  // Brown
+        7 => (0xAA, 0xAA, 0xAA),  // Light Gray
+        8 => (0x55, 0x55, 0x55),  // Dark Gray
+        9 => (0x55, 0x55, 0xFF),  // Light Blue
         10 => (0x55, 0xFF, 0x55), // Light Green
         11 => (0x55, 0xFF, 0xFF), // Light Cyan
         12 => (0xFF, 0x55, 0x55), // Light Red
         13 => (0xFF, 0x55, 0xFF), // Pink
         14 => (0xFF, 0xFF, 0x55), // Yellow
         15 => (0xFF, 0xFF, 0xFF), // White
-        _ => (0xAA, 0xAA, 0xAA), // Default
+        _ => (0xAA, 0xAA, 0xAA),  // Default
     }
 }
