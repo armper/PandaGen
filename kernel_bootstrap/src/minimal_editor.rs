@@ -7,15 +7,18 @@
 extern crate alloc;
 
 #[cfg(not(test))]
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 #[cfg(test)]
-use std::string::String;
+use std::string::{String, ToString};
 
 use editor_core::{CoreOutcome, EditorCore, Key};
 
 // Re-export types from editor_core for test compatibility
 pub use editor_core::{EditorMode, Position};
+
+#[cfg(not(test))]
+use crate::bare_metal_editor_io::{BareMetalEditorIo, DocumentHandle};
 
 /// Minimal editor - thin wrapper around EditorCore with viewport management
 pub struct MinimalEditor {
@@ -27,6 +30,12 @@ pub struct MinimalEditor {
     scroll_offset: usize,
     /// Status message (separate from core for rendering)
     status: String,
+    /// Optional EditorIo for file operations
+    #[cfg(not(test))]
+    pub(crate) editor_io: Option<BareMetalEditorIo>,
+    /// Current document handle
+    #[cfg(not(test))]
+    pub(crate) document: Option<DocumentHandle>,
 }
 
 impl MinimalEditor {
@@ -36,7 +45,25 @@ impl MinimalEditor {
             viewport_rows,
             scroll_offset: 0,
             status: String::new(),
+            #[cfg(not(test))]
+            editor_io: None,
+            #[cfg(not(test))]
+            document: None,
         }
+    }
+    
+    /// Set the EditorIo for this editor session
+    #[cfg(not(test))]
+    pub fn set_editor_io(&mut self, io: BareMetalEditorIo, handle: DocumentHandle) {
+        self.editor_io = Some(io);
+        self.document = Some(handle);
+    }
+    
+    /// Load content into the editor
+    #[cfg(not(test))]
+    pub fn load_content(&mut self, content: &str) {
+        self.core.load_content(content.to_string());
+        self.core.mark_saved();
     }
 
     /// Get current editor mode
@@ -116,17 +143,84 @@ impl MinimalEditor {
                 false
             }
             CoreOutcome::RequestIo(io_req) => {
-                // In bare-metal mode, simulate IO operations
-                use editor_core::CoreIoRequest;
-                match io_req {
-                    CoreIoRequest::Save | CoreIoRequest::SaveAs(_) => {
-                        self.status = String::from("Filesystem unavailable in bare-metal mode");
-                        self.core.mark_saved();
-                        false
+                #[cfg(not(test))]
+                {
+                    // Handle filesystem operations if EditorIo is available
+                    if let Some(ref mut io) = self.editor_io {
+                        use editor_core::CoreIoRequest;
+                        match io_req {
+                            CoreIoRequest::Save => {
+                                if let Some(ref handle) = self.document {
+                                    let content = self.core.buffer().as_string();
+                                    match io.save(handle, &content) {
+                                        Ok(msg) => {
+                                            self.status = msg;
+                                            self.core.mark_saved();
+                                            false
+                                        }
+                                        Err(_) => {
+                                            self.status = String::from("Error: failed to save file");
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    self.status = String::from("Error: no file path (use :w <path>)");
+                                    false
+                                }
+                            }
+                            CoreIoRequest::SaveAs(path) => {
+                                let content = self.core.buffer().as_string();
+                                match io.save_as(&path, &content) {
+                                    Ok((msg, handle)) => {
+                                        self.status = msg;
+                                        self.document = Some(handle);
+                                        self.core.mark_saved();
+                                        false
+                                    }
+                                    Err(_) => {
+                                        self.status = String::from("Error: failed to save file");
+                                        false
+                                    }
+                                }
+                            }
+                            CoreIoRequest::SaveAndQuit => {
+                                if let Some(ref handle) = self.document {
+                                    let content = self.core.buffer().as_string();
+                                    let _ = io.save(handle, &content);
+                                }
+                                true // Quit anyway
+                            }
+                        }
+                    } else {
+                        // No filesystem available - use old behavior
+                        use editor_core::CoreIoRequest;
+                        match io_req {
+                            CoreIoRequest::Save | CoreIoRequest::SaveAs(_) => {
+                                self.status = String::from("Filesystem unavailable");
+                                self.core.mark_saved();
+                                false
+                            }
+                            CoreIoRequest::SaveAndQuit => {
+                                self.status = String::from("Filesystem unavailable");
+                                true // Quit anyway
+                            }
+                        }
                     }
-                    CoreIoRequest::SaveAndQuit => {
-                        self.status = String::from("Filesystem unavailable in bare-metal mode");
-                        true // Quit anyway
+                }
+                #[cfg(test)]
+                {
+                    // In test mode, simulate IO operations
+                    use editor_core::CoreIoRequest;
+                    match io_req {
+                        CoreIoRequest::Save | CoreIoRequest::SaveAs(_) => {
+                            self.status = String::from("Filesystem unavailable in test mode");
+                            self.core.mark_saved();
+                            false
+                        }
+                        CoreIoRequest::SaveAndQuit => {
+                            self.status = String::from("Filesystem unavailable in test mode");
+                            true // Quit anyway
+                        }
                     }
                 }
             }

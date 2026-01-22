@@ -1,12 +1,13 @@
 //! Transaction support for storage operations
 
 use crate::{ObjectId, VersionId};
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
 /// Unique identifier for a transaction
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TransactionId(Uuid);
 
 impl TransactionId {
@@ -26,27 +27,34 @@ impl Default for TransactionId {
 }
 
 /// Errors that can occur during transactions
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TransactionError {
     /// Transaction conflict (concurrent modification)
-    #[error("Transaction conflict on object {0}")]
     Conflict(String),
 
     /// Object not found
-    #[error("Object not found: {0}")]
     ObjectNotFound(String),
 
     /// Transaction already committed or rolled back
-    #[error("Transaction already finalized")]
     AlreadyFinalized,
 
     /// Invalid operation
-    #[error("Invalid operation: {0}")]
     InvalidOperation(String),
 
     /// Storage error (I/O, block device, etc.)
-    #[error("Storage error: {0}")]
     StorageError(String),
+}
+
+impl core::fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TransactionError::Conflict(msg) => write!(f, "Transaction conflict on object {}", msg),
+            TransactionError::ObjectNotFound(msg) => write!(f, "Object not found: {}", msg),
+            TransactionError::AlreadyFinalized => write!(f, "Transaction already finalized"),
+            TransactionError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+            TransactionError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+        }
+    }
 }
 
 /// Transaction state

@@ -24,6 +24,8 @@ mod render_stats;
 mod vga;
 mod workspace;
 mod display_sink;
+mod bare_metal_storage;
+mod bare_metal_editor_io;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -679,11 +681,40 @@ pub extern "C" fn rust_main() -> ! {
         );
     }
 
+    // Initialize filesystem with example files
+    kprintln!(serial, "Initializing filesystem...");
+    let mut filesystem = match bare_metal_storage::BareMetalFilesystem::new() {
+        Ok(fs) => {
+            kprintln!(serial, "Filesystem ready");
+            fs
+        }
+        Err(_) => {
+            kprintln!(serial, "Warning: failed to initialize filesystem");
+            // Continue without filesystem
+            workspace_loop(
+                &mut serial,
+                kernel,
+                vga_console.as_mut(),
+                fb_console.as_mut(),
+                None,
+            )
+        }
+    };
+
+    // Create some example files
+    {
+        let _ = filesystem.create_file("welcome.txt", b"Welcome to PandaGen!\nThis is a bare-metal operating system.");
+        let _ = filesystem.create_file("readme.md", b"# PandaGen\n\nA capability-based OS written in Rust.\n\nTry: open editor readme.md");
+        let _ = filesystem.create_file("test.txt", b"Hello, World!\nThis is a test file.\nYou can edit this with :w to save.");
+        kprintln!(serial, "Created example files: welcome.txt, readme.md, test.txt");
+    }
+
     workspace_loop(
         &mut serial,
         kernel,
         vga_console.as_mut(),
         fb_console.as_mut(),
+        Some(filesystem),
     )
 }
 
@@ -746,18 +777,26 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
 /// Phase 64: This replaces the demo editor loop with a proper workspace prompt
 /// Phase 69: Now supports framebuffer console output
 /// Phase 78: VGA text console is primary UI for QEMU window
+/// Phase 97: Integrated bare-metal filesystem storage
 #[cfg(not(test))]
 fn workspace_loop(
     serial: &mut serial::SerialPort,
     kernel: &mut Kernel,
     mut vga_console: Option<&mut console_vga::VgaConsole>,
     mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
+    filesystem: Option<bare_metal_storage::BareMetalFilesystem>,
 ) -> ! {
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
     let response_channel = ChannelId(1);
 
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
+    
+    // Install filesystem if available
+    if let Some(fs) = filesystem {
+        workspace.set_filesystem(fs);
+    }
+    
     let mut parser_state = Ps2ParserState::new();
 
     let mut input_dirty = true;

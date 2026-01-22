@@ -5,15 +5,18 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["alloc"]
+alloc = []
+
 [dependencies]
 core_types.workspace = true
 identity.workspace = true
 kernel_api.workspace = true
 ipc.workspace = true
-uuid.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
+uuid = { workspace = true, default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 sim_kernel.workspace = true
 hal = { path = "../hal", features = ["alloc"] }
-crc32fast = "1.4"
+crc32fast = { version = "1.4", default-features = false }

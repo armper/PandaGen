@@ -3,11 +3,14 @@
 use crate::{
     ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId,
 };
+use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use identity::ExecutionId;
 use kernel_api::KernelError;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use thiserror::Error;
 
 #[derive(Debug, Clone)]
 struct VersionEntry {
@@ -37,17 +40,17 @@ struct PendingWrite {
 
 /// In-memory journaled storage backend.
 pub struct JournaledStorage {
-    objects: HashMap<ObjectId, Vec<VersionEntry>>,
+    objects: BTreeMap<ObjectId, Vec<VersionEntry>>,
     journal: Vec<JournalEntry>,
-    pending: HashMap<TransactionId, Vec<PendingWrite>>,
+    pending: BTreeMap<TransactionId, Vec<PendingWrite>>,
 }
 
 impl JournaledStorage {
     pub fn new() -> Self {
         Self {
-            objects: HashMap::new(),
+            objects: BTreeMap::new(),
             journal: Vec::new(),
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
         }
     }
 
@@ -84,8 +87,8 @@ impl JournaledStorage {
 
     /// Recovers committed transactions from the journal.
     pub fn recover(&mut self) {
-        let mut committed = HashSet::new();
-        let mut writes: HashMap<TransactionId, Vec<PendingWrite>> = HashMap::new();
+        let mut committed = BTreeSet::new();
+        let mut writes: BTreeMap<TransactionId, Vec<PendingWrite>> = BTreeMap::new();
 
         for entry in &self.journal {
             match entry {
@@ -253,24 +256,32 @@ pub enum StorageOperation {
 }
 
 /// Errors from storage service.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum StorageServiceError {
-    #[error("Transaction error: {0}")]
     Transaction(String),
-
-    #[error("Budget error: {0}")]
     Budget(String),
+}
+
+impl core::fmt::Display for StorageServiceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StorageServiceError::Transaction(msg) => write!(f, "Transaction error: {}", msg),
+            StorageServiceError::Budget(msg) => write!(f, "Budget error: {}", msg),
+        }
+    }
 }
 
 impl From<TransactionError> for StorageServiceError {
     fn from(error: TransactionError) -> Self {
-        StorageServiceError::Transaction(error.to_string())
+        use alloc::format;
+        StorageServiceError::Transaction(format!("{}", error))
     }
 }
 
 impl From<KernelError> for StorageServiceError {
     fn from(error: KernelError) -> Self {
-        StorageServiceError::Budget(error.to_string())
+        use alloc::format;
+        StorageServiceError::Budget(format!("{:?}", error))
     }
 }
 

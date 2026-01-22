@@ -11,6 +11,11 @@ path = "src/lib.rs"
 editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }
 console_vga = { path = "../console_vga", default-features = false, optional = true }
+services_storage = { path = "../services_storage", default-features = false, features = ["alloc"] }
+hal = { path = "../hal", features = ["alloc"] }
+hal_x86_64 = { path = "../hal_x86_64" }
+serde = { workspace = true, default-features = false, features = ["alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 
 [features]
 default = ["console_vga", "limine"]

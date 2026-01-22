@@ -1,13 +1,15 @@
 //! Object types and identifiers
 
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
 
 use crate::permissions::Ownership;
 
 /// Unique identifier for a storage object
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(Uuid);
 
 impl ObjectId {
@@ -43,7 +45,7 @@ impl fmt::Display for ObjectId {
 ///
 /// Unlike traditional filesystems where "versions" are external (git, etc.),
 /// every object modification creates a new version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VersionId(Uuid);
 
 impl VersionId {
@@ -178,6 +180,8 @@ impl Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
 
     #[test]
     fn test_object_id_creation() {

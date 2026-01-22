@@ -3,12 +3,20 @@
 //! This provides a workspace-like experience in the bare-metal kernel without
 //! requiring the full std-based services_workspace_manager.
 
+#[cfg(not(test))]
+extern crate alloc;
+
 use core::fmt::Write;
 
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
 use crate::minimal_editor::MinimalEditor;
+
+#[cfg(not(test))]
+use crate::bare_metal_storage::BareMetalFilesystem;
+#[cfg(not(test))]
+use crate::bare_metal_editor_io::BareMetalEditorIo;
 
 #[cfg(feature = "console_vga")]
 use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
@@ -45,6 +53,12 @@ tile_manager: TileManager,
     output_head: usize,
     output_count: usize,
     output_seq: u64,
+    /// Filesystem storage (optional)
+    #[cfg(not(test))]
+    filesystem: Option<BareMetalFilesystem>,
+    /// Current document path when editor is open
+    #[cfg(not(test))]
+    current_document: Option<crate::bare_metal_editor_io::DocumentHandle>,
 }
 
 impl WorkspaceSession {
@@ -63,7 +77,17 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
             output_head: 0,
             output_count: 0,
             output_seq: 0,
+            #[cfg(not(test))]
+            filesystem: None,
+            #[cfg(not(test))]
+            current_document: None,
         }
+    }
+    
+    /// Set the filesystem for this session
+    #[cfg(not(test))]
+    pub fn set_filesystem(&mut self, fs: BareMetalFilesystem) {
+        self.filesystem = Some(fs);
     }
 
     /// Process a single byte of input
@@ -102,7 +126,14 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                 
                 if should_quit {
                     self.active_component = None;
-                    self.editor = None;
+                    
+                    // Extract filesystem from editor if it had one
+                    if let Some(mut editor_instance) = self.editor.take() {
+                        if let Some(mut io) = editor_instance.editor_io.take() {
+                            self.filesystem = Some(io.into_filesystem());
+                        }
+                    }
+                    
                     let _ = serial.write_str("\r\nEditor closed\r\n");
                     self.show_prompt(serial);
                 }
@@ -228,6 +259,11 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
+                self.emit_line(serial, "File Commands:");
+                self.emit_line(serial, "ls             - List files");
+                self.emit_line(serial, "cat <path>     - Show file contents");
+                self.emit_line(serial, "write <path> <text> - Create/update file");
+                self.emit_line(serial, "");
                 self.emit_line(serial, "System Commands:");
                 self.emit_line(serial, "boot           - Show boot info");
                 self.emit_line(serial, "mem            - Show memory info");
@@ -237,19 +273,40 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                 let what = parts.next();
                 match what {
                     Some("editor") => {
-                        // Create editor with viewport size (e.g., 23 rows for VGA 80x25 minus status line)
-                        let editor = MinimalEditor::new(23);
-                        self.editor = Some(editor);
-                        self.active_component = Some(ComponentType::Editor);
-                        self.emit_line(serial, "Editor opened");
-                        self.emit_line(
-                            serial,
-                            "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :q!=force",
-                        );
-                        self.emit_line(
-                            serial,
-                            "Note: Filesystem unavailable (in-memory editing only)",
-                        );
+                        #[cfg(not(test))]
+                        {
+                            // Try to open file from path argument
+                            let path = parts.next();
+                            let mut editor = MinimalEditor::new(23);
+                            
+                            if let (Some(path), Some(ref mut fs)) = (path, self.filesystem.as_mut()) {
+                                // Try to load file content
+                                let mut io = BareMetalEditorIo::new(core::mem::take(fs));
+                                match io.open(path) {
+                                    Ok((content, handle)) => {
+                                        editor.load_content(&content);
+                                        self.current_document = Some(handle);
+                                        self.emit_line(serial, &alloc::format!("Opened: {}", path));
+                                    }
+                                    Err(_) => {
+                                        self.emit_line(serial, &alloc::format!("File not found: {}", path));
+                                        self.emit_line(serial, "Starting with empty buffer");
+                                    }
+                                }
+                                *fs = io.into_filesystem();
+                            }
+                            
+                            self.editor = Some(editor);
+                            self.active_component = Some(ComponentType::Editor);
+                            self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :w=save");
+                        }
+                        #[cfg(test)]
+                        {
+                            let editor = MinimalEditor::new(23);
+                            self.editor = Some(editor);
+                            self.active_component = Some(ComponentType::Editor);
+                            self.emit_line(serial, "Editor opened (test mode)");
+                        }
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
@@ -260,7 +317,7 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                         );
                     }
                     _ => {
-                        self.emit_line(serial, "Usage: open <editor|cli>");
+                        self.emit_line(serial, "Usage: open editor [path] | open cli");
                     }
                 }
             }
@@ -311,6 +368,87 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
             "ticks" => {
                 // Delegate to existing ticks command
                 self.delegate_to_command_service(ctx, serial, "ticks");
+            }
+            "ls" => {
+                #[cfg(not(test))]
+                {
+                    if let Some(ref mut fs) = self.filesystem {
+                        match fs.list_files() {
+                            Ok(files) => {
+                                if files.is_empty() {
+                                    self.emit_line(serial, "(no files)");
+                                } else {
+                                    for file in files {
+                                        self.emit_line(serial, &file);
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                self.emit_line(serial, "Error: failed to list files");
+                            }
+                        }
+                    } else {
+                        self.emit_line(serial, "Error: filesystem not initialized");
+                    }
+                }
+                #[cfg(test)]
+                self.emit_line(serial, "ls: not available in test mode");
+            }
+            "cat" => {
+                #[cfg(not(test))]
+                {
+                    if let Some(path) = parts.next() {
+                        if let Some(ref mut fs) = self.filesystem {
+                            match fs.read_file_by_name(path) {
+                                Ok(content) => {
+                                    match core::str::from_utf8(&content) {
+                                        Ok(text) => {
+                                            for line in text.lines() {
+                                                self.emit_line(serial, line);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            self.emit_line(serial, "Error: file contains invalid UTF-8");
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    self.emit_line(serial, &alloc::format!("Error: file not found: {}", path));
+                                }
+                            }
+                        } else {
+                            self.emit_line(serial, "Error: filesystem not initialized");
+                        }
+                    } else {
+                        self.emit_line(serial, "Usage: cat <path>");
+                    }
+                }
+                #[cfg(test)]
+                self.emit_line(serial, "cat: not available in test mode");
+            }
+            "write" => {
+                #[cfg(not(test))]
+                {
+                    if let Some(path) = parts.next() {
+                        let text = parts.collect::<alloc::vec::Vec<_>>().join(" ");
+                        if let Some(ref mut fs) = self.filesystem {
+                            match fs.write_file_by_name(path, text.as_bytes()) {
+                                Ok(_) => {
+                                    self.emit_line(serial, &alloc::format!("Wrote to {}", path));
+                                }
+                                Err(_) => {
+                                    self.emit_line(serial, "Error: failed to write file");
+                                }
+                            }
+                        } else {
+                            self.emit_line(serial, "Error: filesystem not initialized");
+                        }
+                    } else {
+                        self.emit_line(serial, "Usage: write <path> <text>");
+                    }
+                }
+                #[cfg(test)]
+                self.emit_line(serial, "write: not available in test mode");
             }
             _ => {
                 self.emit_unknown_command(serial, cmd);

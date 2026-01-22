@@ -6,9 +6,12 @@
 use crate::{
     BlockStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage, VersionId,
 };
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use hal::BlockDevice;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Directory entry - compatible with fs_view::DirectoryEntry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +39,7 @@ impl DirectoryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentDirectory {
     /// Directory entries (name → object_id mapping)
-    pub entries: HashMap<String, DirectoryEntry>,
+    pub entries: BTreeMap<String, DirectoryEntry>,
     /// Parent directory (if any)
     pub parent: Option<ObjectId>,
     /// Metadata
@@ -58,7 +61,7 @@ impl PersistentDirectory {
     /// Create a new empty directory
     pub fn new(owner: impl Into<String>, timestamp: u64) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             parent: None,
             metadata: DirectoryMetadata {
                 created_at: timestamp,
@@ -264,6 +267,7 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use hal::RamDisk;
 
     #[test]
