@@ -229,28 +229,37 @@ impl TextRenderer {
 
         // Check each line against cache
         for (line_idx, line) in lines.iter().enumerate() {
-            let rendered_line = if let Some(cursor_pos) = cursor {
-                if cursor_pos.line == line_idx {
-                    self.render_line_with_cursor(line, cursor_pos.column)
-                } else {
-                    line.clone()
+            let cursor_on_line = cursor.map_or(false, |c| c.line == line_idx);
+
+            if cursor_on_line {
+                // Cursor is on this line - must render with cursor
+                let col = cursor.unwrap().column;
+                let rendered_line = self.render_line_with_cursor(line, col);
+                
+                let line_changed = match self.view_cache.get_line(line_idx) {
+                    Some(cached) => cached != &rendered_line,
+                    None => true,
+                };
+
+                if line_changed {
+                    output.push_str(&format!("[L{}] {}\n", line_idx, rendered_line));
+                    chars_written += rendered_line.len();
+                    self.view_cache.set_line(line_idx, rendered_line);
+                    lines_changed += 1;
                 }
             } else {
-                line.clone()
-            };
+                // Cursor NOT on this line - compare raw line directly
+                let line_changed = match self.view_cache.get_line(line_idx) {
+                    Some(cached) => cached != line,
+                    None => true,
+                };
 
-            // Check if this line changed
-            let line_changed = match self.view_cache.get_line(line_idx) {
-                Some(cached) => cached != rendered_line,
-                None => true, // New line
-            };
-
-            if line_changed {
-                // Write only changed line
-                output.push_str(&format!("[L{}] {}\n", line_idx, rendered_line));
-                self.view_cache.set_line(line_idx, rendered_line.clone());
-                lines_changed += 1;
-                chars_written += rendered_line.len();
+                if line_changed {
+                    output.push_str(&format!("[L{}] {}\n", line_idx, line));
+                    chars_written += line.len();
+                    self.view_cache.set_line(line_idx, line.clone());
+                    lines_changed += 1;
+                }
             }
         }
 
@@ -276,14 +285,25 @@ impl TextRenderer {
 
     /// Helper to render a line with cursor marker
     fn render_line_with_cursor(&self, line: &str, col: usize) -> String {
-        let chars: Vec<char> = line.chars().collect();
-        if col <= chars.len() {
-            let before: String = chars.iter().take(col).collect();
-            let after: String = chars.iter().skip(col).collect();
-            format!("{}|{}", before, after)
-        } else {
-            let padding = (col.saturating_sub(chars.len())).min(1000);
-            format!("{}{}|", line, " ".repeat(padding))
+        // Find byte offset for the cursor column
+        let byte_pos = line.char_indices().map(|(i, _)| i).nth(col);
+
+        match byte_pos {
+            Some(pos) => {
+                // Cursor is inside the string
+                let (before, after) = line.split_at(pos);
+                format!("{}|{}", before, after)
+            }
+            None => {
+                // Cursor is at the end or beyond
+                let char_count = line.chars().count();
+                if col == char_count {
+                    format!("{}|", line)
+                } else {
+                    let padding = (col - char_count).min(1000);
+                    format!("{}{}|", line, " ".repeat(padding))
+                }
+            }
         }
     }
 
