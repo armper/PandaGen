@@ -1098,25 +1098,27 @@ fn workspace_loop(
                         for i in 0..delta_lines {
                             let row = first_row + i;
                             let line_idx = first_line + i;
-                            clear_fb_line(fb, row, cols, bg, fg);
                             if let Some(line) = workspace.output_line(line_idx) {
                                 let bytes = line.as_bytes();
                                 let len = bytes.len().min(cols);
                                 if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_text_at(0, row, text, fg, bg);
+                                    fb.draw_line(row, text, fg, bg);
                                 }
+                            } else {
+                                fb.draw_line(row, "", fg, bg);
                             }
                         }
                     } else {
                         for row in 0..output_rows {
                             let line_idx = start + row;
-                            clear_fb_line(fb, row, cols, bg, fg);
                             if let Some(line) = workspace.output_line(line_idx) {
                                 let bytes = line.as_bytes();
                                 let len = bytes.len().min(cols);
                                 if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_text_at(0, row, text, fg, bg);
+                                    fb.draw_line(row, text, fg, bg);
                                 }
+                            } else {
+                                fb.draw_line(row, "", fg, bg);
                             }
                         }
                     }
