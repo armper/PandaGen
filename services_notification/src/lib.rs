@@ -233,7 +233,9 @@ impl Notification {
         if self.ttl_ns == 0 {
             return false;
         }
-        current_time_ns >= self.timestamp_ns + self.ttl_ns
+        // Use saturating_add to avoid overflow
+        let expiration_time = self.timestamp_ns.saturating_add(self.ttl_ns);
+        current_time_ns >= expiration_time
     }
 
     /// Dismisses the notification

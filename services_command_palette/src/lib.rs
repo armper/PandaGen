@@ -159,30 +159,33 @@ impl CommandDescriptor {
         }
 
         let query_lower = query.to_lowercase();
+        let name_lower = self.name.to_lowercase();
+        let desc_lower = self.description.to_lowercase();
         let mut score = 0u32;
 
         // Exact match in name gets highest score
-        if self.name.to_lowercase() == query_lower {
+        if name_lower == query_lower {
             score += 1000;
-        } else if self.name.to_lowercase().starts_with(&query_lower) {
+        } else if name_lower.starts_with(&query_lower) {
             score += 500;
-        } else if self.name.to_lowercase().contains(&query_lower) {
+        } else if name_lower.contains(&query_lower) {
             score += 100;
         }
 
         // Match in tags
         for tag in &self.tags {
-            if tag.to_lowercase() == query_lower {
+            let tag_lower = tag.to_lowercase();
+            if tag_lower == query_lower {
                 score += 300;
-            } else if tag.to_lowercase().starts_with(&query_lower) {
+            } else if tag_lower.starts_with(&query_lower) {
                 score += 150;
-            } else if tag.to_lowercase().contains(&query_lower) {
+            } else if tag_lower.contains(&query_lower) {
                 score += 50;
             }
         }
 
         // Match in description
-        if self.description.to_lowercase().contains(&query_lower) {
+        if desc_lower.contains(&query_lower) {
             score += 10;
         }
 

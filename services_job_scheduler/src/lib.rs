@@ -246,59 +246,43 @@ impl JobScheduler {
         self.tick_count += 1;
 
         // If there's a running job, continue it
-        if let Some(mut job) = self.running_job.take() {
-            job.ticks_executed += 1;
-            
-            let mut ctx = JobContext::new(self.tick_count, job.ticks_executed);
-            
-            if let Some(ref mut executor) = job.executor {
-                match executor(&mut ctx) {
-                    JobResult::Completed => {
-                        job.status = JobStatus::Completed;
-                        job.progress = 100;
-                        job.executor = None;
-                        self.completed_jobs.push(job);
-                    }
-                    JobResult::Yielded => {
-                        job.status = JobStatus::Yielded;
-                        self.running_job = Some(job);
-                    }
-                    JobResult::Failed(error) => {
-                        job.status = JobStatus::Failed;
-                        job.error = Some(error);
-                        job.executor = None;
-                        self.completed_jobs.push(job);
-                    }
-                }
-            }
+        if let Some(job) = self.running_job.take() {
+            self.execute_and_handle_job(job, true);
             return;
         }
 
         // Start the next pending job
-        if let Some(mut job) = self.pending_jobs.pop_front() {
+        if let Some(job) = self.pending_jobs.pop_front() {
+            self.execute_and_handle_job(job, false);
+        }
+    }
+
+    /// Executes one tick of a job and handles the result
+    fn execute_and_handle_job(&mut self, mut job: JobDescriptor, is_continuing: bool) {
+        if !is_continuing {
             job.status = JobStatus::Running;
-            job.ticks_executed += 1;
-            
-            let mut ctx = JobContext::new(self.tick_count, job.ticks_executed);
-            
-            if let Some(ref mut executor) = job.executor {
-                match executor(&mut ctx) {
-                    JobResult::Completed => {
-                        job.status = JobStatus::Completed;
-                        job.progress = 100;
-                        job.executor = None;
-                        self.completed_jobs.push(job);
-                    }
-                    JobResult::Yielded => {
-                        job.status = JobStatus::Yielded;
-                        self.running_job = Some(job);
-                    }
-                    JobResult::Failed(error) => {
-                        job.status = JobStatus::Failed;
-                        job.error = Some(error);
-                        job.executor = None;
-                        self.completed_jobs.push(job);
-                    }
+        }
+        job.ticks_executed += 1;
+        
+        let mut ctx = JobContext::new(self.tick_count, job.ticks_executed);
+        
+        if let Some(ref mut executor) = job.executor {
+            match executor(&mut ctx) {
+                JobResult::Completed => {
+                    job.status = JobStatus::Completed;
+                    job.progress = 100;
+                    job.executor = None;
+                    self.completed_jobs.push(job);
+                }
+                JobResult::Yielded => {
+                    job.status = JobStatus::Yielded;
+                    self.running_job = Some(job);
+                }
+                JobResult::Failed(error) => {
+                    job.status = JobStatus::Failed;
+                    job.error = Some(error);
+                    job.executor = None;
+                    self.completed_jobs.push(job);
                 }
             }
         }
