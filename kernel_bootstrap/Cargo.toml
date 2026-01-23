@@ -16,6 +16,8 @@ hal = { path = "../hal", features = ["alloc"] }
 hal_x86_64 = { path = "../hal_x86_64" }
 serde = { workspace = true, default-features = false, features = ["alloc"] }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+services_command_palette = { path = "../services_command_palette", default-features = false }
+services_notification = { path = "../services_notification", default-features = false }
 
 [features]
 default = ["console_vga", "limine"]

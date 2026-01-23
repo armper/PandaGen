@@ -26,6 +26,7 @@ mod workspace;
 mod display_sink;
 mod bare_metal_storage;
 mod bare_metal_editor_io;
+mod palette_overlay;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -1659,6 +1660,7 @@ fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
 struct Ps2ParserState {
     pending_e0: bool,
     shift_pressed: bool,
+    ctrl_pressed: bool,
 }
 
 impl Ps2ParserState {
@@ -1666,6 +1668,7 @@ impl Ps2ParserState {
         Self {
             pending_e0: false,
             shift_pressed: false,
+            ctrl_pressed: false,
         }
     }
 
@@ -1693,6 +1696,13 @@ impl Ps2ParserState {
         if code == 0x2A || code == 0x36 {
             // Left/Right Shift
             self.shift_pressed = !is_break;
+            self.pending_e0 = false;
+            return None;
+        }
+
+        // Handle ctrl state (0x1D = Left Ctrl, E0 0x1D = Right Ctrl)
+        if code == 0x1D {
+            self.ctrl_pressed = !is_break;
             self.pending_e0 = false;
             return None;
         }
@@ -1800,7 +1810,10 @@ impl Ps2ParserState {
                 }
             }
             0x19 => {
-                if self.shift_pressed {
+                // P key - handle Ctrl+P specially
+                if self.ctrl_pressed {
+                    return Some(0x10); // Ctrl+P
+                } else if self.shift_pressed {
                     b'P'
                 } else {
                     b'p'

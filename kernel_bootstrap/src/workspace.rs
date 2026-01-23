@@ -13,10 +13,14 @@ use alloc::string::{String, ToString};
 #[cfg(test)]
 use std::string::{String, ToString};
 
+#[cfg(not(test))]
+use alloc::vec;
+
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
 use crate::minimal_editor::{EditorMode, MinimalEditor};
+use crate::palette_overlay::{FocusTarget, PaletteKeyAction, PaletteOverlayState, handle_palette_key};
 
 #[cfg(not(test))]
 use crate::bare_metal_editor_io::BareMetalEditorIo;
@@ -25,6 +29,8 @@ use crate::bare_metal_storage::BareMetalFilesystem;
 
 #[cfg(feature = "console_vga")]
 use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
+
+use services_command_palette::{CommandDescriptor, CommandPalette};
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -61,10 +67,47 @@ pub struct WorkspaceSession {
     /// Filesystem storage (optional)
     #[cfg(not(test))]
     filesystem: Option<BareMetalFilesystem>,
+    /// Command palette overlay state
+    palette_overlay: PaletteOverlayState,
+    /// Command palette service
+    command_palette: CommandPalette,
 }
 
 impl WorkspaceSession {
     pub fn new(command_channel: ChannelId, response_channel: ChannelId) -> Self {
+        let mut command_palette = CommandPalette::new();
+        
+        // Register example commands
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "help",
+                "Show Help",
+                "Display available commands",
+                vec!["help".to_string(), "commands".to_string()],
+            ),
+            Box::new(|_| Ok("Available commands: help, editor, quit".to_string())),
+        );
+        
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "open_editor",
+                "Open Editor",
+                "Open the text editor",
+                vec!["editor".to_string(), "edit".to_string(), "vim".to_string()],
+            ),
+            Box::new(|_| Ok("Opening editor...".to_string())),
+        );
+        
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "quit",
+                "Quit",
+                "Exit the workspace",
+                vec!["exit".to_string(), "close".to_string(), "q".to_string()],
+            ),
+            Box::new(|_| Ok("Quitting...".to_string())),
+        );
+
         Self {
             active_component: None,
             editor: None,
@@ -85,6 +128,8 @@ impl WorkspaceSession {
             output_seq: 0,
             #[cfg(not(test))]
             filesystem: None,
+            palette_overlay: PaletteOverlayState::new(),
+            command_palette,
         }
     }
 
@@ -112,7 +157,73 @@ impl WorkspaceSession {
         let _ = writeln!(serial, "  key={{byte={:#x}}}", byte);
         let _ = writeln!(serial, "  focus_tile={{{:?}}}", focused_tile);
 
-        // Check tile focus before delivering to component
+        // 1. Check for global shortcuts BEFORE component routing
+        // Ctrl+P (0x10) opens command palette
+        if byte == 0x10 && !self.palette_overlay.is_open() {
+            let _ = writeln!(serial, "  action=open_palette");
+            
+            // Determine current focus target
+            let current_focus = if self.active_component == Some(ComponentType::Editor) {
+                FocusTarget::Editor
+            } else if self.in_command_mode {
+                FocusTarget::Cli
+            } else {
+                FocusTarget::None
+            };
+            
+            self.palette_overlay.open(current_focus);
+            return true;
+        }
+
+        // 2. If palette is open, route all input to it
+        if self.palette_overlay.is_open() {
+            let _ = writeln!(serial, "  action=palette_input");
+            
+            let action = handle_palette_key(
+                &mut self.palette_overlay,
+                &self.command_palette,
+                byte,
+            );
+            
+            match action {
+                PaletteKeyAction::Close => {
+                    let _ = writeln!(serial, "  palette_action=close");
+                    self.palette_overlay.close();
+                    return true;
+                }
+                PaletteKeyAction::Execute(cmd_id) => {
+                    let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
+                    
+                    // Execute command
+                    let result = self.command_palette.execute_command(&cmd_id, &[]);
+                    match result {
+                        Ok(msg) => {
+                            let _ = writeln!(serial, "  palette_result=success msg={}", msg);
+                            self.append_output_text(&msg);
+                        }
+                        Err(err) => {
+                            let _ = writeln!(serial, "  palette_result=error err={}", err);
+                            self.append_output_text(&err);
+                        }
+                    }
+                    
+                    // Close palette after execution
+                    self.palette_overlay.close();
+                    return true;
+                }
+                PaletteKeyAction::Consumed => {
+                    let _ = writeln!(serial, "  palette_action=consumed");
+                    return true;
+                }
+                PaletteKeyAction::None => {
+                    let _ = writeln!(serial, "  palette_action=none");
+                    // Fall through - shouldn't happen but handle gracefully
+                    return false;
+                }
+            }
+        }
+
+        // 3. Check tile focus before delivering to component
         #[cfg(feature = "console_vga")]
         {
             // Editor lives in Top tile. If Bottom is focused, Editor shouldn't get input.
@@ -122,6 +233,7 @@ impl WorkspaceSession {
             }
         }
 
+        // 4. Route to active component (existing logic)
         // If editor is active, route input to it
         #[cfg(not(test))]
         if self.active_component == Some(ComponentType::Editor) {
@@ -646,6 +758,16 @@ impl WorkspaceSession {
     /// Get reference to the editor
     pub fn editor(&self) -> Option<&MinimalEditor> {
         self.editor.as_ref()
+    }
+
+    /// Check if the command palette is open
+    pub fn is_palette_open(&self) -> bool {
+        self.palette_overlay.is_open()
+    }
+
+    /// Get reference to the palette overlay state (for rendering)
+    pub fn palette_overlay(&self) -> &PaletteOverlayState {
+        &self.palette_overlay
     }
 
     fn emit_line(&mut self, serial: &mut SerialPort, text: &str) {
