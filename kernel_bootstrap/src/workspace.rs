@@ -16,12 +16,12 @@ use std::string::{String, ToString};
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-use crate::minimal_editor::MinimalEditor;
+use crate::minimal_editor::{EditorMode, MinimalEditor};
 
 #[cfg(not(test))]
-use crate::bare_metal_storage::BareMetalFilesystem;
-#[cfg(not(test))]
 use crate::bare_metal_editor_io::BareMetalEditorIo;
+#[cfg(not(test))]
+use crate::bare_metal_storage::BareMetalFilesystem;
 
 #[cfg(feature = "console_vga")]
 use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
@@ -42,7 +42,7 @@ pub struct WorkspaceSession {
     editor: Option<MinimalEditor>,
     /// Tile manager for layout and focus
     #[cfg(feature = "console_vga")]
-tile_manager: TileManager,
+    tile_manager: TileManager,
     /// Command channel for component communication
     command_channel: ChannelId,
     /// Response channel for replies
@@ -69,7 +69,11 @@ impl WorkspaceSession {
             active_component: None,
             editor: None,
             #[cfg(feature = "console_vga")]
-tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VGA_HEIGHT - 5)), // Editor gets most space
+            tile_manager: TileManager::new(
+                VGA_WIDTH,
+                VGA_HEIGHT,
+                SplitLayout::horizontal(VGA_HEIGHT - 5),
+            ), // Editor gets most space
             command_channel,
             response_channel,
             in_command_mode: true,
@@ -83,7 +87,7 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
             filesystem: None,
         }
     }
-    
+
     /// Set the filesystem for this session
     #[cfg(not(test))]
     pub fn set_filesystem(&mut self, fs: BareMetalFilesystem) {
@@ -97,6 +101,8 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
+        let pre_editor_row = self.editor.as_ref().map(|editor| editor.cursor().row);
+        let pre_editor_col = self.editor.as_ref().map(|editor| editor.cursor().col);
         #[cfg(feature = "console_vga")]
         let focused_tile = self.tile_manager.focused_tile();
         #[cfg(not(feature = "console_vga"))]
@@ -111,8 +117,8 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
         {
             // Editor lives in Top tile. If Bottom is focused, Editor shouldn't get input.
             if self.active_component == Some(ComponentType::Editor) && focused_tile != TileId::Top {
-                 let _ = writeln!(serial, "  consumed_by=none (focus mismatch)");
-                 return false;
+                let _ = writeln!(serial, "  consumed_by=none (focus mismatch)");
+                return false;
             }
         }
 
@@ -120,20 +126,68 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
         #[cfg(not(test))]
         if self.active_component == Some(ComponentType::Editor) {
             if let Some(ref mut editor) = self.editor {
-                let _ = writeln!(serial, "  action=process_byte_start cursor={:?}", editor.cursor());
+                let _ = writeln!(
+                    serial,
+                    "  action=process_byte_start cursor={:?}",
+                    editor.cursor()
+                );
                 let should_quit = editor.process_byte(byte);
-                let _ = writeln!(serial, "  action=process_byte_end cursor={:?} dirty={}", editor.cursor(), editor.is_dirty());
-                
+                let _ = writeln!(
+                    serial,
+                    "  action=process_byte_end cursor={:?} dirty={}",
+                    editor.cursor(),
+                    editor.is_dirty()
+                );
+
+                #[cfg(debug_assertions)]
+                {
+                    if let (Some(pre_row), Some(pre_col)) = (pre_editor_row, pre_editor_col) {
+                        let new_row = editor.cursor().row;
+                        let new_col = editor.cursor().col;
+                        let line_delta = if new_row > pre_row {
+                            new_row - pre_row
+                        } else {
+                            pre_row - new_row
+                        };
+                        let cursor_moved = new_row != pre_row || new_col != pre_col;
+                        let is_editing =
+                            matches!(editor.mode(), EditorMode::Insert | EditorMode::Command);
+                        let is_normal_typing = matches!(
+                            byte,
+                            b'a'..=b'z'
+                                | b'A'..=b'Z'
+                                | b'0'..=b'9'
+                                | b' '
+                                | b'.'
+                                | b','
+                                | b';'
+                                | b':'
+                                | b'\''
+                                | b'"'
+                                | b'-'
+                                | b'_'
+                                | b'!'
+                                | b'?'
+                        );
+                        if is_normal_typing && is_editing && cursor_moved {
+                            debug_assert!(
+                                line_delta <= 1,
+                                "typing must dirty at most one line in a render pass"
+                            );
+                        }
+                    }
+                }
+
                 if should_quit {
                     self.active_component = None;
-                    
+
                     // Extract filesystem from editor if it had one
                     if let Some(mut editor_instance) = self.editor.take() {
                         if let Some(mut io) = editor_instance.editor_io.take() {
                             self.filesystem = Some(io.into_filesystem());
                         }
                     }
-                    
+
                     let _ = serial.write_str("\r\nEditor closed\r\n");
                     self.show_prompt(serial);
                 }
@@ -287,39 +341,48 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                             // Try to open file from path argument
                             let path = parts.next();
                             let mut editor = MinimalEditor::new(23);
-                            
+
                             let mut open_message: Option<String> = None;
                             let mut open_secondary: Option<String> = None;
 
                             // If we have a filesystem, create an IO adapter and keep it with the editor
                             if let Some(fs) = self.filesystem.take() {
                                 let mut io = BareMetalEditorIo::new(fs);
-                                
+
                                 // Try to open the file if a path was provided
                                 if let Some(path) = path {
                                     match io.open(path) {
                                         Ok((content, handle)) => {
                                             editor.load_content(&content);
                                             editor.set_editor_io(io, handle);
-                                            open_message = Some(alloc::format!("Opened: {} [filesystem available]", path));
+                                            open_message = Some(alloc::format!(
+                                                "Opened: {} [filesystem available]",
+                                                path
+                                            ));
                                         }
                                         Err(_) => {
                                             // File not found - create new buffer with IO for save-as
                                             let handle = io.new_buffer(Some(path.to_string()));
                                             editor.set_editor_io(io, handle);
-                                            open_message = Some(alloc::format!("File not found: {}", path));
-                                            open_secondary = Some("Starting with empty buffer [filesystem available]".to_string());
+                                            open_message =
+                                                Some(alloc::format!("File not found: {}", path));
+                                            open_secondary = Some(
+                                                "Starting with empty buffer [filesystem available]"
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 } else {
                                     // No path provided - new buffer with no default path
                                     let handle = io.new_buffer(None);
                                     editor.set_editor_io(io, handle);
-                                    open_message = Some("New buffer [filesystem available]".to_string());
+                                    open_message =
+                                        Some("New buffer [filesystem available]".to_string());
                                 }
                             } else {
                                 // No filesystem available
-                                open_message = Some("Warning: No filesystem - :w will not work".to_string());
+                                open_message =
+                                    Some("Warning: No filesystem - :w will not work".to_string());
                             }
 
                             if let Some(message) = open_message {
@@ -328,10 +391,13 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                             if let Some(message) = open_secondary {
                                 self.emit_line(serial, &message);
                             }
-                            
+
                             self.editor = Some(editor);
                             self.active_component = Some(ComponentType::Editor);
-                            self.emit_line(serial, "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :w=save");
+                            self.emit_line(
+                                serial,
+                                "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :w=save",
+                            );
                         }
                         #[cfg(test)]
                         {
@@ -433,20 +499,24 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                     if let Some(path) = parts.next() {
                         if let Some(ref mut fs) = self.filesystem {
                             match fs.read_file_by_name(path) {
-                                Ok(content) => {
-                                    match core::str::from_utf8(&content) {
-                                        Ok(text) => {
-                                            for line in text.lines() {
-                                                self.emit_line(serial, line);
-                                            }
-                                        }
-                                        Err(_) => {
-                                            self.emit_line(serial, "Error: file contains invalid UTF-8");
+                                Ok(content) => match core::str::from_utf8(&content) {
+                                    Ok(text) => {
+                                        for line in text.lines() {
+                                            self.emit_line(serial, line);
                                         }
                                     }
-                                }
+                                    Err(_) => {
+                                        self.emit_line(
+                                            serial,
+                                            "Error: file contains invalid UTF-8",
+                                        );
+                                    }
+                                },
                                 Err(_) => {
-                                    self.emit_line(serial, &alloc::format!("Error: file not found: {}", path));
+                                    self.emit_line(
+                                        serial,
+                                        &alloc::format!("Error: file not found: {}", path),
+                                    );
                                 }
                             }
                         } else {

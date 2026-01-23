@@ -807,6 +807,8 @@ fn workspace_loop(
     let mut prompt_initialized = false;
     let mut last_prompt_row = 0usize;
     let mut last_view_start = 0usize;
+    #[cfg(debug_assertions)]
+    let mut last_editor_input: Option<u8> = None;
     
     // Editor render cache for incremental updates (Phase 96 optimization)
     let mut editor_render_cache = optimized_render::EditorRenderCache::new();
@@ -865,6 +867,10 @@ fn workspace_loop(
                 };
 
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
+                #[cfg(debug_assertions)]
+                if input_progressed && workspace.is_editor_active() {
+                    last_editor_input = Some(ch);
+                }
 
                 if KBD_DEBUG_LOG {
                     kprintln!(
@@ -965,8 +971,12 @@ fn workspace_loop(
                         let bold_attr = console_vga::Style::Bold.to_vga_attr();
 
                         if let Some(editor) = workspace.editor() {
-                            // Phase 96: Use optimized incremental renderer
-                            // force_full only on initial entry to editor (output_dirty true on first frame)
+                            // Phase 96+: Use optimized incremental renderer
+                            // force_full only on:
+                            // - editor open/close (cache invalidated)
+                            // - viewport/layout/font/theme changes (must invalidate cache)
+                            // - explicit invalidate request (output_dirty on entry)
+                            // Keep full redraws out of normal typing/cursor movement paths.
                             let force_full = !editor_render_cache.valid || output_dirty;
                             let _stats = optimized_render::render_editor_optimized(
                                 sink,
@@ -976,14 +986,44 @@ fn workspace_loop(
                                 bold_attr,
                                 force_full,
                             );
-                            
+
                             #[cfg(debug_assertions)]
-                            if _stats.full_clear {
-                                let _ = writeln!(serial, "editor render: full, cells={}", _stats.cells_written);
+                            {
+                                if KBD_DEBUG_LOG {
+                                    let _ = writeln!(
+                                        serial,
+                                        "editor render: dirty_lines={} spans={} glyphs={} rects={} pixels={} flush={} full={}",
+                                        _stats.dirty_lines_count,
+                                        _stats.dirty_spans_count,
+                                        _stats.glyph_blits_count,
+                                        _stats.rect_fills_count,
+                                        _stats.pixels_written,
+                                        _stats.flush_calls,
+                                        _stats.full_redraws
+                                    );
+                                }
+                                if let Some(last_input) = last_editor_input {
+                                    if editor.mode() == EditorMode::Insert
+                                        && is_typing_byte(last_input)
+                                    {
+                                        debug_assert!(
+                                            _stats.dirty_lines_count <= 1,
+                                            "typing must dirty at most one line"
+                                        );
+                                        debug_assert!(
+                                            _stats.full_redraws == 0,
+                                            "typing must not trigger full redraw"
+                                        );
+                                    }
+                                }
                             }
                         }
                         input_dirty = false;
                         output_dirty = false;
+                        #[cfg(debug_assertions)]
+                        {
+                            last_editor_input = None;
+                        }
                         rendered_editor = true;
                     }
                 }
@@ -1014,6 +1054,11 @@ fn workspace_loop(
                     let mut vga_sink = VgaDisplaySink::new(vga);
                     
                     if let Some(editor) = workspace.editor() {
+                        // force_full only on:
+                        // - editor open/close (cache invalidated)
+                        // - viewport/layout/font/theme changes (must invalidate cache)
+                        // - explicit invalidate request (output_dirty on entry)
+                        // Typing, Enter, Esc, cursor moves, and :w must stay incremental.
                         let force_full = !editor_render_cache.is_valid() || output_dirty;
                         let _stats = optimized_render::render_editor_optimized(
                             &mut vga_sink,
@@ -1023,15 +1068,44 @@ fn workspace_loop(
                             bold_attr,
                             force_full,
                         );
-                        
+
                         #[cfg(debug_assertions)]
-                        if _stats.full_clear {
-                            let _ = writeln!(serial, "vga editor render: full, cells={}", _stats.cells_written);
+                        {
+                            if KBD_DEBUG_LOG {
+                                let _ = writeln!(
+                                    serial,
+                                    "vga editor render: dirty_lines={} spans={} glyphs={} rects={} pixels={} flush={} full={}",
+                                    _stats.dirty_lines_count,
+                                    _stats.dirty_spans_count,
+                                    _stats.glyph_blits_count,
+                                    _stats.rect_fills_count,
+                                    _stats.pixels_written,
+                                    _stats.flush_calls,
+                                    _stats.full_redraws
+                                );
+                            }
+                            if let Some(last_input) = last_editor_input {
+                                if editor.mode() == EditorMode::Insert && is_typing_byte(last_input)
+                                {
+                                    debug_assert!(
+                                        _stats.dirty_lines_count <= 1,
+                                        "typing must dirty at most one line"
+                                    );
+                                    debug_assert!(
+                                        _stats.full_redraws == 0,
+                                        "typing must not trigger full redraw"
+                                    );
+                                }
+                            }
                         }
                     }
 
                     input_dirty = false;
                     output_dirty = false;
+                    #[cfg(debug_assertions)]
+                    {
+                        last_editor_input = None;
+                    }
                     continue; // Skip normal workspace rendering
                 }
 
@@ -1449,6 +1523,27 @@ fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {
         }
         (0, slice, cursor)
     }
+}
+
+#[cfg(debug_assertions)]
+fn is_typing_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b' '
+            | b'.'
+            | b','
+            | b';'
+            | b':'
+            | b'\''
+            | b'"'
+            | b'-'
+            | b'_'
+            | b'!'
+            | b'?'
+    )
 }
 
 /// Renders editor state to serial using structured view output
