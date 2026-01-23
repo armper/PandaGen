@@ -861,3 +861,53 @@ fn append_bytes(buffer: &mut [u8], mut len: usize, bytes: &[u8]) -> usize {
     }
     len
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    // Note: Full integration tests with WorkspaceSession require kernel context
+    // These are simpler unit tests of individual components
+    
+    #[test]
+    fn test_output_line_creation() {
+        let line = OutputLine::empty();
+        assert_eq!(line.as_bytes().len(), 0);
+    }
+    
+    #[test]
+    fn test_output_line_set_from_bytes() {
+        let mut line = OutputLine::empty();
+        line.set_from_bytes(b"Hello");
+        assert_eq!(line.as_bytes(), b"Hello");
+    }
+    
+    #[test]
+    fn test_output_line_truncation() {
+        let mut line = OutputLine::empty();
+        let long_text = [b'x'; OUTPUT_LINE_MAX + 10];
+        line.set_from_bytes(&long_text);
+        assert_eq!(line.as_bytes().len(), OUTPUT_LINE_MAX);
+    }
+    
+    #[test]
+    fn test_append_bytes_function() {
+        let mut buffer = [0u8; 10];
+        let len = append_bytes(&mut buffer, 0, b"Hello");
+        assert_eq!(len, 5);
+        assert_eq!(&buffer[..5], b"Hello");
+        
+        let len = append_bytes(&mut buffer, len, b" World");
+        assert_eq!(len, 10);
+        assert_eq!(&buffer[..10], b"Hello Worl");
+    }
+    
+    #[test]
+    fn test_component_type_display() {
+        let editor = ComponentType::Editor;
+        let cli = ComponentType::Cli;
+        
+        assert_eq!(format!("{}", editor), "Editor");
+        assert_eq!(format!("{}", cli), "CLI");
+    }
+}
