@@ -53,6 +53,7 @@ members = [
     "xtask", "console_vga",
     "services_command_palette",
     "services_notification",
+    "services_settings",
 ]
 
 [workspace.package]
@@ -107,6 +108,7 @@ resources = { path = "resources" }
 packages = { path = "packages" }
 services_command_palette = { path = "services_command_palette" }
 services_notification = { path = "services_notification" }
+services_settings = { path = "services_settings" }
 
 # Input system crates
 input_types = { path = "input_types" }
