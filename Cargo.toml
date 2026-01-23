@@ -52,6 +52,7 @@ members = [
     "pandagend",
     "xtask", "console_vga",
     "services_command_palette",
+    "services_notification",
 ]
 
 [workspace.package]
@@ -105,6 +106,7 @@ policy = { path = "policy" }
 resources = { path = "resources" }
 packages = { path = "packages" }
 services_command_palette = { path = "services_command_palette" }
+services_notification = { path = "services_notification" }
 
 # Input system crates
 input_types = { path = "input_types" }
