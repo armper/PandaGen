@@ -1,0 +1,16 @@
+[package]
+name = "services_command_palette"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types = { workspace = true }
+ipc = { workspace = true }
+input_types = { workspace = true }
+view_types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
