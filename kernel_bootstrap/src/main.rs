@@ -812,6 +812,7 @@ fn workspace_loop(
     let mut editor_render_cache = optimized_render::EditorRenderCache::new();
     let mut last_view_len = 0usize;
     let mut last_cursor_col = 0usize;
+    let mut last_editor_active = false;
 
     // Show initial prompt
     workspace.show_prompt(serial);
@@ -931,8 +932,20 @@ fn workspace_loop(
             }
         }
 
+        let editor_active = workspace.is_editor_active();
+        let mut clear_terminal = false;
+        if last_editor_active && !editor_active {
+            // Transition from editor to terminal: clear screen + reset caches
+            output_dirty = true;
+            output_initialized = false;
+            prompt_initialized = false;
+            editor_render_cache.invalidate();
+            clear_terminal = true;
+        }
+        last_editor_active = editor_active;
+
         // Update display if needed
-        if input_dirty || output_dirty {
+        if input_dirty || output_dirty || clear_terminal {
             let mut rendered_editor = false;
             {
                 use crate::display_sink::{DisplaySink, VgaDisplaySink};
@@ -985,6 +998,14 @@ fn workspace_loop(
                 let bold_attr = console_vga::Style::Bold.to_vga_attr();
                 let rows = console_vga::VGA_HEIGHT;
                 let cols = console_vga::VGA_WIDTH;
+
+                if clear_terminal {
+                    for row in 0..rows {
+                        clear_vga_line(vga, row, normal_attr);
+                    }
+                    last_output_rows = 0;
+                    last_output_seq = 0;
+                }
 
                 // Check if editor is active
                 if workspace.is_editor_active() {
@@ -1159,6 +1180,13 @@ fn workspace_loop(
                     && delta_lines <= output_rows;
 
                 if output_dirty {
+                    if clear_terminal {
+                        for row in 0..rows {
+                            clear_fb_line(fb, row, cols, bg, fg);
+                        }
+                        last_output_rows = 0;
+                        last_output_seq = 0;
+                    }
                     if can_scroll {
                         // Scroll up and draw only new bottom lines
                         fb.scroll_up_text_lines(delta_lines, bg);
