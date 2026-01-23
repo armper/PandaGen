@@ -3,6 +3,10 @@
 //! This module provides a minimal inline framebuffer implementation
 //! to avoid pulling in external dependencies with std requirements.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use crate::BootInfo;
 use crate::display_sink::DisplaySink;
 
@@ -70,6 +74,7 @@ impl FramebufferInfo {
 pub struct BareMetalFramebuffer {
     info: FramebufferInfo,
     buffer: &'static mut [u8],
+    glyph_cache: Option<GlyphCache>,
 }
 
 impl BareMetalFramebuffer {
@@ -112,7 +117,11 @@ impl BareMetalFramebuffer {
         let buffer_size = info.buffer_size();
         let buffer = core::slice::from_raw_parts_mut(addr, buffer_size);
 
-        Some(Self { info, buffer })
+        Some(Self {
+            info,
+            buffer,
+            glyph_cache: None,
+        })
     }
 
     /// Returns the number of text columns based on the font width
@@ -199,6 +208,62 @@ impl BareMetalFramebuffer {
         }
     }
 
+    /// Clear a span of text cells on a row with background color.
+    /// This avoids per-character rasterization when clearing trailing spaces.
+    pub fn clear_text_span(
+        &mut self,
+        col: usize,
+        row: usize,
+        len: usize,
+        bg: (u8, u8, u8),
+    ) {
+        if row >= self.rows() || col >= self.cols() || len == 0 {
+            return;
+        }
+
+        let info = self.info();
+        let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+        let bpp = info.format.bytes_per_pixel();
+        let stride = info.stride_pixels * bpp;
+
+        let max_len = (self.cols() - col).min(len);
+        let pixel_start = col * FONT_WIDTH;
+        let pixel_width = max_len * FONT_WIDTH;
+
+        for scanline in 0..FONT_HEIGHT {
+            let y = row * FONT_HEIGHT + scanline;
+            if y >= info.height {
+                break;
+            }
+
+            let row_base = y * stride + pixel_start * bpp;
+            let byte_len = pixel_width * bpp;
+            if row_base + byte_len > self.buffer.len() {
+                break;
+            }
+
+            let mut offset = row_base;
+            let mut remaining = byte_len;
+            while remaining >= 8 {
+                unsafe {
+                    let ptr = self.buffer.as_mut_ptr().add(offset) as *mut u64;
+                    let packed = u64::from_le_bytes([
+                        bg_bytes[0], bg_bytes[1], bg_bytes[2], bg_bytes[3],
+                        bg_bytes[0], bg_bytes[1], bg_bytes[2], bg_bytes[3],
+                    ]);
+                    ptr.write_unaligned(packed);
+                }
+                offset += 8;
+                remaining -= 8;
+            }
+
+            for _ in 0..(remaining / 4) {
+                self.buffer[offset..offset + 4].copy_from_slice(&bg_bytes);
+                offset += 4;
+            }
+        }
+    }
+
     /// Draw a single character at (col, row) with foreground/background colors
     /// Optimized: writes 8 pixels per scan line at once instead of pixel-by-pixel
     pub fn draw_char_at(
@@ -213,17 +278,18 @@ impl BareMetalFramebuffer {
             return false;
         }
 
-        let bitmap = get_char_bitmap(ch);
         let info = self.info();
         let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
+
+        let glyph = self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes);
 
         let x_offset = col * FONT_WIDTH;
         let y_offset = row * FONT_HEIGHT;
         let bpp = info.format.bytes_per_pixel();
         let stride = info.stride_pixels * bpp;
 
-        for (row_idx, &row_data) in bitmap.iter().enumerate() {
+        for (row_idx, scanline) in glyph.iter().enumerate() {
             let y = y_offset + row_idx;
             if y >= info.height {
                 break;
@@ -232,21 +298,9 @@ impl BareMetalFramebuffer {
             // Calculate base offset for this scan line
             let row_base = y * stride + x_offset * bpp;
             
-            // Build 8 pixels worth of data (32 bytes for 4 bpp)
-            let mut scanline: [u8; 32] = [0; 32];
-            for col_idx in 0..FONT_WIDTH {
-                let bit = (row_data >> (7 - col_idx)) & 1;
-                let color = if bit == 1 { fg_bytes } else { bg_bytes };
-                let off = col_idx * 4;
-                scanline[off] = color[0];
-                scanline[off + 1] = color[1];
-                scanline[off + 2] = color[2];
-                scanline[off + 3] = color[3];
-            }
-            
             // Write all 8 pixels at once
             if row_base + 32 <= self.buffer.len() {
-                self.buffer[row_base..row_base + 32].copy_from_slice(&scanline);
+                self.buffer[row_base..row_base + 32].copy_from_slice(scanline);
             }
         }
 
@@ -294,24 +348,16 @@ impl BareMetalFramebuffer {
             
             // Write each character's scanline
             for (char_idx, &ch) in text_bytes[..max_chars].iter().enumerate() {
-                let bitmap = get_char_bitmap(ch);
-                let row_data = bitmap[scanline_idx];
-                
-                // Build 8 pixels for this character's scanline
+                let glyph = self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes);
+                let row_data = &glyph[scanline_idx];
+
+                // Copy 8 pixels for this character's scanline
                 let char_offset = row_base + char_idx * FONT_WIDTH * bpp;
                 if char_offset + 32 > self.buffer.len() {
                     break;
                 }
-                
-                for bit_idx in 0..FONT_WIDTH {
-                    let bit = (row_data >> (7 - bit_idx)) & 1;
-                    let color = if bit == 1 { fg_bytes } else { bg_bytes };
-                    let off = char_offset + bit_idx * 4;
-                    self.buffer[off] = color[0];
-                    self.buffer[off + 1] = color[1];
-                    self.buffer[off + 2] = color[2];
-                    self.buffer[off + 3] = color[3];
-                }
+
+                self.buffer[char_offset..char_offset + 32].copy_from_slice(row_data);
             }
         }
         
@@ -445,6 +491,116 @@ impl BareMetalFramebuffer {
         let _ = self.draw_char_at(col, row, b'_', fg, bg);
     }
 
+    fn glyph_cache_mut(&mut self) -> &mut GlyphCache {
+        if self.glyph_cache.is_none() {
+            self.glyph_cache = Some(GlyphCache::new());
+        }
+        self.glyph_cache.as_mut().expect("glyph cache initialized")
+    }
+
+
+#[derive(Clone)]
+struct GlyphEntry {
+    ready: bool,
+    scanlines: [[u8; 32]; FONT_HEIGHT],
+}
+
+impl GlyphEntry {
+    fn empty() -> Self {
+        Self {
+            ready: false,
+            scanlines: [[0u8; 32]; FONT_HEIGHT],
+        }
+    }
+}
+
+struct GlyphCacheSlot {
+    fg: [u8; 4],
+    bg: [u8; 4],
+    glyphs: Vec<GlyphEntry>,
+    last_used: u64,
+    valid: bool,
+}
+
+impl GlyphCacheSlot {
+    fn new() -> Self {
+        Self {
+            fg: [0; 4],
+            bg: [0; 4],
+            glyphs: Vec::new(),
+            last_used: 0,
+            valid: false,
+        }
+    }
+
+    fn matches(&self, fg: [u8; 4], bg: [u8; 4]) -> bool {
+        self.valid && self.fg == fg && self.bg == bg
+    }
+}
+
+struct GlyphCache {
+    slots: [GlyphCacheSlot; 2],
+    clock: u64,
+}
+
+impl GlyphCache {
+    fn new() -> Self {
+        Self {
+            slots: [GlyphCacheSlot::new(), GlyphCacheSlot::new()],
+            clock: 0,
+        }
+    }
+
+    fn glyph_for(&mut self, ch: u8, fg: [u8; 4], bg: [u8; 4]) -> &[[u8; 32]; FONT_HEIGHT] {
+        let idx = if (ch as usize) < 128 { ch as usize } else { b'?' as usize };
+        let slot_index = if self.slots[0].matches(fg, bg) {
+            0
+        } else if self.slots[1].matches(fg, bg) {
+            1
+        } else if self.slots[0].last_used <= self.slots[1].last_used {
+            0
+        } else {
+            1
+        };
+
+        let slot = &mut self.slots[slot_index];
+        if !slot.matches(fg, bg) {
+            slot.fg = fg;
+            slot.bg = bg;
+            slot.valid = true;
+            if slot.glyphs.is_empty() {
+                slot.glyphs = vec![GlyphEntry::empty(); 128];
+            } else {
+                for glyph in &mut slot.glyphs {
+                    glyph.ready = false;
+                }
+            }
+        }
+
+        self.clock = self.clock.wrapping_add(1);
+        slot.last_used = self.clock;
+
+        if !slot.glyphs[idx].ready {
+            let bitmap = get_char_bitmap(idx as u8);
+            for (row_idx, &row_data) in bitmap.iter().enumerate() {
+                let mut scanline = [0u8; 32];
+                for col_idx in 0..FONT_WIDTH {
+                    let bit = (row_data >> (7 - col_idx)) & 1;
+                    let color = if bit == 1 { fg } else { bg };
+                    let off = col_idx * 4;
+                    scanline[off] = color[0];
+                    scanline[off + 1] = color[1];
+                    scanline[off + 2] = color[2];
+                    scanline[off + 3] = color[3];
+                }
+                slot.glyphs[idx].scanlines[row_idx] = scanline;
+            }
+            slot.glyphs[idx].ready = true;
+        }
+
+        &slot.glyphs[idx].scanlines
+    }
+}
     /// Scroll the framebuffer up by the given number of text rows.
     ///
     /// This moves pixel rows up by `lines * FONT_HEIGHT` and clears the bottom
@@ -524,6 +680,12 @@ impl DisplaySink for BareMetalFramebuffer {
     fn write_str_at(&mut self, col: usize, row: usize, text: &str, attr: u8) -> usize {
         let (fg, bg) = attr_to_rgb(attr);
         self.draw_text_at(col, row, text, fg, bg)
+    }
+
+    fn clear_span(&mut self, col: usize, row: usize, len: usize, attr: u8) -> usize {
+        let (_, bg) = attr_to_rgb(attr);
+        self.clear_text_span(col, row, len, bg);
+        len
     }
 
     fn draw_cursor(&mut self, col: usize, row: usize, attr: u8) {

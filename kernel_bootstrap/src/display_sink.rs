@@ -28,6 +28,20 @@ pub trait DisplaySink {
 
     /// Draw a cursor at the given position (usually by inverting attributes)
     fn draw_cursor(&mut self, col: usize, row: usize, attr: u8);
+
+    /// Clear a span of cells on a single row.
+    ///
+    /// Default implementation falls back to per-cell writes.
+    /// Implementations can override with a faster path.
+    fn clear_span(&mut self, col: usize, row: usize, len: usize, attr: u8) -> usize {
+        let mut cleared = 0;
+        for offset in 0..len {
+            if self.write_at(col + offset, row, b' ', attr) {
+                cleared += 1;
+            }
+        }
+        cleared
+    }
 }
 
 /// VGA display sink for real hardware

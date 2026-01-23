@@ -282,12 +282,14 @@ fn render_line_full(
         }
     }
     
-    // Clear remaining cells on line
-    for col in line_len..cols {
-        sink.write_at(col, viewport_row, b' ', attr);
-        cache.set(col, viewport_row, Cell::new(b' ', attr));
+    // Clear remaining cells on line in a single span (fast path for framebuffer)
+    if line_len < cols {
+        let cleared = sink.clear_span(line_len, viewport_row, cols - line_len, attr);
+        for col in line_len..cols {
+            cache.set(col, viewport_row, Cell::new(b' ', attr));
+        }
+        stats.cells_written += cleared;
     }
-    stats.cells_written += cols - line_len;
     
     // Update cache for written content
     for (col, &byte) in line_bytes.iter().enumerate().take(cols) {
@@ -343,13 +345,17 @@ fn render_line_incremental(
             }
         }
         
-        // Write any trailing spaces
+        // Write any trailing spaces in one span (fast path for framebuffer)
         let line_len = line_bytes.len();
-        for col in line_len.max(start)..span_end {
-            sink.write_at(col, viewport_row, b' ', attr);
-            stats.cells_written += 1;
-            #[cfg(debug_assertions)]
-            render_stats::record_char_draw();
+        if span_end > line_len {
+            let clear_start = line_len.max(start);
+            let clear_len = span_end.saturating_sub(clear_start);
+            if clear_len > 0 {
+                let cleared = sink.clear_span(clear_start, viewport_row, clear_len, attr);
+                stats.cells_written += cleared;
+                #[cfg(debug_assertions)]
+                render_stats::record_char_draw();
+            }
         }
         
         stats.lines_redrawn += 1;
@@ -375,12 +381,14 @@ fn render_status_line(
     #[cfg(debug_assertions)]
     render_stats::record_pixel_writes((status_len * 128) as u64);
     
-    // Clear remaining cells
-    for col in status_len..cols {
-        sink.write_at(col, row, b' ', attr);
-        cache.set(col, row, Cell::new(b' ', attr));
+    // Clear remaining cells with a single span
+    if status_len < cols {
+        let cleared = sink.clear_span(status_len, row, cols - status_len, attr);
+        for col in status_len..cols {
+            cache.set(col, row, Cell::new(b' ', attr));
+        }
+        stats.cells_written += cleared;
     }
-    stats.cells_written += cols - status_len;
     
     // Update cache
     for (col, &byte) in status_bytes.iter().enumerate().take(cols) {
