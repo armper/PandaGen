@@ -6,7 +6,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-
 use crate::BootInfo;
 use crate::display_sink::DisplaySink;
 
@@ -60,6 +59,102 @@ impl FramebufferInfo {
     /// Returns total buffer size in bytes
     pub const fn buffer_size(&self) -> usize {
         self.height * self.stride_pixels * self.format.bytes_per_pixel()
+    }
+}
+
+/// Glyph entry in the cache
+#[derive(Clone)]
+struct GlyphEntry {
+    ready: bool,
+    scanlines: [[u8; 32]; FONT_HEIGHT],
+}
+
+impl GlyphEntry {
+    fn empty() -> Self {
+        Self {
+            ready: false,
+            scanlines: [[0u8; 32]; FONT_HEIGHT],
+        }
+    }
+}
+
+/// A slot in the glyph cache that caches glyphs for specific fg/bg colors
+struct GlyphCacheSlot {
+    fg: [u8; 4],
+    bg: [u8; 4],
+    glyphs: Vec<GlyphEntry>,
+    last_used: u64,
+    valid: bool,
+}
+
+impl GlyphCacheSlot {
+    fn new() -> Self {
+        Self {
+            fg: [0; 4],
+            bg: [0; 4],
+            glyphs: Vec::new(),
+            last_used: 0,
+            valid: false,
+        }
+    }
+
+    fn matches(&self, fg: [u8; 4], bg: [u8; 4]) -> bool {
+        self.valid && self.fg == fg && self.bg == bg
+    }
+}
+
+/// Simple 2-slot glyph cache for framebuffer rendering
+struct GlyphCache {
+    slots: [GlyphCacheSlot; 2],
+    clock: u64,
+}
+
+impl GlyphCache {
+    fn new() -> Self {
+        Self {
+            slots: [GlyphCacheSlot::new(), GlyphCacheSlot::new()],
+            clock: 0,
+        }
+    }
+
+    fn glyph_for(&mut self, ch: u8, fg: [u8; 4], bg: [u8; 4]) -> &[[u8; 32]; FONT_HEIGHT] {
+        let idx = if (ch as usize) < 128 { ch as usize } else { b'?' as usize };
+        let slot_index = if self.slots[0].matches(fg, bg) {
+            0
+        } else if self.slots[1].matches(fg, bg) {
+            1
+        } else if self.slots[0].last_used <= self.slots[1].last_used {
+            0
+        } else {
+            1
+        };
+
+        let slot = &mut self.slots[slot_index];
+        if !slot.valid || slot.fg != fg || slot.bg != bg {
+            slot.fg = fg;
+            slot.bg = bg;
+            slot.glyphs.clear();
+            slot.glyphs.resize(128, GlyphEntry::empty());
+            slot.valid = true;
+        }
+
+        slot.last_used = self.clock;
+        self.clock += 1;
+
+        if !slot.glyphs[idx].ready {
+            let bitmap = get_char_bitmap(ch);
+            for (row_idx, &row_data) in bitmap.iter().enumerate() {
+                for bit_idx in 0..FONT_WIDTH {
+                    let bit = (row_data >> (7 - bit_idx)) & 1;
+                    let pixel = if bit == 1 { fg } else { bg };
+                    let offset = bit_idx * 4;
+                    slot.glyphs[idx].scanlines[row_idx][offset..offset + 4].copy_from_slice(&pixel);
+                }
+            }
+            slot.glyphs[idx].ready = true;
+        }
+
+        &slot.glyphs[idx].scanlines
     }
 }
 
@@ -498,109 +593,6 @@ impl BareMetalFramebuffer {
         self.glyph_cache.as_mut().expect("glyph cache initialized")
     }
 
-
-#[derive(Clone)]
-struct GlyphEntry {
-    ready: bool,
-    scanlines: [[u8; 32]; FONT_HEIGHT],
-}
-
-impl GlyphEntry {
-    fn empty() -> Self {
-        Self {
-            ready: false,
-            scanlines: [[0u8; 32]; FONT_HEIGHT],
-        }
-    }
-}
-
-struct GlyphCacheSlot {
-    fg: [u8; 4],
-    bg: [u8; 4],
-    glyphs: Vec<GlyphEntry>,
-    last_used: u64,
-    valid: bool,
-}
-
-impl GlyphCacheSlot {
-    fn new() -> Self {
-        Self {
-            fg: [0; 4],
-            bg: [0; 4],
-            glyphs: Vec::new(),
-            last_used: 0,
-            valid: false,
-        }
-    }
-
-    fn matches(&self, fg: [u8; 4], bg: [u8; 4]) -> bool {
-        self.valid && self.fg == fg && self.bg == bg
-    }
-}
-
-struct GlyphCache {
-    slots: [GlyphCacheSlot; 2],
-    clock: u64,
-}
-
-impl GlyphCache {
-    fn new() -> Self {
-        Self {
-            slots: [GlyphCacheSlot::new(), GlyphCacheSlot::new()],
-            clock: 0,
-        }
-    }
-
-    fn glyph_for(&mut self, ch: u8, fg: [u8; 4], bg: [u8; 4]) -> &[[u8; 32]; FONT_HEIGHT] {
-        let idx = if (ch as usize) < 128 { ch as usize } else { b'?' as usize };
-        let slot_index = if self.slots[0].matches(fg, bg) {
-            0
-        } else if self.slots[1].matches(fg, bg) {
-            1
-        } else if self.slots[0].last_used <= self.slots[1].last_used {
-            0
-        } else {
-            1
-        };
-
-        let slot = &mut self.slots[slot_index];
-        if !slot.matches(fg, bg) {
-            slot.fg = fg;
-            slot.bg = bg;
-            slot.valid = true;
-            if slot.glyphs.is_empty() {
-                slot.glyphs = vec![GlyphEntry::empty(); 128];
-            } else {
-                for glyph in &mut slot.glyphs {
-                    glyph.ready = false;
-                }
-            }
-        }
-
-        self.clock = self.clock.wrapping_add(1);
-        slot.last_used = self.clock;
-
-        if !slot.glyphs[idx].ready {
-            let bitmap = get_char_bitmap(idx as u8);
-            for (row_idx, &row_data) in bitmap.iter().enumerate() {
-                let mut scanline = [0u8; 32];
-                for col_idx in 0..FONT_WIDTH {
-                    let bit = (row_data >> (7 - col_idx)) & 1;
-                    let color = if bit == 1 { fg } else { bg };
-                    let off = col_idx * 4;
-                    scanline[off] = color[0];
-                    scanline[off + 1] = color[1];
-                    scanline[off + 2] = color[2];
-                    scanline[off + 3] = color[3];
-                }
-                slot.glyphs[idx].scanlines[row_idx] = scanline;
-            }
-            slot.glyphs[idx].ready = true;
-        }
-
-        &slot.glyphs[idx].scanlines
-    }
-}
     /// Scroll the framebuffer up by the given number of text rows.
     ///
     /// This moves pixel rows up by `lines * FONT_HEIGHT` and clears the bottom
