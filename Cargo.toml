@@ -54,6 +54,7 @@ members = [
     "services_command_palette",
     "services_notification",
     "services_settings",
+    "services_job_scheduler",
 ]
 
 [workspace.package]
@@ -109,6 +110,7 @@ packages = { path = "packages" }
 services_command_palette = { path = "services_command_palette" }
 services_notification = { path = "services_notification" }
 services_settings = { path = "services_settings" }
+services_job_scheduler = { path = "services_job_scheduler" }
 
 # Input system crates
 input_types = { path = "input_types" }
