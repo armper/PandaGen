@@ -275,6 +275,15 @@ tile_manager: TileManager::new(VGA_WIDTH, VGA_HEIGHT, SplitLayout::horizontal(VG
                     Some("editor") => {
                         #[cfg(not(test))]
                         {
+                            // Recover filesystem from any stale editor instance
+                            if self.filesystem.is_none() {
+                                if let Some(mut stale_editor) = self.editor.take() {
+                                    if let Some(io) = stale_editor.editor_io.take() {
+                                        self.filesystem = Some(io.into_filesystem());
+                                    }
+                                }
+                            }
+
                             // Try to open file from path argument
                             let path = parts.next();
                             let mut editor = MinimalEditor::new(23);

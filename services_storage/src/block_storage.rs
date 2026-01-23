@@ -172,10 +172,10 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         // Reserve blocks:
         // - Block 0: superblock
-        // - Blocks 1-N: commit log (5% of disk or 32 blocks min, 256 blocks max)
+        // - Blocks 1-N: commit log (5% of disk or 1 block min, 256 blocks max)
         // - Blocks N+1-M: allocation bitmap (10% of remaining or 1 block min)
         // - Blocks M+1...: data area
-        let commit_log_blocks = ((total_blocks * 5) / 100).max(32).min(256);
+        let commit_log_blocks = ((total_blocks * 5) / 100).max(1).min(256);
         let bitmap_start = 1 + commit_log_blocks;
 
         // Ensure we don't overflow
