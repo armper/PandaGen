@@ -888,6 +888,15 @@ fn workspace_loop(
                         output_dirty = true;
                     }
                 }
+                
+                // Check if palette is now open (for debugging/logging)
+                if workspace.is_palette_open() {
+                    if KBD_DEBUG_LOG {
+                        kprintln!(serial, "palette: OPEN query='{}' results={}", 
+                            workspace.palette_overlay().query(),
+                            workspace.palette_overlay().result_count());
+                    }
+                }
             }
         }
 
@@ -1108,6 +1117,51 @@ fn workspace_loop(
                         last_editor_input = None;
                     }
                     continue; // Skip normal workspace rendering
+                }
+
+                // Render command palette overlay if open
+                if workspace.is_palette_open() && input_dirty {
+                    let palette = workspace.palette_overlay();
+                    let overlay_attr = 0x1F; // White on blue background
+                    
+                    // Simple centered overlay - 3 rows starting from row 10
+                    let overlay_start_row = 10;
+                    let overlay_width = 60.min(cols);
+                    let overlay_col = (cols - overlay_width) / 2;
+                    
+                    // Row 1: Query line
+                    clear_vga_line(vga, overlay_start_row, overlay_attr);
+                    let query_text = palette.query();
+                    let header = "Command Palette: ";
+                    vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
+                    if !query_text.is_empty() {
+                        vga.write_str_at(overlay_col + header.len(), overlay_start_row, query_text, overlay_attr);
+                    }
+                    
+                    // Row 2: Selected result or empty
+                    clear_vga_line(vga, overlay_start_row + 1, overlay_attr);
+                    let results = palette.displayed_results();
+                    if !results.is_empty() {
+                        let selected_idx = palette.selection_index();
+                        if let Some(selected) = results.get(selected_idx) {
+                            let selection_indicator = "> ";
+                            vga.write_str_at(overlay_col, overlay_start_row + 1, selection_indicator, overlay_attr);
+                            vga.write_str_at(
+                                overlay_col + selection_indicator.len(),
+                                overlay_start_row + 1,
+                                &selected.name,
+                                overlay_attr
+                            );
+                        }
+                    }
+                    
+                    // Row 3: Help text
+                    clear_vga_line(vga, overlay_start_row + 2, overlay_attr);
+                    let help = "[ESC] Close  [Enter] Execute";
+                    vga.write_str_at(overlay_col, overlay_start_row + 2, help, overlay_attr);
+                    
+                    input_dirty = false;
+                    continue; // Skip normal workspace rendering when palette open
                 }
 
                 // Normal workspace rendering (when editor not active)
