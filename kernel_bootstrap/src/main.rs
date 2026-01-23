@@ -876,7 +876,7 @@ fn workspace_loop(
                 // Update display on input change
                 if input_progressed {
                     input_dirty = true;
-                    if ch == b'\n' || ch == b'\r' {
+                    if (ch == b'\n' || ch == b'\r') && !workspace.is_editor_active() {
                         output_dirty = true;
                     }
                 }
@@ -969,6 +969,8 @@ fn workspace_loop(
                                 let _ = writeln!(serial, "editor render: full, cells={}", _stats.cells_written);
                             }
                         }
+                        input_dirty = false;
+                        output_dirty = false;
                         rendered_editor = true;
                     }
                 }
