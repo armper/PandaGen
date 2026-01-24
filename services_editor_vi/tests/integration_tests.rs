@@ -150,9 +150,9 @@ fn test_quit_blocked_when_dirty() {
     editor.state_mut().append_to_command('q');
     let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
 
-    // Should refuse to quit
+    // Should refuse to quit with new error message
     assert_eq!(result, EditorAction::Continue);
-    assert!(editor.state().status_message().contains("No write"));
+    assert_eq!(editor.state().status_message(), "Unsaved changes — use :w or :q!");
 
     // Force quit with :q!
     editor
