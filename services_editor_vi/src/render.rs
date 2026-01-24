@@ -2,6 +2,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::format;
+use alloc::vec::Vec;
 use crate::state::{EditorMode, EditorState};
 
 /// Editor view for rendering
@@ -93,10 +94,23 @@ impl EditorView {
             status.push_str(state.search_query());
         }
 
-        // Status message
+        // Status message or mode hint
         if !state.status_message().is_empty() {
             status.push_str(" | ");
             status.push_str(state.status_message());
+        } else {
+            // Show mode-specific hints when no status message
+            status.push_str(" | ");
+            status.push_str(&get_mode_hint(state.mode()));
+            
+            // Add command suggestions in Command mode
+            if state.mode() == EditorMode::Command {
+                let suggestions = get_command_suggestions(state.command_buffer());
+                if !suggestions.is_empty() {
+                    status.push_str(" | Suggestions: ");
+                    status.push_str(&suggestions.join(" "));
+                }
+            }
         }
 
         status
@@ -106,6 +120,54 @@ impl EditorView {
     pub fn render_status(&self, state: &EditorState) -> String {
         self.render_status_line(state)
     }
+}
+
+/// Get mode-specific hint text
+fn get_mode_hint(mode: EditorMode) -> &'static str {
+    match mode {
+        EditorMode::Normal => "Normal — i=Insert :w=Save :q=Quit :help",
+        EditorMode::Insert => "Insert — Esc=Normal",
+        EditorMode::Command => "Command — Enter=Run Esc=Cancel :w :q :wq",
+        EditorMode::Search => "Search — Enter=Find Esc=Cancel",
+    }
+}
+
+/// Get command suggestions based on current command buffer
+/// Returns up to 3 suggestions in deterministic order:
+/// 1. Prefix matches first (command.starts_with(buffer))
+/// 2. Then substring matches (command.contains(buffer))
+/// 3. Lexicographic tie-break for stable ordering
+fn get_command_suggestions(buffer: &str) -> Vec<&'static str> {
+    use alloc::vec;
+    const COMMANDS: &[&str] = &["e", "help", "q", "w", "wq"];
+    
+    if buffer.is_empty() {
+        // Return top 3 commands lexicographically
+        return vec!["e", "help", "q"];
+    }
+    
+    let mut prefix_matches = Vec::new();
+    let mut substring_matches = Vec::new();
+    
+    for &cmd in COMMANDS {
+        if cmd.starts_with(buffer) {
+            prefix_matches.push(cmd);
+        } else if cmd.contains(buffer) {
+            substring_matches.push(cmd);
+        }
+    }
+    
+    // Sort for deterministic ordering
+    prefix_matches.sort();
+    substring_matches.sort();
+    
+    // Combine: prefix matches first, then substring matches
+    let mut result = prefix_matches;
+    result.extend(substring_matches);
+    
+    // Return up to 3 suggestions
+    result.truncate(3);
+    result
 }
 
 impl Default for EditorView {
@@ -118,6 +180,7 @@ impl Default for EditorView {
 mod tests {
     use super::*;
     use crate::state::{EditorState, Position};
+    use alloc::vec;
     use alloc::vec::Vec;
 
     #[test]
@@ -233,5 +296,136 @@ mod tests {
 
         let status = view.render_status(&state);
         assert!(status.contains("Test message"));
+    }
+
+    // Tests for mode hints
+    #[test]
+    fn test_mode_hint_normal() {
+        let hint = get_mode_hint(EditorMode::Normal);
+        assert_eq!(hint, "Normal — i=Insert :w=Save :q=Quit :help");
+    }
+
+    #[test]
+    fn test_mode_hint_insert() {
+        let hint = get_mode_hint(EditorMode::Insert);
+        assert_eq!(hint, "Insert — Esc=Normal");
+    }
+
+    #[test]
+    fn test_mode_hint_command() {
+        let hint = get_mode_hint(EditorMode::Command);
+        assert_eq!(hint, "Command — Enter=Run Esc=Cancel :w :q :wq");
+    }
+
+    #[test]
+    fn test_mode_hint_search() {
+        let hint = get_mode_hint(EditorMode::Search);
+        assert_eq!(hint, "Search — Enter=Find Esc=Cancel");
+    }
+
+    // Tests for command suggestions
+    #[test]
+    fn test_suggestions_empty_buffer() {
+        let suggestions = get_command_suggestions("");
+        assert_eq!(suggestions, vec!["e", "help", "q"]);
+    }
+
+    #[test]
+    fn test_suggestions_prefix_w() {
+        let suggestions = get_command_suggestions("w");
+        assert_eq!(suggestions, vec!["w", "wq"]);
+    }
+
+    #[test]
+    fn test_suggestions_prefix_h() {
+        let suggestions = get_command_suggestions("h");
+        assert_eq!(suggestions, vec!["help"]);
+    }
+
+    #[test]
+    fn test_suggestions_prefix_q() {
+        let suggestions = get_command_suggestions("q");
+        assert_eq!(suggestions, vec!["q", "wq"]); // "wq" contains "q" as substring
+    }
+
+    #[test]
+    fn test_suggestions_prefix_e() {
+        let suggestions = get_command_suggestions("e");
+        assert_eq!(suggestions, vec!["e", "help"]); // "help" contains "e"
+    }
+
+    #[test]
+    fn test_suggestions_unknown() {
+        let suggestions = get_command_suggestions("xyz");
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_suggestions_wq() {
+        let suggestions = get_command_suggestions("wq");
+        assert_eq!(suggestions, vec!["wq"]);
+    }
+
+    #[test]
+    fn test_suggestions_deterministic_order() {
+        // Test that suggestions are always returned in the same order
+        let s1 = get_command_suggestions("e");
+        let s2 = get_command_suggestions("e");
+        assert_eq!(s1, s2);
+    }
+
+    // Integration tests for status line with hints
+    #[test]
+    fn test_status_line_with_normal_hint() {
+        let view = EditorView::new(3);
+        let state = EditorState::new();
+
+        let status = view.render_status(&state);
+        assert!(status.contains("Normal — i=Insert :w=Save :q=Quit :help"));
+    }
+
+    #[test]
+    fn test_status_line_with_insert_hint() {
+        let view = EditorView::new(3);
+        let mut state = EditorState::new();
+        state.set_mode(EditorMode::Insert);
+
+        let status = view.render_status(&state);
+        assert!(status.contains("Insert — Esc=Normal"));
+    }
+
+    #[test]
+    fn test_status_line_with_command_hint_and_suggestions() {
+        let view = EditorView::new(3);
+        let mut state = EditorState::new();
+        state.set_mode(EditorMode::Command);
+
+        let status = view.render_status(&state);
+        assert!(status.contains("Command — Enter=Run Esc=Cancel :w :q :wq"));
+        assert!(status.contains("Suggestions: e help q"));
+    }
+
+    #[test]
+    fn test_status_line_command_with_buffer() {
+        let view = EditorView::new(3);
+        let mut state = EditorState::new();
+        state.set_mode(EditorMode::Command);
+        state.append_to_command('w');
+
+        let status = view.render_status(&state);
+        assert!(status.contains(":w"));
+        assert!(status.contains("Suggestions: w wq"));
+    }
+
+    #[test]
+    fn test_status_message_overrides_hint() {
+        let view = EditorView::new(3);
+        let mut state = EditorState::new();
+        state.set_status_message("Custom message");
+
+        let status = view.render_status(&state);
+        assert!(status.contains("Custom message"));
+        // Hint should not appear when status message is present
+        assert!(!status.contains("Normal — i=Insert"));
     }
 }
