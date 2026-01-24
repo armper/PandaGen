@@ -134,7 +134,7 @@ impl MinimalEditor {
         let outcome = self.core.apply_key(key);
 
         // Handle outcome
-        match outcome {
+        let should_quit = match outcome {
             CoreOutcome::Continue => false,
             CoreOutcome::Changed => {
                 self.adjust_viewport();
@@ -230,6 +230,30 @@ impl MinimalEditor {
                     }
                 }
             }
+        };
+
+        if !should_quit {
+            self.refresh_prompt_status();
+        }
+
+        should_quit
+    }
+
+    fn refresh_prompt_status(&mut self) {
+        if !self.status.is_empty() {
+            return;
+        }
+
+        match self.core.mode() {
+            EditorMode::Command => {
+                self.status.push(':');
+                self.status.push_str(self.core.command_buffer());
+            }
+            EditorMode::Search => {
+                self.status.push('/');
+                self.status.push_str(self.core.search_query());
+            }
+            _ => {}
         }
     }
 
