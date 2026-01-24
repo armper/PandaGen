@@ -15,6 +15,7 @@ pub mod display_sink;
 pub mod minimal_editor;
 pub mod optimized_render;
 pub mod render_stats;
+pub mod palette_overlay;
 
 // Storage modules (available in both test and non-test)
 pub mod bare_metal_storage;
