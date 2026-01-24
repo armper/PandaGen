@@ -334,6 +334,62 @@ impl From<FocusError> for WorkspaceError {
     }
 }
 
+impl WorkspaceError {
+    /// Returns actionable suggestions for recovering from this error
+    /// Returns (error_message, suggested_actions)
+    pub fn actionable_message(&self) -> (String, Vec<String>) {
+        match self {
+            WorkspaceError::ComponentNotFound(id) => (
+                format!("Component not found: {}", id),
+                vec!["list".to_string(), "help workspace".to_string()],
+            ),
+            WorkspaceError::LaunchDenied { reason } => (
+                format!("Component launch denied: {}", reason),
+                vec!["help workspace".to_string()],
+            ),
+            WorkspaceError::FocusDenied { reason } => (
+                format!("Focus denied: {}", reason),
+                vec!["list".to_string()],
+            ),
+            WorkspaceError::NotFocusable(id) => (
+                format!("Component not focusable: {}", id),
+                vec!["list".to_string(), "next".to_string()],
+            ),
+            WorkspaceError::NoComponents => (
+                "No components available".to_string(),
+                vec!["open editor <path>".to_string(), "help".to_string()],
+            ),
+            WorkspaceError::InvalidCommand(cmd) => (
+                format!("Invalid command: {}", cmd),
+                vec!["help".to_string()],
+            ),
+            WorkspaceError::PolicyError(msg) => (
+                format!("Policy error: {}", msg),
+                vec!["help system".to_string()],
+            ),
+            WorkspaceError::BudgetExhausted(id) => (
+                format!("Budget exhausted for component: {}", id),
+                vec!["close {}".to_string(), "list".to_string()],
+            ),
+            WorkspaceError::FocusError(msg) => (
+                format!("Focus error: {}", msg),
+                vec!["list".to_string(), "next".to_string()],
+            ),
+        }
+    }
+
+    /// Formats error with actions for display
+    /// Example: "Component not found — Try: list | help workspace"
+    pub fn format_with_actions(&self) -> String {
+        let (message, actions) = self.actionable_message();
+        if actions.is_empty() {
+            message
+        } else {
+            format!("{} — Try: {}", message, actions.join(" | "))
+        }
+    }
+}
+
 /// Configuration for launching a component
 pub struct LaunchConfig {
     /// Type of component to launch
@@ -1960,5 +2016,43 @@ mod tests {
         let save_event = InputEvent::key(KeyEvent::pressed(KeyCode::S, Modifiers::CTRL));
         let routed_to_save = workspace.route_input(&save_event);
         assert_eq!(routed_to_save, None, "Ctrl+S should be consumed globally");
+    }
+
+    #[test]
+    fn test_actionable_error_no_components() {
+        let err = WorkspaceError::NoComponents;
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("No components"));
+        assert!(actions.len() > 0);
+        assert!(actions.iter().any(|a| a.contains("open")));
+    }
+
+    #[test]
+    fn test_actionable_error_invalid_command() {
+        let err = WorkspaceError::InvalidCommand("unknown".to_string());
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("Invalid command"));
+        assert!(actions.iter().any(|a| a.contains("help")));
+    }
+
+    #[test]
+    fn test_actionable_error_format() {
+        let err = WorkspaceError::NoComponents;
+        let formatted = err.format_with_actions();
+        
+        assert!(formatted.contains("—"));
+        assert!(formatted.contains("Try:"));
+    }
+
+    #[test]
+    fn test_actionable_error_component_not_found() {
+        let id = ComponentId::new();
+        let err = WorkspaceError::ComponentNotFound(id);
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("not found"));
+        assert!(actions.iter().any(|a| a == "list"));
     }
 }
