@@ -22,6 +22,7 @@
 pub mod boot_profile;
 pub mod commands;
 pub mod keybindings;
+pub mod workspace_status;
 
 
 use core_types::TaskId;
@@ -44,6 +45,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
+use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -444,6 +446,12 @@ pub struct WorkspaceManager {
     /// Debug info for keyboard routing (gated behind debug_assertions)
     #[cfg(debug_assertions)]
     key_routing_debug: KeyRoutingDebug,
+    /// Workspace status for status strip
+    workspace_status: WorkspaceStatus,
+    /// Recent history (files, commands, errors)
+    recent_history: RecentHistory,
+    /// Context breadcrumbs
+    breadcrumbs: ContextBreadcrumbs,
 }
 
 impl WorkspaceManager {
@@ -463,6 +471,9 @@ impl WorkspaceManager {
             editor_io_context: None,
             #[cfg(debug_assertions)]
             key_routing_debug: KeyRoutingDebug::new(),
+            workspace_status: WorkspaceStatus::new(),
+            recent_history: RecentHistory::new(),
+            breadcrumbs: ContextBreadcrumbs::new(),
         }
     }
 
@@ -1045,6 +1056,123 @@ impl WorkspaceManager {
         ts
     }
 
+    // ========== Workspace Status and History Methods ==========
+
+    /// Gets the current workspace status
+    pub fn workspace_status(&self) -> &WorkspaceStatus {
+        &self.workspace_status
+    }
+
+    /// Gets the mutable workspace status
+    pub fn workspace_status_mut(&mut self) -> &mut WorkspaceStatus {
+        &mut self.workspace_status
+    }
+
+    /// Gets the recent history
+    pub fn recent_history(&self) -> &RecentHistory {
+        &self.recent_history
+    }
+
+    /// Gets the mutable recent history
+    pub fn recent_history_mut(&mut self) -> &mut RecentHistory {
+        &mut self.recent_history
+    }
+
+    /// Gets the context breadcrumbs
+    pub fn breadcrumbs(&self) -> &ContextBreadcrumbs {
+        &self.breadcrumbs
+    }
+
+    /// Gets the mutable context breadcrumbs
+    pub fn breadcrumbs_mut(&mut self) -> &mut ContextBreadcrumbs {
+        &mut self.breadcrumbs
+    }
+
+    /// Updates workspace status based on current state (deterministic)
+    pub fn update_workspace_status(&mut self) {
+        // Get active editor name from focused component
+        let focused_id = self.get_focused_component();
+        
+        let (active_editor, has_unsaved) = if let Some(id) = focused_id {
+            if let Some(component) = self.get_component(id) {
+                if component.component_type == ComponentType::Editor {
+                    // Extract filename from component metadata or name
+                    let filename = component
+                        .metadata
+                        .get("filename")
+                        .or_else(|| component.metadata.get("arg0"))
+                        .cloned()
+                        .unwrap_or_else(|| component.name.clone());
+                    
+                    // Check for dirty state from metadata
+                    let dirty = component
+                        .metadata
+                        .get("dirty")
+                        .map(|v| v == "true")
+                        .unwrap_or(false);
+                    
+                    (Some(filename), dirty)
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        };
+
+        self.workspace_status.active_editor = active_editor;
+        self.workspace_status.has_unsaved_changes = has_unsaved;
+
+        // Update job count (just count running components for now)
+        self.workspace_status.active_jobs = self
+            .components
+            .values()
+            .filter(|c| c.is_running())
+            .count();
+
+        // Update breadcrumbs based on focused component
+        self.update_breadcrumbs();
+    }
+
+    /// Updates context breadcrumbs based on focused component
+    fn update_breadcrumbs(&mut self) {
+        let focused_id = self.get_focused_component();
+        
+        if let Some(id) = focused_id {
+            if let Some(component) = self.get_component(id) {
+                let mut parts = vec!["PANDA".to_string(), "ROOT".to_string()];
+                
+                match component.component_type {
+                    ComponentType::Editor => {
+                        let filename = component
+                            .metadata
+                            .get("filename")
+                            .or_else(|| component.metadata.get("arg0"))
+                            .cloned()
+                            .unwrap_or_else(|| "untitled".to_string());
+                        parts.push(format!("EDITOR({})", filename));
+                    }
+                    ComponentType::Cli => {
+                        parts.push("CLI".to_string());
+                    }
+                    ComponentType::PipelineExecutor => {
+                        parts.push("PIPELINE".to_string());
+                    }
+                    ComponentType::Custom => {
+                        parts.push("CUSTOM".to_string());
+                    }
+                }
+                
+                self.breadcrumbs.set_parts(parts);
+            }
+        } else {
+            // No focused component, reset to root
+            self.breadcrumbs.set_parts(vec!["PANDA".to_string(), "ROOT".to_string()]);
+        }
+    }
+
     /// Renders the current workspace state
     ///
     /// Returns a snapshot of the focused component's views and status.
@@ -1069,6 +1197,8 @@ impl WorkspaceManager {
             status_view: status_view_frame,
             component_count: self.components.len(),
             running_count: self.components.values().filter(|c| c.is_running()).count(),
+            status_strip: self.workspace_status.format_status_strip_with_action(),
+            breadcrumbs: self.breadcrumbs.format(),
             #[cfg(debug_assertions)]
             debug_info: Some(DebugInfo {
                 focused_component_name: focused_component.map(|c| c.name.clone()),
@@ -1309,6 +1439,10 @@ pub struct WorkspaceRenderSnapshot {
     pub component_count: usize,
     /// Number of running components
     pub running_count: usize,
+    /// Workspace status strip content
+    pub status_strip: String,
+    /// Context breadcrumbs
+    pub breadcrumbs: String,
     /// Debug info (only in debug builds)
     #[cfg(debug_assertions)]
     #[serde(skip_serializing_if = "Option::is_none")]

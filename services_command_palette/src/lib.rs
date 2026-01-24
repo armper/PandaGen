@@ -87,6 +87,12 @@ pub struct CommandDescriptor {
     pub required_capability: Option<String>,
     /// Whether the command is enabled
     pub enabled: bool,
+    /// Category label (e.g., "Workspace", "Editor", "System")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Keybinding hint (display only, e.g., "Ctrl+O")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keybinding: Option<String>,
 }
 
 impl CommandDescriptor {
@@ -104,6 +110,8 @@ impl CommandDescriptor {
             tags,
             required_capability: None,
             enabled: true,
+            category: None,
+            keybinding: None,
         }
     }
 
@@ -117,6 +125,47 @@ impl CommandDescriptor {
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
         self
+    }
+
+    /// Sets the category label
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Sets the keybinding hint
+    pub fn with_keybinding(mut self, keybinding: impl Into<String>) -> Self {
+        self.keybinding = Some(keybinding.into());
+        self
+    }
+
+    /// Formats command for palette display with optional category and keybinding
+    /// Example: "Open File (Workspace)           Ctrl+O"
+    /// Example: "System: Reboot                  Ctrl+Alt+R"
+    /// Example: "Help: Keyboard Shortcuts        ?"
+    pub fn format_for_palette(&self) -> String {
+        let mut result = self.name.clone();
+        
+        // Add category if present
+        if let Some(ref cat) = self.category {
+            result.push_str(" (");
+            result.push_str(cat);
+            result.push(')');
+        }
+        
+        // Add keybinding if present, right-aligned
+        if let Some(ref key) = self.keybinding {
+            // Pad to align keybinding to the right (assuming 40 chars for command name)
+            let padding = if result.len() < 35 {
+                35 - result.len()
+            } else {
+                1
+            };
+            result.push_str(&" ".repeat(padding));
+            result.push_str(key);
+        }
+        
+        result
     }
 
     /// Checks if this command matches the given query
@@ -153,6 +202,7 @@ impl CommandDescriptor {
     }
 
     /// Calculates a relevance score for the given query (higher is better)
+    /// Scoring uses deterministic rules: prefix match > substring match > lexicographic
     pub fn relevance_score(&self, query: &str) -> u32 {
         if !self.enabled {
             return 0;
@@ -163,30 +213,31 @@ impl CommandDescriptor {
         let desc_lower = self.description.to_lowercase();
         let mut score = 0u32;
 
+        // Prefix matches score higher than substring matches
         // Exact match in name gets highest score
         if name_lower == query_lower {
-            score += 1000;
+            score += 10000;
         } else if name_lower.starts_with(&query_lower) {
-            score += 500;
+            score += 5000;
         } else if name_lower.contains(&query_lower) {
-            score += 100;
+            score += 1000;
         }
 
-        // Match in tags
+        // Match in tags (prefix > substring)
         for tag in &self.tags {
             let tag_lower = tag.to_lowercase();
             if tag_lower == query_lower {
-                score += 300;
+                score += 3000;
             } else if tag_lower.starts_with(&query_lower) {
-                score += 150;
+                score += 1500;
             } else if tag_lower.contains(&query_lower) {
-                score += 50;
+                score += 500;
             }
         }
 
-        // Match in description
+        // Match in description (lower priority)
         if desc_lower.contains(&query_lower) {
-            score += 10;
+            score += 100;
         }
 
         score
@@ -245,6 +296,7 @@ impl CommandPalette {
     }
 
     /// Filters commands by query and returns them sorted by relevance
+    /// Deterministic sorting: score (desc) > name (asc)
     pub fn filter_commands(&self, query: &str) -> Vec<CommandDescriptor> {
         let mut matches: Vec<_> = self
             .commands
@@ -252,14 +304,17 @@ impl CommandPalette {
             .filter(|cmd| cmd.descriptor.matches(query))
             .map(|cmd| {
                 let score = cmd.descriptor.relevance_score(query);
-                (score, cmd.descriptor.clone())
+                (score, cmd.descriptor.name.clone(), cmd.descriptor.clone())
             })
             .collect();
 
-        // Sort by score (descending)
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
+        // Sort by score (descending), then by name (ascending) for determinism
+        matches.sort_by(|a, b| {
+            b.0.cmp(&a.0)  // Score descending
+                .then_with(|| a.1.cmp(&b.1))  // Name ascending (for ties)
+        });
 
-        matches.into_iter().map(|(_, desc)| desc).collect()
+        matches.into_iter().map(|(_, _, desc)| desc).collect()
     }
 
     /// Executes a command by ID with the given arguments
@@ -585,5 +640,121 @@ mod tests {
         
         // First result should be the one with exact tag match
         assert_eq!(matches[0].id.as_str(), "open_editor");
+    }
+
+    #[test]
+    fn test_command_descriptor_with_category() {
+        let desc = CommandDescriptor::new(
+            "open_file",
+            "Open File",
+            "Opens a file",
+            vec![],
+        )
+        .with_category("Workspace");
+
+        assert_eq!(desc.category, Some("Workspace".to_string()));
+    }
+
+    #[test]
+    fn test_command_descriptor_with_keybinding() {
+        let desc = CommandDescriptor::new(
+            "save",
+            "Save",
+            "Saves the current file",
+            vec![],
+        )
+        .with_keybinding("Ctrl+S");
+
+        assert_eq!(desc.keybinding, Some("Ctrl+S".to_string()));
+    }
+
+    #[test]
+    fn test_format_for_palette_with_category_and_keybinding() {
+        let desc = CommandDescriptor::new(
+            "open_file",
+            "Open File",
+            "Opens a file",
+            vec![],
+        )
+        .with_category("Workspace")
+        .with_keybinding("Ctrl+O");
+
+        let formatted = desc.format_for_palette();
+        assert!(formatted.contains("Open File"));
+        assert!(formatted.contains("(Workspace)"));
+        assert!(formatted.contains("Ctrl+O"));
+    }
+
+    #[test]
+    fn test_format_for_palette_without_keybinding() {
+        let desc = CommandDescriptor::new(
+            "test_cmd",
+            "Test Command",
+            "Test",
+            vec![],
+        )
+        .with_category("System");
+
+        let formatted = desc.format_for_palette();
+        assert!(formatted.contains("Test Command"));
+        assert!(formatted.contains("(System)"));
+        assert!(!formatted.contains("Ctrl"));
+    }
+
+    #[test]
+    fn test_format_for_palette_minimal() {
+        let desc = CommandDescriptor::new(
+            "simple",
+            "Simple",
+            "A simple command",
+            vec![],
+        );
+
+        let formatted = desc.format_for_palette();
+        assert_eq!(formatted, "Simple");
+    }
+
+    #[test]
+    fn test_deterministic_filtering_order() {
+        let mut palette = CommandPalette::new();
+
+        // Add commands with similar scores but different names
+        palette.register_command(
+            CommandDescriptor::new(
+                "cmd_z",
+                "Z Command",
+                "Contains word system",
+                vec![],
+            ),
+            Box::new(|_| Ok("".to_string())),
+        );
+
+        palette.register_command(
+            CommandDescriptor::new(
+                "cmd_a",
+                "A Command",
+                "Contains word system",
+                vec![],
+            ),
+            Box::new(|_| Ok("".to_string())),
+        );
+
+        palette.register_command(
+            CommandDescriptor::new(
+                "cmd_m",
+                "M Command",
+                "Contains word system",
+                vec![],
+            ),
+            Box::new(|_| Ok("".to_string())),
+        );
+
+        let matches = palette.filter_commands("system");
+        assert_eq!(matches.len(), 3);
+        
+        // With same scores, should be sorted alphabetically by name
+        assert_eq!(matches[0].name, "A Command");
+        assert_eq!(matches[1].name, "M Command");
+        assert_eq!(matches[2].name, "Z Command");
     }
 }

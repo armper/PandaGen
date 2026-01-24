@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 resources = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
