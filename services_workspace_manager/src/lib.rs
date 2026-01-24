@@ -21,6 +21,7 @@
 
 pub mod boot_profile;
 pub mod commands;
+pub mod help;
 pub mod keybindings;
 pub mod workspace_status;
 
@@ -46,6 +47,12 @@ use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
 use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
+
+// Re-export public types from modules
+pub use help::HelpCategory;
+pub use workspace_status::{
+    CommandSuggestion, FsStatus, PromptValidation, generate_suggestions,
+};
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

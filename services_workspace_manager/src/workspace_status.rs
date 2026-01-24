@@ -228,6 +228,65 @@ impl CommandSuggestion {
     }
 }
 
+/// Generate command suggestions based on partial input
+/// Returns deterministically ordered suggestions
+pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
+    let input_lower = input.trim().to_lowercase();
+    
+    // Empty input - show common commands
+    if input_lower.is_empty() {
+        return vec![
+            CommandSuggestion::new("open editor <path>", "Open file in editor"),
+            CommandSuggestion::new("list", "List all components"),
+            CommandSuggestion::new("help", "Show help overview"),
+            CommandSuggestion::new("recent", "Show recent files"),
+        ];
+    }
+    
+    // Match command prefixes
+    let mut suggestions = Vec::new();
+    
+    // "open" commands
+    if "open".starts_with(&input_lower) || input_lower.starts_with("op") {
+        suggestions.push(CommandSuggestion::new("open editor <path>", "Open file in editor"));
+        suggestions.push(CommandSuggestion::new("open recent", "Show recent files"));
+    }
+    
+    // "help" commands
+    if "help".starts_with(&input_lower) || input_lower.starts_with("he") || input_lower == "?" {
+        suggestions.push(CommandSuggestion::new("help", "Overview"));
+        suggestions.push(CommandSuggestion::new("help editor", "Editor commands"));
+        suggestions.push(CommandSuggestion::new("help keys", "Keyboard shortcuts"));
+        suggestions.push(CommandSuggestion::new("help workspace", "Workspace commands"));
+        suggestions.push(CommandSuggestion::new("help system", "System commands"));
+    }
+    
+    // "list" commands
+    if "list".starts_with(&input_lower) || input_lower.starts_with("li") {
+        suggestions.push(CommandSuggestion::new("list", "List all components"));
+    }
+    
+    // "recent" commands
+    if "recent".starts_with(&input_lower) || input_lower.starts_with("rec") {
+        suggestions.push(CommandSuggestion::new("recent", "Show recent files"));
+    }
+    
+    // "close" commands
+    if "close".starts_with(&input_lower) || input_lower.starts_with("cl") {
+        suggestions.push(CommandSuggestion::new("close <id>", "Close a component"));
+    }
+    
+    // "next" / "prev" navigation
+    if "next".starts_with(&input_lower) || input_lower.starts_with("ne") {
+        suggestions.push(CommandSuggestion::new("next", "Focus next component"));
+    }
+    if "prev".starts_with(&input_lower) || "previous".starts_with(&input_lower) || input_lower.starts_with("pr") {
+        suggestions.push(CommandSuggestion::new("prev", "Focus previous component"));
+    }
+    
+    suggestions
+}
+
 /// Prompt validation state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptValidation {
@@ -455,6 +514,44 @@ mod tests {
         
         assert!(formatted.contains("open editor <path>"));
         assert!(formatted.contains("Open file in editor"));
+    }
+
+    #[test]
+    fn test_generate_suggestions_empty_input() {
+        let suggestions = generate_suggestions("");
+        assert!(suggestions.len() > 0);
+        assert!(suggestions.iter().any(|s| s.pattern.contains("open")));
+        assert!(suggestions.iter().any(|s| s.pattern.contains("list")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_open_prefix() {
+        let suggestions = generate_suggestions("op");
+        assert!(suggestions.iter().any(|s| s.pattern.contains("open editor")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_help_prefix() {
+        let suggestions = generate_suggestions("he");
+        assert!(suggestions.iter().any(|s| s.pattern.contains("help")));
+        assert!(suggestions.iter().any(|s| s.pattern.contains("help editor")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_list_prefix() {
+        let suggestions = generate_suggestions("li");
+        assert!(suggestions.iter().any(|s| s.pattern == "list"));
+    }
+
+    #[test]
+    fn test_generate_suggestions_deterministic() {
+        let suggestions1 = generate_suggestions("he");
+        let suggestions2 = generate_suggestions("he");
+        
+        assert_eq!(suggestions1.len(), suggestions2.len());
+        for (s1, s2) in suggestions1.iter().zip(suggestions2.iter()) {
+            assert_eq!(s1.pattern, s2.pattern);
+        }
     }
 
     #[test]
