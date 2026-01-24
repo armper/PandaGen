@@ -21,7 +21,9 @@
 
 pub mod boot_profile;
 pub mod commands;
+pub mod help;
 pub mod keybindings;
+pub mod workspace_status;
 
 
 use core_types::TaskId;
@@ -44,6 +46,13 @@ use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
+use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
+
+// Re-export public types from modules
+pub use help::HelpCategory;
+pub use workspace_status::{
+    CommandSuggestion, FsStatus, PromptValidation, generate_suggestions,
+};
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -325,6 +334,62 @@ impl From<FocusError> for WorkspaceError {
     }
 }
 
+impl WorkspaceError {
+    /// Returns actionable suggestions for recovering from this error
+    /// Returns (error_message, suggested_actions)
+    pub fn actionable_message(&self) -> (String, Vec<String>) {
+        match self {
+            WorkspaceError::ComponentNotFound(id) => (
+                format!("Component not found: {}", id),
+                vec!["list".to_string(), "help workspace".to_string()],
+            ),
+            WorkspaceError::LaunchDenied { reason } => (
+                format!("Component launch denied: {}", reason),
+                vec!["help workspace".to_string()],
+            ),
+            WorkspaceError::FocusDenied { reason } => (
+                format!("Focus denied: {}", reason),
+                vec!["list".to_string()],
+            ),
+            WorkspaceError::NotFocusable(id) => (
+                format!("Component not focusable: {}", id),
+                vec!["list".to_string(), "next".to_string()],
+            ),
+            WorkspaceError::NoComponents => (
+                "No components available".to_string(),
+                vec!["open editor <path>".to_string(), "help".to_string()],
+            ),
+            WorkspaceError::InvalidCommand(cmd) => (
+                format!("Invalid command: {}", cmd),
+                vec!["help".to_string()],
+            ),
+            WorkspaceError::PolicyError(msg) => (
+                format!("Policy error: {}", msg),
+                vec!["help system".to_string()],
+            ),
+            WorkspaceError::BudgetExhausted(id) => (
+                format!("Budget exhausted for component: {}", id),
+                vec!["close {}".to_string(), "list".to_string()],
+            ),
+            WorkspaceError::FocusError(msg) => (
+                format!("Focus error: {}", msg),
+                vec!["list".to_string(), "next".to_string()],
+            ),
+        }
+    }
+
+    /// Formats error with actions for display
+    /// Example: "Component not found — Try: list | help workspace"
+    pub fn format_with_actions(&self) -> String {
+        let (message, actions) = self.actionable_message();
+        if actions.is_empty() {
+            message
+        } else {
+            format!("{} — Try: {}", message, actions.join(" | "))
+        }
+    }
+}
+
 /// Configuration for launching a component
 pub struct LaunchConfig {
     /// Type of component to launch
@@ -444,6 +509,12 @@ pub struct WorkspaceManager {
     /// Debug info for keyboard routing (gated behind debug_assertions)
     #[cfg(debug_assertions)]
     key_routing_debug: KeyRoutingDebug,
+    /// Workspace status for status strip
+    workspace_status: WorkspaceStatus,
+    /// Recent history (files, commands, errors)
+    recent_history: RecentHistory,
+    /// Context breadcrumbs
+    breadcrumbs: ContextBreadcrumbs,
 }
 
 impl WorkspaceManager {
@@ -463,6 +534,9 @@ impl WorkspaceManager {
             editor_io_context: None,
             #[cfg(debug_assertions)]
             key_routing_debug: KeyRoutingDebug::new(),
+            workspace_status: WorkspaceStatus::new(),
+            recent_history: RecentHistory::new(),
+            breadcrumbs: ContextBreadcrumbs::new(),
         }
     }
 
@@ -1045,6 +1119,123 @@ impl WorkspaceManager {
         ts
     }
 
+    // ========== Workspace Status and History Methods ==========
+
+    /// Gets the current workspace status
+    pub fn workspace_status(&self) -> &WorkspaceStatus {
+        &self.workspace_status
+    }
+
+    /// Gets the mutable workspace status
+    pub fn workspace_status_mut(&mut self) -> &mut WorkspaceStatus {
+        &mut self.workspace_status
+    }
+
+    /// Gets the recent history
+    pub fn recent_history(&self) -> &RecentHistory {
+        &self.recent_history
+    }
+
+    /// Gets the mutable recent history
+    pub fn recent_history_mut(&mut self) -> &mut RecentHistory {
+        &mut self.recent_history
+    }
+
+    /// Gets the context breadcrumbs
+    pub fn breadcrumbs(&self) -> &ContextBreadcrumbs {
+        &self.breadcrumbs
+    }
+
+    /// Gets the mutable context breadcrumbs
+    pub fn breadcrumbs_mut(&mut self) -> &mut ContextBreadcrumbs {
+        &mut self.breadcrumbs
+    }
+
+    /// Updates workspace status based on current state (deterministic)
+    pub fn update_workspace_status(&mut self) {
+        // Get active editor name from focused component
+        let focused_id = self.get_focused_component();
+        
+        let (active_editor, has_unsaved) = if let Some(id) = focused_id {
+            if let Some(component) = self.get_component(id) {
+                if component.component_type == ComponentType::Editor {
+                    // Extract filename from component metadata or name
+                    let filename = component
+                        .metadata
+                        .get("filename")
+                        .or_else(|| component.metadata.get("arg0"))
+                        .cloned()
+                        .unwrap_or_else(|| component.name.clone());
+                    
+                    // Check for dirty state from metadata
+                    let dirty = component
+                        .metadata
+                        .get("dirty")
+                        .map(|v| v == "true")
+                        .unwrap_or(false);
+                    
+                    (Some(filename), dirty)
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        };
+
+        self.workspace_status.active_editor = active_editor;
+        self.workspace_status.has_unsaved_changes = has_unsaved;
+
+        // Update job count (just count running components for now)
+        self.workspace_status.active_jobs = self
+            .components
+            .values()
+            .filter(|c| c.is_running())
+            .count();
+
+        // Update breadcrumbs based on focused component
+        self.update_breadcrumbs();
+    }
+
+    /// Updates context breadcrumbs based on focused component
+    fn update_breadcrumbs(&mut self) {
+        let focused_id = self.get_focused_component();
+        
+        if let Some(id) = focused_id {
+            if let Some(component) = self.get_component(id) {
+                let mut parts = vec!["PANDA".to_string(), "ROOT".to_string()];
+                
+                match component.component_type {
+                    ComponentType::Editor => {
+                        let filename = component
+                            .metadata
+                            .get("filename")
+                            .or_else(|| component.metadata.get("arg0"))
+                            .cloned()
+                            .unwrap_or_else(|| "untitled".to_string());
+                        parts.push(format!("EDITOR({})", filename));
+                    }
+                    ComponentType::Cli => {
+                        parts.push("CLI".to_string());
+                    }
+                    ComponentType::PipelineExecutor => {
+                        parts.push("PIPELINE".to_string());
+                    }
+                    ComponentType::Custom => {
+                        parts.push("CUSTOM".to_string());
+                    }
+                }
+                
+                self.breadcrumbs.set_parts(parts);
+            }
+        } else {
+            // No focused component, reset to root
+            self.breadcrumbs.set_parts(vec!["PANDA".to_string(), "ROOT".to_string()]);
+        }
+    }
+
     /// Renders the current workspace state
     ///
     /// Returns a snapshot of the focused component's views and status.
@@ -1069,6 +1260,8 @@ impl WorkspaceManager {
             status_view: status_view_frame,
             component_count: self.components.len(),
             running_count: self.components.values().filter(|c| c.is_running()).count(),
+            status_strip: self.workspace_status.format_status_strip_with_action(),
+            breadcrumbs: self.breadcrumbs.format(),
             #[cfg(debug_assertions)]
             debug_info: Some(DebugInfo {
                 focused_component_name: focused_component.map(|c| c.name.clone()),
@@ -1309,6 +1502,10 @@ pub struct WorkspaceRenderSnapshot {
     pub component_count: usize,
     /// Number of running components
     pub running_count: usize,
+    /// Workspace status strip content
+    pub status_strip: String,
+    /// Context breadcrumbs
+    pub breadcrumbs: String,
     /// Debug info (only in debug builds)
     #[cfg(debug_assertions)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1819,5 +2016,43 @@ mod tests {
         let save_event = InputEvent::key(KeyEvent::pressed(KeyCode::S, Modifiers::CTRL));
         let routed_to_save = workspace.route_input(&save_event);
         assert_eq!(routed_to_save, None, "Ctrl+S should be consumed globally");
+    }
+
+    #[test]
+    fn test_actionable_error_no_components() {
+        let err = WorkspaceError::NoComponents;
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("No components"));
+        assert!(actions.len() > 0);
+        assert!(actions.iter().any(|a| a.contains("open")));
+    }
+
+    #[test]
+    fn test_actionable_error_invalid_command() {
+        let err = WorkspaceError::InvalidCommand("unknown".to_string());
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("Invalid command"));
+        assert!(actions.iter().any(|a| a.contains("help")));
+    }
+
+    #[test]
+    fn test_actionable_error_format() {
+        let err = WorkspaceError::NoComponents;
+        let formatted = err.format_with_actions();
+        
+        assert!(formatted.contains("—"));
+        assert!(formatted.contains("Try:"));
+    }
+
+    #[test]
+    fn test_actionable_error_component_not_found() {
+        let id = ComponentId::new();
+        let err = WorkspaceError::ComponentNotFound(id);
+        let (message, actions) = err.actionable_message();
+        
+        assert!(message.contains("not found"));
+        assert!(actions.iter().any(|a| a == "list"));
     }
 }

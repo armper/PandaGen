@@ -21,11 +21,13 @@ services_focus_manager = { workspace = true }
 services_workspace_manager = { workspace = true }
 services_fs_view = { workspace = true }
 services_editor_vi = { workspace = true }
+services_storage = { workspace = true }
 
 # Input and view system
 input_types = { workspace = true }
 view_types = { workspace = true }
 text_renderer_host = { workspace = true }
+fs_view = { workspace = true }
 
 # Component crates
 cli_console = { workspace = true }
