@@ -218,7 +218,7 @@ mod tests {
         let registry = build_command_registry();
         let commands = registry.list_commands();
         
-        assert!(commands.len() > 0);
+        assert!(!commands.is_empty());
     }
 
     #[test]

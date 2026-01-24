@@ -123,8 +123,8 @@ impl WorkspaceManager {
 
     fn cmd_open(&mut self, component_type: ComponentType, args: Vec<String>) -> CommandResult {
         // Determine name from args
-        let name = if !args.is_empty() {
-            format!("{}-{}", component_type, args[0])
+        let name = if let Some(first_arg) = args.first() {
+            format!("{}-{}", component_type, first_arg)
         } else {
             format!("{}-{}", component_type, self.components.len())
         };
@@ -146,8 +146,10 @@ impl WorkspaceManager {
         match self.launch_component(config) {
             Ok(component_id) => {
                 // Track file in recent history if it's an editor
-                if component_type == ComponentType::Editor && !args.is_empty() {
-                    self.recent_history.add_file(args[0].clone());
+                if component_type == ComponentType::Editor {
+                    if let Some(filename) = args.first() {
+                        self.recent_history.add_file(filename.clone());
+                    }
                 }
                 
                 CommandResult::Opened { component_id, name }

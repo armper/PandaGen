@@ -476,17 +476,30 @@ pub fn validate_command(input: &str) -> PromptValidation {
                 PromptValidation::Invalid
             }
         }
-        // Partial matches for known commands
-        "op" | "ope" => PromptValidation::ValidPrefix,
-        "li" | "lis" => PromptValidation::ValidPrefix,
-        "ne" | "nex" => PromptValidation::ValidPrefix,
-        "pr" | "pre" => PromptValidation::ValidPrefix,
-        "cl" | "clo" | "clos" => PromptValidation::ValidPrefix,
-        "fo" | "foc" | "focu" => PromptValidation::ValidPrefix,
-        "st" | "sta" | "stat" | "statu" => PromptValidation::ValidPrefix,
-        "he" | "hel" => PromptValidation::ValidPrefix,
-        "re" | "rec" | "rece" | "recen" => PromptValidation::ValidPrefix,
-        _ => PromptValidation::Invalid,
+        // Check if input is a valid prefix of any command
+        _ => {
+            // Valid command prefixes
+            let valid_prefixes = [
+                ("open", &["op", "ope"] as &[&str]),
+                ("list", &["li", "lis"]),
+                ("next", &["ne", "nex"]),
+                ("prev", &["pr", "pre"]),  // Note: also matches "previous"
+                ("close", &["cl", "clo", "clos"]),
+                ("focus", &["fo", "foc", "focu"]),
+                ("status", &["st", "sta", "stat", "statu"]),
+                ("help", &["he", "hel"]),
+                ("recent", &["re", "rec", "rece", "recen"]),
+            ];
+            
+            // Check if input matches any valid prefix
+            for (_, prefixes) in &valid_prefixes {
+                if prefixes.contains(&cmd) {
+                    return PromptValidation::ValidPrefix;
+                }
+            }
+            
+            PromptValidation::Invalid
+        }
     }
 }
 

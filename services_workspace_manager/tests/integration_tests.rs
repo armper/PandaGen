@@ -7,6 +7,7 @@ use services_workspace_manager::{
     commands::{parse_command, CommandResult, WorkspaceCommand},
     ComponentType, LaunchConfig, WorkspaceError, WorkspaceManager,
 };
+use uuid::Uuid;
 
 fn create_workspace_with_policy() -> WorkspaceManager {
     let workspace_identity = IdentityMetadata::new(
@@ -627,7 +628,6 @@ fn test_error_tracking_in_history() {
     let mut workspace = WorkspaceManager::new(workspace_identity);
     
     // Try to focus non-existent component (will error)
-    use uuid::Uuid;
     let fake_id = services_workspace_manager::ComponentId::from_uuid(Uuid::new_v4());
     workspace.execute_command(WorkspaceCommand::Focus { component_id: fake_id });
     
