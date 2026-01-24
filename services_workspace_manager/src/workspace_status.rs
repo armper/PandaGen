@@ -312,6 +312,41 @@ impl PromptValidation {
     }
 }
 
+/// Actionable error with suggested actions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionableError {
+    /// Error message
+    pub message: String,
+    /// Suggested actions (e.g., "Retry", "Help")
+    pub actions: Vec<String>,
+}
+
+impl ActionableError {
+    /// Creates a new actionable error
+    pub fn new(message: impl Into<String>, actions: Vec<String>) -> Self {
+        Self {
+            message: message.into(),
+            actions,
+        }
+    }
+
+    /// Creates an error with "Retry" and "Help" actions
+    pub fn with_retry_help(message: impl Into<String>) -> Self {
+        Self::new(message, vec!["Retry".to_string(), "Help".to_string()])
+    }
+
+    /// Creates an error with only "Help" action
+    pub fn with_help(message: impl Into<String>) -> Self {
+        Self::new(message, vec!["Help".to_string()])
+    }
+
+    /// Formats the error with actions
+    /// Example: "Filesystem unavailable — Retry | Help"
+    pub fn format(&self) -> String {
+        format!("{} — {}", self.message, self.actions.join(" | "))
+    }
+}
+
 /// Context breadcrumbs for status strip
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextBreadcrumbs {
@@ -359,6 +394,99 @@ impl ContextBreadcrumbs {
 impl Default for ContextBreadcrumbs {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Validates a command input and returns its validation state
+/// This is render-time validation only - no execution side effects
+pub fn validate_command(input: &str) -> PromptValidation {
+    let input_trimmed = input.trim();
+    
+    if input_trimmed.is_empty() {
+        return PromptValidation::ValidPrefix;
+    }
+    
+    let parts: Vec<&str> = input_trimmed.split_whitespace().collect();
+    if parts.is_empty() {
+        return PromptValidation::ValidPrefix;
+    }
+    
+    let cmd = parts[0];
+    
+    // Check valid commands
+    match cmd {
+        "open" => {
+            // Needs at least component type
+            if parts.len() == 1 {
+                PromptValidation::ValidPrefix
+            } else if parts.len() == 2 {
+                // Has component type but no args - check if it's valid
+                match parts[1] {
+                    "editor" => PromptValidation::ValidPrefix, // Editor needs filename
+                    "cli" | "pipeline" => PromptValidation::ValidComplete,
+                    _ => PromptValidation::Invalid,
+                }
+            } else {
+                // Has component type and args
+                match parts[1] {
+                    "editor" | "cli" | "pipeline" => PromptValidation::ValidComplete,
+                    _ => PromptValidation::Invalid,
+                }
+            }
+        }
+        "list" | "next" | "prev" | "previous" => {
+            if parts.len() == 1 {
+                PromptValidation::ValidComplete
+            } else {
+                PromptValidation::Invalid
+            }
+        }
+        "close" | "focus" | "status" => {
+            // These need a component ID
+            if parts.len() == 1 {
+                PromptValidation::ValidPrefix
+            } else if parts.len() == 2 {
+                // Check if it looks like a component ID
+                if parts[1].starts_with("comp:") {
+                    PromptValidation::ValidComplete
+                } else {
+                    PromptValidation::Invalid
+                }
+            } else {
+                PromptValidation::Invalid
+            }
+        }
+        "help" => {
+            if parts.len() == 1 {
+                PromptValidation::ValidComplete
+            } else if parts.len() == 2 {
+                // Check if it's a valid help category
+                match parts[1] {
+                    "workspace" | "editor" | "keys" | "system" => PromptValidation::ValidComplete,
+                    _ => PromptValidation::Invalid,
+                }
+            } else {
+                PromptValidation::Invalid
+            }
+        }
+        "recent" => {
+            if parts.len() == 1 {
+                PromptValidation::ValidComplete
+            } else {
+                PromptValidation::Invalid
+            }
+        }
+        // Partial matches for known commands
+        "op" | "ope" => PromptValidation::ValidPrefix,
+        "li" | "lis" => PromptValidation::ValidPrefix,
+        "ne" | "nex" => PromptValidation::ValidPrefix,
+        "pr" | "pre" => PromptValidation::ValidPrefix,
+        "cl" | "clo" | "clos" => PromptValidation::ValidPrefix,
+        "fo" | "foc" | "focu" => PromptValidation::ValidPrefix,
+        "st" | "sta" | "stat" | "statu" => PromptValidation::ValidPrefix,
+        "he" | "hel" => PromptValidation::ValidPrefix,
+        "re" | "rec" | "rece" | "recen" => PromptValidation::ValidPrefix,
+        _ => PromptValidation::Invalid,
     }
 }
 
@@ -601,5 +729,86 @@ mod tests {
         let formatted = breadcrumbs.format();
         assert!(formatted.contains("PANDA"));
         assert!(formatted.contains("ROOT"));
+    }
+
+    #[test]
+    fn test_validate_command_empty() {
+        assert_eq!(validate_command(""), PromptValidation::ValidPrefix);
+        assert_eq!(validate_command("   "), PromptValidation::ValidPrefix);
+    }
+
+    #[test]
+    fn test_validate_command_list() {
+        assert_eq!(validate_command("list"), PromptValidation::ValidComplete);
+        assert_eq!(validate_command("list extra"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_validate_command_open_incomplete() {
+        assert_eq!(validate_command("open"), PromptValidation::ValidPrefix);
+        assert_eq!(validate_command("open editor"), PromptValidation::ValidPrefix);
+    }
+
+    #[test]
+    fn test_validate_command_open_complete() {
+        assert_eq!(validate_command("open editor test.txt"), PromptValidation::ValidComplete);
+        assert_eq!(validate_command("open cli"), PromptValidation::ValidComplete);
+    }
+
+    #[test]
+    fn test_validate_command_open_invalid() {
+        assert_eq!(validate_command("open invalid"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_validate_command_help() {
+        assert_eq!(validate_command("help"), PromptValidation::ValidComplete);
+        assert_eq!(validate_command("help workspace"), PromptValidation::ValidComplete);
+        assert_eq!(validate_command("help invalid"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_validate_command_close() {
+        assert_eq!(validate_command("close"), PromptValidation::ValidPrefix);
+        assert_eq!(validate_command("close comp:123"), PromptValidation::ValidComplete);
+        assert_eq!(validate_command("close invalid"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_validate_command_partial() {
+        assert_eq!(validate_command("op"), PromptValidation::ValidPrefix);
+        assert_eq!(validate_command("li"), PromptValidation::ValidPrefix);
+        assert_eq!(validate_command("he"), PromptValidation::ValidPrefix);
+    }
+
+    #[test]
+    fn test_validate_command_invalid() {
+        assert_eq!(validate_command("invalid"), PromptValidation::Invalid);
+        assert_eq!(validate_command("xyz"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_actionable_error_format() {
+        let error = ActionableError::new(
+            "Filesystem unavailable",
+            vec!["Retry".to_string(), "Help".to_string()],
+        );
+        let formatted = error.format();
+        assert_eq!(formatted, "Filesystem unavailable — Retry | Help");
+    }
+
+    #[test]
+    fn test_actionable_error_with_retry_help() {
+        let error = ActionableError::with_retry_help("Connection failed");
+        assert_eq!(error.actions.len(), 2);
+        assert_eq!(error.actions[0], "Retry");
+        assert_eq!(error.actions[1], "Help");
+    }
+
+    #[test]
+    fn test_actionable_error_with_help() {
+        let error = ActionableError::with_help("Invalid command");
+        assert_eq!(error.actions.len(), 1);
+        assert_eq!(error.actions[0], "Help");
     }
 }

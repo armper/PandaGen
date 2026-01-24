@@ -51,7 +51,7 @@ use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 // Re-export public types from modules
 pub use help::HelpCategory;
 pub use workspace_status::{
-    CommandSuggestion, FsStatus, PromptValidation, generate_suggestions,
+    ActionableError, CommandSuggestion, FsStatus, PromptValidation, generate_suggestions, validate_command,
 };
 
 /// Unique identifier for a component in the workspace

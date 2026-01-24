@@ -93,6 +93,12 @@ pub struct CommandDescriptor {
     /// Keybinding hint (display only, e.g., "Ctrl+O")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keybinding: Option<String>,
+    /// Whether this command requires arguments to execute
+    #[serde(default)]
+    pub requires_args: bool,
+    /// Command pattern for prompt pre-fill (e.g., "open editor ")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_pattern: Option<String>,
 }
 
 impl CommandDescriptor {
@@ -112,6 +118,8 @@ impl CommandDescriptor {
             enabled: true,
             category: None,
             keybinding: None,
+            requires_args: false,
+            prompt_pattern: None,
         }
     }
 
@@ -136,6 +144,18 @@ impl CommandDescriptor {
     /// Sets the keybinding hint
     pub fn with_keybinding(mut self, keybinding: impl Into<String>) -> Self {
         self.keybinding = Some(keybinding.into());
+        self
+    }
+
+    /// Marks the command as requiring arguments
+    pub fn requires_args(mut self) -> Self {
+        self.requires_args = true;
+        self
+    }
+
+    /// Sets the prompt pattern for two-step transitions
+    pub fn with_prompt_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.prompt_pattern = Some(pattern.into());
         self
     }
 
@@ -756,5 +776,46 @@ mod tests {
         assert_eq!(matches[0].name, "A Command");
         assert_eq!(matches[1].name, "M Command");
         assert_eq!(matches[2].name, "Z Command");
+    }
+
+    #[test]
+    fn test_command_requires_args() {
+        let desc = CommandDescriptor::new(
+            "open_editor",
+            "Open Editor",
+            "Opens a file in editor",
+            vec![],
+        )
+        .requires_args();
+
+        assert!(desc.requires_args);
+    }
+
+    #[test]
+    fn test_command_with_prompt_pattern() {
+        let desc = CommandDescriptor::new(
+            "open_editor",
+            "Open Editor",
+            "Opens a file in editor",
+            vec![],
+        )
+        .with_prompt_pattern("open editor ");
+
+        assert_eq!(desc.prompt_pattern, Some("open editor ".to_string()));
+    }
+
+    #[test]
+    fn test_parametric_command_two_step() {
+        let desc = CommandDescriptor::new(
+            "open_editor",
+            "Open Editor",
+            "Opens a file in editor",
+            vec![],
+        )
+        .requires_args()
+        .with_prompt_pattern("open editor ");
+
+        assert!(desc.requires_args);
+        assert_eq!(desc.prompt_pattern, Some("open editor ".to_string()));
     }
 }
