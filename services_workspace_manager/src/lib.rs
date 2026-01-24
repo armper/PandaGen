@@ -20,6 +20,7 @@
 //! - A monolithic "god shell"
 
 pub mod boot_profile;
+pub mod command_registry;
 pub mod commands;
 pub mod help;
 pub mod keybindings;
