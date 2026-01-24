@@ -67,8 +67,45 @@ pub struct ComponentSummary {
 }
 
 impl WorkspaceManager {
-    /// Executes a workspace command
+    /// Executes a workspace command with tracking
     pub fn execute_command(&mut self, command: WorkspaceCommand) -> CommandResult {
+        // Format command for history tracking
+        let command_str = format_command(&command);
+        
+        // Execute the command
+        let result = self.execute_command_inner(command);
+        
+        // Track in recent history
+        self.recent_history.add_command(command_str.clone());
+        
+        // Update status based on result
+        match &result {
+            CommandResult::Opened { name, .. } => {
+                self.workspace_status.set_last_action(format!("Opened {}", name));
+            }
+            CommandResult::FocusChanged { .. } => {
+                self.workspace_status.set_last_action("Focus changed");
+            }
+            CommandResult::Closed { .. } => {
+                self.workspace_status.set_last_action("Component closed");
+            }
+            CommandResult::Success { message } => {
+                self.workspace_status.set_last_action(message);
+            }
+            CommandResult::Error { message } => {
+                self.recent_history.add_error(message.clone());
+            }
+            _ => {}
+        }
+        
+        // Update workspace status
+        self.update_workspace_status();
+        
+        result
+    }
+    
+    /// Internal command execution (without tracking)
+    fn execute_command_inner(&mut self, command: WorkspaceCommand) -> CommandResult {
         match command {
             WorkspaceCommand::Open {
                 component_type,
@@ -107,7 +144,14 @@ impl WorkspaceManager {
 
         // Launch component
         match self.launch_component(config) {
-            Ok(component_id) => CommandResult::Opened { component_id, name },
+            Ok(component_id) => {
+                // Track file in recent history if it's an editor
+                if component_type == ComponentType::Editor && !args.is_empty() {
+                    self.recent_history.add_file(args[0].clone());
+                }
+                
+                CommandResult::Opened { component_id, name }
+            }
             Err(err) => CommandResult::Error {
                 message: format!("Failed to open component: {}", err),
             },
@@ -299,6 +343,26 @@ where
         .map_err(|_| WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str)))?;
 
     Ok(constructor(ComponentId::from_uuid(uuid)))
+}
+
+/// Formats a WorkspaceCommand as a string for display
+fn format_command(command: &WorkspaceCommand) -> String {
+    match command {
+        WorkspaceCommand::Open { component_type, args } => {
+            if args.is_empty() {
+                format!("open {}", component_type)
+            } else {
+                format!("open {} {}", component_type, args.join(" "))
+            }
+        }
+        WorkspaceCommand::List => "list".to_string(),
+        WorkspaceCommand::Focus { component_id } => format!("focus {}", component_id),
+        WorkspaceCommand::FocusNext => "next".to_string(),
+        WorkspaceCommand::FocusPrev => "prev".to_string(),
+        WorkspaceCommand::Close { component_id } => format!("close {}", component_id),
+        WorkspaceCommand::Status { component_id } => format!("status {}", component_id),
+        WorkspaceCommand::GetFocus => "get_focus".to_string(),
+    }
 }
 
 #[cfg(test)]

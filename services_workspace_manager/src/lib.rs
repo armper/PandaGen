@@ -516,6 +516,8 @@ pub struct WorkspaceManager {
     recent_history: RecentHistory,
     /// Context breadcrumbs
     breadcrumbs: ContextBreadcrumbs,
+    /// Command palette for command discovery
+    command_palette: services_command_palette::CommandPalette,
 }
 
 impl WorkspaceManager {
@@ -538,6 +540,7 @@ impl WorkspaceManager {
             workspace_status: WorkspaceStatus::new(),
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
+            command_palette: command_registry::build_command_registry(),
         }
     }
 
@@ -1150,6 +1153,16 @@ impl WorkspaceManager {
     /// Gets the mutable context breadcrumbs
     pub fn breadcrumbs_mut(&mut self) -> &mut ContextBreadcrumbs {
         &mut self.breadcrumbs
+    }
+
+    /// Gets the command palette
+    pub fn command_palette(&self) -> &services_command_palette::CommandPalette {
+        &self.command_palette
+    }
+
+    /// Gets the mutable command palette
+    pub fn command_palette_mut(&mut self) -> &mut services_command_palette::CommandPalette {
+        &mut self.command_palette
     }
 
     /// Updates workspace status based on current state (deterministic)
