@@ -453,7 +453,7 @@ impl Editor {
             Command::Quit => {
                 if self.state.is_dirty() {
                     self.state
-                        .set_status_message("No write since last change (use :q! to force)");
+                        .set_status_message("Unsaved changes — use :w or :q!");
                     Ok(EditorAction::Continue)
                 } else {
                     Ok(EditorAction::Quit)
@@ -860,9 +860,9 @@ mod tests {
         editor.state_mut().append_to_command('q');
         let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
 
-        // Should refuse to quit
+        // Should refuse to quit with new error message
         assert_eq!(result, EditorAction::Continue);
-        assert!(editor.state().status_message().contains("No write"));
+        assert_eq!(editor.state().status_message(), "Unsaved changes — use :w or :q!");
     }
 
     #[test]
