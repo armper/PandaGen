@@ -155,7 +155,7 @@ impl FilePicker {
         self.entries = entries;
         
         // Reset selection if out of bounds
-        if self.selected_index >= self.entries.len() && !self.entries.is_empty() {
+        if self.selected_index >= self.entries.len() {
             self.selected_index = 0;
         }
     }

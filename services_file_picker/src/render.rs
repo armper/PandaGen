@@ -43,12 +43,12 @@ impl FilePicker {
         breadcrumb: &str,
     ) -> ViewFrame {
         let entry_count = self.entry_count();
-        let selected = self.selected_index + 1; // 1-indexed for display
         
         let status_text = if entry_count == 0 {
             format!("{} — Empty", breadcrumb)
         } else {
-            format!("{} — {} of {} items", breadcrumb, selected, entry_count)
+            let selected_display = display_index_one_based(self.selected_index);
+            format!("{} — {} of {} items", breadcrumb, selected_display, entry_count)
         };
 
         ViewFrame::new(
@@ -59,6 +59,11 @@ impl FilePicker {
             timestamp_ns,
         )
     }
+}
+
+/// Converts a zero-based index to one-based for display
+fn display_index_one_based(zero_based: usize) -> usize {
+    zero_based + 1
 }
 
 /// Formats a single entry for display
