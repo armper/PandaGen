@@ -4,7 +4,7 @@
 //! and structured responses with explicit error details.
 
 use crate::{MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use core_types::ServiceId;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ impl CommandRequest {
         let payload = MessagePayload::new(&self)?;
         Ok(MessageEnvelope::new(
             destination,
-            COMMAND_REQUEST_ACTION.to_string(),
+            COMMAND_REQUEST_ACTION,
             self.version,
             payload,
         ))
@@ -105,7 +105,7 @@ impl CommandResponse {
         let payload = MessagePayload::new(&self)?;
         Ok(MessageEnvelope::new(
             destination,
-            COMMAND_RESPONSE_ACTION.to_string(),
+            COMMAND_RESPONSE_ACTION,
             self.version,
             payload,
         )

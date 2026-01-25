@@ -18,11 +18,13 @@ impl MessageId {
     }
 
     /// Creates a message ID from a UUID
+    #[inline]
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
     /// Returns the inner UUID
+    #[inline]
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -62,16 +64,19 @@ impl SchemaVersion {
     /// Compatibility rules:
     /// - Same major version = compatible
     /// - Different major version = incompatible
+    #[inline]
     pub fn is_compatible_with(&self, other: &SchemaVersion) -> bool {
         self.major == other.major
     }
 
     /// Checks if this version is older than another
+    #[inline]
     pub fn is_older_than(&self, other: &SchemaVersion) -> bool {
         self.major < other.major || (self.major == other.major && self.minor < other.minor)
     }
 
     /// Checks if this version is newer than another
+    #[inline]
     pub fn is_newer_than(&self, other: &SchemaVersion) -> bool {
         self.major > other.major || (self.major == other.major && self.minor > other.minor)
     }
@@ -248,7 +253,7 @@ impl MessageEnvelope {
     /// Creates a new message envelope
     pub fn new(
         destination: ServiceId,
-        action: String,
+        action: impl Into<String>,
         schema_version: SchemaVersion,
         payload: MessagePayload,
     ) -> Self {
@@ -256,7 +261,7 @@ impl MessageEnvelope {
             id: MessageId::new(),
             destination,
             source: None,
-            action,
+            action: action.into(),
             schema_version,
             correlation_id: None,
             payload,
@@ -276,6 +281,7 @@ impl MessageEnvelope {
     }
 
     /// Checks if this is a response to another message
+    #[inline]
     pub fn is_response(&self) -> bool {
         self.correlation_id.is_some()
     }

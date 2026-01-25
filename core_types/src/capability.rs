@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Capabilities are unforgeable: they can only be created by trusted code
 /// (typically the kernel or a service with authority to grant capabilities).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cap<T> {
     /// Unique identifier for this capability
     id: u64,
@@ -63,6 +63,7 @@ impl<T> Cap<T> {
     }
 
     /// Returns the capability ID
+    #[inline]
     pub fn id(&self) -> u64 {
         self.id
     }

@@ -86,7 +86,7 @@ pub fn build_input_event_envelope(
     })?;
     let mut envelope = MessageEnvelope::new(
         input_service_id(),
-        INPUT_EVENT_ACTION.to_string(),
+        INPUT_EVENT_ACTION,
         INPUT_SCHEMA_VERSION,
         payload,
     );

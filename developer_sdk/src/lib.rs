@@ -132,7 +132,7 @@ impl<K: KernelApi> TraceSink for IpcTraceSink<K> {
             MessagePayload::new(&event).map_err(|err| DebuggerError::Encode(err.to_string()))?;
         let message = MessageEnvelope::new(
             self.destination,
-            DEBUG_TRACE_ACTION.to_string(),
+            DEBUG_TRACE_ACTION,
             DEBUG_SCHEMA_VERSION,
             payload,
         );

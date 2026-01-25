@@ -272,7 +272,7 @@ impl SyscallCodec {
             .map_err(|err| SyscallCodecError::Payload(err.to_string()))?;
         Ok(MessageEnvelope::new(
             self.service_id,
-            SYSCALL_REQUEST_ACTION.to_string(),
+            SYSCALL_REQUEST_ACTION,
             SYSCALL_SCHEMA_VERSION,
             payload,
         ))
@@ -288,7 +288,7 @@ impl SyscallCodec {
             .map_err(|err| SyscallCodecError::Payload(err.to_string()))?;
         Ok(MessageEnvelope::new(
             self.service_id,
-            SYSCALL_RESPONSE_ACTION.to_string(),
+            SYSCALL_RESPONSE_ACTION,
             SYSCALL_SCHEMA_VERSION,
             payload,
         )

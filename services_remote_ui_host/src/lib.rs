@@ -105,7 +105,7 @@ impl<K: KernelApi> SnapshotSink for IpcSnapshotSink<K> {
             MessagePayload::new(&frame).map_err(|err| RemoteUiError::Encode(err.to_string()))?;
         let message = MessageEnvelope::new(
             self.destination,
-            REMOTE_UI_ACTION.to_string(),
+            REMOTE_UI_ACTION,
             REMOTE_UI_SCHEMA,
             payload,
         );

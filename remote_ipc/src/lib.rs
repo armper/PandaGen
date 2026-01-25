@@ -138,7 +138,7 @@ fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> {
         MessagePayload::new(&call).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
     Ok(MessageEnvelope::new(
         ServiceId::new(),
-        REMOTE_CALL_ACTION.to_string(),
+        REMOTE_CALL_ACTION,
         REMOTE_SCHEMA,
         payload,
     ))
@@ -152,7 +152,7 @@ fn encode_response(
         MessagePayload::new(&response).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
     Ok(MessageEnvelope::new(
         ServiceId::new(),
-        REMOTE_RESPONSE_ACTION.to_string(),
+        REMOTE_RESPONSE_ACTION,
         REMOTE_SCHEMA,
         payload,
     )
