@@ -4,6 +4,10 @@
 //! Boot straight into vi, start in workspace mode, or run as a kiosk.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 
 /// Boot profile types

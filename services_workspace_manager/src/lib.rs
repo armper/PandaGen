@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
 //! # Workspace Manager Service
 //!
 //! This crate implements the workspace manager for PandaGen OS.
@@ -27,6 +29,27 @@ pub mod keybindings;
 pub mod platform;
 pub mod workspace_status;
 
+// Use alloc for no_std compatibility
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+
+#[cfg(feature = "std")]
+use std::boxed::Box;
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
+#[cfg(feature = "std")]
+use std::vec::Vec;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
@@ -45,7 +68,6 @@ use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
-use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
@@ -1047,6 +1069,7 @@ impl WorkspaceManager {
                 "none"
             };
 
+            #[cfg(all(debug_assertions, feature = "std"))]
             println!("route_input:\n  key={{code={:?}, mods={:?}, state={:?}}}\n  focus_tile={{TODO}}\n  focus_component={}\n  global_consumed={}\n  delivered_to={}\n  consumed_by={} ",
                 key_event.code,
                 key_event.modifiers,
