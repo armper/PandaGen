@@ -9,6 +9,10 @@ license.workspace = true
 name = "fs_demo"
 path = "../examples/fs_demo.rs"
 
+[[example]]
+name = "settings_demo"
+path = "../examples/settings_demo.rs"
+
 [dependencies]
 core_types.workspace = true
 kernel_api.workspace = true
@@ -21,4 +25,7 @@ fs_view.workspace = true
 input_types.workspace = true
 services_input.workspace = true
 services_focus_manager.workspace = true
+services_settings.workspace = true
+services_workspace_manager.workspace = true
+identity.workspace = true
 hal.workspace = true
