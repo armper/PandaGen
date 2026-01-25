@@ -21,6 +21,10 @@ pub mod palette_overlay;
 pub mod bare_metal_storage;
 pub mod bare_metal_editor_io;
 
+// Workspace platform adapter (test-only for now until no_std dependencies resolved)
+#[cfg(test)]
+pub mod workspace_platform;
+
 // Tests are in the test module
 #[cfg(test)]
 mod minimal_editor_tests;

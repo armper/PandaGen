@@ -2448,6 +2448,13 @@ impl KeyboardEventQueue {
 
         Some(scancode)
     }
+
+    /// Checks if the queue has pending events without consuming them.
+    fn has_pending(&self) -> bool {
+        let read = self.read_pos.load(Ordering::Acquire);
+        let write = self.write_pos.load(Ordering::Acquire);
+        read != write
+    }
 }
 
 #[derive(Copy, Clone)]
