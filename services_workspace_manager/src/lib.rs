@@ -20,6 +20,7 @@
 //! - A monolithic "god shell"
 
 pub mod boot_profile;
+pub mod command_registry;
 pub mod commands;
 pub mod help;
 pub mod keybindings;
@@ -51,7 +52,7 @@ use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 // Re-export public types from modules
 pub use help::HelpCategory;
 pub use workspace_status::{
-    CommandSuggestion, FsStatus, PromptValidation, generate_suggestions,
+    ActionableError, CommandSuggestion, FsStatus, PromptValidation, generate_suggestions, validate_command,
 };
 
 /// Unique identifier for a component in the workspace
@@ -515,6 +516,8 @@ pub struct WorkspaceManager {
     recent_history: RecentHistory,
     /// Context breadcrumbs
     breadcrumbs: ContextBreadcrumbs,
+    /// Command palette for command discovery
+    command_palette: services_command_palette::CommandPalette,
 }
 
 impl WorkspaceManager {
@@ -537,6 +540,7 @@ impl WorkspaceManager {
             workspace_status: WorkspaceStatus::new(),
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
+            command_palette: command_registry::build_command_registry(),
         }
     }
 
@@ -1149,6 +1153,16 @@ impl WorkspaceManager {
     /// Gets the mutable context breadcrumbs
     pub fn breadcrumbs_mut(&mut self) -> &mut ContextBreadcrumbs {
         &mut self.breadcrumbs
+    }
+
+    /// Gets the command palette
+    pub fn command_palette(&self) -> &services_command_palette::CommandPalette {
+        &self.command_palette
+    }
+
+    /// Gets the mutable command palette
+    pub fn command_palette_mut(&mut self) -> &mut services_command_palette::CommandPalette {
+        &mut self.command_palette
     }
 
     /// Updates workspace status based on current state (deterministic)

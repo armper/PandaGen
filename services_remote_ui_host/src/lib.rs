@@ -230,6 +230,8 @@ mod tests {
             status_view: None,
             component_count: 0,
             running_count: 0,
+            status_strip: "Workspace — No editors — Idle".to_string(),
+            breadcrumbs: "PANDA > ROOT".to_string(),
             #[cfg(debug_assertions)]
             debug_info: None,
         };
@@ -259,6 +261,8 @@ mod tests {
                 status_view: None,
                 component_count: 0,
                 running_count: 0,
+                status_strip: "Workspace — No editors — Idle".to_string(),
+                breadcrumbs: "PANDA > ROOT".to_string(),
                 #[cfg(debug_assertions)]
                 debug_info: None,
             },
