@@ -525,6 +525,16 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     command.stderr(Stdio::inherit());
 
     let program = command.get_program().to_string_lossy().to_string();
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    let full_command = if args.is_empty() {
+        program.clone()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    };
+
     let status = match command.status() {
         Ok(status) => status,
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -541,7 +551,7 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Err(io::Error::new(
             ErrorKind::Other,
-            format!("command failed with status {status}"),
+            format!("command `{}` failed with status {}", full_command, status),
         )
         .into())
     }
