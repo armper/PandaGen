@@ -65,7 +65,8 @@ use services_storage::ObjectId;
 use services_storage::ObjectKind;
 use thiserror::Error;
 
-// Re-export DirectoryResolver for convenience
+// Re-export DirectoryResolver for convenience - allows users to implement
+// custom resolvers without importing from fs_view separately
 pub use fs_view::DirectoryResolver;
 
 /// Result of file picker interaction
@@ -238,19 +239,21 @@ impl FilePicker {
 
         if selected.is_directory {
             // Try to enter the directory if we have a resolver
-            if let Some(resolver) = resolver {
-                if let Some(subdir) = resolver.resolve_directory(&selected.object_id) {
-                    // Push current directory onto stack
-                    self.directory_stack.push(self.current_directory.clone());
-                    
-                    // Navigate into the subdirectory
-                    self.current_directory = subdir;
-                    self.refresh_entries();
-                    
-                    return FilePickerResult::Continue;
-                }
-            }
-            // If we can't resolve the directory, just stay where we are
+            let Some(resolver) = resolver else {
+                return FilePickerResult::Continue;
+            };
+            
+            let Some(subdir) = resolver.resolve_directory(&selected.object_id) else {
+                return FilePickerResult::Continue;
+            };
+            
+            // Push current directory onto stack
+            self.directory_stack.push(self.current_directory.clone());
+            
+            // Navigate into the subdirectory
+            self.current_directory = subdir;
+            self.refresh_entries();
+            
             FilePickerResult::Continue
         } else {
             // Select the file
@@ -327,6 +330,11 @@ mod tests {
         fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView> {
             self.directories.get(id).cloned()
         }
+    }
+
+    // Helper to avoid repeating no_resolver() in tests
+    fn no_resolver() -> Option<&'static TestResolver> {
+        None
     }
 
     fn create_test_directory() -> DirectoryView {
@@ -434,7 +442,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(down_event, None::<&TestResolver>);
+        let result = picker.process_input(down_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 1);
 
@@ -443,7 +451,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(up_event, None::<&TestResolver>);
+        let result = picker.process_input(up_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 0);
     }
@@ -461,7 +469,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(enter_event, None::<&TestResolver>);
+        let result = picker.process_input(enter_event, no_resolver());
         match result {
             FilePickerResult::FileSelected { name, .. } => {
                 assert_eq!(name, "apple.txt");
@@ -480,7 +488,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(escape_event, None::<&TestResolver>);
+        let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Cancelled);
     }
 
@@ -514,7 +522,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(release_event, None::<&TestResolver>);
+        let result = picker.process_input(release_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 0); // Should not move
     }
@@ -535,7 +543,7 @@ mod tests {
         ));
 
         // Without a resolver, entering a directory should just continue
-        let result = picker.process_input(enter_event, None::<&TestResolver>);
+        let result = picker.process_input(enter_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
 
         // We should still be in the same directory
@@ -648,7 +656,7 @@ mod tests {
             KeyCode::Escape,
             Modifiers::none(),
         ));
-        let result = picker.process_input(escape_event, None::<&TestResolver>);
+        let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
 
         // We should be back in root
@@ -714,17 +722,17 @@ mod tests {
         ));
 
         // Go back to level1
-        picker.process_input(escape_event.clone(), None::<&TestResolver>);
+        picker.process_input(escape_event.clone(), no_resolver());
         assert_eq!(picker.current_directory().id, level1_id);
         assert_eq!(picker.directory_stack.len(), 1);
 
         // Go back to root
-        picker.process_input(escape_event.clone(), None::<&TestResolver>);
+        picker.process_input(escape_event.clone(), no_resolver());
         assert_eq!(picker.current_directory().id, root_id);
         assert_eq!(picker.directory_stack.len(), 0);
 
         // Escape at root cancels
-        let result = picker.process_input(escape_event, None::<&TestResolver>);
+        let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Cancelled);
     }
 
