@@ -180,6 +180,7 @@ impl Default for EditorView {
 mod tests {
     use super::*;
     use crate::state::{EditorState, Position};
+    use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
 

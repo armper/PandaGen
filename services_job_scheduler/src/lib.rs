@@ -399,7 +399,7 @@ impl Default for JobScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::string::ToString;
 
     #[test]
     fn test_job_id_creation() {

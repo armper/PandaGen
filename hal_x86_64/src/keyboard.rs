@@ -129,6 +129,7 @@ impl<P: PortIo> KeyboardDevice for X86Ps2Keyboard<P> {
 mod tests {
     use super::*;
     use crate::port_io::FakePortIo;
+    use alloc::boxed::Box;
 
     #[test]
     fn test_x86_keyboard_creation() {

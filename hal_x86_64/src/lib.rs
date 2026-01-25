@@ -9,6 +9,7 @@
 //! This is a skeleton implementation. Real hardware operations are stubbed.
 //! In a complete system, this would use actual x86_64 instructions.
 
+#[macro_use]
 extern crate alloc;
 
 use core::prelude::v1::*;

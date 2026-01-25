@@ -378,7 +378,8 @@ impl Default for NotificationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::string::ToString;
+    use alloc::format;
 
     #[test]
     fn test_notification_id_creation() {

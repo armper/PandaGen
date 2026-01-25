@@ -238,6 +238,9 @@ impl ViewContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use alloc::format;
 
     #[test]
     fn test_view_id_creation() {
