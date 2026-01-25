@@ -16,17 +16,17 @@ extern crate std;
 #[cfg(not(test))]
 extern crate alloc;
 
+mod bare_metal_editor_io;
+mod bare_metal_storage;
+mod display_sink;
 mod framebuffer;
 mod minimal_editor;
 mod optimized_render;
 mod output;
+mod palette_overlay;
 mod render_stats;
 mod vga;
 mod workspace;
-mod display_sink;
-mod bare_metal_storage;
-mod bare_metal_editor_io;
-mod palette_overlay;
 
 use core::fmt::Write;
 use core::marker::PhantomData;
@@ -441,8 +441,7 @@ fn log_pic_masks(serial: &mut serial::SerialPort) {
         let _ = writeln!(
             serial,
             "PIC masks: master=0x{:02x} slave=0x{:02x}",
-            master_mask,
-            slave_mask
+            master_mask, slave_mask
         );
     }
 }
@@ -512,8 +511,7 @@ fn enable_ps2_keyboard_irq(serial: &mut serial::SerialPort) {
             let _ = writeln!(
                 serial,
                 "ps2: command byte updated {:02x} -> {:02x}",
-                original,
-                cmd
+                original, cmd
             );
         } else {
             let _ = writeln!(serial, "ps2: command byte already {:02x}", cmd);
@@ -603,8 +601,7 @@ pub extern "C" fn rust_main() -> ! {
         let _ = writeln!(
             serial,
             "IDT[33] flags=0x{:02x} selector=0x{:04x}",
-            idt_flags,
-            idt_selector
+            idt_flags, idt_selector
         );
     }
 
@@ -708,10 +705,22 @@ pub extern "C" fn rust_main() -> ! {
 
     // Create some example files
     {
-        let _ = filesystem.create_file("welcome.txt", b"Welcome to PandaGen!\nThis is a bare-metal operating system.");
-        let _ = filesystem.create_file("readme.md", b"# PandaGen\n\nA capability-based OS written in Rust.\n\nTry: open editor readme.md");
-        let _ = filesystem.create_file("test.txt", b"Hello, World!\nThis is a test file.\nYou can edit this with :w to save.");
-        kprintln!(serial, "Created example files: welcome.txt, readme.md, test.txt");
+        let _ = filesystem.create_file(
+            "welcome.txt",
+            b"Welcome to PandaGen!\nThis is a bare-metal operating system.",
+        );
+        let _ = filesystem.create_file(
+            "readme.md",
+            b"# PandaGen\n\nA capability-based OS written in Rust.\n\nTry: open editor readme.md",
+        );
+        let _ = filesystem.create_file(
+            "test.txt",
+            b"Hello, World!\nThis is a test file.\nYou can edit this with :w to save.",
+        );
+        kprintln!(
+            serial,
+            "Created example files: welcome.txt, readme.md, test.txt"
+        );
     }
 
     workspace_loop(
@@ -796,12 +805,12 @@ fn workspace_loop(
     let response_channel = ChannelId(1);
 
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
-    
+
     // Install filesystem if available
     if let Some(fs) = filesystem {
         workspace.set_filesystem(fs);
     }
-    
+
     let mut parser_state = Ps2ParserState::new();
 
     let mut input_dirty = true;
@@ -814,7 +823,7 @@ fn workspace_loop(
     let mut last_view_start = 0usize;
     #[cfg(debug_assertions)]
     let mut last_editor_input: Option<u8> = None;
-    
+
     // Editor render cache for incremental updates (Phase 96 optimization)
     let mut editor_render_cache = optimized_render::EditorRenderCache::new();
     let mut last_view_len = 0usize;
@@ -845,12 +854,7 @@ fn workspace_loop(
                             ch as char
                         );
                     } else {
-                        kprintln!(
-                            serial,
-                            "kbd keyevent scancode={:#x} ch={:#x}",
-                            scancode,
-                            ch
-                        );
+                        kprintln!(serial, "kbd keyevent scancode={:#x} ch={:#x}", scancode, ch);
                     }
                 }
                 // Build kernel context
@@ -892,13 +896,16 @@ fn workspace_loop(
                         output_dirty = true;
                     }
                 }
-                
+
                 // Check if palette is now open (for debugging/logging)
                 if workspace.is_palette_open() {
                     if KBD_DEBUG_LOG {
-                        kprintln!(serial, "palette: OPEN query='{}' results={}", 
+                        kprintln!(
+                            serial,
+                            "palette: OPEN query='{}' results={}",
                             workspace.palette_overlay().query(),
-                            workspace.palette_overlay().result_count());
+                            workspace.palette_overlay().result_count()
+                        );
                     }
                 }
             }
@@ -1046,47 +1053,47 @@ fn workspace_loop(
             if !rendered_editor {
                 // Invalidate editor cache when not rendering editor
                 editor_render_cache.invalidate();
-                
+
                 if let Some(ref mut vga) = vga_console {
-                let normal_attr = console_vga::Style::Normal.to_vga_attr();
-                let bold_attr = console_vga::Style::Bold.to_vga_attr();
-                let rows = console_vga::VGA_HEIGHT;
-                let cols = console_vga::VGA_WIDTH;
+                    let normal_attr = console_vga::Style::Normal.to_vga_attr();
+                    let bold_attr = console_vga::Style::Bold.to_vga_attr();
+                    let rows = console_vga::VGA_HEIGHT;
+                    let cols = console_vga::VGA_WIDTH;
 
-                if clear_terminal {
-                    for row in 0..rows {
-                        clear_vga_line(vga, row, normal_attr);
+                    if clear_terminal {
+                        for row in 0..rows {
+                            clear_vga_line(vga, row, normal_attr);
+                        }
+                        last_output_rows = 0;
+                        last_output_seq = 0;
                     }
-                    last_output_rows = 0;
-                    last_output_seq = 0;
-                }
 
-                // Check if editor is active
-                if workspace.is_editor_active() {
-                    // Phase 96: Use optimized renderer via VGA sink wrapper
-                    use crate::display_sink::{DisplaySink, VgaDisplaySink};
-                    let mut vga_sink = VgaDisplaySink::new(vga);
-                    
-                    if let Some(editor) = workspace.editor() {
-                        // force_full only on:
-                        // - editor open/close (cache invalidated)
-                        // - viewport/layout/font/theme changes (must invalidate cache)
-                        // - explicit invalidate request (output_dirty on entry)
-                        // Typing, Enter, Esc, cursor moves, and :w must stay incremental.
-                        let force_full = !editor_render_cache.is_valid() || output_dirty;
-                        let _stats = optimized_render::render_editor_optimized(
-                            &mut vga_sink,
-                            editor,
-                            &mut editor_render_cache,
-                            normal_attr,
-                            bold_attr,
-                            force_full,
-                        );
+                    // Check if editor is active
+                    if workspace.is_editor_active() {
+                        // Phase 96: Use optimized renderer via VGA sink wrapper
+                        use crate::display_sink::{DisplaySink, VgaDisplaySink};
+                        let mut vga_sink = VgaDisplaySink::new(vga);
 
-                        #[cfg(debug_assertions)]
-                        {
-                            if KBD_DEBUG_LOG {
-                                let _ = writeln!(
+                        if let Some(editor) = workspace.editor() {
+                            // force_full only on:
+                            // - editor open/close (cache invalidated)
+                            // - viewport/layout/font/theme changes (must invalidate cache)
+                            // - explicit invalidate request (output_dirty on entry)
+                            // Typing, Enter, Esc, cursor moves, and :w must stay incremental.
+                            let force_full = !editor_render_cache.is_valid() || output_dirty;
+                            let _stats = optimized_render::render_editor_optimized(
+                                &mut vga_sink,
+                                editor,
+                                &mut editor_render_cache,
+                                normal_attr,
+                                bold_attr,
+                                force_full,
+                            );
+
+                            #[cfg(debug_assertions)]
+                            {
+                                if KBD_DEBUG_LOG {
+                                    let _ = writeln!(
                                     serial,
                                     "vga editor render: dirty_lines={} spans={} glyphs={} rects={} pixels={} flush={} full={}",
                                     _stats.dirty_lines_count,
@@ -1097,353 +1104,362 @@ fn workspace_loop(
                                     _stats.flush_calls,
                                     _stats.full_redraws
                                 );
-                            }
-                            if let Some(last_input) = last_editor_input {
-                                if editor.mode() == EditorMode::Insert && is_typing_byte(last_input)
-                                {
-                                    debug_assert!(
-                                        _stats.dirty_lines_count <= 1,
-                                        "typing must dirty at most one line"
-                                    );
-                                    debug_assert!(
-                                        _stats.full_redraws == 0,
-                                        "typing must not trigger full redraw"
-                                    );
+                                }
+                                if let Some(last_input) = last_editor_input {
+                                    if editor.mode() == EditorMode::Insert
+                                        && is_typing_byte(last_input)
+                                    {
+                                        debug_assert!(
+                                            _stats.dirty_lines_count <= 1,
+                                            "typing must dirty at most one line"
+                                        );
+                                        debug_assert!(
+                                            _stats.full_redraws == 0,
+                                            "typing must not trigger full redraw"
+                                        );
+                                    }
                                 }
                             }
                         }
+
+                        input_dirty = false;
+                        output_dirty = false;
+                        #[cfg(debug_assertions)]
+                        {
+                            last_editor_input = None;
+                        }
+                        continue; // Skip normal workspace rendering
                     }
 
-                    input_dirty = false;
-                    output_dirty = false;
-                    #[cfg(debug_assertions)]
-                    {
-                        last_editor_input = None;
-                    }
-                    continue; // Skip normal workspace rendering
-                }
+                    // Render command palette overlay if open
+                    if workspace.is_palette_open() && input_dirty {
+                        let palette = workspace.palette_overlay();
+                        let overlay_attr = 0x1F; // White on blue background
 
-                // Render command palette overlay if open
-                if workspace.is_palette_open() && input_dirty {
-                    let palette = workspace.palette_overlay();
-                    let overlay_attr = 0x1F; // White on blue background
-                    
-                    // Simple centered overlay - 3 rows starting from row 10
-                    let overlay_start_row = 10;
-                    let overlay_width = 60.min(cols);
-                    let overlay_col = (cols - overlay_width) / 2;
-                    
-                    // Row 1: Query line
-                    clear_vga_line(vga, overlay_start_row, overlay_attr);
-                    let query_text = palette.query();
-                    let header = "Command Palette: ";
-                    vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
-                    if !query_text.is_empty() {
-                        vga.write_str_at(overlay_col + header.len(), overlay_start_row, query_text, overlay_attr);
-                    }
-                    
-                    // Row 2: Selected result or empty
-                    clear_vga_line(vga, overlay_start_row + 1, overlay_attr);
-                    let results = palette.displayed_results();
-                    if !results.is_empty() {
-                        let selected_idx = palette.selection_index();
-                        if let Some(selected) = results.get(selected_idx) {
-                            let selection_indicator = "> ";
-                            vga.write_str_at(overlay_col, overlay_start_row + 1, selection_indicator, overlay_attr);
+                        // Simple centered overlay - 3 rows starting from row 10
+                        let overlay_start_row = 10;
+                        let overlay_width = 60.min(cols);
+                        let overlay_col = (cols - overlay_width) / 2;
+
+                        // Row 1: Query line
+                        clear_vga_line(vga, overlay_start_row, overlay_attr);
+                        let query_text = palette.query();
+                        let header = "Command Palette: ";
+                        vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
+                        if !query_text.is_empty() {
                             vga.write_str_at(
-                                overlay_col + selection_indicator.len(),
-                                overlay_start_row + 1,
-                                &selected.name,
-                                overlay_attr
+                                overlay_col + header.len(),
+                                overlay_start_row,
+                                query_text,
+                                overlay_attr,
                             );
                         }
+
+                        // Row 2: Selected result or empty
+                        clear_vga_line(vga, overlay_start_row + 1, overlay_attr);
+                        let results = palette.displayed_results();
+                        if !results.is_empty() {
+                            let selected_idx = palette.selection_index();
+                            if let Some(selected) = results.get(selected_idx) {
+                                let selection_indicator = "> ";
+                                vga.write_str_at(
+                                    overlay_col,
+                                    overlay_start_row + 1,
+                                    selection_indicator,
+                                    overlay_attr,
+                                );
+                                vga.write_str_at(
+                                    overlay_col + selection_indicator.len(),
+                                    overlay_start_row + 1,
+                                    &selected.name,
+                                    overlay_attr,
+                                );
+                            }
+                        }
+
+                        // Row 3: Help text
+                        clear_vga_line(vga, overlay_start_row + 2, overlay_attr);
+                        let help = "[ESC] Close  [Enter] Execute";
+                        vga.write_str_at(overlay_col, overlay_start_row + 2, help, overlay_attr);
+
+                        input_dirty = false;
+                        continue; // Skip normal workspace rendering when palette open
                     }
-                    
-                    // Row 3: Help text
-                    clear_vga_line(vga, overlay_start_row + 2, overlay_attr);
-                    let help = "[ESC] Close  [Enter] Execute";
-                    vga.write_str_at(overlay_col, overlay_start_row + 2, help, overlay_attr);
-                    
-                    input_dirty = false;
-                    continue; // Skip normal workspace rendering when palette open
-                }
 
-                // Normal workspace rendering (when editor not active)
+                    // Normal workspace rendering (when editor not active)
 
-                let max_output_rows = rows.saturating_sub(1);
-                let total = workspace.output_line_count();
-                let output_rows = total.min(max_output_rows);
-                let start = total.saturating_sub(max_output_rows);
-                let prompt_row = output_rows.min(max_output_rows);
-                let output_seq = workspace.output_sequence();
-                let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
-                let can_scroll = output_initialized
-                    && output_rows == max_output_rows
-                    && last_output_rows == max_output_rows
-                    && delta_lines > 0
-                    && delta_lines < max_output_rows;
+                    let max_output_rows = rows.saturating_sub(1);
+                    let total = workspace.output_line_count();
+                    let output_rows = total.min(max_output_rows);
+                    let start = total.saturating_sub(max_output_rows);
+                    let prompt_row = output_rows.min(max_output_rows);
+                    let output_seq = workspace.output_sequence();
+                    let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
+                    let can_scroll = output_initialized
+                        && output_rows == max_output_rows
+                        && last_output_rows == max_output_rows
+                        && delta_lines > 0
+                        && delta_lines < max_output_rows;
 
-                if output_dirty {
-                    if can_scroll {
-                        vga.scroll_up(delta_lines, normal_attr);
-                        let first_row = max_output_rows - delta_lines;
-                        let first_line = total.saturating_sub(delta_lines);
-                        for i in 0..delta_lines {
-                            let row = first_row + i;
-                            let line_idx = first_line + i;
-                            clear_vga_line(vga, row, normal_attr);
-                            if let Some(line) = workspace.output_line(line_idx) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    vga.write_str_at(0, row, text, normal_attr);
+                    if output_dirty {
+                        if can_scroll {
+                            vga.scroll_up(delta_lines, normal_attr);
+                            let first_row = max_output_rows - delta_lines;
+                            let first_line = total.saturating_sub(delta_lines);
+                            for i in 0..delta_lines {
+                                let row = first_row + i;
+                                let line_idx = first_line + i;
+                                clear_vga_line(vga, row, normal_attr);
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        vga.write_str_at(0, row, text, normal_attr);
+                                    }
                                 }
                             }
+                        } else {
+                            for row in 0..output_rows {
+                                let line_idx = start + row;
+                                clear_vga_line(vga, row, normal_attr);
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        vga.write_str_at(0, row, text, normal_attr);
+                                    }
+                                }
+                            }
+                        }
+                        output_initialized = true;
+                        last_output_rows = output_rows;
+                        last_output_seq = output_seq;
+                    }
+                    let cmd_bytes = workspace.get_command_text();
+                    let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                    let view_len = cmd_slice.len();
+                    let prompt_full = !prompt_initialized
+                        || output_dirty
+                        || prompt_row != last_prompt_row
+                        || view_start != last_view_start;
+
+                    if prompt_full {
+                        clear_vga_line(vga, prompt_row, normal_attr);
+                        vga.write_str_at(0, prompt_row, "> ", bold_attr);
+                        if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
+                            vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
                         }
                     } else {
-                        for row in 0..output_rows {
-                            let line_idx = start + row;
-                            clear_vga_line(vga, row, normal_attr);
-                            if let Some(line) = workspace.output_line(line_idx) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    vga.write_str_at(0, row, text, normal_attr);
-                                }
+                        vga.write_str_at(0, prompt_row, "> ", bold_attr);
+                        for (idx, &byte) in cmd_slice.iter().enumerate() {
+                            vga.write_at(2 + idx, prompt_row, byte, normal_attr);
+                        }
+                        if last_view_len > view_len {
+                            for col in (2 + view_len)..(2 + last_view_len) {
+                                vga.write_at(col, prompt_row, b' ', normal_attr);
                             }
                         }
-                    }
-                    output_initialized = true;
-                    last_output_rows = output_rows;
-                    last_output_seq = output_seq;
-                }
-                let cmd_bytes = workspace.get_command_text();
-                let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
-                let view_len = cmd_slice.len();
-                let prompt_full = !prompt_initialized
-                    || output_dirty
-                    || prompt_row != last_prompt_row
-                    || view_start != last_view_start;
 
-                if prompt_full {
-                    clear_vga_line(vga, prompt_row, normal_attr);
-                    vga.write_str_at(0, prompt_row, "> ", bold_attr);
-                    if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
-                        vga.write_str_at(2, prompt_row, cmd_str, normal_attr);
-                    }
-                } else {
-                    vga.write_str_at(0, prompt_row, "> ", bold_attr);
-                    for (idx, &byte) in cmd_slice.iter().enumerate() {
-                        vga.write_at(2 + idx, prompt_row, byte, normal_attr);
-                    }
-                    if last_view_len > view_len {
-                        for col in (2 + view_len)..(2 + last_view_len) {
-                            vga.write_at(col, prompt_row, b' ', normal_attr);
-                        }
-                    }
-
-                    if last_cursor_col != cursor_col {
-                        let ch = if last_cursor_col >= 2 {
-                            let idx = last_cursor_col.saturating_sub(2);
-                            if idx < view_len {
-                                cmd_slice[idx]
+                        if last_cursor_col != cursor_col {
+                            let ch = if last_cursor_col >= 2 {
+                                let idx = last_cursor_col.saturating_sub(2);
+                                if idx < view_len {
+                                    cmd_slice[idx]
+                                } else {
+                                    b' '
+                                }
+                            } else if last_cursor_col == 0 {
+                                b'>'
                             } else {
                                 b' '
+                            };
+                            vga.write_at(last_cursor_col, prompt_row, ch, normal_attr);
+                        }
+                    }
+
+                    vga.draw_cursor(cursor_col, prompt_row, normal_attr);
+                    prompt_initialized = true;
+                    last_prompt_row = prompt_row;
+                    last_view_start = view_start;
+                    last_view_len = view_len;
+                    last_cursor_col = cursor_col;
+                } else if let Some(ref mut fb) = fb_console {
+                    // Render workspace state to framebuffer
+                    let bg = (0x00, 0x20, 0x40);
+                    let fg = (0xFF, 0xFF, 0xFF);
+                    let accent = (0x80, 0xFF, 0x80);
+                    let rows = fb.rows();
+                    let cols = fb.cols();
+                    let max_output_rows = rows.saturating_sub(1);
+                    let total = workspace.output_line_count();
+                    let output_rows = total.min(max_output_rows);
+                    let start = total.saturating_sub(max_output_rows);
+                    let prompt_row = output_rows.min(max_output_rows);
+                    let output_seq = workspace.output_sequence();
+                    let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
+
+                    // Determine rendering strategy - prefer incremental over full redraw
+                    //
+                    // Fast paths (only draw changed content):
+                    // - scroll: screen was full, is full, new lines added
+                    // - append: screen not full, add new lines at bottom
+                    // - fill_scroll: screen just became full, scroll + draw new
+                    //
+                    // Slow path:
+                    // - full: first render or complex state change
+
+                    let screen_is_full = output_rows == max_output_rows;
+                    let screen_was_full = last_output_rows == max_output_rows;
+                    let reasonable_delta = delta_lines > 0 && delta_lines < max_output_rows;
+
+                    let can_scroll =
+                        output_initialized && screen_is_full && screen_was_full && reasonable_delta;
+
+                    // Screen just became full - scroll by overflow amount
+                    let can_fill_scroll = output_initialized
+                        && screen_is_full
+                        && !screen_was_full
+                        && last_output_rows > 0
+                        && reasonable_delta;
+
+                    // Screen not full yet, just append
+                    let can_append = output_initialized
+                        && !screen_is_full
+                        && delta_lines > 0
+                        && delta_lines <= output_rows;
+
+                    if output_dirty {
+                        if clear_terminal {
+                            for row in 0..rows {
+                                clear_fb_line(fb, row, cols, bg, fg);
                             }
-                        } else if last_cursor_col == 0 {
-                            b'>'
+                            last_output_rows = 0;
+                            last_output_seq = 0;
+                        }
+                        if can_scroll {
+                            // Scroll up and draw only new bottom lines
+                            fb.scroll_up_text_lines(delta_lines, bg);
+                            let first_row = max_output_rows - delta_lines;
+                            let first_line = total.saturating_sub(delta_lines);
+                            for i in 0..delta_lines {
+                                let row = first_row + i;
+                                let line_idx = first_line + i;
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        fb.draw_line(row, text, fg, bg);
+                                    }
+                                } else {
+                                    fb.draw_line(row, "", fg, bg);
+                                }
+                            }
+                        } else if can_fill_scroll {
+                            // Screen just became full - scroll the overflow and draw new lines
+                            let overflow = total.saturating_sub(max_output_rows);
+                            if overflow > 0 {
+                                fb.scroll_up_text_lines(overflow, bg);
+                            }
+                            // Draw only the new lines at bottom
+                            let lines_to_draw = delta_lines.min(max_output_rows);
+                            let first_row = max_output_rows - lines_to_draw;
+                            let first_line = total.saturating_sub(lines_to_draw);
+                            for i in 0..lines_to_draw {
+                                let row = first_row + i;
+                                let line_idx = first_line + i;
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        fb.draw_line(row, text, fg, bg);
+                                    }
+                                } else {
+                                    fb.draw_line(row, "", fg, bg);
+                                }
+                            }
+                        } else if can_append {
+                            // Just draw new lines at bottom (no scroll needed)
+                            let first_row = output_rows.saturating_sub(delta_lines);
+                            for i in 0..delta_lines {
+                                let row = first_row + i;
+                                if let Some(line) = workspace.output_line(row) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        fb.draw_line(row, text, fg, bg);
+                                    }
+                                } else {
+                                    fb.draw_line(row, "", fg, bg);
+                                }
+                            }
                         } else {
-                            b' '
-                        };
-                        vga.write_at(last_cursor_col, prompt_row, ch, normal_attr);
+                            // Full redraw (first render or complex change)
+                            for row in 0..output_rows {
+                                let line_idx = start + row;
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        fb.draw_line(row, text, fg, bg);
+                                    }
+                                } else {
+                                    fb.draw_line(row, "", fg, bg);
+                                }
+                            }
+                        }
+                        output_initialized = true;
+                        last_output_rows = output_rows;
+                        last_output_seq = output_seq;
                     }
-                }
+                    let cmd_bytes = workspace.get_command_text();
+                    let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
+                    let view_len = cmd_slice.len();
+                    let prompt_full = !prompt_initialized
+                        || output_dirty
+                        || prompt_row != last_prompt_row
+                        || view_start != last_view_start;
 
-                vga.draw_cursor(cursor_col, prompt_row, normal_attr);
-                prompt_initialized = true;
-                last_prompt_row = prompt_row;
-                last_view_start = view_start;
-                last_view_len = view_len;
-                last_cursor_col = cursor_col;
-            } else if let Some(ref mut fb) = fb_console {
-                // Render workspace state to framebuffer
-                let bg = (0x00, 0x20, 0x40);
-                let fg = (0xFF, 0xFF, 0xFF);
-                let accent = (0x80, 0xFF, 0x80);
-                let rows = fb.rows();
-                let cols = fb.cols();
-                let max_output_rows = rows.saturating_sub(1);
-                let total = workspace.output_line_count();
-                let output_rows = total.min(max_output_rows);
-                let start = total.saturating_sub(max_output_rows);
-                let prompt_row = output_rows.min(max_output_rows);
-                let output_seq = workspace.output_sequence();
-                let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
-                
-                // Determine rendering strategy - prefer incremental over full redraw
-                // 
-                // Fast paths (only draw changed content):
-                // - scroll: screen was full, is full, new lines added
-                // - append: screen not full, add new lines at bottom
-                // - fill_scroll: screen just became full, scroll + draw new
-                //
-                // Slow path:
-                // - full: first render or complex state change
-                
-                let screen_is_full = output_rows == max_output_rows;
-                let screen_was_full = last_output_rows == max_output_rows;
-                let reasonable_delta = delta_lines > 0 && delta_lines < max_output_rows;
-                
-                let can_scroll = output_initialized
-                    && screen_is_full
-                    && screen_was_full
-                    && reasonable_delta;
-                
-                // Screen just became full - scroll by overflow amount
-                let can_fill_scroll = output_initialized
-                    && screen_is_full
-                    && !screen_was_full
-                    && last_output_rows > 0
-                    && reasonable_delta;
-                
-                // Screen not full yet, just append
-                let can_append = output_initialized
-                    && !screen_is_full
-                    && delta_lines > 0
-                    && delta_lines <= output_rows;
-
-                if output_dirty {
-                    if clear_terminal {
-                        for row in 0..rows {
-                            clear_fb_line(fb, row, cols, bg, fg);
-                        }
-                        last_output_rows = 0;
-                        last_output_seq = 0;
-                    }
-                    if can_scroll {
-                        // Scroll up and draw only new bottom lines
-                        fb.scroll_up_text_lines(delta_lines, bg);
-                        let first_row = max_output_rows - delta_lines;
-                        let first_line = total.saturating_sub(delta_lines);
-                        for i in 0..delta_lines {
-                            let row = first_row + i;
-                            let line_idx = first_line + i;
-                            if let Some(line) = workspace.output_line(line_idx) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_line(row, text, fg, bg);
-                                }
-                            } else {
-                                fb.draw_line(row, "", fg, bg);
-                            }
-                        }
-                    } else if can_fill_scroll {
-                        // Screen just became full - scroll the overflow and draw new lines
-                        let overflow = total.saturating_sub(max_output_rows);
-                        if overflow > 0 {
-                            fb.scroll_up_text_lines(overflow, bg);
-                        }
-                        // Draw only the new lines at bottom
-                        let lines_to_draw = delta_lines.min(max_output_rows);
-                        let first_row = max_output_rows - lines_to_draw;
-                        let first_line = total.saturating_sub(lines_to_draw);
-                        for i in 0..lines_to_draw {
-                            let row = first_row + i;
-                            let line_idx = first_line + i;
-                            if let Some(line) = workspace.output_line(line_idx) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_line(row, text, fg, bg);
-                                }
-                            } else {
-                                fb.draw_line(row, "", fg, bg);
-                            }
-                        }
-                    } else if can_append {
-                        // Just draw new lines at bottom (no scroll needed)
-                        let first_row = output_rows.saturating_sub(delta_lines);
-                        for i in 0..delta_lines {
-                            let row = first_row + i;
-                            if let Some(line) = workspace.output_line(row) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_line(row, text, fg, bg);
-                                }
-                            } else {
-                                fb.draw_line(row, "", fg, bg);
-                            }
+                    if prompt_full {
+                        clear_fb_line(fb, prompt_row, cols, bg, fg);
+                        fb.draw_text_at(0, prompt_row, "> ", accent, bg);
+                        if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
+                            fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
                         }
                     } else {
-                        // Full redraw (first render or complex change)
-                        for row in 0..output_rows {
-                            let line_idx = start + row;
-                            if let Some(line) = workspace.output_line(line_idx) {
-                                let bytes = line.as_bytes();
-                                let len = bytes.len().min(cols);
-                                if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
-                                    fb.draw_line(row, text, fg, bg);
-                                }
-                            } else {
-                                fb.draw_line(row, "", fg, bg);
+                        fb.draw_text_at(0, prompt_row, "> ", accent, bg);
+                        for (idx, &byte) in cmd_slice.iter().enumerate() {
+                            fb.draw_char_at(2 + idx, prompt_row, byte, fg, bg);
+                        }
+                        if last_view_len > view_len {
+                            for col in (2 + view_len)..(2 + last_view_len) {
+                                fb.draw_char_at(col, prompt_row, b' ', fg, bg);
                             }
                         }
-                    }
-                    output_initialized = true;
-                    last_output_rows = output_rows;
-                    last_output_seq = output_seq;
-                }
-                let cmd_bytes = workspace.get_command_text();
-                let (view_start, cmd_slice, cursor_col) = prompt_view(cmd_bytes, cols);
-                let view_len = cmd_slice.len();
-                let prompt_full = !prompt_initialized
-                    || output_dirty
-                    || prompt_row != last_prompt_row
-                    || view_start != last_view_start;
 
-                if prompt_full {
-                    clear_fb_line(fb, prompt_row, cols, bg, fg);
-                    fb.draw_text_at(0, prompt_row, "> ", accent, bg);
-                    if let Ok(cmd_str) = core::str::from_utf8(cmd_slice) {
-                        fb.draw_text_at(2, prompt_row, cmd_str, fg, bg);
-                    }
-                } else {
-                    fb.draw_text_at(0, prompt_row, "> ", accent, bg);
-                    for (idx, &byte) in cmd_slice.iter().enumerate() {
-                        fb.draw_char_at(2 + idx, prompt_row, byte, fg, bg);
-                    }
-                    if last_view_len > view_len {
-                        for col in (2 + view_len)..(2 + last_view_len) {
-                            fb.draw_char_at(col, prompt_row, b' ', fg, bg);
-                        }
-                    }
-
-                    if last_cursor_col != cursor_col {
-                        let ch = if last_cursor_col >= 2 {
-                            let idx = last_cursor_col.saturating_sub(2);
-                            if idx < view_len {
-                                cmd_slice[idx]
+                        if last_cursor_col != cursor_col {
+                            let ch = if last_cursor_col >= 2 {
+                                let idx = last_cursor_col.saturating_sub(2);
+                                if idx < view_len {
+                                    cmd_slice[idx]
+                                } else {
+                                    b' '
+                                }
+                            } else if last_cursor_col == 0 {
+                                b'>'
                             } else {
                                 b' '
-                            }
-                        } else if last_cursor_col == 0 {
-                            b'>'
-                        } else {
-                            b' '
-                        };
-                        fb.draw_char_at(last_cursor_col, prompt_row, ch, fg, bg);
+                            };
+                            fb.draw_char_at(last_cursor_col, prompt_row, ch, fg, bg);
+                        }
                     }
-                }
 
-                fb.draw_cursor(cursor_col, prompt_row, fg, bg);
-                prompt_initialized = true;
-                last_prompt_row = prompt_row;
-                last_view_start = view_start;
-                last_view_len = view_len;
-                last_cursor_col = cursor_col;
-            }
+                    fb.draw_cursor(cursor_col, prompt_row, fg, bg);
+                    prompt_initialized = true;
+                    last_prompt_row = prompt_row;
+                    last_view_start = view_start;
+                    last_view_len = view_len;
+                    last_cursor_col = cursor_col;
+                }
             } // End !rendered_editor
 
             input_dirty = false;
@@ -1731,7 +1747,11 @@ impl Ps2ParserState {
     }
 
     /// Process a scancode byte and return ASCII character if available
-    fn process_scancode<W: core::fmt::Write>(&mut self, scancode: u8, serial: &mut W) -> Option<u8> {
+    fn process_scancode<W: core::fmt::Write>(
+        &mut self,
+        scancode: u8,
+        serial: &mut W,
+    ) -> Option<u8> {
         // Log state before processing
         if crate::KBD_DEBUG_LOG {
             let _ = writeln!(
@@ -2086,7 +2106,9 @@ mod keyboard_scancode_tests {
 
     struct DummyWriter;
     impl Write for DummyWriter {
-        fn write_str(&mut self, _s: &str) -> fmt::Result { Ok(()) }
+        fn write_str(&mut self, _s: &str) -> fmt::Result {
+            Ok(())
+        }
     }
 
     #[test]
@@ -2131,7 +2153,7 @@ mod keyboard_scancode_tests {
     fn test_unexpected_byte_resets_prefix() {
         let mut parser = Ps2ParserState::new();
         let mut writer = DummyWriter;
-        
+
         // 1. Send E0 (pending_e0 becomes true)
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
         assert!(parser.pending_e0);
@@ -2420,7 +2442,8 @@ impl KeyboardEventQueue {
     /// If queue is full, overwrites oldest entry (DropOldest policy).
     /// Returns true if an entry was dropped.
     fn push(&self, scancode: u8) -> bool {
-        let write_idx = (self.write_pos.load(Ordering::Relaxed) % KEYBOARD_QUEUE_SIZE as u64) as usize;
+        let write_idx =
+            (self.write_pos.load(Ordering::Relaxed) % KEYBOARD_QUEUE_SIZE as u64) as usize;
         self.buffer[write_idx].store(scancode, Ordering::Release);
 
         let new_write = self.write_pos.load(Ordering::Relaxed).wrapping_add(1);

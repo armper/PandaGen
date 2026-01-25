@@ -3,8 +3,8 @@
 use crate::{ObjectId, VersionId};
 use alloc::string::String;
 use alloc::vec::Vec;
-use serde::{Deserialize, Serialize};
 use core_types::new_uuid;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a transaction

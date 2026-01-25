@@ -126,7 +126,10 @@ fn test_editor_launch_via_command() {
 
     // Verify content
     let snapshot = runtime.snapshot();
-    assert!(snapshot.main_view.is_some(), "Editor should have a main view");
+    assert!(
+        snapshot.main_view.is_some(),
+        "Editor should have a main view"
+    );
 
     if let Some(view) = &snapshot.main_view {
         if let view_types::ViewContent::TextBuffer { lines } = &view.content {
@@ -234,8 +237,11 @@ fn test_open_editor_from_cli() {
         IdentityKind::Component,
         TrustDomain::user(),
     );
-    let cli_id = runtime.workspace_mut().launch_component(cli_config).unwrap();
-    
+    let cli_id = runtime
+        .workspace_mut()
+        .launch_component(cli_config)
+        .unwrap();
+
     // CLI should have focus initially
     assert_eq!(runtime.workspace().get_focused_component(), Some(cli_id));
 
@@ -247,13 +253,15 @@ fn test_open_editor_from_cli() {
 
     // Check which component has focus
     let focused = runtime.workspace().get_focused_component();
-    
+
     // Get the editor component
     let components = runtime.workspace().list_components();
-    let editor_comp = components.iter().find(|c| c.component_type == ComponentType::Editor);
+    let editor_comp = components
+        .iter()
+        .find(|c| c.component_type == ComponentType::Editor);
     assert!(editor_comp.is_some(), "Editor should exist");
     let editor_id = editor_comp.unwrap().id;
-    
+
     // THE KEY ASSERTION: Editor should have focus after 'open editor'
     assert_eq!(
         focused,
@@ -274,7 +282,9 @@ fn test_open_editor_from_cli() {
     // Type some more to make sure it works
     runtime.workspace_mut().route_input(&press_key(KeyCode::H));
     runtime.workspace_mut().route_input(&press_key(KeyCode::I));
-    runtime.workspace_mut().route_input(&press_key(KeyCode::Escape));
+    runtime
+        .workspace_mut()
+        .route_input(&press_key(KeyCode::Escape));
 
     // Verify content
     let snapshot = runtime.snapshot();
@@ -308,7 +318,10 @@ fn test_editor_escape_routing() {
         IdentityKind::Component,
         TrustDomain::user(),
     );
-    let editor_id = runtime.workspace_mut().launch_component(editor_config).unwrap();
+    let editor_id = runtime
+        .workspace_mut()
+        .launch_component(editor_config)
+        .unwrap();
 
     // Verify initial focus
     assert_eq!(runtime.workspace().get_focused_component(), Some(editor_id));

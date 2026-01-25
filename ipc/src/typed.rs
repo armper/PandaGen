@@ -103,13 +103,10 @@ impl CommandResponse {
         correlation: MessageId,
     ) -> Result<MessageEnvelope, serde_json::Error> {
         let payload = MessagePayload::new(&self)?;
-        Ok(MessageEnvelope::new(
-            destination,
-            COMMAND_RESPONSE_ACTION,
-            self.version,
-            payload,
+        Ok(
+            MessageEnvelope::new(destination, COMMAND_RESPONSE_ACTION, self.version, payload)
+                .with_correlation(correlation),
         )
-        .with_correlation(correlation))
     }
 }
 

@@ -283,7 +283,7 @@ impl NotificationService {
     /// Sends a notification
     pub fn notify(&mut self, notification: Notification) {
         self.notifications.push_back(notification);
-        
+
         // Trim history if too large
         while self.notifications.len() > MAX_NOTIFICATION_HISTORY {
             self.notifications.pop_front();
@@ -314,11 +314,7 @@ impl NotificationService {
 
     /// Returns all recent notifications (including dismissed ones)
     pub fn get_recent_notifications(&self, limit: usize) -> Vec<&Notification> {
-        self.notifications
-            .iter()
-            .rev()
-            .take(limit)
-            .collect()
+        self.notifications.iter().rev().take(limit).collect()
     }
 
     /// Returns notifications filtered by level
@@ -331,11 +327,7 @@ impl NotificationService {
 
     /// Dismisses a notification by ID
     pub fn dismiss_notification(&mut self, id: NotificationId) -> bool {
-        if let Some(notification) = self
-            .notifications
-            .iter_mut()
-            .find(|n| n.id == id)
-        {
+        if let Some(notification) = self.notifications.iter_mut().find(|n| n.id == id) {
             notification.dismiss();
             true
         } else {
@@ -378,8 +370,8 @@ impl Default for NotificationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
     use alloc::format;
+    use alloc::string::ToString;
 
     #[test]
     fn test_notification_id_creation() {
@@ -398,7 +390,7 @@ mod tests {
     #[test]
     fn test_notification_creation() {
         let notif = Notification::info("Test message", 1000);
-        
+
         assert_eq!(notif.level, NotificationLevel::Info);
         assert_eq!(notif.notification_type, NotificationType::Toast);
         assert_eq!(notif.message, "Test message");
@@ -416,7 +408,7 @@ mod tests {
     #[test]
     fn test_notification_expiration() {
         let notif = Notification::info("Test", 1000).with_ttl(5000);
-        
+
         assert!(!notif.is_expired(1000));
         assert!(!notif.is_expired(5999));
         assert!(notif.is_expired(6000));
@@ -433,7 +425,7 @@ mod tests {
     fn test_notification_dismiss() {
         let mut notif = Notification::info("Test", 1000);
         assert!(!notif.dismissed);
-        
+
         notif.dismiss();
         assert!(notif.dismissed);
     }
@@ -449,20 +441,20 @@ mod tests {
     #[test]
     fn test_service_notify() {
         let mut service = NotificationService::new();
-        
+
         service.notify(Notification::info("Test 1", 1000));
         service.notify(Notification::success("Test 2", 2000));
-        
+
         assert_eq!(service.notification_count(), 2);
     }
 
     #[test]
     fn test_service_set_status() {
         let mut service = NotificationService::new();
-        
+
         service.set_status("Working...");
         assert_eq!(service.get_status(), "Working...");
-        
+
         service.set_status("Done");
         assert_eq!(service.get_status(), "Done");
     }
@@ -471,11 +463,11 @@ mod tests {
     fn test_service_get_active_toasts() {
         let mut service = NotificationService::new();
         service.set_time(1000);
-        
+
         service.notify(Notification::info("Toast 1", 1000));
         service.notify(Notification::success("Toast 2", 1000));
         service.notify(Notification::status("Status", 1000));
-        
+
         let toasts = service.get_active_toasts();
         assert_eq!(toasts.len(), 2);
     }
@@ -484,10 +476,10 @@ mod tests {
     fn test_service_expire_notifications() {
         let mut service = NotificationService::new();
         service.set_time(1000);
-        
+
         service.notify(Notification::info("Test", 1000).with_ttl(5000));
         assert_eq!(service.get_active_toasts().len(), 1);
-        
+
         service.set_time(6001);
         assert_eq!(service.get_active_toasts().len(), 0);
     }
@@ -496,13 +488,13 @@ mod tests {
     fn test_service_dismiss_notification() {
         let mut service = NotificationService::new();
         service.set_time(1000);
-        
+
         let notif = Notification::info("Test", 1000);
         let id = notif.id;
         service.notify(notif);
-        
+
         assert_eq!(service.get_active_toasts().len(), 1);
-        
+
         let dismissed = service.dismiss_notification(id);
         assert!(dismissed);
         assert_eq!(service.get_active_toasts().len(), 0);
@@ -519,12 +511,12 @@ mod tests {
     fn test_service_dismiss_all() {
         let mut service = NotificationService::new();
         service.set_time(1000);
-        
+
         service.notify(Notification::info("Test 1", 1000));
         service.notify(Notification::success("Test 2", 1000));
-        
+
         assert_eq!(service.get_active_toasts().len(), 2);
-        
+
         service.dismiss_all();
         assert_eq!(service.get_active_toasts().len(), 0);
     }
@@ -532,11 +524,11 @@ mod tests {
     #[test]
     fn test_service_get_recent_notifications() {
         let mut service = NotificationService::new();
-        
+
         for i in 0..10 {
             service.notify(Notification::info(format!("Test {}", i), i * 1000));
         }
-        
+
         let recent = service.get_recent_notifications(5);
         assert_eq!(recent.len(), 5);
         // Most recent first
@@ -546,15 +538,15 @@ mod tests {
     #[test]
     fn test_service_get_notifications_by_level() {
         let mut service = NotificationService::new();
-        
+
         service.notify(Notification::info("Info", 1000));
         service.notify(Notification::error("Error", 2000));
         service.notify(Notification::info("Info 2", 3000));
-        
+
         let errors = service.get_notifications_by_level(NotificationLevel::Error);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "Error");
-        
+
         let infos = service.get_notifications_by_level(NotificationLevel::Info);
         assert_eq!(infos.len(), 2);
     }
@@ -562,12 +554,12 @@ mod tests {
     #[test]
     fn test_service_clear_all() {
         let mut service = NotificationService::new();
-        
+
         service.notify(Notification::info("Test 1", 1000));
         service.notify(Notification::info("Test 2", 2000));
-        
+
         assert_eq!(service.notification_count(), 2);
-        
+
         service.clear_all();
         assert_eq!(service.notification_count(), 0);
     }
@@ -575,12 +567,12 @@ mod tests {
     #[test]
     fn test_service_max_history() {
         let mut service = NotificationService::new();
-        
+
         // Add more than MAX_NOTIFICATION_HISTORY notifications
         for i in 0..(MAX_NOTIFICATION_HISTORY + 10) {
             service.notify(Notification::info(format!("Test {}", i), i as u64 * 1000));
         }
-        
+
         // Should only keep MAX_NOTIFICATION_HISTORY
         assert_eq!(service.notification_count(), MAX_NOTIFICATION_HISTORY);
     }
@@ -589,14 +581,14 @@ mod tests {
     fn test_service_advance_time() {
         let mut service = NotificationService::new();
         service.set_time(1000);
-        
+
         service.notify(Notification::info("Test", 1000).with_ttl(5000));
         assert_eq!(service.get_active_toasts().len(), 1);
-        
+
         service.advance_time(3000);
         assert_eq!(service.current_time(), 4000);
         assert_eq!(service.get_active_toasts().len(), 1);
-        
+
         service.advance_time(3000);
         assert_eq!(service.current_time(), 7000);
         assert_eq!(service.get_active_toasts().len(), 0);

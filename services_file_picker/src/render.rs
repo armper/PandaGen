@@ -11,7 +11,12 @@ use crate::{FilePicker, PickerEntry};
 
 impl FilePicker {
     /// Renders the file picker as a text buffer view frame
-    pub fn render_text_buffer(&self, view_id: ViewId, revision: u64, timestamp_ns: u64) -> ViewFrame {
+    pub fn render_text_buffer(
+        &self,
+        view_id: ViewId,
+        revision: u64,
+        timestamp_ns: u64,
+    ) -> ViewFrame {
         let mut lines = Vec::new();
 
         if self.entries.is_empty() {
@@ -43,12 +48,15 @@ impl FilePicker {
         breadcrumb: &str,
     ) -> ViewFrame {
         let entry_count = self.entry_count();
-        
+
         let status_text = if entry_count == 0 {
             format!("{} — Empty", breadcrumb)
         } else {
             let selected_display = display_index_one_based(self.selected_index);
-            format!("{} — {} of {} items", breadcrumb, selected_display, entry_count)
+            format!(
+                "{} — {} of {} items",
+                breadcrumb, selected_display, entry_count
+            )
         };
 
         ViewFrame::new(
@@ -70,7 +78,7 @@ fn display_index_one_based(zero_based: usize) -> usize {
 fn format_entry(entry: &PickerEntry, is_selected: bool) -> String {
     let prefix = if is_selected { "> " } else { "  " };
     let type_marker = if entry.is_directory { "/" } else { " " };
-    
+
     format!("{}{}{}", prefix, entry.name, type_marker)
 }
 

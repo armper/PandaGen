@@ -555,15 +555,15 @@ fn test_command_tracking_in_history() {
         0,
     );
     let mut workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Execute some commands
     workspace.execute_command(WorkspaceCommand::List);
     workspace.execute_command(WorkspaceCommand::FocusNext);
-    
+
     // Check history
     let history = workspace.recent_history();
     let commands = history.get_recent_commands();
-    
+
     assert!(commands.len() >= 2);
     assert!(commands.contains(&"list".to_string()));
     assert!(commands.contains(&"next".to_string()));
@@ -578,17 +578,17 @@ fn test_file_tracking_on_open() {
         0,
     );
     let mut workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Open editor with file
     workspace.execute_command(WorkspaceCommand::Open {
         component_type: ComponentType::Editor,
         args: vec!["test.txt".to_string()],
     });
-    
+
     // Check recent files
     let history = workspace.recent_history();
     let files = history.get_recent_files();
-    
+
     assert!(files.contains(&"test.txt".to_string()));
 }
 
@@ -601,17 +601,17 @@ fn test_status_updates_on_command() {
         0,
     );
     let mut workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Open editor
     let result = workspace.execute_command(WorkspaceCommand::Open {
         component_type: ComponentType::Editor,
         args: vec!["test.txt".to_string()],
     });
-    
+
     // Check last action was set
     let status = workspace.workspace_status();
     assert!(status.last_action.is_some());
-    
+
     // Clear it
     workspace.workspace_status_mut().clear_last_action();
     assert!(workspace.workspace_status().last_action.is_none());
@@ -626,15 +626,17 @@ fn test_error_tracking_in_history() {
         0,
     );
     let mut workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Try to focus non-existent component (will error)
     let fake_id = services_workspace_manager::ComponentId::from_uuid(Uuid::new_v4());
-    workspace.execute_command(WorkspaceCommand::Focus { component_id: fake_id });
-    
+    workspace.execute_command(WorkspaceCommand::Focus {
+        component_id: fake_id,
+    });
+
     // Check error history
     let history = workspace.recent_history();
     let errors = history.get_recent_errors();
-    
+
     assert!(errors.len() > 0);
 }
 
@@ -647,11 +649,11 @@ fn test_command_palette_accessible() {
         0,
     );
     let workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Should have command palette
     let palette = workspace.command_palette();
     let commands = palette.list_commands();
-    
+
     assert!(commands.len() > 0);
     // Should have some key commands
     assert!(commands.iter().any(|c| c.id.as_str() == "open_editor"));
@@ -667,12 +669,16 @@ fn test_breadcrumbs_accessible() {
         0,
     );
     let mut workspace = WorkspaceManager::new(workspace_identity);
-    
+
     // Initial breadcrumbs
     assert_eq!(workspace.breadcrumbs().format(), "PANDA > ROOT");
-    
-    // Can update
-    workspace.breadcrumbs_mut().push("EDITOR(test.txt)".to_string());
-    assert!(workspace.breadcrumbs().format().contains("EDITOR(test.txt)"));
-}
 
+    // Can update
+    workspace
+        .breadcrumbs_mut()
+        .push("EDITOR(test.txt)".to_string());
+    assert!(workspace
+        .breadcrumbs()
+        .format()
+        .contains("EDITOR(test.txt)"));
+}

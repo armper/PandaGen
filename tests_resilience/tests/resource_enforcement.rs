@@ -558,7 +558,7 @@ fn test_unlimited_budget_never_exhausts() {
 
         let result = kernel.send_message(channel, message);
         assert!(result.is_ok(), "Message {} should succeed", i);
-        
+
         // Receive the message to prevent channel from filling up
         let _ = kernel.receive_message(channel, None);
     }

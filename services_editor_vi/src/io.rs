@@ -1,7 +1,7 @@
 //! Document I/O operations
 
-use alloc::string::{String, ToString};
 use alloc::format;
+use alloc::string::{String, ToString};
 use core::fmt;
 use fs_view::DirectoryView;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};

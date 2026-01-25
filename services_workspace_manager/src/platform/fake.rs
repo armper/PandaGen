@@ -26,37 +26,37 @@ impl FakePlatform {
             tick: FakeTick::new(),
         }
     }
-    
+
     /// Queues an input event to be delivered via poll_event
     pub fn queue_input(&mut self, event: KeyEvent) {
         self.input.queue(event);
     }
-    
+
     /// Gets the contents of the rendered main view
     pub fn get_main_view(&self) -> Option<&str> {
         self.display.main_view.as_deref()
     }
-    
+
     /// Gets the contents of the rendered status strip
     pub fn get_status_strip(&self) -> Option<&str> {
         self.display.status_strip.as_deref()
     }
-    
+
     /// Gets the contents of the rendered breadcrumbs
     pub fn get_breadcrumbs(&self) -> Option<&str> {
         self.display.breadcrumbs.as_deref()
     }
-    
+
     /// Checks if the display was cleared
     pub fn was_cleared(&self) -> bool {
         self.display.cleared
     }
-    
+
     /// Checks if present() was called
     pub fn was_presented(&self) -> bool {
         self.display.presented
     }
-    
+
     /// Resets the presentation flag
     pub fn reset_presented(&mut self) {
         self.display.presented = false;
@@ -73,11 +73,11 @@ impl WorkspacePlatform for FakePlatform {
     fn display(&mut self) -> &mut dyn WorkspaceDisplay {
         &mut self.display
     }
-    
+
     fn input(&mut self) -> &mut dyn WorkspaceInput {
         &mut self.input
     }
-    
+
     fn tick(&mut self) -> &mut dyn WorkspaceTick {
         &mut self.tick
     }
@@ -111,23 +111,23 @@ impl WorkspaceDisplay for FakeDisplay {
         // Store a simplified representation of the frame
         self.main_view = Some(format!("ViewFrame[{}:{}]", frame.view_id, frame.revision));
     }
-    
+
     fn render_status_view(&mut self, frame: &ViewFrame) {
         self.status_view = Some(format!("StatusView[{}:{}]", frame.view_id, frame.revision));
     }
-    
+
     fn render_status_strip(&mut self, content: &str) {
         self.status_strip = Some(content.to_string());
     }
-    
+
     fn render_breadcrumbs(&mut self, content: &str) {
         self.breadcrumbs = Some(content.to_string());
     }
-    
+
     fn clear(&mut self) {
         self.cleared = true;
     }
-    
+
     fn present(&mut self) {
         self.presented = true;
     }
@@ -142,7 +142,7 @@ impl FakeInput {
     fn new() -> Self {
         Self { events: Vec::new() }
     }
-    
+
     fn queue(&mut self, event: KeyEvent) {
         self.events.push(event);
     }
@@ -156,7 +156,7 @@ impl WorkspaceInput for FakeInput {
             Some(self.events.remove(0))
         }
     }
-    
+
     fn has_pending(&self) -> bool {
         !self.events.is_empty()
     }
@@ -178,7 +178,7 @@ impl WorkspaceTick for FakeTick {
         self.current += 1;
         self.current
     }
-    
+
     fn current(&self) -> u64 {
         self.current
     }
@@ -188,54 +188,54 @@ impl WorkspaceTick for FakeTick {
 mod tests {
     use super::*;
     use input_types::{KeyCode, Modifiers};
-    
+
     #[test]
     fn test_fake_platform_creation() {
         let platform = FakePlatform::new();
         assert!(!platform.was_cleared());
         assert!(!platform.was_presented());
     }
-    
+
     #[test]
     fn test_fake_input_queue() {
         let mut platform = FakePlatform::new();
         assert!(!platform.input().has_pending());
-        
+
         let event = KeyEvent::pressed(KeyCode::A, Modifiers::none());
         platform.queue_input(event.clone());
-        
+
         assert!(platform.input().has_pending());
         let polled = platform.input().poll_event();
         assert_eq!(polled, Some(event));
         assert!(!platform.input().has_pending());
     }
-    
+
     #[test]
     fn test_fake_display_operations() {
         let mut platform = FakePlatform::new();
-        
+
         platform.display().clear();
         assert!(platform.was_cleared());
-        
+
         platform.display().render_status_strip("test status");
         assert_eq!(platform.get_status_strip(), Some("test status"));
-        
+
         platform.display().render_breadcrumbs("/home/user");
         assert_eq!(platform.get_breadcrumbs(), Some("/home/user"));
-        
+
         platform.display().present();
         assert!(platform.was_presented());
     }
-    
+
     #[test]
     fn test_fake_tick_advances() {
         let mut platform = FakePlatform::new();
         assert_eq!(platform.tick().current(), 0);
-        
+
         let tick1 = platform.tick().advance();
         assert_eq!(tick1, 1);
         assert_eq!(platform.tick().current(), 1);
-        
+
         let tick2 = platform.tick().advance();
         assert_eq!(tick2, 2);
     }

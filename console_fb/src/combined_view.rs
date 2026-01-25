@@ -329,7 +329,12 @@ impl<F: Framebuffer> CombinedView<F> {
 
         let mut plan = EditorRenderPlan::default();
         for row in 0..content_rows {
-            let old_line = self.editor_cache.lines.get(row).map(|s| s.as_str()).unwrap_or("");
+            let old_line = self
+                .editor_cache
+                .lines
+                .get(row)
+                .map(|s| s.as_str())
+                .unwrap_or("");
             let new_line = new_lines.get(row).map(|s| s.as_str()).unwrap_or("~");
             if let Some(update) = diff_line_update(old_line, new_line, cols, row) {
                 plan.line_updates.push(update);
@@ -606,12 +611,8 @@ mod tests {
 
         view.render_editor(&state);
 
-        state
-            .buffer_mut()
-            .insert_char(Position::new(0, 5), 'x');
-        state
-            .cursor_mut()
-            .set_position(Position::new(0, 6));
+        state.buffer_mut().insert_char(Position::new(0, 5), 'x');
+        state.cursor_mut().set_position(Position::new(0, 6));
 
         view.render_editor(&state);
 

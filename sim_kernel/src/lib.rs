@@ -240,10 +240,7 @@ impl SimulatedKernel {
         task_id: TaskId,
         mode: ChannelAccessMode,
     ) -> Result<(), KernelError> {
-        let entry = self
-            .channel_access
-            .entry(channel)
-            .or_default();
+        let entry = self.channel_access.entry(channel).or_default();
 
         match mode {
             ChannelAccessMode::Send => {

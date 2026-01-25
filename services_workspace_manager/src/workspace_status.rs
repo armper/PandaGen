@@ -143,10 +143,10 @@ impl RecentHistory {
     pub fn add_file(&mut self, file: String) {
         // Remove if already exists (move to front)
         self.recent_files.retain(|f| f != &file);
-        
+
         // Add to front
         self.recent_files.push_front(file);
-        
+
         // Trim to max size
         while self.recent_files.len() > MAX_HISTORY_SIZE {
             self.recent_files.pop_back();
@@ -157,10 +157,10 @@ impl RecentHistory {
     pub fn add_command(&mut self, command: String) {
         // Remove if already exists
         self.recent_commands.retain(|c| c != &command);
-        
+
         // Add to front
         self.recent_commands.push_front(command);
-        
+
         // Trim to max size
         while self.recent_commands.len() > MAX_HISTORY_SIZE {
             self.recent_commands.pop_back();
@@ -171,7 +171,7 @@ impl RecentHistory {
     pub fn add_error(&mut self, error: String) {
         // Don't remove duplicates for errors
         self.recent_errors.push_front(error);
-        
+
         // Trim to max size (keep last N errors)
         while self.recent_errors.len() > MAX_HISTORY_SIZE {
             self.recent_errors.pop_back();
@@ -236,7 +236,7 @@ impl CommandSuggestion {
 /// Returns deterministically ordered suggestions
 pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
     let input_lower = input.trim().to_lowercase();
-    
+
     // Empty input - show common commands
     if input_lower.is_empty() {
         return vec![
@@ -246,48 +246,57 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
             CommandSuggestion::new("recent", "Show recent files"),
         ];
     }
-    
+
     // Match command prefixes
     let mut suggestions = Vec::new();
-    
+
     // "open" commands
     if "open".starts_with(&input_lower) || input_lower.starts_with("op") {
-        suggestions.push(CommandSuggestion::new("open editor <path>", "Open file in editor"));
+        suggestions.push(CommandSuggestion::new(
+            "open editor <path>",
+            "Open file in editor",
+        ));
         suggestions.push(CommandSuggestion::new("open recent", "Show recent files"));
     }
-    
+
     // "help" commands
     if "help".starts_with(&input_lower) || input_lower.starts_with("he") || input_lower == "?" {
         suggestions.push(CommandSuggestion::new("help", "Overview"));
         suggestions.push(CommandSuggestion::new("help editor", "Editor commands"));
         suggestions.push(CommandSuggestion::new("help keys", "Keyboard shortcuts"));
-        suggestions.push(CommandSuggestion::new("help workspace", "Workspace commands"));
+        suggestions.push(CommandSuggestion::new(
+            "help workspace",
+            "Workspace commands",
+        ));
         suggestions.push(CommandSuggestion::new("help system", "System commands"));
     }
-    
+
     // "list" commands
     if "list".starts_with(&input_lower) || input_lower.starts_with("li") {
         suggestions.push(CommandSuggestion::new("list", "List all components"));
     }
-    
+
     // "recent" commands
     if "recent".starts_with(&input_lower) || input_lower.starts_with("rec") {
         suggestions.push(CommandSuggestion::new("recent", "Show recent files"));
     }
-    
+
     // "close" commands
     if "close".starts_with(&input_lower) || input_lower.starts_with("cl") {
         suggestions.push(CommandSuggestion::new("close <id>", "Close a component"));
     }
-    
+
     // "next" / "prev" navigation
     if "next".starts_with(&input_lower) || input_lower.starts_with("ne") {
         suggestions.push(CommandSuggestion::new("next", "Focus next component"));
     }
-    if "prev".starts_with(&input_lower) || "previous".starts_with(&input_lower) || input_lower.starts_with("pr") {
+    if "prev".starts_with(&input_lower)
+        || "previous".starts_with(&input_lower)
+        || input_lower.starts_with("pr")
+    {
         suggestions.push(CommandSuggestion::new("prev", "Focus previous component"));
     }
-    
+
     suggestions
 }
 
@@ -405,18 +414,18 @@ impl Default for ContextBreadcrumbs {
 /// This is render-time validation only - no execution side effects
 pub fn validate_command(input: &str) -> PromptValidation {
     let input_trimmed = input.trim();
-    
+
     if input_trimmed.is_empty() {
         return PromptValidation::ValidPrefix;
     }
-    
+
     let parts: Vec<&str> = input_trimmed.split_whitespace().collect();
     if parts.is_empty() {
         return PromptValidation::ValidPrefix;
     }
-    
+
     let cmd = parts[0];
-    
+
     // Check valid commands
     match cmd {
         "open" => {
@@ -487,21 +496,21 @@ pub fn validate_command(input: &str) -> PromptValidation {
                 ("open", &["op", "ope"] as &[&str]),
                 ("list", &["li", "lis"]),
                 ("next", &["ne", "nex"]),
-                ("prev", &["pr", "pre"]),  // Note: also matches "previous"
+                ("prev", &["pr", "pre"]), // Note: also matches "previous"
                 ("close", &["cl", "clo", "clos"]),
                 ("focus", &["fo", "foc", "focu"]),
                 ("status", &["st", "sta", "stat", "statu"]),
                 ("help", &["he", "hel"]),
                 ("recent", &["re", "rec", "rece", "recen"]),
             ];
-            
+
             // Check if input matches any valid prefix
             for (_, prefixes) in &valid_prefixes {
                 if prefixes.contains(&cmd) {
                     return PromptValidation::ValidPrefix;
                 }
             }
-            
+
             PromptValidation::Invalid
         }
     }
@@ -524,7 +533,7 @@ mod tests {
         let mut status = WorkspaceStatus::new();
         status.active_editor = Some("test.txt".to_string());
         status.has_unsaved_changes = false;
-        
+
         let strip = status.format_status_strip();
         assert!(strip.contains("Editor: test.txt"));
         assert!(strip.contains("Saved"));
@@ -535,7 +544,7 @@ mod tests {
         let mut status = WorkspaceStatus::new();
         status.active_editor = Some("main.rs".to_string());
         status.has_unsaved_changes = true;
-        
+
         let strip = status.format_status_strip();
         assert!(strip.contains("Editor: main.rs"));
         assert!(strip.contains("Unsaved"));
@@ -545,7 +554,7 @@ mod tests {
     fn test_workspace_status_with_jobs() {
         let mut status = WorkspaceStatus::new();
         status.active_jobs = 2;
-        
+
         let strip = status.format_status_strip();
         assert!(strip.contains("Jobs: 2"));
     }
@@ -554,7 +563,7 @@ mod tests {
     fn test_workspace_status_fs_readonly() {
         let mut status = WorkspaceStatus::new();
         status.fs_status = FsStatus::ReadOnly;
-        
+
         let strip = status.format_status_strip();
         assert!(strip.contains("FS: Read-only"));
     }
@@ -563,7 +572,7 @@ mod tests {
     fn test_workspace_status_with_last_action() {
         let mut status = WorkspaceStatus::new();
         status.set_last_action("Wrote 12 lines to disk");
-        
+
         let strip = status.format_status_strip_with_action();
         assert!(strip.contains("[ Wrote 12 lines to disk ]"));
     }
@@ -573,7 +582,7 @@ mod tests {
         let mut status = WorkspaceStatus::new();
         status.set_last_action("Test");
         status.clear_last_action();
-        
+
         assert!(status.last_action.is_none());
     }
 
@@ -582,7 +591,7 @@ mod tests {
         let mut history = RecentHistory::new();
         history.add_file("file1.txt".to_string());
         history.add_file("file2.txt".to_string());
-        
+
         let files = history.get_recent_files();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0], "file2.txt");
@@ -595,7 +604,7 @@ mod tests {
         history.add_file("file1.txt".to_string());
         history.add_file("file2.txt".to_string());
         history.add_file("file1.txt".to_string()); // Move to front
-        
+
         let files = history.get_recent_files();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0], "file1.txt");
@@ -605,12 +614,12 @@ mod tests {
     #[test]
     fn test_recent_history_max_size() {
         let mut history = RecentHistory::new();
-        
+
         // Add more than MAX_HISTORY_SIZE items
         for i in 0..25 {
             history.add_file(format!("file{}.txt", i));
         }
-        
+
         let files = history.get_recent_files();
         assert_eq!(files.len(), MAX_HISTORY_SIZE);
         assert_eq!(files[0], "file24.txt");
@@ -621,7 +630,7 @@ mod tests {
         let mut history = RecentHistory::new();
         history.add_command("open editor test.txt".to_string());
         history.add_command("list".to_string());
-        
+
         let commands = history.get_recent_commands();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0], "list");
@@ -632,7 +641,7 @@ mod tests {
         let mut history = RecentHistory::new();
         history.add_error("Error 1".to_string());
         history.add_error("Error 2".to_string());
-        
+
         let errors = history.get_recent_errors();
         assert_eq!(errors.len(), 2);
         assert_eq!(errors[0], "Error 2");
@@ -644,9 +653,9 @@ mod tests {
         history.add_file("file.txt".to_string());
         history.add_command("test".to_string());
         history.add_error("error".to_string());
-        
+
         history.clear();
-        
+
         assert_eq!(history.get_recent_files().len(), 0);
         assert_eq!(history.get_recent_commands().len(), 0);
         assert_eq!(history.get_recent_errors().len(), 0);
@@ -656,7 +665,7 @@ mod tests {
     fn test_command_suggestion_format() {
         let suggestion = CommandSuggestion::new("open editor <path>", "Open file in editor");
         let formatted = suggestion.format();
-        
+
         assert!(formatted.contains("open editor <path>"));
         assert!(formatted.contains("Open file in editor"));
     }
@@ -672,14 +681,18 @@ mod tests {
     #[test]
     fn test_generate_suggestions_open_prefix() {
         let suggestions = generate_suggestions("op");
-        assert!(suggestions.iter().any(|s| s.pattern.contains("open editor")));
+        assert!(suggestions
+            .iter()
+            .any(|s| s.pattern.contains("open editor")));
     }
 
     #[test]
     fn test_generate_suggestions_help_prefix() {
         let suggestions = generate_suggestions("he");
         assert!(suggestions.iter().any(|s| s.pattern.contains("help")));
-        assert!(suggestions.iter().any(|s| s.pattern.contains("help editor")));
+        assert!(suggestions
+            .iter()
+            .any(|s| s.pattern.contains("help editor")));
     }
 
     #[test]
@@ -692,7 +705,7 @@ mod tests {
     fn test_generate_suggestions_deterministic() {
         let suggestions1 = generate_suggestions("he");
         let suggestions2 = generate_suggestions("he");
-        
+
         assert_eq!(suggestions1.len(), suggestions2.len());
         for (s1, s2) in suggestions1.iter().zip(suggestions2.iter()) {
             assert_eq!(s1.pattern, s2.pattern);
@@ -710,7 +723,7 @@ mod tests {
     fn test_context_breadcrumbs_default() {
         let breadcrumbs = ContextBreadcrumbs::new();
         let formatted = breadcrumbs.format();
-        
+
         assert_eq!(formatted, "PANDA > ROOT");
     }
 
@@ -719,9 +732,12 @@ mod tests {
         let mut breadcrumbs = ContextBreadcrumbs::new();
         breadcrumbs.push("EDITOR(main.rs)".to_string());
         breadcrumbs.push("INSERT".to_string());
-        
-        assert_eq!(breadcrumbs.format(), "PANDA > ROOT > EDITOR(main.rs) > INSERT");
-        
+
+        assert_eq!(
+            breadcrumbs.format(),
+            "PANDA > ROOT > EDITOR(main.rs) > INSERT"
+        );
+
         breadcrumbs.pop();
         assert_eq!(breadcrumbs.format(), "PANDA > ROOT > EDITOR(main.rs)");
     }
@@ -731,7 +747,7 @@ mod tests {
         let mut breadcrumbs = ContextBreadcrumbs::new();
         breadcrumbs.push("TEST".to_string());
         breadcrumbs.clear();
-        
+
         assert_eq!(breadcrumbs.format(), "PANDA > ROOT");
     }
 
@@ -741,7 +757,7 @@ mod tests {
         breadcrumbs.pop();
         breadcrumbs.pop();
         breadcrumbs.pop();
-        
+
         // Should still have at least PANDA > ROOT
         let formatted = breadcrumbs.format();
         assert!(formatted.contains("PANDA"));
@@ -763,13 +779,22 @@ mod tests {
     #[test]
     fn test_validate_command_open_incomplete() {
         assert_eq!(validate_command("open"), PromptValidation::ValidPrefix);
-        assert_eq!(validate_command("open editor"), PromptValidation::ValidPrefix);
+        assert_eq!(
+            validate_command("open editor"),
+            PromptValidation::ValidPrefix
+        );
     }
 
     #[test]
     fn test_validate_command_open_complete() {
-        assert_eq!(validate_command("open editor test.txt"), PromptValidation::ValidComplete);
-        assert_eq!(validate_command("open cli"), PromptValidation::ValidComplete);
+        assert_eq!(
+            validate_command("open editor test.txt"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open cli"),
+            PromptValidation::ValidComplete
+        );
     }
 
     #[test]
@@ -780,14 +805,20 @@ mod tests {
     #[test]
     fn test_validate_command_help() {
         assert_eq!(validate_command("help"), PromptValidation::ValidComplete);
-        assert_eq!(validate_command("help workspace"), PromptValidation::ValidComplete);
+        assert_eq!(
+            validate_command("help workspace"),
+            PromptValidation::ValidComplete
+        );
         assert_eq!(validate_command("help invalid"), PromptValidation::Invalid);
     }
 
     #[test]
     fn test_validate_command_close() {
         assert_eq!(validate_command("close"), PromptValidation::ValidPrefix);
-        assert_eq!(validate_command("close comp:123"), PromptValidation::ValidComplete);
+        assert_eq!(
+            validate_command("close comp:123"),
+            PromptValidation::ValidComplete
+        );
         assert_eq!(validate_command("close invalid"), PromptValidation::Invalid);
     }
 

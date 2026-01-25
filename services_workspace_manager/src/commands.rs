@@ -83,17 +83,18 @@ impl WorkspaceManager {
     pub fn execute_command(&mut self, command: WorkspaceCommand) -> CommandResult {
         // Format command for history tracking
         let command_str = format_command(&command);
-        
+
         // Execute the command
         let result = self.execute_command_inner(command);
-        
+
         // Track in recent history
         self.recent_history.add_command(command_str.clone());
-        
+
         // Update status based on result
         match &result {
             CommandResult::Opened { name, .. } => {
-                self.workspace_status.set_last_action(format!("Opened {}", name));
+                self.workspace_status
+                    .set_last_action(format!("Opened {}", name));
             }
             CommandResult::FocusChanged { .. } => {
                 self.workspace_status.set_last_action("Focus changed");
@@ -109,13 +110,13 @@ impl WorkspaceManager {
             }
             _ => {}
         }
-        
+
         // Update workspace status
         self.update_workspace_status();
-        
+
         result
     }
-    
+
     /// Internal command execution (without tracking)
     fn execute_command_inner(&mut self, command: WorkspaceCommand) -> CommandResult {
         match command {
@@ -169,7 +170,7 @@ impl WorkspaceManager {
                         self.recent_history.add_file(filename.clone());
                     }
                 }
-                
+
                 CommandResult::Opened { component_id, name }
             }
             Err(err) => CommandResult::Error {
@@ -277,61 +278,69 @@ impl WorkspaceManager {
     fn cmd_settings_list(&self) -> CommandResult {
         // Get all default settings
         let defaults = self.settings_registry.list_defaults();
-        let user_overrides = self.settings_registry.list_user_overrides(&self.current_user);
-        
+        let user_overrides = self
+            .settings_registry
+            .list_user_overrides(&self.current_user);
+
         let mut message = String::from("Settings:\n");
-        
+
         for key in &defaults {
             let value = self.settings_registry.get(&self.current_user, key);
             let is_override = user_overrides.contains(key);
             let marker = if is_override { "*" } else { " " };
-            
+
             if let Some(v) = value {
                 message.push_str(&format!("{}  {} = {}\n", marker, key, v));
             }
         }
-        
+
         if !user_overrides.is_empty() {
             message.push_str("\n* = user override\n");
         }
-        
+
         CommandResult::Success { message }
     }
 
     fn cmd_settings_set(&mut self, key: String, value_str: String) -> CommandResult {
         use services_settings::{SettingKey, SettingValue};
-        
+
         // Get the default to determine type
         let setting_key = SettingKey::new(&key);
         let default_value = self.settings_registry.get_default(&setting_key);
-        
+
         let value = match default_value {
             Some(SettingValue::Boolean(_)) => {
                 // Parse as boolean
                 match value_str.to_lowercase().as_str() {
                     "true" | "yes" | "1" | "on" => SettingValue::Boolean(true),
                     "false" | "no" | "0" | "off" => SettingValue::Boolean(false),
-                    _ => return CommandResult::Error {
-                        message: format!("Invalid boolean value: {}", value_str),
-                    },
+                    _ => {
+                        return CommandResult::Error {
+                            message: format!("Invalid boolean value: {}", value_str),
+                        }
+                    }
                 }
             }
             Some(SettingValue::Integer(_)) => {
                 // Parse as integer
                 match value_str.parse::<i64>() {
                     Ok(i) => SettingValue::Integer(i),
-                    Err(_) => return CommandResult::Error {
-                        message: format!("Invalid integer value: {}", value_str),
-                    },
+                    Err(_) => {
+                        return CommandResult::Error {
+                            message: format!("Invalid integer value: {}", value_str),
+                        }
+                    }
                 }
             }
             Some(SettingValue::Float(_)) => {
                 // Parse as float
                 match value_str.parse::<f64>() {
                     Ok(f) => SettingValue::Float(f),
-                    Err(_) => return CommandResult::Error {
-                        message: format!("Invalid float value: {}", value_str),
-                    },
+                    Err(_) => {
+                        return CommandResult::Error {
+                            message: format!("Invalid float value: {}", value_str),
+                        }
+                    }
                 }
             }
             Some(SettingValue::String(_)) => {
@@ -340,10 +349,8 @@ impl WorkspaceManager {
             }
             Some(SettingValue::StringList(_)) => {
                 // Parse as comma-separated list
-                let items: Vec<String> = value_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
+                let items: Vec<String> =
+                    value_str.split(',').map(|s| s.trim().to_string()).collect();
                 SettingValue::StringList(items)
             }
             None => {
@@ -352,10 +359,10 @@ impl WorkspaceManager {
                 }
             }
         };
-        
+
         // Set the value and apply
         self.set_setting(key.clone(), value.clone());
-        
+
         CommandResult::Success {
             message: format!("Set {} = {}", key, value),
         }
@@ -473,7 +480,7 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
                     "Usage: settings <list|set|reset|save>".to_string(),
                 ));
             }
-            
+
             match parts[1] {
                 "list" => Ok(WorkspaceCommand::SettingsList),
                 "set" => {
@@ -545,7 +552,10 @@ where
 /// Formats a WorkspaceCommand as a string for display
 fn format_command(command: &WorkspaceCommand) -> String {
     match command {
-        WorkspaceCommand::Open { component_type, args } => {
+        WorkspaceCommand::Open {
+            component_type,
+            args,
+        } => {
             if args.is_empty() {
                 format!("open {}", component_type)
             } else {
@@ -925,13 +935,21 @@ mod tests {
 
     #[test]
     fn test_settings_persistence_roundtrip() {
-        use services_settings::persistence::{serialize_overrides, deserialize_overrides, SettingsOverridesData};
-        
+        use services_settings::persistence::{
+            deserialize_overrides, serialize_overrides, SettingsOverridesData,
+        };
+
         let mut workspace = create_test_workspace();
 
         // Set some settings
-        workspace.set_setting("editor.tab_size", services_settings::SettingValue::Integer(2));
-        workspace.set_setting("ui.theme", services_settings::SettingValue::String("dark".to_string()));
+        workspace.set_setting(
+            "editor.tab_size",
+            services_settings::SettingValue::Integer(2),
+        );
+        workspace.set_setting(
+            "ui.theme",
+            services_settings::SettingValue::String("dark".to_string()),
+        );
 
         // Export and serialize
         let overrides = workspace.settings_registry().export_overrides();
@@ -944,11 +962,16 @@ mod tests {
 
         // Create new workspace and import
         let mut new_workspace = create_test_workspace();
-        new_workspace.settings_registry_mut().import_overrides(loaded_overrides);
+        new_workspace
+            .settings_registry_mut()
+            .import_overrides(loaded_overrides);
 
         // Verify settings persisted
         assert_eq!(
-            new_workspace.get_setting("editor.tab_size").unwrap().as_integer(),
+            new_workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
             Some(2)
         );
         assert_eq!(

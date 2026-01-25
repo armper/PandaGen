@@ -1,14 +1,14 @@
 //! Main editor implementation
 
-use alloc::boxed::Box;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::format;
-use core::fmt;
 use crate::commands::{Command, CommandError, CommandParser};
 use crate::io::{DocumentHandle, EditorIo, IoError, OpenOptions};
 use crate::render::EditorView;
 use crate::state::{EditorMode, EditorState, Position};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 use input_types::{InputEvent, KeyCode, KeyEvent};
 use services_storage::{ObjectId, VersionId};
 use services_view_host::{ViewHandleCap, ViewHost};
@@ -516,9 +516,7 @@ impl Editor {
 
         // Update document handle with new path
         let new_handle = DocumentHandle::new(
-            result
-                .object_id
-                .unwrap_or_else(ObjectId::new),
+            result.object_id.unwrap_or_else(ObjectId::new),
             result.new_version_id,
             Some(path.to_string()),
             true, // Can update link since we just created it
@@ -862,7 +860,10 @@ mod tests {
 
         // Should refuse to quit with new error message
         assert_eq!(result, EditorAction::Continue);
-        assert_eq!(editor.state().status_message(), "Unsaved changes — use :w or :q!");
+        assert_eq!(
+            editor.state().status_message(),
+            "Unsaved changes — use :w or :q!"
+        );
     }
 
     #[test]

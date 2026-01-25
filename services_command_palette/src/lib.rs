@@ -165,14 +165,14 @@ impl CommandDescriptor {
     /// Example: "Help: Keyboard Shortcuts        ?"
     pub fn format_for_palette(&self) -> String {
         let mut result = self.name.clone();
-        
+
         // Add category if present
         if let Some(ref cat) = self.category {
             result.push_str(" (");
             result.push_str(cat);
             result.push(')');
         }
-        
+
         // Add keybinding if present, right-aligned
         if let Some(ref key) = self.keybinding {
             // Pad to align keybinding to the right (assuming 40 chars for command name)
@@ -184,7 +184,7 @@ impl CommandDescriptor {
             result.push_str(&" ".repeat(padding));
             result.push_str(key);
         }
-        
+
         result
     }
 
@@ -195,7 +195,7 @@ impl CommandDescriptor {
         }
 
         let query_lower = query.to_lowercase();
-        
+
         // Match against name
         if self.name.to_lowercase().contains(&query_lower) {
             return true;
@@ -299,7 +299,11 @@ impl CommandPalette {
 
     /// Unregisters a command by ID
     pub fn unregister_command(&mut self, id: &CommandId) -> bool {
-        if let Some(pos) = self.commands.iter().position(|cmd| cmd.descriptor.id == *id) {
+        if let Some(pos) = self
+            .commands
+            .iter()
+            .position(|cmd| cmd.descriptor.id == *id)
+        {
             self.commands.remove(pos);
             true
         } else {
@@ -330,8 +334,8 @@ impl CommandPalette {
 
         // Sort by score (descending), then by name (ascending) for determinism
         matches.sort_by(|a, b| {
-            b.0.cmp(&a.0)  // Score descending
-                .then_with(|| a.1.cmp(&b.1))  // Name ascending (for ties)
+            b.0.cmp(&a.0) // Score descending
+                .then_with(|| a.1.cmp(&b.1)) // Name ascending (for ties)
         });
 
         matches.into_iter().map(|(_, _, desc)| desc).collect()
@@ -407,13 +411,7 @@ mod tests {
 
     #[test]
     fn test_command_descriptor_disabled() {
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        )
-        .disabled();
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]).disabled();
 
         assert!(!desc.enabled);
     }
@@ -445,10 +443,10 @@ mod tests {
 
         // Exact name match should score highest
         let score_exact = desc.relevance_score("Open Editor");
-        
+
         // Prefix match should score lower
         let score_prefix = desc.relevance_score("Open");
-        
+
         // Contains match should score even lower
         let score_contains = desc.relevance_score("dit");
 
@@ -458,13 +456,7 @@ mod tests {
 
     #[test]
     fn test_disabled_command_no_match() {
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test Command",
-            "Test",
-            vec![],
-        )
-        .disabled();
+        let desc = CommandDescriptor::new("test", "Test Command", "Test", vec![]).disabled();
 
         assert!(!desc.matches("test"));
         assert_eq!(desc.relevance_score("test"), 0);
@@ -473,12 +465,7 @@ mod tests {
     #[test]
     fn test_palette_register_command() {
         let mut palette = CommandPalette::new();
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        );
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]);
 
         palette.register_command(desc.clone(), Box::new(|_| Ok("test".to_string())));
 
@@ -490,12 +477,7 @@ mod tests {
     #[test]
     fn test_palette_unregister_command() {
         let mut palette = CommandPalette::new();
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        );
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]);
         let id = desc.id.clone();
 
         palette.register_command(desc, Box::new(|_| Ok("test".to_string())));
@@ -557,26 +539,19 @@ mod tests {
     #[test]
     fn test_palette_execute_command() {
         let mut palette = CommandPalette::new();
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        );
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]);
         let id = desc.id.clone();
 
-        palette.register_command(desc, Box::new(|args| {
-            Ok(format!("executed with {} args", args.len()))
-        }));
+        palette.register_command(
+            desc,
+            Box::new(|args| Ok(format!("executed with {} args", args.len()))),
+        );
 
         let result = palette.execute_command(&id, &[]);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "executed with 0 args");
 
-        let result = palette.execute_command(
-            &id,
-            &["arg1".to_string(), "arg2".to_string()],
-        );
+        let result = palette.execute_command(&id, &["arg1".to_string(), "arg2".to_string()]);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "executed with 2 args");
     }
@@ -592,13 +567,7 @@ mod tests {
     #[test]
     fn test_palette_execute_disabled_command() {
         let mut palette = CommandPalette::new();
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        )
-        .disabled();
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]).disabled();
         let id = desc.id.clone();
 
         palette.register_command(desc, Box::new(|_| Ok("".to_string())));
@@ -611,12 +580,7 @@ mod tests {
     #[test]
     fn test_palette_get_command() {
         let mut palette = CommandPalette::new();
-        let desc = CommandDescriptor::new(
-            "test",
-            "Test",
-            "Test command",
-            vec![],
-        );
+        let desc = CommandDescriptor::new("test", "Test", "Test command", vec![]);
         let id = desc.id.clone();
 
         palette.register_command(desc, Box::new(|_| Ok("".to_string())));
@@ -657,47 +621,32 @@ mod tests {
 
         let matches = palette.filter_commands("editor");
         assert_eq!(matches.len(), 2);
-        
+
         // First result should be the one with exact tag match
         assert_eq!(matches[0].id.as_str(), "open_editor");
     }
 
     #[test]
     fn test_command_descriptor_with_category() {
-        let desc = CommandDescriptor::new(
-            "open_file",
-            "Open File",
-            "Opens a file",
-            vec![],
-        )
-        .with_category("Workspace");
+        let desc = CommandDescriptor::new("open_file", "Open File", "Opens a file", vec![])
+            .with_category("Workspace");
 
         assert_eq!(desc.category, Some("Workspace".to_string()));
     }
 
     #[test]
     fn test_command_descriptor_with_keybinding() {
-        let desc = CommandDescriptor::new(
-            "save",
-            "Save",
-            "Saves the current file",
-            vec![],
-        )
-        .with_keybinding("Ctrl+S");
+        let desc = CommandDescriptor::new("save", "Save", "Saves the current file", vec![])
+            .with_keybinding("Ctrl+S");
 
         assert_eq!(desc.keybinding, Some("Ctrl+S".to_string()));
     }
 
     #[test]
     fn test_format_for_palette_with_category_and_keybinding() {
-        let desc = CommandDescriptor::new(
-            "open_file",
-            "Open File",
-            "Opens a file",
-            vec![],
-        )
-        .with_category("Workspace")
-        .with_keybinding("Ctrl+O");
+        let desc = CommandDescriptor::new("open_file", "Open File", "Opens a file", vec![])
+            .with_category("Workspace")
+            .with_keybinding("Ctrl+O");
 
         let formatted = desc.format_for_palette();
         assert!(formatted.contains("Open File"));
@@ -707,13 +656,8 @@ mod tests {
 
     #[test]
     fn test_format_for_palette_without_keybinding() {
-        let desc = CommandDescriptor::new(
-            "test_cmd",
-            "Test Command",
-            "Test",
-            vec![],
-        )
-        .with_category("System");
+        let desc = CommandDescriptor::new("test_cmd", "Test Command", "Test", vec![])
+            .with_category("System");
 
         let formatted = desc.format_for_palette();
         assert!(formatted.contains("Test Command"));
@@ -723,12 +667,7 @@ mod tests {
 
     #[test]
     fn test_format_for_palette_minimal() {
-        let desc = CommandDescriptor::new(
-            "simple",
-            "Simple",
-            "A simple command",
-            vec![],
-        );
+        let desc = CommandDescriptor::new("simple", "Simple", "A simple command", vec![]);
 
         let formatted = desc.format_for_palette();
         assert_eq!(formatted, "Simple");
@@ -740,38 +679,23 @@ mod tests {
 
         // Add commands with similar scores but different names
         palette.register_command(
-            CommandDescriptor::new(
-                "cmd_z",
-                "Z Command",
-                "Contains word system",
-                vec![],
-            ),
+            CommandDescriptor::new("cmd_z", "Z Command", "Contains word system", vec![]),
             Box::new(|_| Ok("".to_string())),
         );
 
         palette.register_command(
-            CommandDescriptor::new(
-                "cmd_a",
-                "A Command",
-                "Contains word system",
-                vec![],
-            ),
+            CommandDescriptor::new("cmd_a", "A Command", "Contains word system", vec![]),
             Box::new(|_| Ok("".to_string())),
         );
 
         palette.register_command(
-            CommandDescriptor::new(
-                "cmd_m",
-                "M Command",
-                "Contains word system",
-                vec![],
-            ),
+            CommandDescriptor::new("cmd_m", "M Command", "Contains word system", vec![]),
             Box::new(|_| Ok("".to_string())),
         );
 
         let matches = palette.filter_commands("system");
         assert_eq!(matches.len(), 3);
-        
+
         // With same scores, should be sorted alphabetically by name
         assert_eq!(matches[0].name, "A Command");
         assert_eq!(matches[1].name, "M Command");

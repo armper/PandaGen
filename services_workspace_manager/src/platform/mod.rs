@@ -26,10 +26,10 @@ use view_types::ViewFrame;
 pub trait WorkspacePlatform {
     /// Get the display interface for rendering workspace content
     fn display(&mut self) -> &mut dyn WorkspaceDisplay;
-    
+
     /// Get the input interface for handling keyboard events
     fn input(&mut self) -> &mut dyn WorkspaceInput;
-    
+
     /// Get the tick interface for time stepping
     fn tick(&mut self) -> &mut dyn WorkspaceTick;
 }
@@ -45,29 +45,29 @@ pub trait WorkspaceDisplay {
     /// The implementation should render the ViewFrame content to the appropriate
     /// region of the display.
     fn render_main_view(&mut self, frame: &ViewFrame);
-    
+
     /// Render the status view
     ///
     /// This is called when the focused component has a status line to display.
     /// Typically rendered in a fixed region (e.g., bottom of screen).
     fn render_status_view(&mut self, frame: &ViewFrame);
-    
+
     /// Render the workspace status strip
     ///
     /// Shows workspace-level status information (mode, file count, etc.)
     fn render_status_strip(&mut self, content: &str);
-    
+
     /// Render context breadcrumbs
     ///
     /// Shows the current navigation context (directory, file, etc.)
     fn render_breadcrumbs(&mut self, content: &str);
-    
+
     /// Clear the display
     ///
     /// Called when the workspace needs to clear the display before rendering
     /// new content.
     fn clear(&mut self);
-    
+
     /// Present the rendered content to the display
     ///
     /// Called after all render operations to flush buffered content to the
@@ -84,7 +84,7 @@ pub trait WorkspaceInput {
     /// Returns `Some(event)` if an input event is available, or `None` if no
     /// events are pending. This is a non-blocking operation.
     fn poll_event(&mut self) -> Option<KeyEvent>;
-    
+
     /// Check if input is available without consuming it
     ///
     /// Returns `true` if `poll_event()` would return `Some`.
@@ -100,7 +100,7 @@ pub trait WorkspaceTick {
     ///
     /// Returns the current tick number after incrementing.
     fn advance(&mut self) -> u64;
-    
+
     /// Get the current tick number
     fn current(&self) -> u64;
 }
@@ -113,10 +113,10 @@ pub trait WorkspaceTick {
 pub struct WorkspaceCaps {
     /// Storage capability for file operations (optional)
     pub storage: Option<crate::EditorIoContext>,
-    
+
     /// File system view capability (optional)
     pub fs_view: Option<()>, // Placeholder for now
-    
+
     /// Settings registry capability (optional)
     pub settings: Option<()>, // Placeholder for now
 }
@@ -130,7 +130,7 @@ impl WorkspaceCaps {
             settings: None,
         }
     }
-    
+
     /// Creates capabilities with storage
     pub fn with_storage(storage: crate::EditorIoContext) -> Self {
         Self {
@@ -144,7 +144,7 @@ impl WorkspaceCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_workspace_caps_empty() {
         let caps = WorkspaceCaps::empty();
@@ -152,7 +152,7 @@ mod tests {
         assert!(caps.fs_view.is_none());
         assert!(caps.settings.is_none());
     }
-    
+
     #[test]
     fn test_workspace_caps_with_storage() {
         use services_storage::JournaledStorage;

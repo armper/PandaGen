@@ -86,8 +86,14 @@ mod parity_tests {
         // Validate parity
         assert_eq!(adapter.mode(), core.mode());
         assert_eq!(adapter.cursor(), core.cursor());
-        assert_eq!(adapter.get_viewport_line(0).unwrap(), core.buffer().line(0).unwrap());
-        assert_eq!(adapter.get_viewport_line(1).unwrap(), core.buffer().line(1).unwrap());
+        assert_eq!(
+            adapter.get_viewport_line(0).unwrap(),
+            core.buffer().line(0).unwrap()
+        );
+        assert_eq!(
+            adapter.get_viewport_line(1).unwrap(),
+            core.buffer().line(1).unwrap()
+        );
     }
 
     /// Trace 3: Movement in normal mode
@@ -117,7 +123,10 @@ mod parity_tests {
         // Validate
         assert_eq!(adapter.mode(), core.mode());
         assert_eq!(adapter.cursor(), core.cursor());
-        assert_eq!(adapter.get_viewport_line(0).unwrap(), core.buffer().line(0).unwrap());
+        assert_eq!(
+            adapter.get_viewport_line(0).unwrap(),
+            core.buffer().line(0).unwrap()
+        );
     }
 
     /// Trace 4: Delete character with x
@@ -149,7 +158,10 @@ mod parity_tests {
         // Validate
         assert_eq!(adapter.mode(), core.mode());
         assert_eq!(adapter.cursor(), core.cursor());
-        assert_eq!(adapter.get_viewport_line(0).unwrap(), core.buffer().line(0).unwrap());
+        assert_eq!(
+            adapter.get_viewport_line(0).unwrap(),
+            core.buffer().line(0).unwrap()
+        );
     }
 
     /// Trace 5: Backspace in insert mode
@@ -177,7 +189,10 @@ mod parity_tests {
         // Validate
         assert_eq!(adapter.mode(), core.mode());
         assert_eq!(adapter.cursor(), core.cursor());
-        assert_eq!(adapter.get_viewport_line(0).unwrap(), core.buffer().line(0).unwrap());
+        assert_eq!(
+            adapter.get_viewport_line(0).unwrap(),
+            core.buffer().line(0).unwrap()
+        );
     }
 
     /// Test that status line reflects mode correctly
@@ -200,8 +215,11 @@ mod parity_tests {
         adapter.process_byte(b':');
         let status = adapter.status_line();
         // In command mode, status shows either COMMAND or the command buffer starting with ':'
-        assert!(status.contains("COMMAND") || status.starts_with(':'), 
-            "Expected COMMAND mode indicator or command buffer, got: {}", status);
+        assert!(
+            status.contains("COMMAND") || status.starts_with(':'),
+            "Expected COMMAND mode indicator or command buffer, got: {}",
+            status
+        );
     }
 
     /// Test that dirty flag is reflected in adapter
@@ -216,18 +234,21 @@ mod parity_tests {
         // Entering insert mode alone doesn't make buffer dirty
         core.apply_key(Key::from_ascii(b'i').unwrap());
         adapter.process_byte(b'i');
-        
+
         // Still clean (no content changes yet)
         assert_eq!(adapter.is_dirty(), core.dirty());
         assert!(!adapter.is_dirty());
-        
+
         // Actually insert content to make dirty
         core.apply_key(Key::from_ascii(b'x').unwrap());
         adapter.process_byte(b'x');
 
         // Now both should be dirty
         assert!(core.dirty(), "Core should be dirty after inserting text");
-        assert!(adapter.is_dirty(), "Adapter should be dirty after inserting text");
+        assert!(
+            adapter.is_dirty(),
+            "Adapter should be dirty after inserting text"
+        );
         assert_eq!(adapter.is_dirty(), core.dirty(), "Dirty flags should match");
     }
 }

@@ -1,9 +1,9 @@
 //! Editor rendering and output
 
-use alloc::string::String;
-use alloc::format;
-use alloc::vec::Vec;
 use crate::state::{EditorMode, EditorState};
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Editor view for rendering
 ///
@@ -102,7 +102,7 @@ impl EditorView {
             // Show mode-specific hints when no status message
             status.push_str(" | ");
             status.push_str(get_mode_hint(state.mode()));
-            
+
             // Add command suggestions in Command mode
             if state.mode() == EditorMode::Command {
                 let suggestions = get_command_suggestions(state.command_buffer());
@@ -140,15 +140,15 @@ fn get_mode_hint(mode: EditorMode) -> &'static str {
 fn get_command_suggestions(buffer: &str) -> Vec<&'static str> {
     use alloc::vec;
     const COMMANDS: &[&str] = &["e", "help", "q", "w", "wq"];
-    
+
     if buffer.is_empty() {
         // Return top 3 commands lexicographically
         return vec!["e", "help", "q"];
     }
-    
+
     let mut prefix_matches = Vec::new();
     let mut substring_matches = Vec::new();
-    
+
     for &cmd in COMMANDS {
         if cmd.starts_with(buffer) {
             prefix_matches.push(cmd);
@@ -156,15 +156,15 @@ fn get_command_suggestions(buffer: &str) -> Vec<&'static str> {
             substring_matches.push(cmd);
         }
     }
-    
+
     // Sort for deterministic ordering
     prefix_matches.sort();
     substring_matches.sort();
-    
+
     // Combine: prefix matches first, then substring matches
     let mut result = prefix_matches;
     result.extend(substring_matches);
-    
+
     // Return up to 3 suggestions
     result.truncate(3);
     result

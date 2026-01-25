@@ -23,8 +23,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use serde::{Deserialize, Serialize};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a view
@@ -238,9 +238,9 @@ impl ViewContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::string::ToString;
     use alloc::vec;
-    use alloc::format;
 
     #[test]
     fn test_view_id_creation() {

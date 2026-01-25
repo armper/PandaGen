@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 pub enum Key {
     // Printable ASCII
     Char(char),
-    
+
     // Navigation
     Left,
     Right,
     Up,
     Down,
-    
+
     // Special keys
     Enter,
     Backspace,
@@ -23,7 +23,7 @@ pub enum Key {
     Escape,
     Tab,
     Space,
-    
+
     // Letters (for commands in normal mode)
     H,
     J,
@@ -35,11 +35,11 @@ pub enum Key {
     D,
     U,
     N,
-    
+
     // Commands
     Colon,
     Slash,
-    
+
     // Modifiers (for Ctrl+R etc)
     CtrlR,
 }

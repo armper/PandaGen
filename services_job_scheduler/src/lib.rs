@@ -227,16 +227,16 @@ impl JobScheduler {
     /// Schedules a new job
     pub fn schedule_job(&mut self, job: JobDescriptor) -> JobId {
         let id = job.id;
-        
+
         // Insert based on priority (higher priority first)
         let insert_pos = self
             .pending_jobs
             .iter()
             .position(|j| j.priority < job.priority)
             .unwrap_or(self.pending_jobs.len());
-        
+
         self.pending_jobs.insert(insert_pos, job);
-        
+
         id
     }
 
@@ -262,9 +262,9 @@ impl JobScheduler {
             job.status = JobStatus::Running;
         }
         job.ticks_executed += 1;
-        
+
         let mut ctx = JobContext::new(self.tick_count, job.ticks_executed);
-        
+
         if let Some(ref mut executor) = job.executor {
             match executor(&mut ctx) {
                 JobResult::Completed => {
@@ -426,13 +426,13 @@ mod tests {
     #[test]
     fn test_schedule_single_job() {
         let mut scheduler = JobScheduler::new();
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         assert_eq!(scheduler.pending_count(), 1);
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Pending));
     }
@@ -440,15 +440,15 @@ mod tests {
     #[test]
     fn test_tick_completes_job() {
         let mut scheduler = JobScheduler::new();
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         scheduler.tick();
-        
+
         assert_eq!(scheduler.pending_count(), 0);
         assert_eq!(scheduler.completed_count(), 1);
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Completed));
@@ -459,7 +459,7 @@ mod tests {
     fn test_tick_yields_job() {
         let mut scheduler = JobScheduler::new();
         let mut tick_count = 0;
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
@@ -472,16 +472,16 @@ mod tests {
                 }
             }),
         ));
-        
+
         // First tick: should yield
         scheduler.tick();
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Yielded));
         assert!(scheduler.has_running_job());
-        
+
         // Second tick: should yield again
         scheduler.tick();
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Yielded));
-        
+
         // Third tick: should complete
         scheduler.tick();
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Completed));
@@ -491,15 +491,15 @@ mod tests {
     #[test]
     fn test_job_failure() {
         let mut scheduler = JobScheduler::new();
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
             Box::new(|_| JobResult::Failed("Test error".to_string())),
         ));
-        
+
         scheduler.tick();
-        
+
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Failed));
         assert_eq!(scheduler.completed_count(), 1);
     }
@@ -507,51 +507,60 @@ mod tests {
     #[test]
     fn test_scheduler_priority_ordering() {
         let mut scheduler = JobScheduler::new();
-        
+
         let low_job = scheduler.schedule_job(JobDescriptor::new(
             "low",
             JobPriority::Low,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         let high_job = scheduler.schedule_job(JobDescriptor::new(
             "high",
             JobPriority::High,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         let normal_job = scheduler.schedule_job(JobDescriptor::new(
             "normal",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         // High priority should run first
         scheduler.tick();
-        assert_eq!(scheduler.get_job_status(high_job), Some(JobStatus::Completed));
-        
+        assert_eq!(
+            scheduler.get_job_status(high_job),
+            Some(JobStatus::Completed)
+        );
+
         // Normal priority should run second
         scheduler.tick();
-        assert_eq!(scheduler.get_job_status(normal_job), Some(JobStatus::Completed));
-        
+        assert_eq!(
+            scheduler.get_job_status(normal_job),
+            Some(JobStatus::Completed)
+        );
+
         // Low priority should run last
         scheduler.tick();
-        assert_eq!(scheduler.get_job_status(low_job), Some(JobStatus::Completed));
+        assert_eq!(
+            scheduler.get_job_status(low_job),
+            Some(JobStatus::Completed)
+        );
     }
 
     #[test]
     fn test_cancel_pending_job() {
         let mut scheduler = JobScheduler::new();
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         let cancelled = scheduler.cancel_job(job_id);
         assert!(cancelled);
-        
+
         assert_eq!(scheduler.pending_count(), 0);
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Cancelled));
     }
@@ -559,15 +568,15 @@ mod tests {
     #[test]
     fn test_cannot_cancel_running_job() {
         let mut scheduler = JobScheduler::new();
-        
+
         let job_id = scheduler.schedule_job(JobDescriptor::new(
             "test_job",
             JobPriority::Normal,
             Box::new(|_| JobResult::Yielded),
         ));
-        
+
         scheduler.tick();
-        
+
         // Job is now running (yielded)
         let cancelled = scheduler.cancel_job(job_id);
         assert!(!cancelled);
@@ -576,7 +585,7 @@ mod tests {
     #[test]
     fn test_job_context() {
         let mut scheduler = JobScheduler::new();
-        
+
         // Just verify that job_ticks increment and eventually complete
         let mut ticks = 0;
         scheduler.schedule_job(JobDescriptor::new(
@@ -588,7 +597,7 @@ mod tests {
                 // Verify job_ticks is reasonable
                 assert_eq!(ctx.job_ticks, ticks + 1);
                 ticks += 1;
-                
+
                 if ctx.job_ticks < 3 {
                     JobResult::Yielded
                 } else {
@@ -596,31 +605,31 @@ mod tests {
                 }
             }),
         ));
-        
+
         // Run the job to completion
         scheduler.tick();
         scheduler.tick();
         scheduler.tick();
-        
+
         assert_eq!(scheduler.completed_count(), 1);
     }
 
     #[test]
     fn test_list_pending_jobs() {
         let mut scheduler = JobScheduler::new();
-        
+
         scheduler.schedule_job(JobDescriptor::new(
             "job1",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         scheduler.schedule_job(JobDescriptor::new(
             "job2",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         let pending = scheduler.list_pending_jobs();
         assert_eq!(pending.len(), 2);
     }
@@ -628,22 +637,22 @@ mod tests {
     #[test]
     fn test_list_completed_jobs() {
         let mut scheduler = JobScheduler::new();
-        
+
         scheduler.schedule_job(JobDescriptor::new(
             "job1",
             JobPriority::Normal,
             Box::new(|_| JobResult::Completed),
         ));
-        
+
         scheduler.schedule_job(JobDescriptor::new(
             "job2",
             JobPriority::Normal,
             Box::new(|_| JobResult::Failed("error".to_string())),
         ));
-        
+
         scheduler.tick();
         scheduler.tick();
-        
+
         let completed = scheduler.list_completed_jobs();
         assert_eq!(completed.len(), 2);
         assert_eq!(completed[0].2, JobStatus::Completed);

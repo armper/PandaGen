@@ -175,10 +175,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         println!("QEMU smoke test: PASS (scancode observed)");
         Ok(())
     } else {
-        Err(io::Error::other(
-            "QEMU smoke test: FAIL (no scancode log found)",
-        )
-        .into())
+        Err(io::Error::other("QEMU smoke test: FAIL (no scancode log found)").into())
     }
 }
 
@@ -538,9 +535,6 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::other(
-            format!("command failed with status {status}"),
-        )
-        .into())
+        Err(io::Error::other(format!("command failed with status {status}")).into())
     }
 }

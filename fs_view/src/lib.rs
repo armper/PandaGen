@@ -35,4 +35,3 @@ pub trait DirectoryResolver {
     /// Returns None if the directory cannot be accessed or doesn't exist.
     fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView>;
 }
-

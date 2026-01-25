@@ -21,9 +21,7 @@ pub fn build_command_registry() -> CommandPalette {
         .with_keybinding("Ctrl+O")
         .requires_args()
         .with_prompt_pattern("open editor "),
-        Box::new(|_args| {
-            Ok("Editor command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Editor command - handled by workspace".to_string())),
     );
 
     // List Components
@@ -36,9 +34,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Workspace")
         .with_keybinding("Ctrl+L"),
-        Box::new(|_args| {
-            Ok("List command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("List command - handled by workspace".to_string())),
     );
 
     // Next Component
@@ -51,9 +47,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Workspace")
         .with_keybinding("Alt+Tab"),
-        Box::new(|_args| {
-            Ok("Next command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Next command - handled by workspace".to_string())),
     );
 
     // Previous Component
@@ -62,13 +56,15 @@ pub fn build_command_registry() -> CommandPalette {
             "focus_prev",
             "Previous Component",
             "Focus the previous component",
-            vec!["prev".to_string(), "previous".to_string(), "focus".to_string()],
+            vec![
+                "prev".to_string(),
+                "previous".to_string(),
+                "focus".to_string(),
+            ],
         )
         .with_category("Workspace")
         .with_keybinding("Alt+Shift+Tab"),
-        Box::new(|_args| {
-            Ok("Previous command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Previous command - handled by workspace".to_string())),
     );
 
     // Close Component - parametric
@@ -82,9 +78,7 @@ pub fn build_command_registry() -> CommandPalette {
         .with_category("Workspace")
         .requires_args()
         .with_prompt_pattern("close "),
-        Box::new(|_args| {
-            Ok("Close command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Close command - handled by workspace".to_string())),
     );
 
     // Recent Files
@@ -93,12 +87,14 @@ pub fn build_command_registry() -> CommandPalette {
             "recent",
             "Recent Files",
             "Show recently opened files",
-            vec!["recent".to_string(), "history".to_string(), "files".to_string()],
+            vec![
+                "recent".to_string(),
+                "history".to_string(),
+                "files".to_string(),
+            ],
         )
         .with_category("Workspace"),
-        Box::new(|_args| {
-            Ok("Recent command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Recent command - handled by workspace".to_string())),
     );
 
     // Help - Overview
@@ -111,9 +107,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Workspace")
         .with_keybinding("?"),
-        Box::new(|_args| {
-            Ok("Help command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Help command - handled by workspace".to_string())),
     );
 
     // Help - Workspace
@@ -126,9 +120,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Workspace")
         .with_prompt_pattern("help workspace"),
-        Box::new(|_args| {
-            Ok("Help workspace - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Help workspace - handled by workspace".to_string())),
     );
 
     // Help - Editor
@@ -141,9 +133,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Editor")
         .with_prompt_pattern("help editor"),
-        Box::new(|_args| {
-            Ok("Help editor - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Help editor - handled by workspace".to_string())),
     );
 
     // Help - Keys
@@ -152,13 +142,16 @@ pub fn build_command_registry() -> CommandPalette {
             "help_keys",
             "Help: Keyboard Shortcuts",
             "Show keyboard shortcuts reference",
-            vec!["help".to_string(), "keys".to_string(), "keyboard".to_string(), "shortcuts".to_string()],
+            vec![
+                "help".to_string(),
+                "keys".to_string(),
+                "keyboard".to_string(),
+                "shortcuts".to_string(),
+            ],
         )
         .with_category("Workspace")
         .with_prompt_pattern("help keys"),
-        Box::new(|_args| {
-            Ok("Help keys - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Help keys - handled by workspace".to_string())),
     );
 
     // Help - System
@@ -171,9 +164,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("System")
         .with_prompt_pattern("help system"),
-        Box::new(|_args| {
-            Ok("Help system - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Help system - handled by workspace".to_string())),
     );
 
     // Save Current File
@@ -186,9 +177,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("Editor")
         .with_keybinding("Ctrl+S"),
-        Box::new(|_args| {
-            Ok("Save command - handled by editor".to_string())
-        }),
+        Box::new(|_args| Ok("Save command - handled by editor".to_string())),
     );
 
     // Quit Workspace
@@ -201,9 +190,7 @@ pub fn build_command_registry() -> CommandPalette {
         )
         .with_category("System")
         .with_keybinding("Ctrl+Q"),
-        Box::new(|_args| {
-            Ok("Quit command - handled by workspace".to_string())
-        }),
+        Box::new(|_args| Ok("Quit command - handled by workspace".to_string())),
     );
 
     palette
@@ -217,7 +204,7 @@ mod tests {
     fn test_registry_has_commands() {
         let registry = build_command_registry();
         let commands = registry.list_commands();
-        
+
         assert!(!commands.is_empty());
     }
 
@@ -225,7 +212,7 @@ mod tests {
     fn test_registry_has_open_editor() {
         let registry = build_command_registry();
         let commands = registry.filter_commands("editor");
-        
+
         assert!(commands.iter().any(|c| c.id.as_str() == "open_editor"));
     }
 
@@ -233,12 +220,15 @@ mod tests {
     fn test_registry_parametric_commands() {
         let registry = build_command_registry();
         let commands = registry.list_commands();
-        
+
         // Check open_editor is parametric
-        let open_editor = commands.iter().find(|c| c.id.as_str() == "open_editor").unwrap();
+        let open_editor = commands
+            .iter()
+            .find(|c| c.id.as_str() == "open_editor")
+            .unwrap();
         assert!(open_editor.requires_args);
         assert_eq!(open_editor.prompt_pattern, Some("open editor ".to_string()));
-        
+
         // Check close is parametric
         let close = commands.iter().find(|c| c.id.as_str() == "close").unwrap();
         assert!(close.requires_args);
@@ -249,21 +239,30 @@ mod tests {
     fn test_registry_has_categories() {
         let registry = build_command_registry();
         let commands = registry.list_commands();
-        
-        assert!(commands.iter().any(|c| c.category == Some("Workspace".to_string())));
-        assert!(commands.iter().any(|c| c.category == Some("Editor".to_string())));
-        assert!(commands.iter().any(|c| c.category == Some("System".to_string())));
+
+        assert!(commands
+            .iter()
+            .any(|c| c.category == Some("Workspace".to_string())));
+        assert!(commands
+            .iter()
+            .any(|c| c.category == Some("Editor".to_string())));
+        assert!(commands
+            .iter()
+            .any(|c| c.category == Some("System".to_string())));
     }
 
     #[test]
     fn test_registry_has_keybindings() {
         let registry = build_command_registry();
         let commands = registry.list_commands();
-        
+
         // Check some key commands have keybindings
-        let open = commands.iter().find(|c| c.id.as_str() == "open_editor").unwrap();
+        let open = commands
+            .iter()
+            .find(|c| c.id.as_str() == "open_editor")
+            .unwrap();
         assert_eq!(open.keybinding, Some("Ctrl+O".to_string()));
-        
+
         let save = commands.iter().find(|c| c.id.as_str() == "save").unwrap();
         assert_eq!(save.keybinding, Some("Ctrl+S".to_string()));
     }
@@ -272,7 +271,7 @@ mod tests {
     fn test_registry_filter_by_category() {
         let registry = build_command_registry();
         let commands = registry.filter_commands("workspace");
-        
+
         // Should return workspace-related commands
         assert!(commands.len() > 0);
     }
@@ -281,7 +280,7 @@ mod tests {
     fn test_registry_help_commands() {
         let registry = build_command_registry();
         let commands = registry.filter_commands("help");
-        
+
         // Should have multiple help commands
         assert!(commands.len() >= 5);
     }

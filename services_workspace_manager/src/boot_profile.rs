@@ -11,11 +11,12 @@ use hashbrown::HashMap;
 use std::collections::HashMap;
 
 /// Boot profile types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BootProfile {
     /// Boot into workspace manager (default)
     ///
     /// User gets command prompt, can launch services/editors
+    #[default]
     Workspace,
 
     /// Boot straight into vi editor
@@ -51,19 +52,13 @@ impl BootProfile {
     }
 
     /// Parses profile from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "workspace" => Some(BootProfile::Workspace),
             "editor" => Some(BootProfile::Editor),
             "kiosk" => Some(BootProfile::Kiosk),
             _ => None,
         }
-    }
-}
-
-impl Default for BootProfile {
-    fn default() -> Self {
-        BootProfile::Workspace
     }
 }
 
@@ -246,16 +241,16 @@ mod tests {
     #[test]
     fn test_boot_profile_from_str() {
         assert_eq!(
-            BootProfile::from_str("workspace"),
+            BootProfile::parse("workspace"),
             Some(BootProfile::Workspace)
         );
-        assert_eq!(BootProfile::from_str("editor"), Some(BootProfile::Editor));
-        assert_eq!(BootProfile::from_str("kiosk"), Some(BootProfile::Kiosk));
+        assert_eq!(BootProfile::parse("editor"), Some(BootProfile::Editor));
+        assert_eq!(BootProfile::parse("kiosk"), Some(BootProfile::Kiosk));
         assert_eq!(
-            BootProfile::from_str("WORKSPACE"),
+            BootProfile::parse("WORKSPACE"),
             Some(BootProfile::Workspace)
         );
-        assert_eq!(BootProfile::from_str("invalid"), None);
+        assert_eq!(BootProfile::parse("invalid"), None);
     }
 
     #[test]

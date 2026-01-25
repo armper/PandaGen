@@ -50,6 +50,12 @@ pub struct RemoteUiHost {
     sinks: Vec<Box<dyn SnapshotSink>>,
 }
 
+impl Default for RemoteUiHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RemoteUiHost {
     pub fn new() -> Self {
         Self {
