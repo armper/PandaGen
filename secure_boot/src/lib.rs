@@ -30,6 +30,12 @@ pub struct BootPolicy {
     pub required: BTreeMap<String, String>,
 }
 
+impl Default for BootPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BootPolicy {
     pub fn new() -> Self {
         Self {
@@ -64,6 +70,12 @@ pub enum BootError {
 
 pub struct BootVerifier {
     log: MeasurementLog,
+}
+
+impl Default for BootVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BootVerifier {

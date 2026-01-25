@@ -121,7 +121,7 @@ impl ServiceHandle {
 
     /// Gets a human-readable status summary
     pub fn status_summary(&self) -> String {
-        let mut summary = format!("{}", self.state.as_str());
+        let mut summary = self.state.as_str().to_string();
 
         if let Some(ref reason) = self.crash_reason {
             summary.push_str(&format!(" ({})", reason.description()));

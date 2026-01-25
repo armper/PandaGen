@@ -12,6 +12,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkInterfaceId(Uuid);
 
+impl Default for NetworkInterfaceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkInterfaceId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())

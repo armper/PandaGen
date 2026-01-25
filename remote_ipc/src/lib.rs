@@ -94,7 +94,7 @@ impl<T: RemoteTransport> RemoteIpcClient<T> {
             return Err(RemoteIpcError::Codec("request_id mismatch".to_string()));
         }
 
-        response.result.map_err(|err| RemoteIpcError::Codec(err))
+        response.result.map_err(RemoteIpcError::Codec)
     }
 }
 

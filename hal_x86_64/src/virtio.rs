@@ -84,6 +84,12 @@ impl VirtqDesc {
     }
 }
 
+impl Default for VirtqDesc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Virtqueue available ring
 #[repr(C)]
 pub struct VirtqAvail {
@@ -101,6 +107,12 @@ impl VirtqAvail {
             ring: [0; VIRTQ_MAX_SIZE],
             used_event: 0,
         }
+    }
+}
+
+impl Default for VirtqAvail {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -129,6 +141,12 @@ impl VirtqUsed {
             ring: [VirtqUsedElem { id: 0, len: 0 }; VIRTQ_MAX_SIZE],
             avail_event: 0,
         }
+    }
+}
+
+impl Default for VirtqUsed {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

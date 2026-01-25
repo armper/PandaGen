@@ -263,7 +263,7 @@ impl EditorIo for StorageEditorIo {
 
         // Link to filesystem (simplified - assumes path is just a name in current dir)
         // In a full implementation, this would parse the path and create directories as needed
-        let name = path.split('/').last().unwrap_or(path);
+        let name = path.split('/').next_back().unwrap_or(path);
         if let Err(err) = fs.link(root, name, object_id, services_storage::ObjectKind::Blob) {
             return Err(IoError::StorageError(format!(
                 "Failed to link file: {}",

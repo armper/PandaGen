@@ -101,7 +101,7 @@ impl EditorView {
         } else {
             // Show mode-specific hints when no status message
             status.push_str(" | ");
-            status.push_str(&get_mode_hint(state.mode()));
+            status.push_str(get_mode_hint(state.mode()));
             
             // Add command suggestions in Command mode
             if state.mode() == EditorMode::Command {

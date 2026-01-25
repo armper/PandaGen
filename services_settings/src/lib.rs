@@ -210,7 +210,7 @@ impl SettingsRegistry {
         
         self.user_overrides
             .entry(user_id)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(key, value);
     }
 
@@ -262,7 +262,7 @@ impl SettingsRegistry {
         self.user_overrides
             .get(user_id)
             .map(|settings| settings.keys().cloned().collect())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 
     /// Returns all settings with a given prefix for a user
@@ -318,7 +318,7 @@ impl SettingsRegistry {
         let user_id = user_id.into();
         self.user_overrides
             .entry(user_id)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .extend(overrides);
     }
 }

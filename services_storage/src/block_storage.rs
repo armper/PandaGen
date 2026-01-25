@@ -1,14 +1,14 @@
-///! Block-backed storage implementation with crash-safe commits
-///!
-///! Provides persistent storage by writing to block devices.
-///! Objects are stored as blocks on disk, with a crash-safe commit protocol.
-///!
-///! ## Crash Safety Model
-///! This implementation uses an append-only commit log with checksums:
-///! - Each transaction writes data blocks first
-///! - Then writes a commit record with checksum (atomic point of truth)
-///! - On recovery, scans for valid commit records
-///! - Incomplete transactions (no commit record or bad checksum) are discarded
+//! Block-backed storage implementation with crash-safe commits
+//!
+//! Provides persistent storage by writing to block devices.
+//! Objects are stored as blocks on disk, with a crash-safe commit protocol.
+//!
+//! ## Crash Safety Model
+//! This implementation uses an append-only commit log with checksums:
+//! - Each transaction writes data blocks first
+//! - Then writes a commit record with checksum (atomic point of truth)
+//! - On recovery, scans for valid commit records
+//! - Incomplete transactions (no commit record or bad checksum) are discarded
 use crate::{
     ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId,
 };
@@ -175,7 +175,7 @@ impl<D: BlockDevice> BlockStorage<D> {
         // - Blocks 1-N: commit log (5% of disk or 1 block min, 256 blocks max)
         // - Blocks N+1-M: allocation bitmap (10% of remaining or 1 block min)
         // - Blocks M+1...: data area
-        let commit_log_blocks = ((total_blocks * 5) / 100).max(1).min(256);
+        let commit_log_blocks = ((total_blocks * 5) / 100).clamp(1, 256);
         let bitmap_start = 1 + commit_log_blocks;
 
         // Ensure we don't overflow
@@ -293,8 +293,7 @@ impl<D: BlockDevice> BlockStorage<D> {
 
                                     // Mark blocks as allocated
                                     let blocks_needed =
-                                        ((alloc.size_bytes as usize + BLOCK_SIZE - 1) / BLOCK_SIZE)
-                                            as u64;
+                                        (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
                                     for j in 0..blocks_needed {
                                         self.free_blocks.remove(&(alloc.block_idx + j));
                                     }
@@ -350,7 +349,7 @@ impl<D: BlockDevice> BlockStorage<D> {
         }
 
         // Find commit log slot (round-robin)
-        let log_slot = (sequence % self.superblock.commit_log_blocks) as u64;
+        let log_slot = sequence % self.superblock.commit_log_blocks;
         let commit_block_idx = self.superblock.commit_log_start + log_slot;
 
         // Write commit record
@@ -381,7 +380,7 @@ impl<D: BlockDevice> BlockStorage<D> {
 
     /// Allocate blocks for data
     fn allocate_blocks(&mut self, size_bytes: u64) -> Result<Vec<u64>, BlockStorageError> {
-        let blocks_needed = ((size_bytes as usize + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64;
+        let blocks_needed = (size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
         if (self.free_blocks.len() as u64) < blocks_needed {
             return Err(BlockStorageError::NoFreeSpace);
         }
@@ -454,7 +453,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             .ok_or(BlockStorageError::ObjectNotFound)?;
 
         // Calculate blocks needed
-        let blocks_needed = ((entry.size_bytes as usize + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64;
+        let blocks_needed = (entry.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
         let blocks: Vec<u64> = (entry.block_idx..entry.block_idx + blocks_needed).collect();
 
         self.read_data(&blocks, entry.size_bytes)

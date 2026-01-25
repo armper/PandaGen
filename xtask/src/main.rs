@@ -30,7 +30,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask qemu-smoke");
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
-    Err(io::Error::new(ErrorKind::Other, "unknown xtask command").into())
+    Err(io::Error::other("unknown xtask command").into())
 }
 
 fn repo_root() -> PathBuf {
@@ -175,8 +175,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         println!("QEMU smoke test: PASS (scancode observed)");
         Ok(())
     } else {
-        Err(io::Error::new(
-            ErrorKind::Other,
+        Err(io::Error::other(
             "QEMU smoke test: FAIL (no scancode log found)",
         )
         .into())
@@ -539,8 +538,7 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::new(
-            ErrorKind::Other,
+        Err(io::Error::other(
             format!("command failed with status {status}"),
         )
         .into())
