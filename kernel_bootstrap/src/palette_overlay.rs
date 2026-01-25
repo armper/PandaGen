@@ -6,7 +6,7 @@
 extern crate alloc;
 
 #[cfg(not(test))]
-use alloc::string::{String, ToString};
+use alloc::string::String;
 #[cfg(not(test))]
 use alloc::vec::Vec;
 

@@ -380,6 +380,8 @@ impl fmt::Display for Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     #[test]
     fn test_input_event_key() {
@@ -626,7 +628,7 @@ mod tests {
 
         // Single modifiers
         for mod1 in &all_mods {
-            assert!(mod1.contains(*mod1));
+            assert!((*mod1).contains(*mod1));
             assert!(!mod1.is_empty());
         }
 

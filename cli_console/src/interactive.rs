@@ -278,7 +278,7 @@ impl InteractiveConsole {
         }
 
         let text_before_cursor = &self.text_buffer[0..self.cursor_pos];
-        let mut chars: Vec<char> = text_before_cursor.chars().collect();
+        let chars: Vec<char> = text_before_cursor.chars().collect();
         let mut pos = chars.len();
 
         // Skip trailing whitespace

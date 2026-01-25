@@ -377,7 +377,8 @@ impl BareMetalFramebuffer {
         let fg_bytes = info.format.to_bytes(fg.0, fg.1, fg.2);
         let bg_bytes = info.format.to_bytes(bg.0, bg.1, bg.2);
 
-        let glyph = self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes);
+        // Copy glyph data to avoid borrowing issues
+        let glyph = *self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes);
 
         let x_offset = col * FONT_WIDTH;
         let y_offset = row * FONT_HEIGHT;
@@ -432,6 +433,12 @@ impl BareMetalFramebuffer {
         let x_start = col * FONT_WIDTH;
         let y_start = row * FONT_HEIGHT;
         
+        // Pre-fetch all glyphs to avoid borrowing issues
+        let mut glyphs: Vec<[[u8; 32]; FONT_HEIGHT]> = Vec::with_capacity(max_chars);
+        for &ch in text_bytes[..max_chars].iter() {
+            glyphs.push(*self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes));
+        }
+        
         // For each scanline of the font (16 lines)
         for scanline_idx in 0..FONT_HEIGHT {
             let y = y_start + scanline_idx;
@@ -442,8 +449,7 @@ impl BareMetalFramebuffer {
             let row_base = y * stride + x_start * bpp;
             
             // Write each character's scanline
-            for (char_idx, &ch) in text_bytes[..max_chars].iter().enumerate() {
-                let glyph = self.glyph_cache_mut().glyph_for(ch, fg_bytes, bg_bytes);
+            for (char_idx, glyph) in glyphs.iter().enumerate() {
                 let row_data = &glyph[scanline_idx];
 
                 // Copy 8 pixels for this character's scanline

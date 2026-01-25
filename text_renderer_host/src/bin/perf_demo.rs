@@ -5,7 +5,7 @@
 //! - Characters written per frame (before/after)
 //! - Lines redrawn per frame (before/after)
 
-use text_renderer_host::{TextRenderer, RenderStats};
+use text_renderer_host::TextRenderer;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 fn create_text_frame(lines: Vec<String>, cursor: Option<CursorPosition>, revision: u64) -> ViewFrame {

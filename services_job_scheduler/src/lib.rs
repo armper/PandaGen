@@ -50,8 +50,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -400,7 +399,7 @@ impl Default for JobScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::string::ToString;
 
     #[test]
     fn test_job_id_creation() {

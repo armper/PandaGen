@@ -44,8 +44,7 @@
 extern crate alloc;
 
 use alloc::collections::VecDeque;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -379,7 +378,8 @@ impl Default for NotificationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::string::ToString;
+    use alloc::format;
 
     #[test]
     fn test_notification_id_creation() {

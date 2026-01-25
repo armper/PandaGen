@@ -147,6 +147,9 @@ pub trait KeyboardDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use alloc::boxed::Box;
 
     #[test]
     fn test_hal_key_event_creation() {
