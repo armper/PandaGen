@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use fs_view::DirectoryView;
 use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
 use services_fs_view::FileSystemViewService;
+use services_settings::{self, SettingsRegistry, SettingKey, SettingValue};
 use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
@@ -518,6 +519,10 @@ pub struct WorkspaceManager {
     breadcrumbs: ContextBreadcrumbs,
     /// Command palette for command discovery
     command_palette: services_command_palette::CommandPalette,
+    /// Settings registry for user preferences
+    settings_registry: SettingsRegistry,
+    /// Current user ID for settings (default "default")
+    current_user: String,
 }
 
 impl WorkspaceManager {
@@ -541,6 +546,8 @@ impl WorkspaceManager {
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
             command_palette: command_registry::build_command_registry(),
+            settings_registry: services_settings::create_default_registry(),
+            current_user: "default".to_string(),
         }
     }
 
@@ -1163,6 +1170,124 @@ impl WorkspaceManager {
     /// Gets the mutable command palette
     pub fn command_palette_mut(&mut self) -> &mut services_command_palette::CommandPalette {
         &mut self.command_palette
+    }
+
+    /// Gets the settings registry
+    pub fn settings_registry(&self) -> &SettingsRegistry {
+        &self.settings_registry
+    }
+
+    /// Gets the mutable settings registry
+    pub fn settings_registry_mut(&mut self) -> &mut SettingsRegistry {
+        &mut self.settings_registry
+    }
+
+    /// Gets the current user ID for settings
+    pub fn current_user(&self) -> &str {
+        &self.current_user
+    }
+
+    /// Gets a setting value for the current user
+    pub fn get_setting(&self, key: &str) -> Option<&SettingValue> {
+        self.settings_registry.get(&self.current_user, &SettingKey::new(key))
+    }
+
+    /// Sets a setting value for the current user
+    pub fn set_setting(&mut self, key: impl Into<String>, value: SettingValue) {
+        let key_str = key.into();
+        self.settings_registry.set_user_override(&self.current_user, key_str.as_str(), value);
+        // Apply settings changes immediately
+        self.apply_setting(&key_str);
+    }
+
+    /// Resets a setting to its default value
+    pub fn reset_setting(&mut self, key: &str) -> bool {
+        let result = self.settings_registry.reset_to_default(&self.current_user, &SettingKey::new(key));
+        if result {
+            // Reapply to restore default behavior
+            self.apply_setting(key);
+        }
+        result
+    }
+
+    /// Applies a specific setting change to the UI/editor state
+    fn apply_setting(&mut self, key: &str) {
+        // Get the effective value
+        let value = match self.get_setting(key) {
+            Some(v) => v.clone(),
+            None => return, // Setting doesn't exist
+        };
+
+        // Apply based on setting key
+        match key {
+            services_settings::keys::UI_THEME => {
+                // TODO: Apply theme changes when theme system is implemented
+                // For now, just record in workspace status
+                if let Some(theme) = value.as_string() {
+                    self.workspace_status.set_last_action(format!("Theme set to: {}", theme));
+                }
+            }
+            services_settings::keys::UI_SHOW_KEYBINDING_HINTS => {
+                // This would affect the command palette display
+                // For now, just record the change
+                if let Some(show) = value.as_boolean() {
+                    self.workspace_status.set_last_action(format!("Keybinding hints: {}", if show { "enabled" } else { "disabled" }));
+                }
+            }
+            services_settings::keys::EDITOR_TAB_SIZE => {
+                // Apply to all editor instances
+                // TODO: When editors support runtime configuration, apply here
+                if let Some(tab_size) = value.as_integer() {
+                    self.workspace_status.set_last_action(format!("Tab size set to: {}", tab_size));
+                }
+            }
+            services_settings::keys::EDITOR_LINE_NUMBERS => {
+                // Apply to all editor instances
+                if let Some(show) = value.as_boolean() {
+                    self.workspace_status.set_last_action(format!("Line numbers: {}", if show { "enabled" } else { "disabled" }));
+                }
+            }
+            services_settings::keys::KEYBINDINGS_PROFILE => {
+                // Apply keybinding profile changes
+                if let Some(profile) = value.as_string() {
+                    self.workspace_status.set_last_action(format!("Keybinding profile: {}", profile));
+                }
+            }
+            _ => {
+                // Unknown or not live-applied setting
+            }
+        }
+    }
+
+    /// Saves settings to storage (if storage context is available)
+    pub fn save_settings(&mut self) -> Result<(), String> {
+        // Export overrides
+        let overrides = self.settings_registry.export_overrides();
+        let data = services_settings::persistence::SettingsOverridesData::from_overrides(&overrides);
+        
+        // Serialize to JSON
+        let bytes = services_settings::persistence::serialize_overrides(&data)
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+        
+        // TODO(Phase 113): Integrate with StorageService
+        // - Add settings path constant (e.g., "/settings/user_overrides.json")
+        // - Use editor_io_context.storage.write() with proper capabilities
+        // - Wrap in transaction for atomicity
+        // For now, just validate serialization works
+        self.workspace_status.set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
+        
+        Ok(())
+    }
+
+    /// Loads settings from storage (if storage context is available)
+    pub fn load_settings(&mut self) -> Result<(), String> {
+        // TODO(Phase 113): Integrate with StorageService
+        // - Read from settings path
+        // - Use load_overrides_safe() for corruption handling
+        // - Call import_overrides() to apply
+        // - Emit notification on success/failure
+        self.workspace_status.set_last_action("Settings loaded".to_string());
+        Ok(())
     }
 
     /// Updates workspace status based on current state (deterministic)

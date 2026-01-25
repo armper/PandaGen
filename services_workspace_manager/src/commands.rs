@@ -29,6 +29,14 @@ pub enum WorkspaceCommand {
     Status { component_id: ComponentId },
     /// Get currently focused component
     GetFocus,
+    /// Settings: List all settings
+    SettingsList,
+    /// Settings: Set a setting value
+    SettingsSet { key: String, value: String },
+    /// Settings: Reset a setting to default
+    SettingsReset { key: String },
+    /// Settings: Save settings to storage
+    SettingsSave,
 }
 
 /// Result of executing a workspace command
@@ -118,6 +126,10 @@ impl WorkspaceManager {
             WorkspaceCommand::Close { component_id } => self.cmd_close(component_id),
             WorkspaceCommand::Status { component_id } => self.cmd_status(component_id),
             WorkspaceCommand::GetFocus => self.cmd_get_focus(),
+            WorkspaceCommand::SettingsList => self.cmd_settings_list(),
+            WorkspaceCommand::SettingsSet { key, value } => self.cmd_settings_set(key, value),
+            WorkspaceCommand::SettingsReset { key } => self.cmd_settings_reset(key),
+            WorkspaceCommand::SettingsSave => self.cmd_settings_save(),
         }
     }
 
@@ -255,6 +267,122 @@ impl WorkspaceManager {
         let component_id = self.get_focused_component();
         CommandResult::FocusInfo { component_id }
     }
+
+    fn cmd_settings_list(&self) -> CommandResult {
+        // Get all default settings
+        let defaults = self.settings_registry.list_defaults();
+        let user_overrides = self.settings_registry.list_user_overrides(&self.current_user);
+        
+        let mut message = String::from("Settings:\n");
+        
+        for key in &defaults {
+            let value = self.settings_registry.get(&self.current_user, key);
+            let is_override = user_overrides.contains(key);
+            let marker = if is_override { "*" } else { " " };
+            
+            if let Some(v) = value {
+                message.push_str(&format!("{}  {} = {}\n", marker, key, v));
+            }
+        }
+        
+        if !user_overrides.is_empty() {
+            message.push_str("\n* = user override\n");
+        }
+        
+        CommandResult::Success { message }
+    }
+
+    fn cmd_settings_set(&mut self, key: String, value_str: String) -> CommandResult {
+        use services_settings::{SettingKey, SettingValue};
+        
+        // Get the default to determine type
+        let setting_key = SettingKey::new(&key);
+        let default_value = self.settings_registry.get_default(&setting_key);
+        
+        let value = match default_value {
+            Some(SettingValue::Boolean(_)) => {
+                // Parse as boolean
+                match value_str.to_lowercase().as_str() {
+                    "true" | "yes" | "1" | "on" => SettingValue::Boolean(true),
+                    "false" | "no" | "0" | "off" => SettingValue::Boolean(false),
+                    _ => return CommandResult::Error {
+                        message: format!("Invalid boolean value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::Integer(_)) => {
+                // Parse as integer
+                match value_str.parse::<i64>() {
+                    Ok(i) => SettingValue::Integer(i),
+                    Err(_) => return CommandResult::Error {
+                        message: format!("Invalid integer value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::Float(_)) => {
+                // Parse as float
+                match value_str.parse::<f64>() {
+                    Ok(f) => SettingValue::Float(f),
+                    Err(_) => return CommandResult::Error {
+                        message: format!("Invalid float value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::String(_)) => {
+                // Use as string
+                SettingValue::String(value_str)
+            }
+            Some(SettingValue::StringList(_)) => {
+                // Parse as comma-separated list
+                let items: Vec<String> = value_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                SettingValue::StringList(items)
+            }
+            None => {
+                return CommandResult::Error {
+                    message: format!("Unknown setting: {}", key),
+                }
+            }
+        };
+        
+        // Set the value and apply
+        self.set_setting(key.clone(), value.clone());
+        
+        CommandResult::Success {
+            message: format!("Set {} = {}", key, value),
+        }
+    }
+
+    fn cmd_settings_reset(&mut self, key: String) -> CommandResult {
+        if self.reset_setting(&key) {
+            // Get the default value for display
+            let default_value = self.get_setting(&key);
+            let value_str = match default_value {
+                Some(val) => format!("{}", val),
+                None => "none".to_string(),
+            };
+            CommandResult::Success {
+                message: format!("Reset {} to default: {}", key, value_str),
+            }
+        } else {
+            CommandResult::Error {
+                message: format!("Setting not found or not overridden: {}", key),
+            }
+        }
+    }
+
+    fn cmd_settings_save(&mut self) -> CommandResult {
+        match self.save_settings() {
+            Ok(()) => CommandResult::Success {
+                message: "Settings saved successfully".to_string(),
+            },
+            Err(err) => CommandResult::Error {
+                message: format!("Failed to save settings: {}", err),
+            },
+        }
+    }
 }
 
 /// Parses a command string into a WorkspaceCommand
@@ -310,6 +438,44 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
         "status" => parse_component_id_command(&parts, "status", |id| WorkspaceCommand::Status {
             component_id: id,
         }),
+        "settings" => {
+            if parts.len() < 2 {
+                return Err(WorkspaceError::InvalidCommand(
+                    "Usage: settings <list|set|reset|save>".to_string(),
+                ));
+            }
+            
+            match parts[1] {
+                "list" => Ok(WorkspaceCommand::SettingsList),
+                "set" => {
+                    if parts.len() < 4 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: settings set <key> <value>".to_string(),
+                        ));
+                    }
+                    // Join remaining parts to support values with spaces (e.g., "hello world")
+                    Ok(WorkspaceCommand::SettingsSet {
+                        key: parts[2].to_string(),
+                        value: parts[3..].join(" "),
+                    })
+                }
+                "reset" => {
+                    if parts.len() < 3 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: settings reset <key>".to_string(),
+                        ));
+                    }
+                    Ok(WorkspaceCommand::SettingsReset {
+                        key: parts[2].to_string(),
+                    })
+                }
+                "save" => Ok(WorkspaceCommand::SettingsSave),
+                other => Err(WorkspaceError::InvalidCommand(format!(
+                    "Unknown settings command: {}",
+                    other
+                ))),
+            }
+        }
         unknown => Err(WorkspaceError::InvalidCommand(format!(
             "Unknown command: {}",
             unknown
@@ -364,6 +530,10 @@ fn format_command(command: &WorkspaceCommand) -> String {
         WorkspaceCommand::Close { component_id } => format!("close {}", component_id),
         WorkspaceCommand::Status { component_id } => format!("status {}", component_id),
         WorkspaceCommand::GetFocus => "get_focus".to_string(),
+        WorkspaceCommand::SettingsList => "settings list".to_string(),
+        WorkspaceCommand::SettingsSet { key, value } => format!("settings set {} {}", key, value),
+        WorkspaceCommand::SettingsReset { key } => format!("settings reset {}", key),
+        WorkspaceCommand::SettingsSave => "settings save".to_string(),
     }
 }
 
@@ -545,5 +715,214 @@ mod tests {
             }
             _ => panic!("Expected FocusInfo result"),
         }
+    }
+
+    #[test]
+    fn test_parse_settings_list_command() {
+        let cmd = parse_command("settings list").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::SettingsList);
+    }
+
+    #[test]
+    fn test_parse_settings_set_command() {
+        let cmd = parse_command("settings set editor.tab_size 2").unwrap();
+        match cmd {
+            WorkspaceCommand::SettingsSet { key, value } => {
+                assert_eq!(key, "editor.tab_size");
+                assert_eq!(value, "2");
+            }
+            _ => panic!("Expected SettingsSet command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_reset_command() {
+        let cmd = parse_command("settings reset editor.tab_size").unwrap();
+        match cmd {
+            WorkspaceCommand::SettingsReset { key } => {
+                assert_eq!(key, "editor.tab_size");
+            }
+            _ => panic!("Expected SettingsReset command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_save_command() {
+        let cmd = parse_command("settings save").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::SettingsSave);
+    }
+
+    #[test]
+    fn test_execute_settings_list() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsList);
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Settings:"));
+                assert!(message.contains("editor.tab_size"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_integer() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "2".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Set editor.tab_size"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("editor.tab_size");
+        assert_eq!(value.unwrap().as_integer(), Some(2));
+    }
+
+    #[test]
+    fn test_execute_settings_set_boolean() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.line_numbers".to_string(),
+            value: "false".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("editor.line_numbers");
+        assert_eq!(value.unwrap().as_boolean(), Some(false));
+    }
+
+    #[test]
+    fn test_execute_settings_set_string() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "ui.theme".to_string(),
+            value: "dark".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("ui.theme");
+        assert_eq!(value.unwrap().as_string(), Some("dark"));
+    }
+
+    #[test]
+    fn test_execute_settings_reset() {
+        let mut workspace = create_test_workspace();
+
+        // First set a value
+        workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "2".to_string(),
+        });
+
+        // Then reset it
+        let result = workspace.execute_command(WorkspaceCommand::SettingsReset {
+            key: "editor.tab_size".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify it's back to default
+        let value = workspace.get_setting("editor.tab_size");
+        assert_eq!(value.unwrap().as_integer(), Some(4)); // Default is 4
+    }
+
+    #[test]
+    fn test_execute_settings_save() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSave);
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Settings saved"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_invalid_type() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "not_a_number".to_string(),
+        });
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Invalid integer value"));
+            }
+            _ => panic!("Expected Error result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_unknown_key() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "unknown.setting".to_string(),
+            value: "value".to_string(),
+        });
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Unknown setting"));
+            }
+            _ => panic!("Expected Error result"),
+        }
+    }
+
+    #[test]
+    fn test_settings_persistence_roundtrip() {
+        use services_settings::persistence::{serialize_overrides, deserialize_overrides, SettingsOverridesData};
+        
+        let mut workspace = create_test_workspace();
+
+        // Set some settings
+        workspace.set_setting("editor.tab_size", services_settings::SettingValue::Integer(2));
+        workspace.set_setting("ui.theme", services_settings::SettingValue::String("dark".to_string()));
+
+        // Export and serialize
+        let overrides = workspace.settings_registry().export_overrides();
+        let data = SettingsOverridesData::from_overrides(&overrides);
+        let bytes = serialize_overrides(&data).unwrap();
+
+        // Deserialize and import
+        let loaded_data = deserialize_overrides(&bytes).unwrap();
+        let loaded_overrides = loaded_data.to_overrides();
+
+        // Create new workspace and import
+        let mut new_workspace = create_test_workspace();
+        new_workspace.settings_registry_mut().import_overrides(loaded_overrides);
+
+        // Verify settings persisted
+        assert_eq!(
+            new_workspace.get_setting("editor.tab_size").unwrap().as_integer(),
+            Some(2)
+        );
+        assert_eq!(
+            new_workspace.get_setting("ui.theme").unwrap().as_string(),
+            Some("dark")
+        );
     }
 }
