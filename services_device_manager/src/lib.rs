@@ -130,7 +130,7 @@ pub enum DeviceManagerError {
 #[derive(Debug)]
 struct DriverRecord {
     id: DriverId,
-    name: String,
+    _name: String,
 }
 
 /// Device manager that provides sandboxed driver access.
@@ -159,7 +159,7 @@ impl DeviceManager {
             id,
             DriverRecord {
                 id,
-                name: name.into(),
+                _name: name.into(),
             },
         );
         id

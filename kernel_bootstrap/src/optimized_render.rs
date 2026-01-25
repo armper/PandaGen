@@ -125,7 +125,7 @@ impl EditorRenderCache {
             return false;
         }
 
-        let (cursor_col, cursor_row) = match cursor_pos {
+        let (_cursor_col, cursor_row) = match cursor_pos {
             Some(pos) => pos,
             None => return false,
         };

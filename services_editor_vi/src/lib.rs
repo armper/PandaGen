@@ -1,6 +1,5 @@
 #![no_std]
 
-#![no_std]
 
 //! # VI-like Editor Service
 //!

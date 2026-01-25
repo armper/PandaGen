@@ -92,7 +92,7 @@ impl CoreState {
 
 #[derive(Debug)]
 struct TaskInfo {
-    state: TaskState,
+    _state: TaskState,
 }
 
 /// Deterministic multi-core scheduler.
@@ -125,7 +125,7 @@ impl MultiCoreScheduler {
 
     pub fn enqueue(&mut self, task_id: TaskId) {
         let task_info = TaskInfo {
-            state: TaskState::Runnable,
+            _state: TaskState::Runnable,
         };
         self.tasks.insert(task_id, task_info);
         let core_idx = self.next_core % self.cores.len();

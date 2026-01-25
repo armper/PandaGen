@@ -1,6 +1,6 @@
 //! Editor rendering and output
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::format;
 use alloc::vec::Vec;
 use crate::state::{EditorMode, EditorState};
