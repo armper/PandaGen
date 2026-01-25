@@ -1269,7 +1269,10 @@ impl WorkspaceManager {
         let bytes = services_settings::persistence::serialize_overrides(&data)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
         
-        // TODO: Write to storage when storage integration is complete
+        // TODO(Phase 113): Integrate with StorageService
+        // - Add settings path constant (e.g., "/settings/user_overrides.json")
+        // - Use editor_io_context.storage.write() with proper capabilities
+        // - Wrap in transaction for atomicity
         // For now, just validate serialization works
         self.workspace_status.set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
         
@@ -1278,8 +1281,11 @@ impl WorkspaceManager {
 
     /// Loads settings from storage (if storage context is available)
     pub fn load_settings(&mut self) -> Result<(), String> {
-        // TODO: Read from storage when storage integration is complete
-        // For now, this is a placeholder that demonstrates the API
+        // TODO(Phase 113): Integrate with StorageService
+        // - Read from settings path
+        // - Use load_overrides_safe() for corruption handling
+        // - Call import_overrides() to apply
+        // - Emit notification on success/failure
         self.workspace_status.set_last_action("Settings loaded".to_string());
         Ok(())
     }

@@ -357,9 +357,14 @@ impl WorkspaceManager {
 
     fn cmd_settings_reset(&mut self, key: String) -> CommandResult {
         if self.reset_setting(&key) {
+            // Get the default value for display
             let default_value = self.get_setting(&key);
+            let value_str = match default_value {
+                Some(val) => format!("{}", val),
+                None => "none".to_string(),
+            };
             CommandResult::Success {
-                message: format!("Reset {} to default: {:?}", key, default_value),
+                message: format!("Reset {} to default: {}", key, value_str),
             }
         } else {
             CommandResult::Error {
@@ -448,6 +453,7 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
                             "Usage: settings set <key> <value>".to_string(),
                         ));
                     }
+                    // Join remaining parts to support values with spaces (e.g., "hello world")
                     Ok(WorkspaceCommand::SettingsSet {
                         key: parts[2].to_string(),
                         value: parts[3..].join(" "),
