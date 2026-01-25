@@ -98,6 +98,8 @@ pub enum ComponentType {
     Cli,
     /// Pipeline executor component
     PipelineExecutor,
+    /// File picker component
+    FilePicker,
     /// Custom component
     Custom,
 }
@@ -138,6 +140,7 @@ impl std::fmt::Display for ComponentType {
             ComponentType::Editor => write!(f, "Editor"),
             ComponentType::Cli => write!(f, "CLI"),
             ComponentType::PipelineExecutor => write!(f, "PipelineExecutor"),
+            ComponentType::FilePicker => write!(f, "FilePicker"),
             ComponentType::Custom => write!(f, "Custom"),
         }
     }
@@ -1361,6 +1364,9 @@ impl WorkspaceManager {
                     }
                     ComponentType::PipelineExecutor => {
                         parts.push("PIPELINE".to_string());
+                    }
+                    ComponentType::FilePicker => {
+                        parts.push("FILE_PICKER".to_string());
                     }
                     ComponentType::Custom => {
                         parts.push("CUSTOM".to_string());

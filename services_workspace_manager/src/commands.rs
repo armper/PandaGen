@@ -37,6 +37,10 @@ pub enum WorkspaceCommand {
     SettingsReset { key: String },
     /// Settings: Save settings to storage
     SettingsSave,
+    /// Open file picker
+    OpenFilePicker,
+    /// Open recent files
+    RecentFiles,
 }
 
 /// Result of executing a workspace command
@@ -130,6 +134,8 @@ impl WorkspaceManager {
             WorkspaceCommand::SettingsSet { key, value } => self.cmd_settings_set(key, value),
             WorkspaceCommand::SettingsReset { key } => self.cmd_settings_reset(key),
             WorkspaceCommand::SettingsSave => self.cmd_settings_save(),
+            WorkspaceCommand::OpenFilePicker => self.cmd_open_file_picker(),
+            WorkspaceCommand::RecentFiles => self.cmd_recent_files(),
         }
     }
 
@@ -383,6 +389,29 @@ impl WorkspaceManager {
             },
         }
     }
+
+    fn cmd_open_file_picker(&mut self) -> CommandResult {
+        // Launch file picker component
+        // TODO: Implement actual file picker launching with proper root directory
+        CommandResult::Success {
+            message: "File picker opened (not yet implemented)".to_string(),
+        }
+    }
+
+    fn cmd_recent_files(&mut self) -> CommandResult {
+        // Show recent files
+        let recent_files = self.recent_history.get_recent_files();
+        if recent_files.is_empty() {
+            CommandResult::Success {
+                message: "No recent files".to_string(),
+            }
+        } else {
+            let files_list = recent_files.join("\n");
+            CommandResult::Success {
+                message: format!("Recent files:\n{}", files_list),
+            }
+        }
+    }
 }
 
 /// Parses a command string into a WorkspaceCommand
@@ -534,6 +563,8 @@ fn format_command(command: &WorkspaceCommand) -> String {
         WorkspaceCommand::SettingsSet { key, value } => format!("settings set {} {}", key, value),
         WorkspaceCommand::SettingsReset { key } => format!("settings reset {}", key),
         WorkspaceCommand::SettingsSave => "settings save".to_string(),
+        WorkspaceCommand::OpenFilePicker => "open file".to_string(),
+        WorkspaceCommand::RecentFiles => "recent files".to_string(),
     }
 }
 
