@@ -1,0 +1,22 @@
+[package]
+name = "services_file_picker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+core_types = { workspace = true }
+input_types = { workspace = true }
+services_input = { workspace = true }
+services_focus_manager = { workspace = true }
+services_storage = { workspace = true }
+services_fs_view = { workspace = true }
+fs_view = { workspace = true }
+view_types = { workspace = true }
+services_view_host = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+sim_kernel = { workspace = true }
