@@ -36,10 +36,11 @@
 //! let tab_size = registry.get("user123", "editor.tab_size");
 //! ```
 
+pub mod persistence;
+
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -301,6 +302,25 @@ impl SettingsRegistry {
     pub fn reset_to_default(&mut self, user_id: &str, key: &SettingKey) -> bool {
         self.remove_user_override(user_id, key)
     }
+
+    /// Exports all user overrides for persistence
+    pub fn export_overrides(&self) -> BTreeMap<UserId, BTreeMap<SettingKey, SettingValue>> {
+        self.user_overrides.clone()
+    }
+
+    /// Imports user overrides (replaces existing overrides)
+    pub fn import_overrides(&mut self, overrides: BTreeMap<UserId, BTreeMap<SettingKey, SettingValue>>) {
+        self.user_overrides = overrides;
+    }
+
+    /// Applies overrides for a specific user (merges with existing)
+    pub fn apply_user_overrides(&mut self, user_id: impl Into<UserId>, overrides: BTreeMap<SettingKey, SettingValue>) {
+        let user_id = user_id.into();
+        self.user_overrides
+            .entry(user_id)
+            .or_insert_with(BTreeMap::new)
+            .extend(overrides);
+    }
 }
 
 impl Default for SettingsRegistry {
@@ -320,6 +340,9 @@ pub mod keys {
     pub const KEYBINDING_COMMAND_PALETTE: &str = "keybinding.command_palette";
     pub const UI_SHOW_STATUS_BAR: &str = "ui.show_status_bar";
     pub const UI_RECENT_FILES_LIMIT: &str = "ui.recent_files_limit";
+    pub const UI_SHOW_KEYBINDING_HINTS: &str = "ui.show_keybinding_hints";
+    pub const UI_THEME: &str = "ui.theme";
+    pub const KEYBINDINGS_PROFILE: &str = "keybindings.profile";
 }
 
 /// Creates a settings registry with default settings
@@ -341,10 +364,13 @@ pub fn create_default_registry() -> SettingsRegistry {
         keys::KEYBINDING_COMMAND_PALETTE,
         SettingValue::String("Ctrl+P".to_string()),
     );
+    registry.register_default(keys::KEYBINDINGS_PROFILE, SettingValue::String("default".to_string()));
 
     // UI settings
     registry.register_default(keys::UI_SHOW_STATUS_BAR, SettingValue::Boolean(true));
     registry.register_default(keys::UI_RECENT_FILES_LIMIT, SettingValue::Integer(10));
+    registry.register_default(keys::UI_SHOW_KEYBINDING_HINTS, SettingValue::Boolean(true));
+    registry.register_default(keys::UI_THEME, SettingValue::String("default".to_string()));
 
     registry
 }
