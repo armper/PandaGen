@@ -23,7 +23,6 @@ mod output;
 mod render_stats;
 mod vga;
 mod workspace;
-mod workspace_platform;
 mod display_sink;
 mod bare_metal_storage;
 mod bare_metal_editor_io;

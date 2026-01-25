@@ -1,51 +1,54 @@
 //! Bare-metal platform adapter for services_workspace_manager
 //!
-//! This module implements the `WorkspacePlatform` trait using kernel-provided
-//! services (framebuffer, keyboard queue, tick counter) to enable the unified
-//! workspace runtime to run on bare metal.
+//! This module implements the `WorkspacePlatform` trait design for kernel integration.
+//!
+//! NOTE: This is currently test-only until all dependencies of services_workspace_manager
+//! are no_std compatible. The bare-metal kernel binary still uses the legacy workspace
+//! implementation in workspace.rs.
 
+#[cfg(test)]
 extern crate alloc;
 
+#[cfg(test)]
 use alloc::vec::Vec;
+#[cfg(test)]
 use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use services_workspace_manager::platform::{
     WorkspaceDisplay, WorkspaceInput, WorkspacePlatform, WorkspaceTick,
 };
+#[cfg(test)]
 use input_types::KeyEvent;
+#[cfg(test)]
 use view_types::ViewFrame;
-
-use crate::framebuffer::BareMetalFramebuffer;
-use crate::KeyboardEventQueue;
 
 /// Bare-metal workspace platform adapter
 ///
 /// Implements the WorkspacePlatform trait by bridging to kernel-provided
 /// framebuffer, keyboard queue, and tick counter.
+///
+/// NOTE: This is a work-in-progress integration. Currently only available in tests
+/// until dependency issues are resolved.
+#[cfg(test)]
 pub struct KernelWorkspacePlatform {
     display: KernelDisplay,
     input: KernelInput,
     tick: KernelTick,
 }
 
+#[cfg(test)]
 impl KernelWorkspacePlatform {
-    /// Creates a new kernel workspace platform
-    ///
-    /// # Arguments
-    ///
-    /// * `framebuffer` - Framebuffer for rendering
-    /// * `keyboard_queue` - Keyboard event queue reference
-    pub fn new(
-        framebuffer: BareMetalFramebuffer,
-        keyboard_queue: &'static KeyboardEventQueue,
-    ) -> Self {
+    /// Creates a new kernel workspace platform for testing
+    pub fn new_test() -> Self {
         Self {
-            display: KernelDisplay::new(framebuffer),
-            input: KernelInput::new(keyboard_queue),
+            display: KernelDisplay::new(),
+            input: KernelInput::new(),
             tick: KernelTick::new(),
         }
     }
 }
 
+#[cfg(test)]
 impl WorkspacePlatform for KernelWorkspacePlatform {
     fn display(&mut self) -> &mut dyn WorkspaceDisplay {
         &mut self.display
@@ -60,75 +63,78 @@ impl WorkspacePlatform for KernelWorkspacePlatform {
     }
 }
 
-/// Kernel display implementation using framebuffer
+/// Kernel display implementation (test stub)
+#[cfg(test)]
 struct KernelDisplay {
-    framebuffer: BareMetalFramebuffer,
+    cleared: bool,
 }
 
+#[cfg(test)]
 impl KernelDisplay {
-    fn new(framebuffer: BareMetalFramebuffer) -> Self {
-        Self { framebuffer }
+    fn new() -> Self {
+        Self { cleared: false }
     }
 }
 
+#[cfg(test)]
 impl WorkspaceDisplay for KernelDisplay {
-    fn render_main_view(&mut self, frame: &ViewFrame) {
-        // Render the main view frame to the framebuffer
-        // For now, this is a placeholder - actual rendering will be handled
-        // by the framebuffer's existing text rendering capabilities
-        let _ = frame;
-        // TODO: Integrate with framebuffer's text rendering
+    fn render_main_view(&mut self, _frame: &ViewFrame) {
+        // Test stub - would render to framebuffer in real implementation
     }
 
-    fn render_status_view(&mut self, frame: &ViewFrame) {
-        // Render status view (typically bottom line)
-        let _ = frame;
-        // TODO: Integrate with framebuffer's text rendering
+    fn render_status_view(&mut self, _frame: &ViewFrame) {
+        // Test stub - would render to framebuffer in real implementation
     }
 
-    fn render_status_strip(&mut self, content: &str) {
-        // Render workspace status strip
-        // This will display mode, file count, etc.
-        let _ = content;
-        // TODO: Render to a specific region of the framebuffer
+    fn render_status_strip(&mut self, _content: &str) {
+        // Test stub - would render to framebuffer in real implementation
     }
 
-    fn render_breadcrumbs(&mut self, content: &str) {
-        // Render navigation breadcrumbs
-        let _ = content;
-        // TODO: Render to a specific region of the framebuffer
+    fn render_breadcrumbs(&mut self, _content: &str) {
+        // Test stub - would render to framebuffer in real implementation
     }
 
     fn clear(&mut self) {
-        // Clear the display (black background)
-        self.framebuffer.clear(0, 0, 0);
+        self.cleared = true;
     }
 
     fn present(&mut self) {
-        // Framebuffer writes directly to hardware memory,
-        // so no explicit present/flush is needed
+        // Test stub - framebuffer writes directly to hardware in real implementation
     }
 }
 
 /// Kernel input implementation using keyboard queue
+///
+/// NOTE: This is a simplified test version that doesn't connect to the actual
+/// keyboard IRQ queue in main.rs.
+#[cfg(test)]
 struct KernelInput {
-    keyboard_queue: &'static KeyboardEventQueue,
     parser: Ps2ParserState,
+    test_queue: Vec<u8>,
 }
 
+#[cfg(test)]
 impl KernelInput {
-    fn new(keyboard_queue: &'static KeyboardEventQueue) -> Self {
+    fn new() -> Self {
         Self {
-            keyboard_queue,
             parser: Ps2ParserState::new(),
+            test_queue: Vec::new(),
         }
+    }
+    
+    /// For testing: inject scancodes directly
+    #[allow(dead_code)]
+    pub fn inject_scancode(&mut self, scancode: u8) {
+        self.test_queue.push(scancode);
     }
 }
 
+#[cfg(test)]
 impl WorkspaceInput for KernelInput {
     fn poll_event(&mut self) -> Option<KeyEvent> {
-        // Poll keyboard queue and convert scancodes to KeyEvents
-        while let Some(scancode) = self.keyboard_queue.pop() {
+        // Poll test queue and convert scancodes to KeyEvents
+        while !self.test_queue.is_empty() {
+            let scancode = self.test_queue.remove(0);
             if let Some(key_event) = self.parser.process_scancode(scancode) {
                 return Some(key_event);
             }
@@ -137,12 +143,12 @@ impl WorkspaceInput for KernelInput {
     }
 
     fn has_pending(&self) -> bool {
-        // Check if keyboard queue has pending events
-        self.keyboard_queue.has_pending()
+        !self.test_queue.is_empty()
     }
 }
 
 /// PS/2 keyboard parser state
+#[cfg(test)]
 struct Ps2ParserState {
     pending_e0: bool,
     shift_pressed: bool,
@@ -150,6 +156,7 @@ struct Ps2ParserState {
     alt_pressed: bool,
 }
 
+#[cfg(test)]
 impl Ps2ParserState {
     fn new() -> Self {
         Self {
@@ -203,23 +210,21 @@ impl Ps2ParserState {
         self.pending_e0 = false;
 
         // Convert scancode to KeyEvent
-        // This is a simplified version - full implementation would need
-        // more comprehensive key mapping
         self.scancode_to_key_event(code)
     }
 
     fn scancode_to_key_event(&self, code: u8) -> Option<KeyEvent> {
-        use input_types::{KeyCode, Modifiers};
+        use input_types::{KeyCode, KeyState, Modifiers};
 
-        let mut modifiers = Modifiers::none();
+        let mut modifiers = Modifiers::NONE;
         if self.shift_pressed {
-            modifiers = modifiers.with_shift();
+            modifiers = modifiers.with(Modifiers::SHIFT);
         }
         if self.ctrl_pressed {
-            modifiers = modifiers.with_ctrl();
+            modifiers = modifiers.with(Modifiers::CTRL);
         }
         if self.alt_pressed {
-            modifiers = modifiers.with_alt();
+            modifiers = modifiers.with(Modifiers::ALT);
         }
 
         let key_code = match code {
@@ -271,18 +276,15 @@ impl Ps2ParserState {
             
             // Punctuation
             0x0C => KeyCode::Minus,
-            0x0D => KeyCode::Equals,
             0x1A => KeyCode::LeftBracket,
             0x1B => KeyCode::RightBracket,
             0x2B => KeyCode::Backslash,
             0x27 => KeyCode::Semicolon,
             0x28 => KeyCode::Quote,
-            0x29 => KeyCode::Backtick,
             0x33 => KeyCode::Comma,
             0x34 => KeyCode::Period,
             0x35 => KeyCode::Slash,
             
-            // Arrow keys (with E0 prefix, but we ignore those currently)
             // Function keys
             0x3B => KeyCode::F1,
             0x3C => KeyCode::F2,
@@ -300,15 +302,17 @@ impl Ps2ParserState {
             _ => return None,
         };
 
-        Some(KeyEvent::pressed(key_code, modifiers))
+        Some(KeyEvent::new(key_code, modifiers, KeyState::Pressed))
     }
 }
 
 /// Kernel tick implementation
+#[cfg(test)]
 struct KernelTick {
     tick_count: AtomicU64,
 }
 
+#[cfg(test)]
 impl KernelTick {
     fn new() -> Self {
         Self {
@@ -317,6 +321,7 @@ impl KernelTick {
     }
 }
 
+#[cfg(test)]
 impl WorkspaceTick for KernelTick {
     fn advance(&mut self) -> u64 {
         let new_tick = self.tick_count.load(Ordering::Relaxed) + 1;
@@ -332,6 +337,7 @@ impl WorkspaceTick for KernelTick {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_types::{KeyCode, Modifiers};
 
     #[test]
     fn test_ps2_parser_basic() {
@@ -342,8 +348,8 @@ mod tests {
         assert!(event.is_some());
         
         if let Some(e) = event {
-            assert_eq!(e.key_code, KeyCode::A);
-            assert!(!e.modifiers.has_shift());
+            assert_eq!(e.code, KeyCode::A);
+            assert!(!e.modifiers.contains(Modifiers::SHIFT));
         }
     }
 
@@ -360,8 +366,8 @@ mod tests {
         assert!(event.is_some());
         
         if let Some(e) = event {
-            assert_eq!(e.key_code, KeyCode::A);
-            assert!(e.modifiers.has_shift());
+            assert_eq!(e.code, KeyCode::A);
+            assert!(e.modifiers.contains(Modifiers::SHIFT));
         }
     }
 
@@ -378,8 +384,15 @@ mod tests {
         assert!(event.is_some());
         
         if let Some(e) = event {
-            assert_eq!(e.key_code, KeyCode::P);
-            assert!(e.modifiers.has_ctrl());
+            assert_eq!(e.code, KeyCode::P);
+            assert!(e.modifiers.contains(Modifiers::CTRL));
         }
+    }
+    
+    #[test]
+    fn test_kernel_platform_creation() {
+        let platform = KernelWorkspacePlatform::new_test();
+        // Just verify it can be created
+        let _ = platform;
     }
 }

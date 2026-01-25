@@ -68,6 +68,7 @@ use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
+#[cfg(feature = "std")]
 use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
@@ -109,8 +110,8 @@ impl Default for ComponentId {
     }
 }
 
-impl std::fmt::Display for ComponentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ComponentId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "comp:{}", self.0)
     }
 }
@@ -160,8 +161,8 @@ impl EditorIoContext {
     }
 }
 
-impl std::fmt::Display for ComponentType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ComponentType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ComponentType::Editor => write!(f, "Editor"),
             ComponentType::Cli => write!(f, "CLI"),
@@ -185,8 +186,8 @@ pub enum ComponentState {
     Failed,
 }
 
-impl std::fmt::Display for ComponentState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ComponentState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ComponentState::Running => write!(f, "Running"),
             ComponentState::Exited => write!(f, "Exited"),
@@ -329,33 +330,34 @@ pub enum WorkspaceEvent {
 }
 
 /// Workspace manager errors
-#[derive(Debug, Error, PartialEq, Eq)]
+#[cfg_attr(feature = "std", derive(Error))]
+#[derive(Debug, PartialEq, Eq)]
 pub enum WorkspaceError {
-    #[error("Component not found: {0}")]
+    #[cfg_attr(feature = "std", error("Component not found: {0}"))]
     ComponentNotFound(ComponentId),
 
-    #[error("Component launch denied: {reason}")]
+    #[cfg_attr(feature = "std", error("Component launch denied: {reason}"))]
     LaunchDenied { reason: String },
 
-    #[error("Focus denied: {reason}")]
+    #[cfg_attr(feature = "std", error("Focus denied: {reason}"))]
     FocusDenied { reason: String },
 
-    #[error("Component not focusable: {0}")]
+    #[cfg_attr(feature = "std", error("Component not focusable: {0}"))]
     NotFocusable(ComponentId),
 
-    #[error("No components available")]
+    #[cfg_attr(feature = "std", error("No components available"))]
     NoComponents,
 
-    #[error("Invalid command: {0}")]
+    #[cfg_attr(feature = "std", error("Invalid command: {0}"))]
     InvalidCommand(String),
 
-    #[error("Policy error: {0}")]
+    #[cfg_attr(feature = "std", error("Policy error: {0}"))]
     PolicyError(String),
 
-    #[error("Budget exhausted for component: {0}")]
+    #[cfg_attr(feature = "std", error("Budget exhausted for component: {0}"))]
     BudgetExhausted(ComponentId),
 
-    #[error("Focus error: {0}")]
+    #[cfg_attr(feature = "std", error("Focus error: {0}"))]
     FocusError(String),
 }
 
