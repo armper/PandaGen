@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 core_types = { workspace = true }
 identity = { workspace = true }
@@ -29,6 +33,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+# For no_std HashMap support
+[target.'cfg(not(feature = "std"))'.dependencies]
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "allocator-api2"] }
 
 [dev-dependencies]
 sim_kernel = { workspace = true }

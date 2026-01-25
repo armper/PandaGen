@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
 //! # Workspace Manager Service
 //!
 //! This crate implements the workspace manager for PandaGen OS.
@@ -24,8 +26,30 @@ pub mod command_registry;
 pub mod commands;
 pub mod help;
 pub mod keybindings;
+pub mod platform;
 pub mod workspace_status;
 
+// Use alloc for no_std compatibility
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+
+#[cfg(feature = "std")]
+use std::boxed::Box;
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
+#[cfg(feature = "std")]
+use std::vec::Vec;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 use core_types::TaskId;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
@@ -44,7 +68,6 @@ use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
 use services_input::InputSubscriptionCap;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
-use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 use view_types::{ViewFrame, ViewId, ViewKind};
@@ -52,6 +75,9 @@ use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 
 // Re-export public types from modules
 pub use help::HelpCategory;
+pub use platform::{
+    FakePlatform, WorkspaceCaps, WorkspaceDisplay, WorkspaceInput, WorkspacePlatform, WorkspaceTick,
+};
 pub use workspace_status::{
     ActionableError, CommandSuggestion, FsStatus, PromptValidation, generate_suggestions, validate_command,
 };
@@ -1043,6 +1069,7 @@ impl WorkspaceManager {
                 "none"
             };
 
+            #[cfg(all(debug_assertions, feature = "std"))]
             println!("route_input:\n  key={{code={:?}, mods={:?}, state={:?}}}\n  focus_tile={{TODO}}\n  focus_component={}\n  global_consumed={}\n  delivered_to={}\n  consumed_by={} ",
                 key_event.code,
                 key_event.modifiers,
@@ -2201,3 +2228,154 @@ mod tests {
         assert!(actions.iter().any(|a| a == "list"));
     }
 }
+
+// ============================================================================
+// Workspace Runtime - Public Entrypoint
+// ============================================================================
+
+/// Runtime environment for the workspace manager
+///
+/// This is the main public entrypoint for driving the workspace manager with
+/// a platform-specific implementation. It wraps the core WorkspaceManager and
+/// coordinates with the platform for input, display, and time stepping.
+///
+/// # Example
+///
+/// ```no_run
+/// use services_workspace_manager::{WorkspaceRuntime, WorkspaceCaps};
+/// use identity::{IdentityKind, IdentityMetadata, TrustDomain};
+///
+/// // Create platform implementation (simulation, bare-metal, etc.)
+/// // let platform = MyPlatform::new();
+///
+/// // Create workspace identity
+/// let identity = IdentityMetadata::new(
+///     IdentityKind::Service,
+///     TrustDomain::core(),
+///     "workspace",
+///     0
+/// );
+///
+/// // Create runtime with capabilities
+/// // let mut runtime = WorkspaceRuntime::new(platform, identity, WorkspaceCaps::empty());
+///
+/// // Main loop
+/// // loop {
+/// //     runtime.handle_input();
+/// //     runtime.tick();
+/// //     runtime.render();
+/// // }
+/// ```
+pub struct WorkspaceRuntime<P: WorkspacePlatform> {
+    /// Platform implementation
+    platform: P,
+    /// Core workspace manager
+    workspace: WorkspaceManager,
+    /// Current tick number
+    tick_count: u64,
+}
+
+impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
+    /// Creates a new workspace runtime
+    ///
+    /// # Arguments
+    ///
+    /// * `platform` - Platform implementation providing display, input, and tick interfaces
+    /// * `workspace_identity` - Identity metadata for the workspace service
+    /// * `initial_caps` - Initial capabilities (storage, settings, etc.)
+    pub fn new(
+        platform: P,
+        workspace_identity: IdentityMetadata,
+        initial_caps: WorkspaceCaps,
+    ) -> Self {
+        let mut workspace = WorkspaceManager::new(workspace_identity);
+        
+        // Set editor I/O context if storage capability is provided
+        if let Some(storage_context) = initial_caps.storage {
+            workspace.set_editor_io_context(storage_context);
+        }
+        
+        Self {
+            platform,
+            workspace,
+            tick_count: 0,
+        }
+    }
+    
+    /// Creates a new workspace runtime with policy
+    pub fn with_policy(mut self, policy: Box<dyn PolicyEngine>) -> Self {
+        self.workspace = self.workspace.with_policy(policy);
+        self
+    }
+    
+    /// Handle pending input events
+    ///
+    /// Polls for input events from the platform and routes them through the
+    /// workspace manager to the focused component.
+    pub fn handle_input(&mut self) {
+        let input = self.platform.input();
+        while let Some(key_event) = input.poll_event() {
+            let input_event = InputEvent::key(key_event);
+            self.workspace.route_input(&input_event);
+        }
+    }
+    
+    /// Advance the logical time by one tick
+    ///
+    /// This is called by the platform's main loop to advance time.
+    /// The workspace manager itself doesn't need explicit time, but this
+    /// allows the platform to synchronize timing.
+    pub fn tick(&mut self) {
+        self.tick_count = self.platform.tick().advance();
+    }
+    
+    /// Render the current workspace state
+    ///
+    /// Retrieves the current workspace state and renders it through the
+    /// platform's display interface.
+    pub fn render(&mut self) {
+        let snapshot = self.workspace.render_snapshot();
+        let display = self.platform.display();
+        
+        // Clear display before rendering new content
+        display.clear();
+        
+        // Render main view if available
+        if let Some(ref main_view) = snapshot.main_view {
+            display.render_main_view(main_view);
+        }
+        
+        // Render status view if available
+        if let Some(ref status_view) = snapshot.status_view {
+            display.render_status_view(status_view);
+        }
+        
+        // Render workspace status strip
+        display.render_status_strip(&snapshot.status_strip);
+        
+        // Render breadcrumbs
+        display.render_breadcrumbs(&snapshot.breadcrumbs);
+        
+        // Present the rendered content
+        display.present();
+    }
+    
+    /// Get a reference to the underlying workspace manager
+    ///
+    /// This allows direct access to workspace operations like launching
+    /// components, focus management, etc.
+    pub fn workspace(&self) -> &WorkspaceManager {
+        &self.workspace
+    }
+    
+    /// Get a mutable reference to the underlying workspace manager
+    pub fn workspace_mut(&mut self) -> &mut WorkspaceManager {
+        &mut self.workspace
+    }
+    
+    /// Get the current tick count
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+}
+

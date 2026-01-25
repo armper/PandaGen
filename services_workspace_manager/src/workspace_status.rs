@@ -7,6 +7,10 @@
 //! - Validation indicators
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(feature = "std"))]
+use alloc::collections::VecDeque;
+#[cfg(feature = "std")]
 use std::collections::VecDeque;
 
 /// Maximum number of items to keep in history

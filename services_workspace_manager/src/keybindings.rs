@@ -11,6 +11,10 @@
 
 use input_types::{KeyCode, KeyEvent, Modifiers};
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 
 /// Action that can be triggered by a keybinding

@@ -2,7 +2,7 @@
 //!
 //! Tiered help system for workspace commands
 
-use std::fmt;
+use core::fmt;
 
 /// Help category
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
