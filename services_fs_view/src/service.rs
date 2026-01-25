@@ -3,7 +3,7 @@
 //! This module provides the actual service that implements filesystem operations.
 
 use crate::operations::{FileSystemOperations, OperationError, StatInfo};
-use fs_view::{DirectoryEntry, DirectoryView, PathResolver};
+use fs_view::{DirectoryEntry, DirectoryResolver, DirectoryView, PathResolver};
 use services_storage::{ObjectId, ObjectKind};
 use std::collections::HashMap;
 
@@ -252,6 +252,13 @@ impl FileSystemOperations for FileSystemViewService {
         }
 
         Ok(())
+    }
+}
+
+// Implement DirectoryResolver for FileSystemViewService to enable file picker integration
+impl DirectoryResolver for FileSystemViewService {
+    fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView> {
+        self.get_directory(id).cloned()
     }
 }
 
