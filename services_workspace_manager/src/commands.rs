@@ -29,6 +29,14 @@ pub enum WorkspaceCommand {
     Status { component_id: ComponentId },
     /// Get currently focused component
     GetFocus,
+    /// Settings: List all settings
+    SettingsList,
+    /// Settings: Set a setting value
+    SettingsSet { key: String, value: String },
+    /// Settings: Reset a setting to default
+    SettingsReset { key: String },
+    /// Settings: Save settings to storage
+    SettingsSave,
 }
 
 /// Result of executing a workspace command
@@ -118,6 +126,10 @@ impl WorkspaceManager {
             WorkspaceCommand::Close { component_id } => self.cmd_close(component_id),
             WorkspaceCommand::Status { component_id } => self.cmd_status(component_id),
             WorkspaceCommand::GetFocus => self.cmd_get_focus(),
+            WorkspaceCommand::SettingsList => self.cmd_settings_list(),
+            WorkspaceCommand::SettingsSet { key, value } => self.cmd_settings_set(key, value),
+            WorkspaceCommand::SettingsReset { key } => self.cmd_settings_reset(key),
+            WorkspaceCommand::SettingsSave => self.cmd_settings_save(),
         }
     }
 
@@ -255,6 +267,117 @@ impl WorkspaceManager {
         let component_id = self.get_focused_component();
         CommandResult::FocusInfo { component_id }
     }
+
+    fn cmd_settings_list(&self) -> CommandResult {
+        // Get all default settings
+        let defaults = self.settings_registry.list_defaults();
+        let user_overrides = self.settings_registry.list_user_overrides(&self.current_user);
+        
+        let mut message = String::from("Settings:\n");
+        
+        for key in &defaults {
+            let value = self.settings_registry.get(&self.current_user, key);
+            let is_override = user_overrides.contains(key);
+            let marker = if is_override { "*" } else { " " };
+            
+            if let Some(v) = value {
+                message.push_str(&format!("{}  {} = {}\n", marker, key, v));
+            }
+        }
+        
+        if !user_overrides.is_empty() {
+            message.push_str("\n* = user override\n");
+        }
+        
+        CommandResult::Success { message }
+    }
+
+    fn cmd_settings_set(&mut self, key: String, value_str: String) -> CommandResult {
+        use services_settings::{SettingKey, SettingValue};
+        
+        // Get the default to determine type
+        let setting_key = SettingKey::new(&key);
+        let default_value = self.settings_registry.get_default(&setting_key);
+        
+        let value = match default_value {
+            Some(SettingValue::Boolean(_)) => {
+                // Parse as boolean
+                match value_str.to_lowercase().as_str() {
+                    "true" | "yes" | "1" | "on" => SettingValue::Boolean(true),
+                    "false" | "no" | "0" | "off" => SettingValue::Boolean(false),
+                    _ => return CommandResult::Error {
+                        message: format!("Invalid boolean value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::Integer(_)) => {
+                // Parse as integer
+                match value_str.parse::<i64>() {
+                    Ok(i) => SettingValue::Integer(i),
+                    Err(_) => return CommandResult::Error {
+                        message: format!("Invalid integer value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::Float(_)) => {
+                // Parse as float
+                match value_str.parse::<f64>() {
+                    Ok(f) => SettingValue::Float(f),
+                    Err(_) => return CommandResult::Error {
+                        message: format!("Invalid float value: {}", value_str),
+                    },
+                }
+            }
+            Some(SettingValue::String(_)) => {
+                // Use as string
+                SettingValue::String(value_str)
+            }
+            Some(SettingValue::StringList(_)) => {
+                // Parse as comma-separated list
+                let items: Vec<String> = value_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                SettingValue::StringList(items)
+            }
+            None => {
+                return CommandResult::Error {
+                    message: format!("Unknown setting: {}", key),
+                }
+            }
+        };
+        
+        // Set the value and apply
+        self.set_setting(key.clone(), value.clone());
+        
+        CommandResult::Success {
+            message: format!("Set {} = {}", key, value),
+        }
+    }
+
+    fn cmd_settings_reset(&mut self, key: String) -> CommandResult {
+        if self.reset_setting(&key) {
+            let default_value = self.get_setting(&key);
+            CommandResult::Success {
+                message: format!("Reset {} to default: {:?}", key, default_value),
+            }
+        } else {
+            CommandResult::Error {
+                message: format!("Setting not found or not overridden: {}", key),
+            }
+        }
+    }
+
+    fn cmd_settings_save(&mut self) -> CommandResult {
+        match self.save_settings() {
+            Ok(()) => CommandResult::Success {
+                message: "Settings saved successfully".to_string(),
+            },
+            Err(err) => CommandResult::Error {
+                message: format!("Failed to save settings: {}", err),
+            },
+        }
+    }
 }
 
 /// Parses a command string into a WorkspaceCommand
@@ -310,6 +433,43 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
         "status" => parse_component_id_command(&parts, "status", |id| WorkspaceCommand::Status {
             component_id: id,
         }),
+        "settings" => {
+            if parts.len() < 2 {
+                return Err(WorkspaceError::InvalidCommand(
+                    "Usage: settings <list|set|reset|save>".to_string(),
+                ));
+            }
+            
+            match parts[1] {
+                "list" => Ok(WorkspaceCommand::SettingsList),
+                "set" => {
+                    if parts.len() < 4 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: settings set <key> <value>".to_string(),
+                        ));
+                    }
+                    Ok(WorkspaceCommand::SettingsSet {
+                        key: parts[2].to_string(),
+                        value: parts[3..].join(" "),
+                    })
+                }
+                "reset" => {
+                    if parts.len() < 3 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: settings reset <key>".to_string(),
+                        ));
+                    }
+                    Ok(WorkspaceCommand::SettingsReset {
+                        key: parts[2].to_string(),
+                    })
+                }
+                "save" => Ok(WorkspaceCommand::SettingsSave),
+                other => Err(WorkspaceError::InvalidCommand(format!(
+                    "Unknown settings command: {}",
+                    other
+                ))),
+            }
+        }
         unknown => Err(WorkspaceError::InvalidCommand(format!(
             "Unknown command: {}",
             unknown
@@ -364,6 +524,10 @@ fn format_command(command: &WorkspaceCommand) -> String {
         WorkspaceCommand::Close { component_id } => format!("close {}", component_id),
         WorkspaceCommand::Status { component_id } => format!("status {}", component_id),
         WorkspaceCommand::GetFocus => "get_focus".to_string(),
+        WorkspaceCommand::SettingsList => "settings list".to_string(),
+        WorkspaceCommand::SettingsSet { key, value } => format!("settings set {} {}", key, value),
+        WorkspaceCommand::SettingsReset { key } => format!("settings reset {}", key),
+        WorkspaceCommand::SettingsSave => "settings save".to_string(),
     }
 }
 
