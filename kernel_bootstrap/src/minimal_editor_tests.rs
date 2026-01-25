@@ -259,7 +259,13 @@ mod tests {
         editor.process_byte(b'x');
 
         let line1 = editor.get_viewport_line(0).unwrap();
-        assert!(line1.starts_with("ine1") || line1 == "line1"); // Depends on cursor position
+        // After typing "line1", Enter, "line2", Esc, k (move up), x (delete char under cursor)
+        // The expected result depends on where the cursor lands after moving up.
+        // When entering normal mode from insert, cursor moves back one position.
+        // After typing "line2", cursor is at col 5. Esc moves to col 4 (on '2').
+        // k moves up, maintaining column 4, which is on '1' in "line1".
+        // x deletes '1', leaving "line".
+        assert_eq!(line1, "line", "Expected 'line' after deleting '1' from 'line1'");
 
         // Force quit
         editor.process_byte(b':');

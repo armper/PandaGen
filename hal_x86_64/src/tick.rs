@@ -114,6 +114,7 @@ mod tests {
     use super::*;
     use crate::port_io::FakePortIo;
     use crate::timer::FakeTimerDevice;
+    use alloc::vec;
 
     #[test]
     fn test_tick_source_hpet_config() {

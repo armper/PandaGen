@@ -124,9 +124,10 @@ impl<H: RemoteHandler> RemoteIpcServer<H> {
             return encode_response(response, message.id);
         }
 
+        let request_id = call.request_id;
         let result = self.handler.handle(call);
         let response = RemoteResponse {
-            request_id: message.id,
+            request_id,
             result,
         };
         encode_response(response, message.id)
