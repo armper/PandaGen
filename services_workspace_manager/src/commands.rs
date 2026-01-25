@@ -710,4 +710,213 @@ mod tests {
             _ => panic!("Expected FocusInfo result"),
         }
     }
+
+    #[test]
+    fn test_parse_settings_list_command() {
+        let cmd = parse_command("settings list").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::SettingsList);
+    }
+
+    #[test]
+    fn test_parse_settings_set_command() {
+        let cmd = parse_command("settings set editor.tab_size 2").unwrap();
+        match cmd {
+            WorkspaceCommand::SettingsSet { key, value } => {
+                assert_eq!(key, "editor.tab_size");
+                assert_eq!(value, "2");
+            }
+            _ => panic!("Expected SettingsSet command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_reset_command() {
+        let cmd = parse_command("settings reset editor.tab_size").unwrap();
+        match cmd {
+            WorkspaceCommand::SettingsReset { key } => {
+                assert_eq!(key, "editor.tab_size");
+            }
+            _ => panic!("Expected SettingsReset command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_save_command() {
+        let cmd = parse_command("settings save").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::SettingsSave);
+    }
+
+    #[test]
+    fn test_execute_settings_list() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsList);
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Settings:"));
+                assert!(message.contains("editor.tab_size"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_integer() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "2".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Set editor.tab_size"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("editor.tab_size");
+        assert_eq!(value.unwrap().as_integer(), Some(2));
+    }
+
+    #[test]
+    fn test_execute_settings_set_boolean() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.line_numbers".to_string(),
+            value: "false".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("editor.line_numbers");
+        assert_eq!(value.unwrap().as_boolean(), Some(false));
+    }
+
+    #[test]
+    fn test_execute_settings_set_string() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "ui.theme".to_string(),
+            value: "dark".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify setting was changed
+        let value = workspace.get_setting("ui.theme");
+        assert_eq!(value.unwrap().as_string(), Some("dark"));
+    }
+
+    #[test]
+    fn test_execute_settings_reset() {
+        let mut workspace = create_test_workspace();
+
+        // First set a value
+        workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "2".to_string(),
+        });
+
+        // Then reset it
+        let result = workspace.execute_command(WorkspaceCommand::SettingsReset {
+            key: "editor.tab_size".to_string(),
+        });
+
+        match result {
+            CommandResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+
+        // Verify it's back to default
+        let value = workspace.get_setting("editor.tab_size");
+        assert_eq!(value.unwrap().as_integer(), Some(4)); // Default is 4
+    }
+
+    #[test]
+    fn test_execute_settings_save() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSave);
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Settings saved"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_invalid_type() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "editor.tab_size".to_string(),
+            value: "not_a_number".to_string(),
+        });
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Invalid integer value"));
+            }
+            _ => panic!("Expected Error result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_settings_set_unknown_key() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
+            key: "unknown.setting".to_string(),
+            value: "value".to_string(),
+        });
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Unknown setting"));
+            }
+            _ => panic!("Expected Error result"),
+        }
+    }
+
+    #[test]
+    fn test_settings_persistence_roundtrip() {
+        use services_settings::persistence::{serialize_overrides, deserialize_overrides, SettingsOverridesData};
+        
+        let mut workspace = create_test_workspace();
+
+        // Set some settings
+        workspace.set_setting("editor.tab_size", services_settings::SettingValue::Integer(2));
+        workspace.set_setting("ui.theme", services_settings::SettingValue::String("dark".to_string()));
+
+        // Export and serialize
+        let overrides = workspace.settings_registry().export_overrides();
+        let data = SettingsOverridesData::from_overrides(&overrides);
+        let bytes = serialize_overrides(&data).unwrap();
+
+        // Deserialize and import
+        let loaded_data = deserialize_overrides(&bytes).unwrap();
+        let loaded_overrides = loaded_data.to_overrides();
+
+        // Create new workspace and import
+        let mut new_workspace = create_test_workspace();
+        new_workspace.settings_registry_mut().import_overrides(loaded_overrides);
+
+        // Verify settings persisted
+        assert_eq!(
+            new_workspace.get_setting("editor.tab_size").unwrap().as_integer(),
+            Some(2)
+        );
+        assert_eq!(
+            new_workspace.get_setting("ui.theme").unwrap().as_string(),
+            Some("dark")
+        );
+    }
 }
