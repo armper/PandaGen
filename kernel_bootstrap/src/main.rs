@@ -23,6 +23,7 @@ mod output;
 mod render_stats;
 mod vga;
 mod workspace;
+mod workspace_platform;
 mod display_sink;
 mod bare_metal_storage;
 mod bare_metal_editor_io;
@@ -2447,6 +2448,13 @@ impl KeyboardEventQueue {
         self.read_pos.store(read.wrapping_add(1), Ordering::Release);
 
         Some(scancode)
+    }
+
+    /// Checks if the queue has pending events without consuming them.
+    fn has_pending(&self) -> bool {
+        let read = self.read_pos.load(Ordering::Acquire);
+        let write = self.write_pos.load(Ordering::Acquire);
+        read != write
     }
 }
 

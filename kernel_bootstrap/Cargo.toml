@@ -12,6 +12,10 @@ editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }
 console_vga = { path = "../console_vga", default-features = false, optional = true }
 services_storage = { path = "../services_storage", default-features = false, features = ["alloc"] }
+services_workspace_manager = { path = "../services_workspace_manager", default-features = true }
+input_types = { workspace = true }
+view_types = { workspace = true }
+identity = { workspace = true }
 hal = { path = "../hal", features = ["alloc"] }
 hal_x86_64 = { path = "../hal_x86_64" }
 serde = { workspace = true, default-features = false, features = ["alloc"] }
