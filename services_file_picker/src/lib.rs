@@ -21,15 +21,28 @@
 //! ## Example
 //!
 //! ```ignore
-//! use services_file_picker::{FilePicker, FilePickerResult};
+//! use services_file_picker::{FilePicker, FilePickerResult, DirectoryResolver};
 //! use fs_view::DirectoryView;
 //!
+//! // Create a resolver that can load subdirectories
+//! struct MyResolver {
+//!     // ... your directory resolution logic
+//! }
+//!
+//! impl DirectoryResolver for MyResolver {
+//!     fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView> {
+//!         // Load directory contents from storage
+//!     }
+//! }
+//!
+//! let resolver = MyResolver::new();
 //! let mut picker = FilePicker::new(root_directory);
 //! 
-//! // Process input
-//! match picker.process_input(key_event) {
-//!     FilePickerResult::FileSelected(object_id) => {
+//! // Process input with resolver for directory navigation
+//! match picker.process_input(key_event, Some(&resolver)) {
+//!     FilePickerResult::FileSelected { object_id, name } => {
 //!         // User selected a file
+//!         println!("Selected: {}", name);
 //!     }
 //!     FilePickerResult::Cancelled => {
 //!         // User cancelled
@@ -51,6 +64,10 @@ use input_types::{InputEvent, KeyCode, KeyState};
 use services_storage::ObjectId;
 use services_storage::ObjectKind;
 use thiserror::Error;
+
+// Re-export DirectoryResolver for convenience - allows users to implement
+// custom resolvers without importing from fs_view separately
+pub use fs_view::DirectoryResolver;
 
 /// Result of file picker interaction
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +178,15 @@ impl FilePicker {
     }
 
     /// Processes an input event and returns the result
-    pub fn process_input(&mut self, event: InputEvent) -> FilePickerResult {
+    ///
+    /// The resolver is used to load subdirectory contents when entering directories.
+    /// If no resolver is provided, directory navigation will not work (directories
+    /// will be treated as non-navigable).
+    pub fn process_input<R: DirectoryResolver>(
+        &mut self,
+        event: InputEvent,
+        resolver: Option<&R>,
+    ) -> FilePickerResult {
         // Only handle key press events
         let key_event = match event {
             InputEvent::Key(ke) if ke.state == KeyState::Pressed => ke,
@@ -177,7 +202,7 @@ impl FilePicker {
                 self.move_selection_down();
                 FilePickerResult::Continue
             }
-            KeyCode::Enter => self.handle_selection(),
+            KeyCode::Enter => self.handle_selection(resolver),
             KeyCode::Escape => self.handle_back(),
             _ => FilePickerResult::Continue,
         }
@@ -202,7 +227,10 @@ impl FilePicker {
     }
 
     /// Handles the Enter key (select file or enter directory)
-    fn handle_selection(&mut self) -> FilePickerResult {
+    fn handle_selection<R: DirectoryResolver>(
+        &mut self,
+        resolver: Option<&R>,
+    ) -> FilePickerResult {
         if self.entries.is_empty() {
             return FilePickerResult::Continue;
         }
@@ -210,9 +238,22 @@ impl FilePicker {
         let selected = &self.entries[self.selected_index];
 
         if selected.is_directory {
-            // Enter the directory
-            // TODO: Implement directory navigation when DirectoryView supports it
-            // For now, just continue
+            // Try to enter the directory if we have a resolver
+            let Some(resolver) = resolver else {
+                return FilePickerResult::Continue;
+            };
+            
+            let Some(subdir) = resolver.resolve_directory(&selected.object_id) else {
+                return FilePickerResult::Continue;
+            };
+            
+            // Push current directory onto stack
+            self.directory_stack.push(self.current_directory.clone());
+            
+            // Navigate into the subdirectory
+            self.current_directory = subdir;
+            self.refresh_entries();
+            
             FilePickerResult::Continue
         } else {
             // Select the file
@@ -266,6 +307,35 @@ impl FilePicker {
 mod tests {
     use super::*;
     use input_types::{KeyEvent, Modifiers};
+    use std::collections::HashMap;
+
+    // A simple test resolver that stores directories in a HashMap
+    struct TestResolver {
+        directories: HashMap<ObjectId, DirectoryView>,
+    }
+
+    impl TestResolver {
+        fn new() -> Self {
+            Self {
+                directories: HashMap::new(),
+            }
+        }
+
+        fn register_directory(&mut self, dir: DirectoryView) {
+            self.directories.insert(dir.id, dir);
+        }
+    }
+
+    impl DirectoryResolver for TestResolver {
+        fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView> {
+            self.directories.get(id).cloned()
+        }
+    }
+
+    // Helper to avoid repeating no_resolver() in tests
+    fn no_resolver() -> Option<&'static TestResolver> {
+        None
+    }
 
     fn create_test_directory() -> DirectoryView {
         let dir_id = ObjectId::new();
@@ -372,7 +442,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(down_event);
+        let result = picker.process_input(down_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 1);
 
@@ -381,7 +451,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(up_event);
+        let result = picker.process_input(up_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 0);
     }
@@ -399,7 +469,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(enter_event);
+        let result = picker.process_input(enter_event, no_resolver());
         match result {
             FilePickerResult::FileSelected { name, .. } => {
                 assert_eq!(name, "apple.txt");
@@ -418,7 +488,7 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(escape_event);
+        let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Cancelled);
     }
 
@@ -452,8 +522,301 @@ mod tests {
             Modifiers::none(),
         ));
 
-        let result = picker.process_input(release_event);
+        let result = picker.process_input(release_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 0); // Should not move
+    }
+
+    #[test]
+    fn test_enter_directory_without_resolver() {
+        // Test that entering a directory without a resolver does nothing
+        let dir = create_test_directory();
+        let mut picker = FilePicker::new(dir.clone());
+
+        // Select first entry (which is "docs" directory)
+        assert_eq!(picker.entries()[0].name, "docs");
+        assert!(picker.entries()[0].is_directory);
+
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+
+        // Without a resolver, entering a directory should just continue
+        let result = picker.process_input(enter_event, no_resolver());
+        assert_eq!(result, FilePickerResult::Continue);
+
+        // We should still be in the same directory
+        assert_eq!(picker.current_directory().id, dir.id);
+        assert_eq!(picker.directory_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_enter_directory_with_resolver() {
+        // Create a root directory with subdirectories
+        let root_id = ObjectId::new();
+        let mut root = DirectoryView::new(root_id);
+
+        let docs_id = ObjectId::new();
+        root.add_entry(DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            ObjectKind::Map,
+        ));
+
+        // Create the "docs" subdirectory with some files
+        let mut docs_dir = DirectoryView::new(docs_id);
+        docs_dir.add_entry(DirectoryEntry::new(
+            "readme.md".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+        docs_dir.add_entry(DirectoryEntry::new(
+            "guide.pdf".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        // Create resolver and register the subdirectory
+        let mut resolver = TestResolver::new();
+        resolver.register_directory(docs_dir.clone());
+
+        let mut picker = FilePicker::new(root.clone());
+
+        // Select first entry (which is "docs" directory)
+        assert_eq!(picker.entries()[0].name, "docs");
+        assert!(picker.entries()[0].is_directory);
+
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+
+        // Enter the directory
+        let result = picker.process_input(enter_event, Some(&resolver));
+        assert_eq!(result, FilePickerResult::Continue);
+
+        // We should now be in the docs directory
+        assert_eq!(picker.current_directory().id, docs_id);
+        assert_eq!(picker.entry_count(), 2);
+        
+        // Check that the directory stack has the root
+        assert_eq!(picker.directory_stack.len(), 1);
+        assert_eq!(picker.directory_stack[0].id, root_id);
+
+        // Verify the entries are correct
+        let entries = picker.entries();
+        assert_eq!(entries[0].name, "guide.pdf");
+        assert_eq!(entries[1].name, "readme.md");
+    }
+
+    #[test]
+    fn test_go_back_to_parent() {
+        // Create directory structure: root -> docs -> subdir
+        let root_id = ObjectId::new();
+        let mut root = DirectoryView::new(root_id);
+
+        let docs_id = ObjectId::new();
+        root.add_entry(DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            ObjectKind::Map,
+        ));
+        root.add_entry(DirectoryEntry::new(
+            "file.txt".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        let mut docs_dir = DirectoryView::new(docs_id);
+        docs_dir.add_entry(DirectoryEntry::new(
+            "readme.md".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        let mut resolver = TestResolver::new();
+        resolver.register_directory(docs_dir.clone());
+
+        let mut picker = FilePicker::new(root.clone());
+
+        // Enter docs directory
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+        picker.process_input(enter_event, Some(&resolver));
+
+        // Verify we're in docs
+        assert_eq!(picker.current_directory().id, docs_id);
+        assert_eq!(picker.entry_count(), 1);
+
+        // Go back
+        let escape_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Escape,
+            Modifiers::none(),
+        ));
+        let result = picker.process_input(escape_event, no_resolver());
+        assert_eq!(result, FilePickerResult::Continue);
+
+        // We should be back in root
+        assert_eq!(picker.current_directory().id, root_id);
+        assert_eq!(picker.entry_count(), 2);
+        assert_eq!(picker.directory_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_multi_level_navigation() {
+        // Create directory structure: root -> level1 -> level2
+        let root_id = ObjectId::new();
+        let mut root = DirectoryView::new(root_id);
+
+        let level1_id = ObjectId::new();
+        root.add_entry(DirectoryEntry::new(
+            "level1".to_string(),
+            level1_id,
+            ObjectKind::Map,
+        ));
+
+        let mut level1 = DirectoryView::new(level1_id);
+        let level2_id = ObjectId::new();
+        level1.add_entry(DirectoryEntry::new(
+            "level2".to_string(),
+            level2_id,
+            ObjectKind::Map,
+        ));
+
+        let mut level2 = DirectoryView::new(level2_id);
+        level2.add_entry(DirectoryEntry::new(
+            "deep_file.txt".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        let mut resolver = TestResolver::new();
+        resolver.register_directory(level1.clone());
+        resolver.register_directory(level2.clone());
+
+        let mut picker = FilePicker::new(root.clone());
+
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+
+        // Enter level1
+        picker.process_input(enter_event.clone(), Some(&resolver));
+        assert_eq!(picker.current_directory().id, level1_id);
+        assert_eq!(picker.directory_stack.len(), 1);
+
+        // Enter level2
+        picker.process_input(enter_event.clone(), Some(&resolver));
+        assert_eq!(picker.current_directory().id, level2_id);
+        assert_eq!(picker.directory_stack.len(), 2);
+        assert_eq!(picker.entry_count(), 1);
+        assert_eq!(picker.entries()[0].name, "deep_file.txt");
+
+        let escape_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Escape,
+            Modifiers::none(),
+        ));
+
+        // Go back to level1
+        picker.process_input(escape_event.clone(), no_resolver());
+        assert_eq!(picker.current_directory().id, level1_id);
+        assert_eq!(picker.directory_stack.len(), 1);
+
+        // Go back to root
+        picker.process_input(escape_event.clone(), no_resolver());
+        assert_eq!(picker.current_directory().id, root_id);
+        assert_eq!(picker.directory_stack.len(), 0);
+
+        // Escape at root cancels
+        let result = picker.process_input(escape_event, no_resolver());
+        assert_eq!(result, FilePickerResult::Cancelled);
+    }
+
+    #[test]
+    fn test_enter_unresolved_directory() {
+        // Test what happens when resolver can't resolve a directory
+        let root_id = ObjectId::new();
+        let mut root = DirectoryView::new(root_id);
+
+        let unknown_id = ObjectId::new();
+        root.add_entry(DirectoryEntry::new(
+            "unknown".to_string(),
+            unknown_id,
+            ObjectKind::Map,
+        ));
+
+        // Create resolver but don't register the unknown directory
+        let resolver = TestResolver::new();
+
+        let mut picker = FilePicker::new(root.clone());
+
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+
+        // Try to enter the unresolved directory
+        let result = picker.process_input(enter_event, Some(&resolver));
+        assert_eq!(result, FilePickerResult::Continue);
+
+        // We should still be in the root directory
+        assert_eq!(picker.current_directory().id, root_id);
+        assert_eq!(picker.directory_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_selection_reset_on_directory_change() {
+        // Test that selection is reset when navigating directories
+        let root_id = ObjectId::new();
+        let mut root = DirectoryView::new(root_id);
+
+        let docs_id = ObjectId::new();
+        root.add_entry(DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            ObjectKind::Map,
+        ));
+        root.add_entry(DirectoryEntry::new(
+            "file1.txt".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+        root.add_entry(DirectoryEntry::new(
+            "file2.txt".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        let mut docs_dir = DirectoryView::new(docs_id);
+        docs_dir.add_entry(DirectoryEntry::new(
+            "readme.md".to_string(),
+            ObjectId::new(),
+            ObjectKind::Blob,
+        ));
+
+        let mut resolver = TestResolver::new();
+        resolver.register_directory(docs_dir.clone());
+
+        let mut picker = FilePicker::new(root.clone());
+
+        // Move selection to last item
+        picker.selected_index = 2;
+        assert_eq!(picker.selected_index(), 2);
+
+        // Go back to first item and enter the docs directory
+        picker.selected_index = 0;
+        let enter_event = InputEvent::Key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        ));
+        picker.process_input(enter_event, Some(&resolver));
+
+        // Selection should be reset to 0 in the new directory
+        assert_eq!(picker.selected_index(), 0);
+        assert_eq!(picker.current_directory().id, docs_id);
     }
 }

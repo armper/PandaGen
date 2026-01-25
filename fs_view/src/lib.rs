@@ -21,3 +21,18 @@ pub mod path;
 
 pub use directory::{DirectoryEntry, DirectoryView};
 pub use path::{PathError, PathResolver};
+
+use services_storage::ObjectId;
+
+/// Trait for resolving subdirectories
+///
+/// This trait abstracts away the mechanism for loading directory contents,
+/// allowing components to work with different storage backends while
+/// remaining testable and avoiding circular dependencies.
+pub trait DirectoryResolver {
+    /// Resolves a directory by its ObjectId, returning its view
+    ///
+    /// Returns None if the directory cannot be accessed or doesn't exist.
+    fn resolve_directory(&self, id: &ObjectId) -> Option<DirectoryView>;
+}
+
