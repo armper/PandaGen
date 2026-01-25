@@ -32,16 +32,20 @@ use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
+#[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+#[cfg(not(test))]
 use limine::memory_map::EntryType;
+#[cfg(not(test))]
 use limine::request::{
     ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
 };
+#[cfg(not(test))]
 use limine::BaseRevision;
 
 #[cfg(not(test))]

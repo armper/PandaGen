@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 
 #[cfg(test)]
-use std::string::{String, ToString};
+use std::string::String;
 
 use editor_core::{CoreOutcome, EditorCore, Key};
 

@@ -325,6 +325,7 @@ impl TimerInterrupt for HpetTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_fake_timer_basic() {

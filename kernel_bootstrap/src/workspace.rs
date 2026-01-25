@@ -40,6 +40,16 @@ pub enum ComponentType {
     Shell,
 }
 
+impl core::fmt::Display for ComponentType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ComponentType::Editor => write!(f, "Editor"),
+            ComponentType::Cli => write!(f, "CLI"),
+            ComponentType::Shell => write!(f, "Shell"),
+        }
+    }
+}
+
 /// Workspace session state
 pub struct WorkspaceSession {
     /// Active component type
@@ -146,8 +156,8 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
-        let pre_editor_row = self.editor.as_ref().map(|editor| editor.cursor().row);
-        let pre_editor_col = self.editor.as_ref().map(|editor| editor.cursor().col);
+        let _pre_editor_row = self.editor.as_ref().map(|editor| editor.cursor().row);
+        let _pre_editor_col = self.editor.as_ref().map(|editor| editor.cursor().col);
         #[cfg(feature = "console_vga")]
         let focused_tile = self.tile_manager.focused_tile();
         #[cfg(not(feature = "console_vga"))]
@@ -253,7 +263,7 @@ impl WorkspaceSession {
 
                 #[cfg(debug_assertions)]
                 {
-                    if let (Some(pre_row), Some(pre_col)) = (pre_editor_row, pre_editor_col) {
+                    if let (Some(pre_row), Some(pre_col)) = (_pre_editor_row, _pre_editor_col) {
                         let new_row = editor.cursor().row;
                         let new_col = editor.cursor().col;
                         let line_delta = if new_row > pre_row {

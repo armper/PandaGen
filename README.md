@@ -6,10 +6,13 @@ PandaGen is an experimental OS-like runtime that intentionally rejects POSIX and
 
 ## ⚠️ Project Status
 
-This is a **research prototype** and **foundation scaffold**. It is:
+This is a **research prototype** and **advanced foundation**. It is:
 - ✅ Designed for testability and clarity
 - ✅ Modular and evolvable
 - ✅ Fully functional under `cargo test`
+- ✅ Boots on x86_64 bare metal (via QEMU)
+- ✅ Interactive text editor with workspace management
+- ✅ Capability-based storage with permissions
 - ❌ Not a replacement for Linux/BSD/Windows
 - ❌ Not production-ready
 - ❌ Not POSIX-compatible (by design)
@@ -60,29 +63,60 @@ Legacy operating systems optimize for backward compatibility, not clarity. We be
 
 ```
 PandaGen/
-├── core_types/              # Fundamental types (Cap<T>, IDs)
-├── ipc/                     # Message passing primitives
-├── kernel_api/              # Kernel interface trait
-├── sim_kernel/              # Simulated kernel (for testing)
-├── hal/                     # Hardware abstraction traits
-├── hal_x86_64/              # x86_64 HAL implementation (skeleton)
-├── identity/                # Execution identities & trust domains
-├── policy/                  # Policy engine framework
-├── resources/               # Resource budgets & enforcement
-├── lifecycle/               # Task lifecycle management
-├── pipeline/                # Pipeline execution primitives
-├── services_registry/       # Service discovery
-├── services_process_manager/# Service lifecycle management
-├── services_logger/         # Structured logging
-├── services_storage/        # Versioned object storage
-├── services_fs_view/        # Filesystem view illusion
+├── core_types/                 # Fundamental types (Cap<T>, IDs)
+├── ipc/                        # Message passing primitives
+├── kernel_api/                 # Kernel interface trait
+├── sim_kernel/                 # Simulated kernel (for testing)
+├── hal/                        # Hardware abstraction traits
+├── hal_x86_64/                 # x86_64 HAL implementation
+├── identity/                   # Execution identities & trust domains
+├── policy/                     # Policy engine framework
+├── resources/                  # Resource budgets & enforcement
+├── lifecycle/                  # Task lifecycle management
+├── pipeline/                   # Pipeline execution primitives
+├── services_registry/          # Service discovery
+├── services_process_manager/   # Service lifecycle management
+├── services_logger/            # Structured logging
+├── services_storage/           # Versioned object storage with permissions
+├── services_fs_view/           # Filesystem view illusion
 ├── services_pipeline_executor/ # Pipeline execution service
-├── services_input/          # Input subscription management (Phase 14)
-├── services_focus_manager/  # Focus control & routing (Phase 14)
-├── input_types/             # Input event types (Phase 14)
-├── fs_view/                 # Filesystem view client library
-├── intent_router/           # Typed command routing
-└── cli_console/             # Demo bootstrap & interactive console
+├── services_input/             # Input subscription management
+├── services_focus_manager/     # Focus control & routing
+├── services_command_palette/   # Command palette with fuzzy search
+├── services_view_host/         # View rendering coordination
+├── services_gui_host/          # GUI composition and rendering
+├── services_remote_ui_host/    # Remote UI over network
+├── services_editor_vi/         # Vi-style text editor service
+├── services_workspace_manager/ # Workspace and component management
+├── services_file_picker/       # File selection interface
+├── services_app_store/         # Application package management
+├── services_network/           # Network stack primitives
+├── services_notification/      # System notifications
+├── services_job_scheduler/     # Job scheduling and execution
+├── services_device_manager/    # Device enumeration and management
+├── services_settings/          # Configuration management
+├── input_types/                # Input event types
+├── view_types/                 # View rendering types
+├── editor_core/                # Reusable editor logic
+├── text_renderer_host/         # Text rendering engine
+├── console_vga/                # VGA console rendering
+├── console_fb/                 # Framebuffer console
+├── fs_view/                    # Filesystem view client library
+├── intent_router/              # Typed command routing
+├── packages/                   # Package metadata types
+├── package_registry/           # Package registry service
+├── remote_ipc/                 # Remote IPC with capabilities
+├── distributed_storage/        # Distributed storage coordination
+├── workspace_access/           # Workspace access control
+├── developer_sdk/              # Developer tools and utilities
+├── formal_verification/        # Formal verification tools
+├── secure_boot/                # Secure boot infrastructure
+├── kernel_bootstrap/           # Bare-metal kernel bootstrap
+├── boot/                       # Boot loader integration
+├── cli_console/                # Demo bootstrap & interactive console
+├── tests_pipelines/            # Pipeline integration tests
+├── tests_resilience/           # Resilience and fault injection tests
+└── contract_tests/             # Contract testing infrastructure
 ```
 
 ### Key Design Decisions
@@ -147,7 +181,14 @@ cargo clippy -- -D warnings
 
 ### Bare-Metal Track
 
-- B1 bootable ISO pipeline is available. See `docs/qemu_boot.md`.
+PandaGen can boot on x86_64 hardware:
+- ✅ Bootable ISO via Limine bootloader
+- ✅ QEMU-tested kernel bootstrap
+- ✅ VGA text mode and framebuffer support
+- ✅ PS/2 keyboard input handling
+- ✅ Interactive workspace with editor
+
+See `docs/qemu_boot.md` for build and boot instructions.
 
 ## 📖 Documentation
 
@@ -242,22 +283,51 @@ cargo test --all
 - [x] Pipeline execution
 - [x] Fault injection & resilience testing
 
-### ✅ Phase 14: Input System (Complete)
+### ✅ Phase 14-56: Input & Bare-Metal Foundation (Complete)
 - [x] Input types (KeyEvent, KeyCode, Modifiers)
 - [x] Input service (subscription management)
 - [x] Focus manager (stack-based focus control)
 - [x] SimKernel event injection utilities
 - [x] Interactive console demo
-- [x] Full documentation & examples
+- [x] Bare-metal boot proof (Phase 56)
+- [x] x86_64 HAL implementation
 
-### Phase 15+: Future Work
-- [ ] Real kernel implementation (baremetal)
-- [ ] Hardware drivers (keyboard, display, etc.)
-- [ ] Pointer/touch input support
+### ✅ Phase 57-90: Views, Rendering & Editor (Complete)
+- [x] View host & snapshot rendering (Phase 60)
+- [x] Framebuffer console support
+- [x] VGA text mode console
+- [x] Filesystem permissions & ownership (Phase 80)
+- [x] Unified editor architecture (Phase 90)
+- [x] Core editor extraction
+- [x] Text rendering engine
+
+### ✅ Phase 91-117: Workspace, UI & Performance (Complete)
+- [x] Fast framebuffer editor rendering (Phase 100)
+- [x] File persistence and UX improvements
+- [x] Workspace modernization (Phase 110)
+- [x] Command palette with fuzzy search
+- [x] Workspace manager service
+- [x] Vi-style editor service
+- [x] Bare-metal workspace platform adapter (Phase 115)
+- [x] High-impact performance optimizations (Phase 117)
+
+### 🔄 Current Status
+The system now includes:
+- **Bare-metal capable**: Can boot on x86_64 hardware via QEMU
+- **Interactive editor**: Full vi-style text editor with rendering
+- **Workspace management**: Multi-component workspace with command palette
+- **Storage with permissions**: Capability-based file ownership
+- **Remote capabilities**: IPC over network with explicit authority
+- **Package system**: Application package registry and management
+- **Comprehensive testing**: Unit tests, integration tests, and resilience tests
+
+### Phase 118+: Future Work
 - [ ] Multi-core support
-- [ ] Graphics/UI framework
-- [ ] Network stack
-- [ ] Bootloader integration
+- [ ] Graphics/UI framework beyond text mode
+- [ ] Advanced network protocols
+- [ ] Distributed consensus algorithms
+- [ ] Real-time scheduling guarantees
+- [ ] Formal verification of critical paths
 
 ## 🤝 Contributing
 
