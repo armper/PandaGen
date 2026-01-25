@@ -19,7 +19,7 @@ use alloc::vec;
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-use crate::minimal_editor::MinimalEditor;
+use crate::minimal_editor::{EditorMode, MinimalEditor};
 use crate::palette_overlay::{FocusTarget, PaletteKeyAction, PaletteOverlayState, handle_palette_key};
 
 #[cfg(not(test))]
