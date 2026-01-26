@@ -3,7 +3,10 @@
 //! This example demonstrates the settings persistence and live apply functionality.
 
 use identity::{IdentityKind, IdentityMetadata, TrustDomain};
-use services_workspace_manager::{WorkspaceManager, commands::{WorkspaceCommand, CommandResult}};
+use services_workspace_manager::{
+    commands::{CommandResult, WorkspaceCommand},
+    WorkspaceManager,
+};
 
 fn main() {
     println!("=== PandaGen Settings System Demo ===\n");
@@ -26,7 +29,7 @@ fn main() {
 
     // Change some settings
     println!("\n2. Changing settings:");
-    
+
     println!("   Setting editor.tab_size to 2...");
     let result = workspace.execute_command(WorkspaceCommand::SettingsSet {
         key: "editor.tab_size".to_string(),
@@ -62,7 +65,7 @@ fn main() {
 
     // Demonstrate persistence round-trip
     println!("\n5. Simulating persistence round-trip:");
-    
+
     // Export current settings
     let overrides = workspace.settings_registry().export_overrides();
     let data = services_settings::persistence::SettingsOverridesData::from_overrides(&overrides);
@@ -76,13 +79,18 @@ fn main() {
     // Restore settings
     let loaded_data = services_settings::persistence::deserialize_overrides(&bytes).unwrap();
     let loaded_overrides = loaded_data.to_overrides();
-    new_workspace.settings_registry_mut().import_overrides(loaded_overrides);
+    new_workspace
+        .settings_registry_mut()
+        .import_overrides(loaded_overrides);
     println!("   Restored settings from serialized data");
 
     // Verify settings persisted
     println!("\n6. Verifying restored settings:");
     assert_eq!(
-        new_workspace.get_setting("editor.tab_size").unwrap().as_integer(),
+        new_workspace
+            .get_setting("editor.tab_size")
+            .unwrap()
+            .as_integer(),
         Some(2)
     );
     println!("   ✓ editor.tab_size = 2");
@@ -94,7 +102,10 @@ fn main() {
     println!("   ✓ ui.theme = dark");
 
     assert_eq!(
-        new_workspace.get_setting("editor.line_numbers").unwrap().as_boolean(),
+        new_workspace
+            .get_setting("editor.line_numbers")
+            .unwrap()
+            .as_boolean(),
         Some(false)
     );
     println!("   ✓ editor.line_numbers = false");
@@ -107,14 +118,17 @@ fn main() {
     print_result(&result);
 
     assert_eq!(
-        new_workspace.get_setting("editor.tab_size").unwrap().as_integer(),
+        new_workspace
+            .get_setting("editor.tab_size")
+            .unwrap()
+            .as_integer(),
         Some(4)
     );
     println!("   ✓ Verified: editor.tab_size = 4 (default)");
 
     // Error handling demo
     println!("\n8. Error handling demonstration:");
-    
+
     println!("   Trying to set unknown setting...");
     let result = new_workspace.execute_command(WorkspaceCommand::SettingsSet {
         key: "unknown.setting".to_string(),

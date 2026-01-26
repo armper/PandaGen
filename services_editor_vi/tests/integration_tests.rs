@@ -3,11 +3,11 @@
 //! These tests validate complete editing workflows using simulated keyboard input.
 
 use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+use services_editor_vi::io::IoError;
 use services_editor_vi::{
     DocumentHandle, Editor, EditorAction, EditorIo, OpenOptions, OpenResult, SaveResult,
     StorageEditorIo,
 };
-use services_editor_vi::io::IoError;
 use services_storage::{JournaledStorage, ObjectId, TransactionalStorage, VersionId};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,9 +24,7 @@ impl SharedStorageIo {
 
 impl EditorIo for SharedStorageIo {
     fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError> {
-        let object_id = options
-            .object_id
-            .ok_or(IoError::NotFound)?;
+        let object_id = options.object_id.ok_or(IoError::NotFound)?;
 
         let mut storage = self.storage.borrow_mut();
         let mut tx = storage
@@ -152,7 +150,10 @@ fn test_quit_blocked_when_dirty() {
 
     // Should refuse to quit with new error message
     assert_eq!(result, EditorAction::Continue);
-    assert_eq!(editor.state().status_message(), "Unsaved changes — use :w or :q!");
+    assert_eq!(
+        editor.state().status_message(),
+        "Unsaved changes — use :w or :q!"
+    );
 
     // Force quit with :q!
     editor
@@ -555,9 +556,7 @@ fn test_editor_persistence_across_reboot() {
     {
         let mut storage_mut = storage.borrow_mut();
         let mut tx = storage_mut.begin_transaction().unwrap();
-        storage_mut
-            .write(&mut tx, object_id, b"hello")
-            .unwrap();
+        storage_mut.write(&mut tx, object_id, b"hello").unwrap();
         storage_mut.commit(&mut tx).unwrap();
     }
 

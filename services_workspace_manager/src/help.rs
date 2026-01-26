@@ -21,7 +21,7 @@ pub enum HelpCategory {
 
 impl HelpCategory {
     /// Parse help category from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "overview" | "" => Some(HelpCategory::Overview),
             "workspace" => Some(HelpCategory::Workspace),
@@ -44,8 +44,7 @@ impl HelpCategory {
     }
 
     fn overview_help(&self) -> String {
-        format!(
-            "PandaGen OS Workspace\n\
+        "PandaGen OS Workspace\n\
              \n\
              Available help topics:\n\
              - help workspace  — Workspace management commands\n\
@@ -54,12 +53,11 @@ impl HelpCategory {
              - help system     — System control commands\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
-        )
+            .to_string()
     }
 
     fn workspace_help(&self) -> String {
-        format!(
-            "Workspace Commands\n\
+        "Workspace Commands\n\
              \n\
              open editor <path>   — Open file in editor\n\
              list                 — List all components\n\
@@ -68,12 +66,11 @@ impl HelpCategory {
              recent               — Show recent files\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
-        )
+            .to_string()
     }
 
     fn editor_help(&self) -> String {
-        format!(
-            "Editor Commands\n\
+        "Editor Commands\n\
              \n\
              The editor is vi-like with familiar keybindings:\n\
              - i        — Enter insert mode\n\
@@ -83,12 +80,11 @@ impl HelpCategory {
              - h,j,k,l  — Navigate left, down, up, right\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
-        )
+            .to_string()
     }
 
     fn keys_help(&self) -> String {
-        format!(
-            "Keyboard Shortcuts\n\
+        "Keyboard Shortcuts\n\
              \n\
              Global shortcuts:\n\
              - Ctrl+P       — Open command palette\n\
@@ -101,12 +97,11 @@ impl HelpCategory {
              - Ctrl+2       — Focus bottom component\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
-        )
+            .to_string()
     }
 
     fn system_help(&self) -> String {
-        format!(
-            "System Commands\n\
+        "System Commands\n\
              \n\
              System control:\n\
              - halt         — Shut down system\n\
@@ -115,7 +110,7 @@ impl HelpCategory {
              - ticks        — Show scheduler ticks\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
-        )
+            .to_string()
     }
 }
 
@@ -137,14 +132,20 @@ mod tests {
 
     #[test]
     fn test_help_category_from_str() {
-        assert_eq!(HelpCategory::from_str(""), Some(HelpCategory::Overview));
-        assert_eq!(HelpCategory::from_str("overview"), Some(HelpCategory::Overview));
-        assert_eq!(HelpCategory::from_str("workspace"), Some(HelpCategory::Workspace));
-        assert_eq!(HelpCategory::from_str("editor"), Some(HelpCategory::Editor));
-        assert_eq!(HelpCategory::from_str("keys"), Some(HelpCategory::Keys));
-        assert_eq!(HelpCategory::from_str("keyboard"), Some(HelpCategory::Keys));
-        assert_eq!(HelpCategory::from_str("system"), Some(HelpCategory::System));
-        assert_eq!(HelpCategory::from_str("invalid"), None);
+        assert_eq!(HelpCategory::parse(""), Some(HelpCategory::Overview));
+        assert_eq!(
+            HelpCategory::parse("overview"),
+            Some(HelpCategory::Overview)
+        );
+        assert_eq!(
+            HelpCategory::parse("workspace"),
+            Some(HelpCategory::Workspace)
+        );
+        assert_eq!(HelpCategory::parse("editor"), Some(HelpCategory::Editor));
+        assert_eq!(HelpCategory::parse("keys"), Some(HelpCategory::Keys));
+        assert_eq!(HelpCategory::parse("keyboard"), Some(HelpCategory::Keys));
+        assert_eq!(HelpCategory::parse("system"), Some(HelpCategory::System));
+        assert_eq!(HelpCategory::parse("invalid"), None);
     }
 
     #[test]

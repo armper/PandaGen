@@ -265,7 +265,10 @@ mod tests {
         // After typing "line2", cursor is at col 5. Esc moves to col 4 (on '2').
         // k moves up, maintaining column 4, which is on '1' in "line1".
         // x deletes '1', leaving "line".
-        assert_eq!(line1, "line", "Expected 'line' after deleting '1' from 'line1'");
+        assert_eq!(
+            line1, "line",
+            "Expected 'line' after deleting '1' from 'line1'"
+        );
 
         // Force quit
         editor.process_byte(b':');

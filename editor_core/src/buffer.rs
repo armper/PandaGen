@@ -1,6 +1,7 @@
 //! Text buffer and position types
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(feature = "serde_support")]
@@ -33,19 +34,13 @@ pub struct TextBuffer {
 impl TextBuffer {
     pub fn new() -> Self {
         Self {
-            lines: {
-                let mut v = Vec::new();
-                v.push(String::new());
-                v
-            },
+            lines: vec![String::new()],
         }
     }
 
     pub fn from_string(content: String) -> Self {
         let lines = if content.is_empty() {
-            let mut v = Vec::new();
-            v.push(String::new());
-            v
+            vec![String::new()]
         } else {
             content.lines().map(|s| s.into()).collect()
         };

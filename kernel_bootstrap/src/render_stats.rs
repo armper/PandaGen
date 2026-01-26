@@ -84,7 +84,9 @@ pub fn frame_begin(current_tick: u64) {
     RENDER_STATS.char_draws.store(0, Ordering::Relaxed);
     RENDER_STATS.full_clears.store(0, Ordering::Relaxed);
     RENDER_STATS.line_clears.store(0, Ordering::Relaxed);
-    RENDER_STATS.frame_start_tick.store(current_tick, Ordering::Relaxed);
+    RENDER_STATS
+        .frame_start_tick
+        .store(current_tick, Ordering::Relaxed);
 }
 
 #[inline]
@@ -97,23 +99,37 @@ pub fn frame_begin(_current_tick: u64) {}
 pub fn frame_end(current_tick: u64) -> RenderFrameStats {
     let start = RENDER_STATS.frame_start_tick.load(Ordering::Relaxed);
     let duration = current_tick.saturating_sub(start);
-    
-    RENDER_STATS.last_frame_ticks.store(duration, Ordering::Relaxed);
-    RENDER_STATS.total_frame_ticks.fetch_add(duration, Ordering::Relaxed);
+
+    RENDER_STATS
+        .last_frame_ticks
+        .store(duration, Ordering::Relaxed);
+    RENDER_STATS
+        .total_frame_ticks
+        .fetch_add(duration, Ordering::Relaxed);
     RENDER_STATS.frame_count.fetch_add(1, Ordering::Relaxed);
-    
+
     // Update min/max
-    let _ = RENDER_STATS.min_frame_ticks.fetch_update(
-        Ordering::Relaxed, 
-        Ordering::Relaxed,
-        |old| if duration < old { Some(duration) } else { None }
-    );
-    let _ = RENDER_STATS.max_frame_ticks.fetch_update(
-        Ordering::Relaxed,
-        Ordering::Relaxed, 
-        |old| if duration > old { Some(duration) } else { None }
-    );
-    
+    let _ =
+        RENDER_STATS
+            .min_frame_ticks
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                if duration < old {
+                    Some(duration)
+                } else {
+                    None
+                }
+            });
+    let _ =
+        RENDER_STATS
+            .max_frame_ticks
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                if duration > old {
+                    Some(duration)
+                } else {
+                    None
+                }
+            });
+
     RenderFrameStats {
         pixel_writes: RENDER_STATS.pixel_writes.load(Ordering::Relaxed),
         char_draws: RENDER_STATS.char_draws.load(Ordering::Relaxed),
@@ -144,7 +160,9 @@ pub fn record_pixel_write() {}
 #[inline]
 #[cfg(debug_assertions)]
 pub fn record_pixel_writes(count: u64) {
-    RENDER_STATS.pixel_writes.fetch_add(count, Ordering::Relaxed);
+    RENDER_STATS
+        .pixel_writes
+        .fetch_add(count, Ordering::Relaxed);
 }
 
 #[inline]
@@ -189,8 +207,8 @@ pub fn record_line_clear() {}
 pub fn get_cumulative_stats() -> RenderCumulativeStats {
     let frame_count = RENDER_STATS.frame_count.load(Ordering::Relaxed);
     let total_ticks = RENDER_STATS.total_frame_ticks.load(Ordering::Relaxed);
-    let avg = if frame_count > 0 { total_ticks / frame_count } else { 0 };
-    
+    let avg = total_ticks.checked_div(frame_count).unwrap_or(0);
+
     RenderCumulativeStats {
         frame_count,
         avg_frame_ticks: avg,
@@ -217,7 +235,9 @@ pub fn reset_stats() {
     RENDER_STATS.last_frame_ticks.store(0, Ordering::Relaxed);
     RENDER_STATS.total_frame_ticks.store(0, Ordering::Relaxed);
     RENDER_STATS.frame_count.store(0, Ordering::Relaxed);
-    RENDER_STATS.min_frame_ticks.store(u64::MAX, Ordering::Relaxed);
+    RENDER_STATS
+        .min_frame_ticks
+        .store(u64::MAX, Ordering::Relaxed);
     RENDER_STATS.max_frame_ticks.store(0, Ordering::Relaxed);
 }
 
@@ -227,11 +247,11 @@ pub fn reset_stats() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_render_stats_frame_tracking() {
         reset_stats();
-        
+
         // Simulate a frame
         frame_begin(100);
         record_char_draw();
@@ -239,28 +259,28 @@ mod tests {
         record_pixel_writes(256); // 2 chars × 128 pixels
         record_line_clear();
         let stats = frame_end(105);
-        
+
         assert_eq!(stats.char_draws, 2);
         assert_eq!(stats.pixel_writes, 256);
         assert_eq!(stats.line_clears, 1);
         assert_eq!(stats.frame_ticks, 5);
     }
-    
+
     #[test]
     fn test_cumulative_stats() {
         reset_stats();
-        
+
         // Frame 1
         frame_begin(0);
         record_char_draw();
         frame_end(10);
-        
+
         // Frame 2
         frame_begin(10);
         record_char_draw();
         record_char_draw();
         frame_end(25);
-        
+
         let cumulative = get_cumulative_stats();
         assert_eq!(cumulative.frame_count, 2);
         // min=10, max=15, avg=12 (but this is tricky with atomics)

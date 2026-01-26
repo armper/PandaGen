@@ -4,11 +4,11 @@
 //! serialized into MessageEnvelope payloads, routed via a transport, and
 //! decoded back into typed responses.
 
+use crate::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use alloc::format;
 use alloc::string::{String, ToString};
 use core::cell::RefCell;
 use core::fmt;
-use crate::{Duration, Instant, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use core_types::{Cap, ServiceId, TaskId};
 use ipc::{ChannelId, MessageEnvelope, MessageId, MessagePayload, SchemaVersion};
 use serde::{Deserialize, Serialize};

@@ -35,7 +35,7 @@ pub enum CommandOutcome {
 /// Parse command string (without leading ':')
 pub fn parse_command(cmd_str: &str) -> Command {
     let trimmed = cmd_str.trim();
-    
+
     match trimmed {
         "q" => Command::Quit { force: false },
         "q!" => Command::Quit { force: true },

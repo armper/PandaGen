@@ -33,6 +33,12 @@ pub struct TraceRecorder {
     log: TraceLog,
 }
 
+impl Default for TraceRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TraceRecorder {
     pub fn new() -> Self {
         Self {
@@ -59,8 +65,12 @@ impl ReplaySession {
     pub fn new(log: TraceLog) -> Self {
         Self { log, cursor: 0 }
     }
+}
 
-    pub fn next(&mut self) -> Option<TraceEvent> {
+impl Iterator for ReplaySession {
+    type Item = TraceEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
         if self.cursor >= self.log.events.len() {
             return None;
         }
@@ -91,6 +101,12 @@ pub trait TraceSink {
 
 pub struct DebuggerHost {
     sinks: Vec<Box<dyn TraceSink>>,
+}
+
+impl Default for DebuggerHost {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DebuggerHost {

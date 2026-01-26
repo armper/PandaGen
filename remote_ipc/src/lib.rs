@@ -94,7 +94,7 @@ impl<T: RemoteTransport> RemoteIpcClient<T> {
             return Err(RemoteIpcError::Codec("request_id mismatch".to_string()));
         }
 
-        response.result.map_err(|err| RemoteIpcError::Codec(err))
+        response.result.map_err(RemoteIpcError::Codec)
     }
 }
 
@@ -126,10 +126,7 @@ impl<H: RemoteHandler> RemoteIpcServer<H> {
 
         let request_id = call.request_id;
         let result = self.handler.handle(call);
-        let response = RemoteResponse {
-            request_id,
-            result,
-        };
+        let response = RemoteResponse { request_id, result };
         encode_response(response, message.id)
     }
 }

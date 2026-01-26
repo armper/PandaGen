@@ -296,7 +296,7 @@ impl Executable {
         buf.extend_from_slice(&1u32.to_le_bytes());
 
         // Text section
-        let size = ((code.len() + 4095) / 4096) * 4096; // Round up to page size
+        let size = code.len().div_ceil(4096) * 4096; // Round up to page size
         buf.extend_from_slice(&(SectionType::Text as u32).to_le_bytes());
         buf.extend_from_slice(&(size as u64).to_le_bytes());
         buf.extend_from_slice(&5u32.to_le_bytes()); // read + execute

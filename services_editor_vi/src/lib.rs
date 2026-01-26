@@ -1,6 +1,5 @@
 #![no_std]
 
-
 //! # VI-like Editor Service
 //!
 //! This crate implements a modal text editor for PandaGen OS.

@@ -16,8 +16,8 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::fmt;
-use serde::{Deserialize, Serialize};
 use core_types::new_uuid;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{ObjectId, VersionId};

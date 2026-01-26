@@ -4,16 +4,16 @@
 
 use crate::commands::{HostCommand, HostCommandParser};
 use crate::input_script::{InputScript, ScriptedInput};
+use fs_view::DirectoryView;
 use identity::{ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use policy::NoOpPolicy;
+use services_fs_view::FileSystemViewService;
+use services_storage::{JournaledStorage, ObjectId};
 use services_workspace_manager::{
     ComponentType, EditorIoContext, LaunchConfig, WorkspaceError, WorkspaceManager,
     WorkspaceRenderSnapshot,
 };
-use services_fs_view::FileSystemViewService;
-use services_storage::{JournaledStorage, ObjectId};
-use fs_view::DirectoryView;
 use sim_kernel::SimulatedKernel;
 use text_renderer_host::TextRenderer;
 use thiserror::Error;
@@ -469,10 +469,7 @@ impl HostRuntime {
                         .as_deref()
                         .unwrap_or("(no key events yet)")
                 ));
-                output.push_str(&format!(
-                    "║ Routed To: {:?}\n",
-                    debug_info.last_routed_to
-                ));
+                output.push_str(&format!("║ Routed To: {:?}\n", debug_info.last_routed_to));
                 output.push_str(&format!(
                     "║ Global Keybinding: {}\n",
                     if debug_info.consumed_by_global {

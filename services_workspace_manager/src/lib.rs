@@ -45,13 +45,14 @@ use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::boxed::Box;
 #[cfg(feature = "std")]
+use std::collections::HashMap;
+#[cfg(feature = "std")]
 use std::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::vec::Vec;
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 
 use core_types::TaskId;
+use fs_view::DirectoryView;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use keybindings::KeyBindingManager;
@@ -60,13 +61,12 @@ use packages::{ComponentLoader, PackageComponentType, PackageManifest};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
-use fs_view::DirectoryView;
 use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
-use services_fs_view::FileSystemViewService;
-use services_settings::{self, SettingsRegistry, SettingKey, SettingValue};
-use services_storage::JournaledStorage;
 use services_focus_manager::{FocusError, FocusManager};
+use services_fs_view::FileSystemViewService;
 use services_input::InputSubscriptionCap;
+use services_settings::{self, SettingKey, SettingValue, SettingsRegistry};
+use services_storage::JournaledStorage;
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
 #[cfg(feature = "std")]
 use thiserror::Error;
@@ -80,7 +80,8 @@ pub use platform::{
     FakePlatform, WorkspaceCaps, WorkspaceDisplay, WorkspaceInput, WorkspacePlatform, WorkspaceTick,
 };
 pub use workspace_status::{
-    ActionableError, CommandSuggestion, FsStatus, PromptValidation, generate_suggestions, validate_command,
+    generate_suggestions, validate_command, ActionableError, CommandSuggestion, FsStatus,
+    PromptValidation,
 };
 
 /// Unique identifier for a component in the workspace
@@ -484,7 +485,7 @@ impl LaunchConfig {
 /// Stores the actual running component instance
 enum ComponentInstance {
     /// Editor component
-    Editor(Editor),
+    Editor(Box<Editor>),
     /// No instance (placeholder for components not yet implemented)
     None,
 }
@@ -716,7 +717,7 @@ impl WorkspaceManager {
                 if let (Some(main_view), Some(status_view)) =
                     (&component.main_view, &component.status_view)
                 {
-                    editor.set_view_handles(main_view.clone(), status_view.clone());
+                    editor.set_view_handles(*main_view, *status_view);
                 }
                 // Configure editor I/O context if available
                 if let Some(context) = &self.editor_io_context {
@@ -741,7 +742,7 @@ impl WorkspaceManager {
                         }
                     }
                 }
-                ComponentInstance::Editor(editor)
+                ComponentInstance::Editor(Box::new(editor))
             }
             _ => ComponentInstance::None,
         };
@@ -1080,7 +1081,8 @@ impl WorkspaceManager {
                     eprintln!("Failed to save settings: {}", e);
                     return false;
                 }
-                self.workspace_status.set_last_action("Settings saved".to_string());
+                self.workspace_status
+                    .set_last_action("Settings saved".to_string());
                 true
             }
             Action::Quit => {
@@ -1094,7 +1096,8 @@ impl WorkspaceManager {
                         },
                     );
                 }
-                self.workspace_status.set_last_action("Quitting...".to_string());
+                self.workspace_status
+                    .set_last_action("Quitting...".to_string());
                 true
             }
             Action::CommandMode => {
@@ -1114,10 +1117,7 @@ impl WorkspaceManager {
 
     /// Routes an input event to the focused component and processes it
     pub fn route_input(&mut self, event: &InputEvent) -> Option<ComponentId> {
-        let key_event = match event.as_key() {
-            Some(key_event) => key_event,
-            None => return None,
-        };
+        let key_event = event.as_key()?;
 
         // Track debug info (only in debug builds)
         #[cfg(debug_assertions)]
@@ -1127,8 +1127,7 @@ impl WorkspaceManager {
         }
 
         // Check global keybindings first
-        let global_consumed = if let Some(action) = self.key_binding_manager.get_action(key_event)
-        {
+        let global_consumed = if let Some(action) = self.key_binding_manager.get_action(key_event) {
             // Clone action to avoid borrow checker issues
             let action = action.clone();
             // Execute the action
@@ -1328,20 +1327,24 @@ impl WorkspaceManager {
 
     /// Gets a setting value for the current user
     pub fn get_setting(&self, key: &str) -> Option<&SettingValue> {
-        self.settings_registry.get(&self.current_user, &SettingKey::new(key))
+        self.settings_registry
+            .get(&self.current_user, &SettingKey::new(key))
     }
 
     /// Sets a setting value for the current user
     pub fn set_setting(&mut self, key: impl Into<String>, value: SettingValue) {
         let key_str = key.into();
-        self.settings_registry.set_user_override(&self.current_user, key_str.as_str(), value);
+        self.settings_registry
+            .set_user_override(&self.current_user, key_str.as_str(), value);
         // Apply settings changes immediately
         self.apply_setting(&key_str);
     }
 
     /// Resets a setting to its default value
     pub fn reset_setting(&mut self, key: &str) -> bool {
-        let result = self.settings_registry.reset_to_default(&self.current_user, &SettingKey::new(key));
+        let result = self
+            .settings_registry
+            .reset_to_default(&self.current_user, &SettingKey::new(key));
         if result {
             // Reapply to restore default behavior
             self.apply_setting(key);
@@ -1363,33 +1366,42 @@ impl WorkspaceManager {
                 // TODO: Apply theme changes when theme system is implemented
                 // For now, just record in workspace status
                 if let Some(theme) = value.as_string() {
-                    self.workspace_status.set_last_action(format!("Theme set to: {}", theme));
+                    self.workspace_status
+                        .set_last_action(format!("Theme set to: {}", theme));
                 }
             }
             services_settings::keys::UI_SHOW_KEYBINDING_HINTS => {
                 // This would affect the command palette display
                 // For now, just record the change
                 if let Some(show) = value.as_boolean() {
-                    self.workspace_status.set_last_action(format!("Keybinding hints: {}", if show { "enabled" } else { "disabled" }));
+                    self.workspace_status.set_last_action(format!(
+                        "Keybinding hints: {}",
+                        if show { "enabled" } else { "disabled" }
+                    ));
                 }
             }
             services_settings::keys::EDITOR_TAB_SIZE => {
                 // Apply to all editor instances
                 // TODO: When editors support runtime configuration, apply here
                 if let Some(tab_size) = value.as_integer() {
-                    self.workspace_status.set_last_action(format!("Tab size set to: {}", tab_size));
+                    self.workspace_status
+                        .set_last_action(format!("Tab size set to: {}", tab_size));
                 }
             }
             services_settings::keys::EDITOR_LINE_NUMBERS => {
                 // Apply to all editor instances
                 if let Some(show) = value.as_boolean() {
-                    self.workspace_status.set_last_action(format!("Line numbers: {}", if show { "enabled" } else { "disabled" }));
+                    self.workspace_status.set_last_action(format!(
+                        "Line numbers: {}",
+                        if show { "enabled" } else { "disabled" }
+                    ));
                 }
             }
             services_settings::keys::KEYBINDINGS_PROFILE => {
                 // Apply keybinding profile changes
                 if let Some(profile) = value.as_string() {
-                    self.workspace_status.set_last_action(format!("Keybinding profile: {}", profile));
+                    self.workspace_status
+                        .set_last_action(format!("Keybinding profile: {}", profile));
                 }
             }
             _ => {
@@ -1402,19 +1414,21 @@ impl WorkspaceManager {
     pub fn save_settings(&mut self) -> Result<(), String> {
         // Export overrides
         let overrides = self.settings_registry.export_overrides();
-        let data = services_settings::persistence::SettingsOverridesData::from_overrides(&overrides);
-        
+        let data =
+            services_settings::persistence::SettingsOverridesData::from_overrides(&overrides);
+
         // Serialize to JSON
         let bytes = services_settings::persistence::serialize_overrides(&data)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        
+
         // TODO(Phase 113): Integrate with StorageService
         // - Add settings path constant (e.g., "/settings/user_overrides.json")
         // - Use editor_io_context.storage.write() with proper capabilities
         // - Wrap in transaction for atomicity
         // For now, just validate serialization works
-        self.workspace_status.set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
-        
+        self.workspace_status
+            .set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
+
         Ok(())
     }
 
@@ -1425,7 +1439,8 @@ impl WorkspaceManager {
         // - Use load_overrides_safe() for corruption handling
         // - Call import_overrides() to apply
         // - Emit notification on success/failure
-        self.workspace_status.set_last_action("Settings loaded".to_string());
+        self.workspace_status
+            .set_last_action("Settings loaded".to_string());
         Ok(())
     }
 
@@ -1433,7 +1448,7 @@ impl WorkspaceManager {
     pub fn update_workspace_status(&mut self) {
         // Get active editor name from focused component
         let focused_id = self.get_focused_component();
-        
+
         let (active_editor, has_unsaved) = if let Some(id) = focused_id {
             if let Some(component) = self.get_component(id) {
                 if component.component_type == ComponentType::Editor {
@@ -1444,14 +1459,14 @@ impl WorkspaceManager {
                         .or_else(|| component.metadata.get("arg0"))
                         .cloned()
                         .unwrap_or_else(|| component.name.clone());
-                    
+
                     // Check for dirty state from metadata
                     let dirty = component
                         .metadata
                         .get("dirty")
                         .map(|v| v == "true")
                         .unwrap_or(false);
-                    
+
                     (Some(filename), dirty)
                 } else {
                     (None, false)
@@ -1467,11 +1482,8 @@ impl WorkspaceManager {
         self.workspace_status.has_unsaved_changes = has_unsaved;
 
         // Update job count (just count running components for now)
-        self.workspace_status.active_jobs = self
-            .components
-            .values()
-            .filter(|c| c.is_running())
-            .count();
+        self.workspace_status.active_jobs =
+            self.components.values().filter(|c| c.is_running()).count();
 
         // Update breadcrumbs based on focused component
         self.update_breadcrumbs();
@@ -1480,11 +1492,11 @@ impl WorkspaceManager {
     /// Updates context breadcrumbs based on focused component
     fn update_breadcrumbs(&mut self) {
         let focused_id = self.get_focused_component();
-        
+
         if let Some(id) = focused_id {
             if let Some(component) = self.get_component(id) {
                 let mut parts = vec!["PANDA".to_string(), "ROOT".to_string()];
-                
+
                 match component.component_type {
                     ComponentType::Editor => {
                         let filename = component
@@ -1508,12 +1520,13 @@ impl WorkspaceManager {
                         parts.push("CUSTOM".to_string());
                     }
                 }
-                
+
                 self.breadcrumbs.set_parts(parts);
             }
         } else {
             // No focused component, reset to root
-            self.breadcrumbs.set_parts(vec!["PANDA".to_string(), "ROOT".to_string()]);
+            self.breadcrumbs
+                .set_parts(vec!["PANDA".to_string(), "ROOT".to_string()]);
         }
     }
 
@@ -2261,16 +2274,24 @@ mod tests {
         // Send 'i' key to enter insert mode
         let i_event = InputEvent::key(KeyEvent::pressed(KeyCode::I, Modifiers::none()));
         let routed_to = workspace.route_input(&i_event);
-        
+
         // Verify event was routed to the editor
-        assert_eq!(routed_to, Some(editor_id), "KeyEvent should be routed to editor");
+        assert_eq!(
+            routed_to,
+            Some(editor_id),
+            "KeyEvent should be routed to editor"
+        );
 
         // Send 'a' key to type character
         let a_event = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::none()));
         let routed_to2 = workspace.route_input(&a_event);
-        
+
         // Verify event was routed to the editor
-        assert_eq!(routed_to2, Some(editor_id), "KeyEvent should be routed to editor");
+        assert_eq!(
+            routed_to2,
+            Some(editor_id),
+            "KeyEvent should be routed to editor"
+        );
     }
 
     #[test]
@@ -2303,7 +2324,7 @@ mod tests {
     fn test_actionable_error_no_components() {
         let err = WorkspaceError::NoComponents;
         let (message, actions) = err.actionable_message();
-        
+
         assert!(message.contains("No components"));
         assert!(actions.len() > 0);
         assert!(actions.iter().any(|a| a.contains("open")));
@@ -2313,7 +2334,7 @@ mod tests {
     fn test_actionable_error_invalid_command() {
         let err = WorkspaceError::InvalidCommand("unknown".to_string());
         let (message, actions) = err.actionable_message();
-        
+
         assert!(message.contains("Invalid command"));
         assert!(actions.iter().any(|a| a.contains("help")));
     }
@@ -2322,7 +2343,7 @@ mod tests {
     fn test_actionable_error_format() {
         let err = WorkspaceError::NoComponents;
         let formatted = err.format_with_actions();
-        
+
         assert!(formatted.contains("—"));
         assert!(formatted.contains("Try:"));
     }
@@ -2332,7 +2353,7 @@ mod tests {
         let id = ComponentId::new();
         let err = WorkspaceError::ComponentNotFound(id);
         let (message, actions) = err.actionable_message();
-        
+
         assert!(message.contains("not found"));
         assert!(actions.iter().any(|a| a == "list"));
     }
@@ -2340,7 +2361,7 @@ mod tests {
     #[test]
     fn test_action_switch_tile() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch two components
@@ -2374,7 +2395,7 @@ mod tests {
     #[test]
     fn test_action_focus_top() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch two components
@@ -2406,7 +2427,7 @@ mod tests {
     #[test]
     fn test_action_focus_bottom() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch two components
@@ -2441,7 +2462,7 @@ mod tests {
     #[test]
     fn test_action_save() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch an editor component
@@ -2468,7 +2489,7 @@ mod tests {
     #[test]
     fn test_action_quit() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch a component
@@ -2488,13 +2509,15 @@ mod tests {
 
         // All components should be terminated
         let components = workspace.list_components();
-        assert!(components.iter().all(|c| c.state != ComponentState::Running));
+        assert!(components
+            .iter()
+            .all(|c| c.state != ComponentState::Running));
     }
 
     #[test]
     fn test_action_command_mode() {
         use crate::keybindings::Action;
-        
+
         let mut workspace = create_test_workspace();
 
         // Execute CommandMode action
@@ -2511,7 +2534,7 @@ mod tests {
     #[test]
     fn test_keybinding_triggers_action() {
         use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
-        
+
         let mut workspace = create_test_workspace();
 
         // Launch two components
@@ -2534,14 +2557,13 @@ mod tests {
         // Trigger Alt+Tab keybinding (should execute SwitchTile action)
         let key_event = KeyEvent::pressed(KeyCode::Tab, Modifiers::ALT);
         let input_event = InputEvent::key(key_event);
-        
+
         workspace.route_input(&input_event);
 
         // Focus should have switched to first component
         assert_eq!(workspace.get_focused_component(), Some(id1));
     }
 }
-
 
 // ============================================================================
 // Workspace Runtime - Public Entrypoint
@@ -2603,25 +2625,25 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
         initial_caps: WorkspaceCaps,
     ) -> Self {
         let mut workspace = WorkspaceManager::new(workspace_identity);
-        
+
         // Set editor I/O context if storage capability is provided
         if let Some(storage_context) = initial_caps.storage {
             workspace.set_editor_io_context(storage_context);
         }
-        
+
         Self {
             platform,
             workspace,
             tick_count: 0,
         }
     }
-    
+
     /// Creates a new workspace runtime with policy
     pub fn with_policy(mut self, policy: Box<dyn PolicyEngine>) -> Self {
         self.workspace = self.workspace.with_policy(policy);
         self
     }
-    
+
     /// Handle pending input events
     ///
     /// Polls for input events from the platform and routes them through the
@@ -2633,7 +2655,7 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
             self.workspace.route_input(&input_event);
         }
     }
-    
+
     /// Advance the logical time by one tick
     ///
     /// This is called by the platform's main loop to advance time.
@@ -2642,7 +2664,7 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     pub fn tick(&mut self) {
         self.tick_count = self.platform.tick().advance();
     }
-    
+
     /// Render the current workspace state
     ///
     /// Retrieves the current workspace state and renders it through the
@@ -2650,30 +2672,30 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     pub fn render(&mut self) {
         let snapshot = self.workspace.render_snapshot();
         let display = self.platform.display();
-        
+
         // Clear display before rendering new content
         display.clear();
-        
+
         // Render main view if available
         if let Some(ref main_view) = snapshot.main_view {
             display.render_main_view(main_view);
         }
-        
+
         // Render status view if available
         if let Some(ref status_view) = snapshot.status_view {
             display.render_status_view(status_view);
         }
-        
+
         // Render workspace status strip
         display.render_status_strip(&snapshot.status_strip);
-        
+
         // Render breadcrumbs
         display.render_breadcrumbs(&snapshot.breadcrumbs);
-        
+
         // Present the rendered content
         display.present();
     }
-    
+
     /// Get a reference to the underlying workspace manager
     ///
     /// This allows direct access to workspace operations like launching
@@ -2681,15 +2703,14 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     pub fn workspace(&self) -> &WorkspaceManager {
         &self.workspace
     }
-    
+
     /// Get a mutable reference to the underlying workspace manager
     pub fn workspace_mut(&mut self) -> &mut WorkspaceManager {
         &mut self.workspace
     }
-    
+
     /// Get the current tick count
     pub fn tick_count(&self) -> u64 {
         self.tick_count
     }
 }
-

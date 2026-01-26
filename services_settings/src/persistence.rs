@@ -5,10 +5,10 @@
 
 extern crate alloc;
 
+use crate::{SettingKey, SettingValue, UserId};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::{SettingKey, SettingValue, UserId};
 use serde::{Deserialize, Serialize};
 
 /// Serializable container for settings overrides
@@ -138,17 +138,17 @@ mod tests {
     fn test_from_overrides() {
         let mut user_overrides = BTreeMap::new();
         let mut user1_settings = BTreeMap::new();
-        user1_settings.insert(
-            SettingKey::new("editor.tab_size"),
-            SettingValue::Integer(2),
-        );
+        user1_settings.insert(SettingKey::new("editor.tab_size"), SettingValue::Integer(2));
         user_overrides.insert("user1".to_string(), user1_settings);
 
         let data = SettingsOverridesData::from_overrides(&user_overrides);
         assert_eq!(data.user_overrides.len(), 1);
         assert!(data.user_overrides.contains_key("user1"));
         assert_eq!(
-            data.user_overrides.get("user1").unwrap().get("editor.tab_size"),
+            data.user_overrides
+                .get("user1")
+                .unwrap()
+                .get("editor.tab_size"),
             Some(&SettingValue::Integer(2))
         );
     }
@@ -158,7 +158,8 @@ mod tests {
         let mut data = SettingsOverridesData::new();
         let mut user1_settings = BTreeMap::new();
         user1_settings.insert("editor.tab_size".to_string(), SettingValue::Integer(2));
-        data.user_overrides.insert("user1".to_string(), user1_settings);
+        data.user_overrides
+            .insert("user1".to_string(), user1_settings);
 
         let overrides = data.to_overrides();
         assert_eq!(overrides.len(), 1);
@@ -176,10 +177,7 @@ mod tests {
     fn test_roundtrip_conversion() {
         let mut user_overrides = BTreeMap::new();
         let mut user1_settings = BTreeMap::new();
-        user1_settings.insert(
-            SettingKey::new("editor.tab_size"),
-            SettingValue::Integer(2),
-        );
+        user1_settings.insert(SettingKey::new("editor.tab_size"), SettingValue::Integer(2));
         user1_settings.insert(
             SettingKey::new("editor.use_spaces"),
             SettingValue::Boolean(false),
@@ -197,7 +195,8 @@ mod tests {
         let mut data = SettingsOverridesData::new();
         let mut user1_settings = BTreeMap::new();
         user1_settings.insert("editor.tab_size".to_string(), SettingValue::Integer(2));
-        data.user_overrides.insert("user1".to_string(), user1_settings);
+        data.user_overrides
+            .insert("user1".to_string(), user1_settings);
 
         let bytes = serialize_overrides(&data).unwrap();
         let deserialized = deserialize_overrides(&bytes).unwrap();
@@ -213,7 +212,8 @@ mod tests {
         user1_settings.insert("zzz.last".to_string(), SettingValue::Integer(1));
         user1_settings.insert("aaa.first".to_string(), SettingValue::Integer(2));
         user1_settings.insert("mmm.middle".to_string(), SettingValue::Integer(3));
-        data.user_overrides.insert("user1".to_string(), user1_settings);
+        data.user_overrides
+            .insert("user1".to_string(), user1_settings);
 
         // Serialize twice
         let bytes1 = serialize_overrides(&data).unwrap();
@@ -253,7 +253,8 @@ mod tests {
         let mut data = SettingsOverridesData::new();
         let mut user1_settings = BTreeMap::new();
         user1_settings.insert("test.key".to_string(), SettingValue::Integer(42));
-        data.user_overrides.insert("user1".to_string(), user1_settings);
+        data.user_overrides
+            .insert("user1".to_string(), user1_settings);
 
         let bytes = serialize_overrides(&data).unwrap();
         let loaded = load_overrides_safe(&bytes);

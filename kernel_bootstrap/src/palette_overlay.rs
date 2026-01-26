@@ -211,7 +211,7 @@ pub fn handle_palette_key(
             // TODO: Properly handle arrow keys
             PaletteKeyAction::Consumed
         }
-        byte if byte >= 0x20 && byte < 0x7F => {
+        byte if (0x20..0x7F).contains(&byte) => {
             // Printable character
             state.append_char(palette, byte as char);
             PaletteKeyAction::Consumed
@@ -240,7 +240,7 @@ mod tests {
 
     fn create_test_palette() -> CommandPalette {
         let mut palette = CommandPalette::new();
-        
+
         palette.register_command(
             CommandDescriptor::new(
                 "open_editor",
@@ -277,13 +277,13 @@ mod tests {
     #[test]
     fn test_palette_open_close() {
         let mut state = PaletteOverlayState::new();
-        
+
         assert!(!state.is_open());
-        
+
         state.open(FocusTarget::Editor);
         assert!(state.is_open());
         assert_eq!(state.prev_focus(), FocusTarget::Editor);
-        
+
         state.close();
         assert!(!state.is_open());
     }
@@ -366,7 +366,7 @@ mod tests {
         state.open(FocusTarget::None);
 
         state.update_query(&palette, "edit".to_string());
-        
+
         assert!(state.selected_command().is_some());
     }
 
@@ -435,7 +435,7 @@ mod tests {
 
         state.update_query(&palette, "edit".to_string());
         assert!(state.result_count() > 0);
-        
+
         // The "Open Editor" command should match
         let results = state.displayed_results();
         assert!(results.iter().any(|r| r.id.as_str() == "open_editor"));

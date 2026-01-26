@@ -37,7 +37,7 @@
 //!
 //! let resolver = MyResolver::new();
 //! let mut picker = FilePicker::new(root_directory);
-//! 
+//!
 //! // Process input with resolver for directory navigation
 //! match picker.process_input(key_event, Some(&resolver)) {
 //!     FilePickerResult::FileSelected { object_id, name } => {
@@ -90,10 +90,10 @@ pub enum FilePickerResult {
 pub enum FilePickerError {
     #[error("Permission denied: cannot access {0}")]
     PermissionDenied(String),
-    
+
     #[error("Invalid directory: {0}")]
     InvalidDirectory(String),
-    
+
     #[error("No entries in directory")]
     EmptyDirectory,
 }
@@ -153,13 +153,13 @@ impl FilePicker {
     /// Applies deterministic sorting: directories first, then files, lexicographic within each group
     fn refresh_entries(&mut self) {
         let raw_entries = self.current_directory.list_entries();
-        
+
         // Convert to picker entries
         let mut entries: Vec<PickerEntry> = raw_entries
             .iter()
             .map(|entry| PickerEntry::from_directory_entry(entry))
             .collect();
-        
+
         // Sort deterministically:
         // 1. Directories first (is_directory = true comes before false)
         // 2. Within each group, lexicographic by name
@@ -168,9 +168,9 @@ impl FilePicker {
                 .cmp(&a.is_directory)
                 .then_with(|| a.name.cmp(&b.name))
         });
-        
+
         self.entries = entries;
-        
+
         // Reset selection if out of bounds
         if self.selected_index >= self.entries.len() {
             self.selected_index = 0;
@@ -227,10 +227,7 @@ impl FilePicker {
     }
 
     /// Handles the Enter key (select file or enter directory)
-    fn handle_selection<R: DirectoryResolver>(
-        &mut self,
-        resolver: Option<&R>,
-    ) -> FilePickerResult {
+    fn handle_selection<R: DirectoryResolver>(&mut self, resolver: Option<&R>) -> FilePickerResult {
         if self.entries.is_empty() {
             return FilePickerResult::Continue;
         }
@@ -242,18 +239,18 @@ impl FilePicker {
             let Some(resolver) = resolver else {
                 return FilePickerResult::Continue;
             };
-            
+
             let Some(subdir) = resolver.resolve_directory(&selected.object_id) else {
                 return FilePickerResult::Continue;
             };
-            
+
             // Push current directory onto stack
             self.directory_stack.push(self.current_directory.clone());
-            
+
             // Navigate into the subdirectory
             self.current_directory = subdir;
             self.refresh_entries();
-            
+
             FilePickerResult::Continue
         } else {
             // Select the file
@@ -437,19 +434,13 @@ mod tests {
         let dir = create_test_directory();
         let mut picker = FilePicker::new(dir);
 
-        let down_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Down,
-            Modifiers::none(),
-        ));
+        let down_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Down, Modifiers::none()));
 
         let result = picker.process_input(down_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
         assert_eq!(picker.selected_index(), 1);
 
-        let up_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Up,
-            Modifiers::none(),
-        ));
+        let up_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Up, Modifiers::none()));
 
         let result = picker.process_input(up_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
@@ -464,10 +455,7 @@ mod tests {
         // Move to a file entry (index 2 is "apple.txt")
         picker.selected_index = 2;
 
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
 
         let result = picker.process_input(enter_event, no_resolver());
         match result {
@@ -483,10 +471,7 @@ mod tests {
         let dir = create_test_directory();
         let mut picker = FilePicker::new(dir);
 
-        let escape_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Escape,
-            Modifiers::none(),
-        ));
+        let escape_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Escape, Modifiers::none()));
 
         let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Cancelled);
@@ -517,10 +502,7 @@ mod tests {
         let dir = create_test_directory();
         let mut picker = FilePicker::new(dir);
 
-        let release_event = InputEvent::Key(KeyEvent::released(
-            KeyCode::Down,
-            Modifiers::none(),
-        ));
+        let release_event = InputEvent::Key(KeyEvent::released(KeyCode::Down, Modifiers::none()));
 
         let result = picker.process_input(release_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
@@ -537,10 +519,7 @@ mod tests {
         assert_eq!(picker.entries()[0].name, "docs");
         assert!(picker.entries()[0].is_directory);
 
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
 
         // Without a resolver, entering a directory should just continue
         let result = picker.process_input(enter_event, no_resolver());
@@ -587,10 +566,7 @@ mod tests {
         assert_eq!(picker.entries()[0].name, "docs");
         assert!(picker.entries()[0].is_directory);
 
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
 
         // Enter the directory
         let result = picker.process_input(enter_event, Some(&resolver));
@@ -599,7 +575,7 @@ mod tests {
         // We should now be in the docs directory
         assert_eq!(picker.current_directory().id, docs_id);
         assert_eq!(picker.entry_count(), 2);
-        
+
         // Check that the directory stack has the root
         assert_eq!(picker.directory_stack.len(), 1);
         assert_eq!(picker.directory_stack[0].id, root_id);
@@ -641,10 +617,7 @@ mod tests {
         let mut picker = FilePicker::new(root.clone());
 
         // Enter docs directory
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
         picker.process_input(enter_event, Some(&resolver));
 
         // Verify we're in docs
@@ -652,10 +625,7 @@ mod tests {
         assert_eq!(picker.entry_count(), 1);
 
         // Go back
-        let escape_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Escape,
-            Modifiers::none(),
-        ));
+        let escape_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Escape, Modifiers::none()));
         let result = picker.process_input(escape_event, no_resolver());
         assert_eq!(result, FilePickerResult::Continue);
 
@@ -699,10 +669,7 @@ mod tests {
 
         let mut picker = FilePicker::new(root.clone());
 
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
 
         // Enter level1
         picker.process_input(enter_event.clone(), Some(&resolver));
@@ -716,10 +683,7 @@ mod tests {
         assert_eq!(picker.entry_count(), 1);
         assert_eq!(picker.entries()[0].name, "deep_file.txt");
 
-        let escape_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Escape,
-            Modifiers::none(),
-        ));
+        let escape_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Escape, Modifiers::none()));
 
         // Go back to level1
         picker.process_input(escape_event.clone(), no_resolver());
@@ -754,10 +718,7 @@ mod tests {
 
         let mut picker = FilePicker::new(root.clone());
 
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
 
         // Try to enter the unresolved directory
         let result = picker.process_input(enter_event, Some(&resolver));
@@ -809,10 +770,7 @@ mod tests {
 
         // Go back to first item and enter the docs directory
         picker.selected_index = 0;
-        let enter_event = InputEvent::Key(KeyEvent::pressed(
-            KeyCode::Enter,
-            Modifiers::none(),
-        ));
+        let enter_event = InputEvent::Key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
         picker.process_input(enter_event, Some(&resolver));
 
         // Selection should be reset to 0 in the new directory

@@ -371,7 +371,10 @@ pub enum MemoryError {
 
     RegionOverlap,
 
-    BudgetExhausted { requested: u64, available: u64 },
+    BudgetExhausted {
+        requested: u64,
+        available: u64,
+    },
 
     CrossSpaceAccess {
         region_id: MemoryRegionId,

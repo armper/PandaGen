@@ -4,8 +4,8 @@
 //! boundary. All kernel operations from user tasks must go through this gate.
 
 use core_types::{
-    AddressSpaceCap, Cap, MemoryAccessType, MemoryBacking, MemoryError,
-    MemoryPerms, MemoryRegionCap, ServiceId, TaskId,
+    AddressSpaceCap, Cap, MemoryAccessType, MemoryBacking, MemoryError, MemoryPerms,
+    MemoryRegionCap, ServiceId, TaskId,
 };
 use identity::ExecutionId;
 use ipc::{ChannelId, MessageEnvelope};

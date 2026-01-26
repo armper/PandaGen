@@ -74,9 +74,7 @@ impl CommandParser {
                     let path = parts[1..].join(" ");
                     Ok(Command::Edit { path, force: false })
                 } else {
-                    Err(CommandError::InvalidSyntax(
-                        "Usage: :e <path>".to_string(),
-                    ))
+                    Err(CommandError::InvalidSyntax("Usage: :e <path>".to_string()))
                 }
             }
             "e!" | "edit!" => {
@@ -84,9 +82,7 @@ impl CommandParser {
                     let path = parts[1..].join(" ");
                     Ok(Command::Edit { path, force: true })
                 } else {
-                    Err(CommandError::InvalidSyntax(
-                        "Usage: :e! <path>".to_string(),
-                    ))
+                    Err(CommandError::InvalidSyntax("Usage: :e! <path>".to_string()))
                 }
             }
             "q" | "quit" => Ok(Command::Quit),

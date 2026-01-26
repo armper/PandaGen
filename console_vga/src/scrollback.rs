@@ -226,11 +226,7 @@ impl VgaScrollback {
 
         // Calculate the start of the visible window
         let end = total - self.viewport_offset;
-        let start = if end > self.viewport_rows {
-            end - self.viewport_rows
-        } else {
-            0
-        };
+        let start = end.saturating_sub(self.viewport_rows);
 
         &self.lines[start..end]
     }

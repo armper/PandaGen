@@ -14,11 +14,11 @@ use alloc::vec::Vec;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
+use input_types::KeyEvent;
+#[cfg(test)]
 use services_workspace_manager::platform::{
     WorkspaceDisplay, WorkspaceInput, WorkspacePlatform, WorkspaceTick,
 };
-#[cfg(test)]
-use input_types::KeyEvent;
 #[cfg(test)]
 use view_types::ViewFrame;
 
@@ -121,7 +121,7 @@ impl KernelInput {
             test_queue: Vec::new(),
         }
     }
-    
+
     /// For testing: inject scancodes directly
     #[allow(dead_code)]
     pub fn inject_scancode(&mut self, scancode: u8) {
@@ -233,7 +233,7 @@ impl Ps2ParserState {
             0x0F => KeyCode::Tab,
             0x1C => KeyCode::Enter,
             0x39 => KeyCode::Space,
-            
+
             // Letters
             0x1E => KeyCode::A,
             0x30 => KeyCode::B,
@@ -261,7 +261,7 @@ impl Ps2ParserState {
             0x2D => KeyCode::X,
             0x15 => KeyCode::Y,
             0x2C => KeyCode::Z,
-            
+
             // Numbers
             0x02 => KeyCode::Num1,
             0x03 => KeyCode::Num2,
@@ -273,7 +273,7 @@ impl Ps2ParserState {
             0x09 => KeyCode::Num8,
             0x0A => KeyCode::Num9,
             0x0B => KeyCode::Num0,
-            
+
             // Punctuation
             0x0C => KeyCode::Minus,
             0x1A => KeyCode::LeftBracket,
@@ -284,7 +284,7 @@ impl Ps2ParserState {
             0x33 => KeyCode::Comma,
             0x34 => KeyCode::Period,
             0x35 => KeyCode::Slash,
-            
+
             // Function keys
             0x3B => KeyCode::F1,
             0x3C => KeyCode::F2,
@@ -298,7 +298,7 @@ impl Ps2ParserState {
             0x44 => KeyCode::F10,
             0x57 => KeyCode::F11,
             0x58 => KeyCode::F12,
-            
+
             _ => return None,
         };
 
@@ -342,11 +342,11 @@ mod tests {
     #[test]
     fn test_ps2_parser_basic() {
         let mut parser = Ps2ParserState::new();
-        
+
         // Test 'A' key press (scancode 0x1E)
         let event = parser.process_scancode(0x1E);
         assert!(event.is_some());
-        
+
         if let Some(e) = event {
             assert_eq!(e.code, KeyCode::A);
             assert!(!e.modifiers.contains(Modifiers::SHIFT));
@@ -356,15 +356,15 @@ mod tests {
     #[test]
     fn test_ps2_parser_shift() {
         let mut parser = Ps2ParserState::new();
-        
+
         // Press left shift (0x2A)
         assert!(parser.process_scancode(0x2A).is_none());
         assert!(parser.shift_pressed);
-        
+
         // Press 'A' with shift
         let event = parser.process_scancode(0x1E);
         assert!(event.is_some());
-        
+
         if let Some(e) = event {
             assert_eq!(e.code, KeyCode::A);
             assert!(e.modifiers.contains(Modifiers::SHIFT));
@@ -374,21 +374,21 @@ mod tests {
     #[test]
     fn test_ps2_parser_ctrl() {
         let mut parser = Ps2ParserState::new();
-        
+
         // Press left ctrl (0x1D)
         assert!(parser.process_scancode(0x1D).is_none());
         assert!(parser.ctrl_pressed);
-        
+
         // Press 'P' with ctrl (Ctrl+P for command palette)
         let event = parser.process_scancode(0x19);
         assert!(event.is_some());
-        
+
         if let Some(e) = event {
             assert_eq!(e.code, KeyCode::P);
             assert!(e.modifiers.contains(Modifiers::CTRL));
         }
     }
-    
+
     #[test]
     fn test_kernel_platform_creation() {
         let platform = KernelWorkspacePlatform::new_test();

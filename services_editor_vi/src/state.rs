@@ -1,11 +1,11 @@
 //! Editor state and buffer management
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::vec;
 use alloc::collections::BTreeSet;
-use serde::{Deserialize, Serialize};
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Editor mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,10 +766,10 @@ mod tests {
     fn test_dirty_tracking_insert_char() {
         let mut state = EditorState::new();
         state.mark_line_dirty(5);
-        
+
         let dirty = state.get_dirty_lines();
         assert_eq!(dirty, vec![5]);
-        
+
         // Take should clear
         let taken = state.take_dirty_lines();
         assert_eq!(taken, vec![5]);
@@ -781,7 +781,7 @@ mod tests {
         let mut state = EditorState::new();
         state.load_content("line1\nline2\nline3\nline4\nline5\nline6".to_string());
         state.mark_lines_dirty(2, 5);
-        
+
         let dirty = state.get_dirty_lines();
         assert_eq!(dirty.len(), 4); // lines 2, 3, 4, 5
         assert!(dirty.contains(&2));
@@ -794,10 +794,10 @@ mod tests {
     fn test_cursor_dirty_tracking() {
         let mut state = EditorState::new();
         assert!(!state.take_cursor_dirty());
-        
+
         state.mark_cursor_dirty();
         assert!(state.take_cursor_dirty());
-        
+
         // Should be cleared after take
         assert!(!state.take_cursor_dirty());
     }
@@ -806,13 +806,13 @@ mod tests {
     fn test_cursor_movement_marks_dirty() {
         let mut state = EditorState::new();
         state.load_content("hello\nworld".to_string());
-        
+
         // Clear any dirty flags from load
         state.take_cursor_dirty();
-        
+
         state.move_cursor_right();
         assert!(state.take_cursor_dirty());
-        
+
         state.move_cursor_down();
         assert!(state.take_cursor_dirty());
     }
@@ -821,10 +821,10 @@ mod tests {
     fn test_mark_all_dirty() {
         let mut state = EditorState::new();
         state.load_content("line1\nline2\nline3\nline4\nline5".to_string());
-        
+
         state.mark_all_dirty(3);
         let dirty = state.get_dirty_lines();
-        
+
         assert!(dirty.len() >= 3);
         assert!(state.take_cursor_dirty());
     }

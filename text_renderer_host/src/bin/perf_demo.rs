@@ -8,7 +8,11 @@
 use text_renderer_host::TextRenderer;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
-fn create_text_frame(lines: Vec<String>, cursor: Option<CursorPosition>, revision: u64) -> ViewFrame {
+fn create_text_frame(
+    lines: Vec<String>,
+    cursor: Option<CursorPosition>,
+    revision: u64,
+) -> ViewFrame {
     let mut frame = ViewFrame::new(
         ViewId::new(),
         ViewKind::TextBuffer,
@@ -28,11 +32,31 @@ fn main() {
 
     // Scenario: Start with empty buffer, type "test" one char at a time
     let scenarios = vec![
-        (vec!["".to_string()], Some(CursorPosition::new(0, 0)), "Initial empty buffer"),
-        (vec!["t".to_string()], Some(CursorPosition::new(0, 1)), "Typed 't'"),
-        (vec!["te".to_string()], Some(CursorPosition::new(0, 2)), "Typed 'e'"),
-        (vec!["tes".to_string()], Some(CursorPosition::new(0, 3)), "Typed 's'"),
-        (vec!["test".to_string()], Some(CursorPosition::new(0, 4)), "Typed 't'"),
+        (
+            vec!["".to_string()],
+            Some(CursorPosition::new(0, 0)),
+            "Initial empty buffer",
+        ),
+        (
+            vec!["t".to_string()],
+            Some(CursorPosition::new(0, 1)),
+            "Typed 't'",
+        ),
+        (
+            vec!["te".to_string()],
+            Some(CursorPosition::new(0, 2)),
+            "Typed 'e'",
+        ),
+        (
+            vec!["tes".to_string()],
+            Some(CursorPosition::new(0, 3)),
+            "Typed 's'",
+        ),
+        (
+            vec!["test".to_string()],
+            Some(CursorPosition::new(0, 4)),
+            "Typed 't'",
+        ),
     ];
 
     println!("=== FULL REDRAW MODE (baseline) ===");
@@ -43,7 +67,7 @@ fn main() {
         let frame = create_text_frame(lines.clone(), *cursor, i as u64 + 1);
         let _output = renderer_full.render_snapshot(Some(&frame), None);
         let stats = renderer_full.stats();
-        
+
         println!(
             "Frame {}: {} - chars_written={}, lines_redrawn=N/A",
             i + 1,
@@ -64,7 +88,7 @@ fn main() {
         let frame = create_text_frame(lines.clone(), *cursor, i as u64 + 1);
         let _output = renderer_incr.render_incremental(Some(&frame), None);
         let stats = renderer_incr.stats();
-        
+
         println!(
             "Frame {}: {} - chars_written={}, lines_redrawn={}",
             i + 1,
@@ -99,24 +123,28 @@ fn main() {
     // Initial render
     let frame1 = create_text_frame(content.clone(), Some(CursorPosition::new(0, 0)), 1);
     renderer_cursor.render_incremental(Some(&frame1), None);
-    println!("Initial: chars_written={}, lines_redrawn={}", 
-             renderer_cursor.stats().chars_written_per_frame,
-             renderer_cursor.stats().lines_redrawn_per_frame);
+    println!(
+        "Initial: chars_written={}, lines_redrawn={}",
+        renderer_cursor.stats().chars_written_per_frame,
+        renderer_cursor.stats().lines_redrawn_per_frame
+    );
 
     // Move cursor without changing content
     let frame2 = create_text_frame(content.clone(), Some(CursorPosition::new(0, 5)), 2);
     renderer_cursor.render_incremental(Some(&frame2), None);
-    println!("Cursor moved: chars_written={}, lines_redrawn={}", 
-             renderer_cursor.stats().chars_written_per_frame,
-             renderer_cursor.stats().lines_redrawn_per_frame);
+    println!(
+        "Cursor moved: chars_written={}, lines_redrawn={}",
+        renderer_cursor.stats().chars_written_per_frame,
+        renderer_cursor.stats().lines_redrawn_per_frame
+    );
 
     println!("\n✓ Cursor-only moves should have minimal overhead!");
-    
+
     println!("\n=== MULTI-LINE EDITING TEST ===");
     println!("Editing a multi-line document...\n");
 
     let mut renderer_multi = TextRenderer::new();
-    
+
     // Initial 5-line document
     let lines1 = vec![
         "line 1".to_string(),
@@ -127,9 +155,11 @@ fn main() {
     ];
     let frame = create_text_frame(lines1, Some(CursorPosition::new(0, 0)), 1);
     renderer_multi.render_incremental(Some(&frame), None);
-    println!("Initial render: chars_written={}, lines_redrawn={}", 
-             renderer_multi.stats().chars_written_per_frame,
-             renderer_multi.stats().lines_redrawn_per_frame);
+    println!(
+        "Initial render: chars_written={}, lines_redrawn={}",
+        renderer_multi.stats().chars_written_per_frame,
+        renderer_multi.stats().lines_redrawn_per_frame
+    );
 
     // Edit only line 2
     let lines2 = vec![
@@ -141,9 +171,11 @@ fn main() {
     ];
     let frame = create_text_frame(lines2, Some(CursorPosition::new(1, 15)), 2);
     renderer_multi.render_incremental(Some(&frame), None);
-    println!("Edit line 2: chars_written={}, lines_redrawn={}", 
-             renderer_multi.stats().chars_written_per_frame,
-             renderer_multi.stats().lines_redrawn_per_frame);
+    println!(
+        "Edit line 2: chars_written={}, lines_redrawn={}",
+        renderer_multi.stats().chars_written_per_frame,
+        renderer_multi.stats().lines_redrawn_per_frame
+    );
 
     println!("\n✓ Only modified line should be redrawn (1 line out of 5)!");
 

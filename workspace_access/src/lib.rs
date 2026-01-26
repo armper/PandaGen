@@ -8,6 +8,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserId(Uuid);
 
+impl Default for UserId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UserId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -43,6 +49,12 @@ pub enum AccessError {
 /// Access control model for workspace.
 pub struct WorkspaceAccessControl {
     users: HashMap<UserId, UserRecord>,
+}
+
+impl Default for WorkspaceAccessControl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkspaceAccessControl {

@@ -207,19 +207,15 @@ impl SettingsRegistry {
     ) {
         let user_id = user_id.into();
         let key = key.into();
-        
+
         self.user_overrides
             .entry(user_id)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(key, value);
     }
 
     /// Removes a user-specific override
-    pub fn remove_user_override(
-        &mut self,
-        user_id: &str,
-        key: &SettingKey,
-    ) -> bool {
+    pub fn remove_user_override(&mut self, user_id: &str, key: &SettingKey) -> bool {
         if let Some(user_settings) = self.user_overrides.get_mut(user_id) {
             user_settings.remove(key).is_some()
         } else {
@@ -235,7 +231,7 @@ impl SettingsRegistry {
                 return Some(value);
             }
         }
-        
+
         // Fall back to default
         self.defaults.get(key)
     }
@@ -262,7 +258,7 @@ impl SettingsRegistry {
         self.user_overrides
             .get(user_id)
             .map(|settings| settings.keys().cloned().collect())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 
     /// Returns all settings with a given prefix for a user
@@ -309,16 +305,23 @@ impl SettingsRegistry {
     }
 
     /// Imports user overrides (replaces existing overrides)
-    pub fn import_overrides(&mut self, overrides: BTreeMap<UserId, BTreeMap<SettingKey, SettingValue>>) {
+    pub fn import_overrides(
+        &mut self,
+        overrides: BTreeMap<UserId, BTreeMap<SettingKey, SettingValue>>,
+    ) {
         self.user_overrides = overrides;
     }
 
     /// Applies overrides for a specific user (merges with existing)
-    pub fn apply_user_overrides(&mut self, user_id: impl Into<UserId>, overrides: BTreeMap<SettingKey, SettingValue>) {
+    pub fn apply_user_overrides(
+        &mut self,
+        user_id: impl Into<UserId>,
+        overrides: BTreeMap<SettingKey, SettingValue>,
+    ) {
         let user_id = user_id.into();
         self.user_overrides
             .entry(user_id)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .extend(overrides);
     }
 }
@@ -356,7 +359,10 @@ pub fn create_default_registry() -> SettingsRegistry {
     registry.register_default(keys::EDITOR_WORD_WRAP, SettingValue::Boolean(false));
 
     // Theme settings
-    registry.register_default(keys::THEME_NAME, SettingValue::String("default".to_string()));
+    registry.register_default(
+        keys::THEME_NAME,
+        SettingValue::String("default".to_string()),
+    );
     registry.register_default(keys::THEME_FONT_SIZE, SettingValue::Integer(14));
 
     // Keybinding settings
@@ -364,7 +370,10 @@ pub fn create_default_registry() -> SettingsRegistry {
         keys::KEYBINDING_COMMAND_PALETTE,
         SettingValue::String("Ctrl+P".to_string()),
     );
-    registry.register_default(keys::KEYBINDINGS_PROFILE, SettingValue::String("default".to_string()));
+    registry.register_default(
+        keys::KEYBINDINGS_PROFILE,
+        SettingValue::String("default".to_string()),
+    );
 
     // UI settings
     registry.register_default(keys::UI_SHOW_STATUS_BAR, SettingValue::Boolean(true));
@@ -428,7 +437,10 @@ mod tests {
     fn test_setting_value_string_list() {
         let val = SettingValue::StringList(vec!["a".to_string(), "b".to_string()]);
         assert!(val.is_string_list());
-        assert_eq!(val.as_string_list(), Some(&["a".to_string(), "b".to_string()][..]));
+        assert_eq!(
+            val.as_string_list(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
     }
 
     #[test]
@@ -440,9 +452,9 @@ mod tests {
     #[test]
     fn test_registry_register_default() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key", SettingValue::Integer(42));
-        
+
         let value = registry.get_default(&SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(42)));
     }
@@ -450,14 +462,14 @@ mod tests {
     #[test]
     fn test_registry_set_user_override() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key", SettingValue::Integer(42));
         registry.set_user_override("user1", "test.key", SettingValue::Integer(100));
-        
+
         // User1 should see override
         let value = registry.get("user1", &SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(100)));
-        
+
         // Other users should see default
         let value = registry.get("user2", &SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(42)));
@@ -466,17 +478,17 @@ mod tests {
     #[test]
     fn test_registry_remove_user_override() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key", SettingValue::Integer(42));
         registry.set_user_override("user1", "test.key", SettingValue::Integer(100));
-        
+
         let removed = registry.remove_user_override("user1", &SettingKey::new("test.key"));
         assert!(removed);
-        
+
         // Should fall back to default
         let value = registry.get("user1", &SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(42)));
-        
+
         // Try removing again
         let removed = registry.remove_user_override("user1", &SettingKey::new("test.key"));
         assert!(!removed);
@@ -485,7 +497,7 @@ mod tests {
     #[test]
     fn test_registry_get_nonexistent() {
         let registry = SettingsRegistry::new();
-        
+
         let value = registry.get("user1", &SettingKey::new("nonexistent"));
         assert_eq!(value, None);
     }
@@ -493,10 +505,10 @@ mod tests {
     #[test]
     fn test_registry_list_defaults() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key1", SettingValue::Integer(1));
         registry.register_default("test.key2", SettingValue::Integer(2));
-        
+
         let keys = registry.list_defaults();
         assert_eq!(keys.len(), 2);
     }
@@ -504,17 +516,17 @@ mod tests {
     #[test]
     fn test_registry_list_user_overrides() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.set_user_override("user1", "test.key1", SettingValue::Integer(1));
         registry.set_user_override("user1", "test.key2", SettingValue::Integer(2));
         registry.set_user_override("user2", "test.key3", SettingValue::Integer(3));
-        
+
         let keys = registry.list_user_overrides("user1");
         assert_eq!(keys.len(), 2);
-        
+
         let keys = registry.list_user_overrides("user2");
         assert_eq!(keys.len(), 1);
-        
+
         let keys = registry.list_user_overrides("user3");
         assert_eq!(keys.len(), 0);
     }
@@ -522,20 +534,22 @@ mod tests {
     #[test]
     fn test_registry_list_with_prefix() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("editor.tab_size", SettingValue::Integer(4));
         registry.register_default("editor.use_spaces", SettingValue::Boolean(true));
         registry.register_default("theme.name", SettingValue::String("dark".to_string()));
-        
+
         registry.set_user_override("user1", "editor.tab_size", SettingValue::Integer(2));
-        
+
         let settings = registry.list_with_prefix("user1", "editor");
         assert_eq!(settings.len(), 2);
-        
+
         // Check that override is applied
-        let tab_size = settings.iter().find(|(k, _)| k.as_str() == "editor.tab_size");
+        let tab_size = settings
+            .iter()
+            .find(|(k, _)| k.as_str() == "editor.tab_size");
         assert_eq!(tab_size.unwrap().1, SettingValue::Integer(2));
-        
+
         let settings = registry.list_with_prefix("user1", "theme");
         assert_eq!(settings.len(), 1);
     }
@@ -543,16 +557,16 @@ mod tests {
     #[test]
     fn test_registry_clear_user_overrides() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key", SettingValue::Integer(42));
         registry.set_user_override("user1", "test.key", SettingValue::Integer(100));
         registry.set_user_override("user1", "test.key2", SettingValue::Integer(200));
-        
+
         assert_eq!(registry.list_user_overrides("user1").len(), 2);
-        
+
         registry.clear_user_overrides("user1");
         assert_eq!(registry.list_user_overrides("user1").len(), 0);
-        
+
         // Should fall back to default
         let value = registry.get("user1", &SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(42)));
@@ -561,13 +575,13 @@ mod tests {
     #[test]
     fn test_registry_reset_to_default() {
         let mut registry = SettingsRegistry::new();
-        
+
         registry.register_default("test.key", SettingValue::Integer(42));
         registry.set_user_override("user1", "test.key", SettingValue::Integer(100));
-        
+
         let reset = registry.reset_to_default("user1", &SettingKey::new("test.key"));
         assert!(reset);
-        
+
         let value = registry.get("user1", &SettingKey::new("test.key"));
         assert_eq!(value, Some(&SettingValue::Integer(42)));
     }
@@ -575,29 +589,32 @@ mod tests {
     #[test]
     fn test_create_default_registry() {
         let registry = create_default_registry();
-        
+
         // Check some default values
         let tab_size = registry.get("any_user", &SettingKey::new(keys::EDITOR_TAB_SIZE));
         assert_eq!(tab_size, Some(&SettingValue::Integer(4)));
-        
+
         let use_spaces = registry.get("any_user", &SettingKey::new(keys::EDITOR_USE_SPACES));
         assert_eq!(use_spaces, Some(&SettingValue::Boolean(true)));
-        
+
         let theme_name = registry.get("any_user", &SettingKey::new(keys::THEME_NAME));
-        assert_eq!(theme_name, Some(&SettingValue::String("default".to_string())));
+        assert_eq!(
+            theme_name,
+            Some(&SettingValue::String("default".to_string()))
+        );
     }
 
     #[test]
     fn test_default_registry_override() {
         let mut registry = create_default_registry();
-        
+
         // Override tab size for user1
         registry.set_user_override("user1", keys::EDITOR_TAB_SIZE, SettingValue::Integer(2));
-        
+
         // user1 should see 2
         let tab_size = registry.get("user1", &SettingKey::new(keys::EDITOR_TAB_SIZE));
         assert_eq!(tab_size, Some(&SettingValue::Integer(2)));
-        
+
         // user2 should still see 4
         let tab_size = registry.get("user2", &SettingKey::new(keys::EDITOR_TAB_SIZE));
         assert_eq!(tab_size, Some(&SettingValue::Integer(4)));

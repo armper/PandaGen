@@ -240,10 +240,7 @@ impl SimulatedKernel {
         task_id: TaskId,
         mode: ChannelAccessMode,
     ) -> Result<(), KernelError> {
-        let entry = self
-            .channel_access
-            .entry(channel)
-            .or_insert_with(ChannelAccess::default);
+        let entry = self.channel_access.entry(channel).or_default();
 
         match mode {
             ChannelAccessMode::Send => {
@@ -2152,7 +2149,7 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
             if let Some(budget) = &identity.budget {
                 if let Some(limit) = budget.memory_units {
                     // Calculate units: 1 unit per 4096 bytes (1 page)
-                    let units_needed = ((size_bytes + 4095) / 4096) as u64;
+                    let units_needed = size_bytes.div_ceil(4096);
                     let current_usage = identity.usage.memory_units.0;
 
                     if current_usage + units_needed > limit.0 {

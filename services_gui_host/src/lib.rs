@@ -14,6 +14,12 @@ pub struct SurfaceFrame {
 /// Simple compositor that merges view frames into a surface.
 pub struct Compositor;
 
+impl Default for Compositor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compositor {
     pub fn new() -> Self {
         Self
@@ -30,7 +36,7 @@ impl Compositor {
                 .unwrap_or_else(|| format!("{:?}", frame.kind));
             output.push_str(&format!("[{}]\n", title));
             output.push_str(&render_content(&frame.content));
-            output.push_str("\n");
+            output.push('\n');
         }
 
         SurfaceFrame {
