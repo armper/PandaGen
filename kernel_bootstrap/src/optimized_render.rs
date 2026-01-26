@@ -678,7 +678,8 @@ mod tests {
         let editor = MinimalEditor::new(24);
 
         // First render should be full
-        let stats1 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 100);
+        let stats1 =
+            render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 100);
         #[cfg(debug_assertions)]
         assert!(stats1.full_clear);
         let writes_full = sink.write_count;
@@ -687,7 +688,8 @@ mod tests {
         sink.write_count = 0;
 
         // Second render with no changes should be minimal
-        let stats2 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 110);
+        let stats2 =
+            render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 110);
         #[cfg(debug_assertions)]
         assert!(!stats2.full_clear);
         let writes_incremental = sink.write_count;
@@ -759,7 +761,15 @@ mod tests {
         for i in 0..50 {
             let ch = b'a' + (i % 26) as u8;
             editor.process_byte(ch);
-            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 20 + i as u64);
+            let _stats = render_editor_optimized(
+                &mut sink,
+                &editor,
+                &mut cache,
+                0x07,
+                0x0F,
+                false,
+                20 + i as u64,
+            );
             total_writes += sink.write_count;
             sink.write_count = 0;
         }
@@ -814,7 +824,15 @@ mod tests {
 
         for (idx, &movement) in moves.iter().enumerate() {
             editor.process_byte(movement);
-            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 10 + idx as u64);
+            let _stats = render_editor_optimized(
+                &mut sink,
+                &editor,
+                &mut cache,
+                0x07,
+                0x0F,
+                false,
+                10 + idx as u64,
+            );
             total_writes += sink.write_count;
             sink.write_count = 0;
         }

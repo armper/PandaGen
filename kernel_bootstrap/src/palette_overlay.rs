@@ -15,8 +15,8 @@ use std::string::{String, ToString};
 #[cfg(test)]
 use std::vec::Vec;
 
-use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
 use input_types::{KeyCode, KeyEvent};
+use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
 
 /// Maximum query length for palette search
 const MAX_QUERY_LEN: usize = 128;
@@ -298,8 +298,8 @@ pub enum PaletteKeyAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use services_command_palette::CommandDescriptor;
     use input_types::{KeyState, Modifiers};
+    use services_command_palette::CommandDescriptor;
 
     fn create_test_palette() -> CommandPalette {
         let mut palette = CommandPalette::new();
