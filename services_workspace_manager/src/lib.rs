@@ -75,6 +75,7 @@ use view_types::{ViewFrame, ViewId, ViewKind};
 use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 
 // Re-export public types from modules
+pub use commands::WorkspaceCommand;
 pub use help::HelpCategory;
 pub use platform::{
     FakePlatform, WorkspaceCaps, WorkspaceDisplay, WorkspaceInput, WorkspacePlatform, WorkspaceTick,
@@ -486,6 +487,8 @@ impl LaunchConfig {
 enum ComponentInstance {
     /// Editor component
     Editor(Box<Editor>),
+    /// File picker component
+    FilePicker(Box<services_file_picker::FilePicker>),
     /// No instance (placeholder for components not yet implemented)
     None,
 }
@@ -743,6 +746,21 @@ impl WorkspaceManager {
                     }
                 }
                 ComponentInstance::Editor(Box::new(editor))
+            }
+            ComponentType::FilePicker => {
+                // Create file picker with root directory from editor I/O context
+                if let Some(context) = &self.editor_io_context {
+                    if let Some(root) = &context.root {
+                        let picker = services_file_picker::FilePicker::new(root.clone());
+                        ComponentInstance::FilePicker(Box::new(picker))
+                    } else {
+                        // No root directory available
+                        ComponentInstance::None
+                    }
+                } else {
+                    // No editor I/O context available
+                    ComponentInstance::None
+                }
             }
             _ => ComponentInstance::None,
         };
@@ -1229,6 +1247,49 @@ impl WorkspaceManager {
                         }
                         Err(_e) => {
                             // Error processing input - could log here
+                        }
+                    }
+                }
+                ComponentInstance::FilePicker(picker) => {
+                    // Process input with directory resolver from editor I/O context
+                    let resolver = self.editor_io_context.as_ref().and_then(|ctx| ctx.fs_view.as_ref());
+                    let result = picker.process_input(event.clone(), resolver);
+                    
+                    // Publish updated views
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
+                            // Get breadcrumb for status line
+                            let breadcrumb = "/"; // TODO: Track actual path
+                            
+                            // Render and publish main view
+                            let main_frame = picker.render_text_buffer(main_view.view_id, 0, timestamp);
+                            let _ = self.view_host.publish_frame(main_view, main_frame);
+                            
+                            // Render and publish status view
+                            let status_frame = picker.render_status_line(status_view.view_id, 0, timestamp, breadcrumb);
+                            let _ = self.view_host.publish_frame(status_view, status_frame);
+                        }
+                    }
+                    
+                    // Handle file selection or cancellation
+                    match result {
+                        services_file_picker::FilePickerResult::FileSelected { object_id: _, name } => {
+                            // File selected - close picker and open in editor
+                            let _ = self.terminate_component(component_id, ExitReason::Normal);
+                            
+                            // Launch editor with the selected file
+                            // TODO: Map ObjectId to path for editor
+                            let _ = self.execute_command(WorkspaceCommand::Open {
+                                component_type: ComponentType::Editor,
+                                args: vec![name],
+                            });
+                        }
+                        services_file_picker::FilePickerResult::Cancelled => {
+                            // User cancelled - close picker
+                            let _ = self.terminate_component(component_id, ExitReason::Normal);
+                        }
+                        services_file_picker::FilePickerResult::Continue => {
+                            // Still navigating
                         }
                     }
                 }

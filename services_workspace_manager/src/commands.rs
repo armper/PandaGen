@@ -398,10 +398,22 @@ impl WorkspaceManager {
     }
 
     fn cmd_open_file_picker(&mut self) -> CommandResult {
-        // Launch file picker component
-        // TODO: Implement actual file picker launching with proper root directory
-        CommandResult::Success {
-            message: "File picker opened (not yet implemented)".to_string(),
+        // Launch file picker component with storage service integration
+        let config = LaunchConfig::new(
+            ComponentType::FilePicker,
+            "File Picker".to_string(),
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        match self.launch_component(config) {
+            Ok(component_id) => CommandResult::Opened {
+                component_id,
+                name: "File Picker".to_string(),
+            },
+            Err(err) => CommandResult::Error {
+                message: format!("Failed to open file picker: {}", err),
+            },
         }
     }
 
