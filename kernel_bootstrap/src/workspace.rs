@@ -9,9 +9,9 @@ extern crate alloc;
 use core::fmt::Write;
 
 #[cfg(not(test))]
-use alloc::string::{String, ToString};
-#[cfg(not(test))]
 use alloc::boxed::Box;
+#[cfg(not(test))]
+use alloc::string::{String, ToString};
 #[cfg(test)]
 use std::string::{String, ToString};
 
@@ -121,7 +121,11 @@ fn byte_to_key_event(byte: u8) -> Option<KeyEvent> {
         _ => return None,
     };
 
-    Some(KeyEvent::new(key_code, Modifiers::none(), KeyState::Pressed))
+    Some(KeyEvent::new(
+        key_code,
+        Modifiers::none(),
+        KeyState::Pressed,
+    ))
 }
 
 /// Workspace session state
@@ -265,7 +269,11 @@ impl WorkspaceSession {
 
             // Convert byte to KeyEvent
             if let Some(key_event) = byte_to_key_event(byte) {
-                let action = handle_palette_key(&mut self.palette_overlay, &self.command_palette, &key_event);
+                let action = handle_palette_key(
+                    &mut self.palette_overlay,
+                    &self.command_palette,
+                    &key_event,
+                );
 
                 match action {
                     PaletteKeyAction::Close => {
