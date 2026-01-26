@@ -16,6 +16,7 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
+use input_types::{KeyCode, KeyEvent};
 
 /// Maximum query length for palette search
 const MAX_QUERY_LEN: usize = 128;
@@ -176,18 +177,18 @@ impl Default for PaletteOverlayState {
 
 /// Handles a key event for the palette overlay
 ///
-/// Returns true if the event was consumed, false otherwise
+/// Returns the action to take based on the key event
 pub fn handle_palette_key(
     state: &mut PaletteOverlayState,
     palette: &CommandPalette,
-    byte: u8,
+    key_event: &KeyEvent,
 ) -> PaletteKeyAction {
-    match byte {
-        0x1B => {
+    match key_event.code {
+        KeyCode::Escape => {
             // Escape - close palette
             PaletteKeyAction::Close
         }
-        b'\n' | b'\r' => {
+        KeyCode::Enter => {
             // Enter - execute selected command
             if let Some(cmd_id) = state.selected_command() {
                 PaletteKeyAction::Execute(cmd_id.clone())
@@ -195,28 +196,89 @@ pub fn handle_palette_key(
                 PaletteKeyAction::None
             }
         }
-        0x08 | 0x7F => {
+        KeyCode::Backspace => {
             // Backspace
             state.backspace(palette);
             PaletteKeyAction::Consumed
         }
-        0x1E => {
-            // Up arrow (special handling needed - this is 'a' in current parser)
-            // For now, we'll use a different approach
-            // TODO: Properly handle arrow keys
+        KeyCode::Up => {
+            // Up arrow - move selection up
+            state.move_selection_up();
             PaletteKeyAction::Consumed
         }
-        0x1F => {
-            // Down arrow (special handling needed)
-            // TODO: Properly handle arrow keys
+        KeyCode::Down => {
+            // Down arrow - move selection down
+            state.move_selection_down();
             PaletteKeyAction::Consumed
         }
-        byte if (0x20..0x7F).contains(&byte) => {
-            // Printable character
-            state.append_char(palette, byte as char);
-            PaletteKeyAction::Consumed
+        // Printable characters
+        code => {
+            if let Some(ch) = keycode_to_char(code) {
+                state.append_char(palette, ch);
+                PaletteKeyAction::Consumed
+            } else {
+                PaletteKeyAction::None
+            }
         }
-        _ => PaletteKeyAction::None,
+    }
+}
+
+/// Converts a KeyCode to a char if it represents a printable character
+///
+/// Note: This function always returns lowercase letters and does not account for
+/// modifier keys like Shift. For the command palette's search functionality,
+/// case-insensitive search handles both uppercase and lowercase input.
+fn keycode_to_char(code: KeyCode) -> Option<char> {
+    match code {
+        KeyCode::A => Some('a'),
+        KeyCode::B => Some('b'),
+        KeyCode::C => Some('c'),
+        KeyCode::D => Some('d'),
+        KeyCode::E => Some('e'),
+        KeyCode::F => Some('f'),
+        KeyCode::G => Some('g'),
+        KeyCode::H => Some('h'),
+        KeyCode::I => Some('i'),
+        KeyCode::J => Some('j'),
+        KeyCode::K => Some('k'),
+        KeyCode::L => Some('l'),
+        KeyCode::M => Some('m'),
+        KeyCode::N => Some('n'),
+        KeyCode::O => Some('o'),
+        KeyCode::P => Some('p'),
+        KeyCode::Q => Some('q'),
+        KeyCode::R => Some('r'),
+        KeyCode::S => Some('s'),
+        KeyCode::T => Some('t'),
+        KeyCode::U => Some('u'),
+        KeyCode::V => Some('v'),
+        KeyCode::W => Some('w'),
+        KeyCode::X => Some('x'),
+        KeyCode::Y => Some('y'),
+        KeyCode::Z => Some('z'),
+        KeyCode::Num0 => Some('0'),
+        KeyCode::Num1 => Some('1'),
+        KeyCode::Num2 => Some('2'),
+        KeyCode::Num3 => Some('3'),
+        KeyCode::Num4 => Some('4'),
+        KeyCode::Num5 => Some('5'),
+        KeyCode::Num6 => Some('6'),
+        KeyCode::Num7 => Some('7'),
+        KeyCode::Num8 => Some('8'),
+        KeyCode::Num9 => Some('9'),
+        KeyCode::Space => Some(' '),
+        KeyCode::Minus => Some('-'),
+        KeyCode::Equal => Some('='),
+        KeyCode::LeftBracket => Some('['),
+        KeyCode::RightBracket => Some(']'),
+        KeyCode::Backslash => Some('\\'),
+        KeyCode::Semicolon => Some(';'),
+        KeyCode::Quote => Some('\''),
+        KeyCode::Comma => Some(','),
+        KeyCode::Period => Some('.'),
+        KeyCode::Slash => Some('/'),
+        KeyCode::Grave => Some('`'),
+        _ => None,
     }
 }
 
@@ -237,6 +299,7 @@ pub enum PaletteKeyAction {
 mod tests {
     use super::*;
     use services_command_palette::CommandDescriptor;
+    use input_types::{KeyState, Modifiers};
 
     fn create_test_palette() -> CommandPalette {
         let mut palette = CommandPalette::new();
@@ -376,7 +439,8 @@ mod tests {
         let mut state = PaletteOverlayState::new();
         state.open(FocusTarget::None);
 
-        let action = handle_palette_key(&mut state, &palette, 0x1B);
+        let key_event = KeyEvent::new(KeyCode::Escape, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &key_event);
         assert_eq!(action, PaletteKeyAction::Close);
     }
 
@@ -388,7 +452,8 @@ mod tests {
 
         state.update_query(&palette, "edit".to_string());
 
-        let action = handle_palette_key(&mut state, &palette, b'\n');
+        let key_event = KeyEvent::new(KeyCode::Enter, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &key_event);
         assert!(matches!(action, PaletteKeyAction::Execute(_)));
     }
 
@@ -398,7 +463,8 @@ mod tests {
         let mut state = PaletteOverlayState::new();
         state.open(FocusTarget::None);
 
-        let action = handle_palette_key(&mut state, &palette, b'a');
+        let key_event = KeyEvent::new(KeyCode::A, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &key_event);
         assert_eq!(action, PaletteKeyAction::Consumed);
         assert_eq!(state.query(), "a");
     }
@@ -412,7 +478,8 @@ mod tests {
         state.append_char(&palette, 'a');
         state.append_char(&palette, 'b');
 
-        let action = handle_palette_key(&mut state, &palette, 0x08);
+        let key_event = KeyEvent::new(KeyCode::Backspace, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &key_event);
         assert_eq!(action, PaletteKeyAction::Consumed);
         assert_eq!(state.query(), "a");
     }
@@ -439,5 +506,43 @@ mod tests {
         // The "Open Editor" command should match
         let results = state.displayed_results();
         assert!(results.iter().any(|r| r.id.as_str() == "open_editor"));
+    }
+
+    #[test]
+    fn test_arrow_key_navigation() {
+        let palette = create_test_palette();
+        let mut state = PaletteOverlayState::new();
+        state.open(FocusTarget::None);
+
+        // Get all commands
+        state.update_query(&palette, "".to_string());
+        assert_eq!(state.selection_index(), 0);
+
+        // Test Down arrow
+        let down_event = KeyEvent::new(KeyCode::Down, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &down_event);
+        assert_eq!(action, PaletteKeyAction::Consumed);
+        assert_eq!(state.selection_index(), 1);
+
+        // Test Down arrow again
+        let action = handle_palette_key(&mut state, &palette, &down_event);
+        assert_eq!(action, PaletteKeyAction::Consumed);
+        assert_eq!(state.selection_index(), 2);
+
+        // Test Up arrow
+        let up_event = KeyEvent::new(KeyCode::Up, Modifiers::none(), KeyState::Pressed);
+        let action = handle_palette_key(&mut state, &palette, &up_event);
+        assert_eq!(action, PaletteKeyAction::Consumed);
+        assert_eq!(state.selection_index(), 1);
+
+        // Test Up arrow again
+        let action = handle_palette_key(&mut state, &palette, &up_event);
+        assert_eq!(action, PaletteKeyAction::Consumed);
+        assert_eq!(state.selection_index(), 0);
+
+        // Test Up arrow at top (should stay at 0)
+        let action = handle_palette_key(&mut state, &palette, &up_event);
+        assert_eq!(action, PaletteKeyAction::Consumed);
+        assert_eq!(state.selection_index(), 0);
     }
 }

@@ -10,6 +10,8 @@ use core::fmt::Write;
 
 #[cfg(not(test))]
 use alloc::string::{String, ToString};
+#[cfg(not(test))]
+use alloc::boxed::Box;
 #[cfg(test)]
 use std::string::{String, ToString};
 
@@ -23,6 +25,8 @@ use crate::minimal_editor::{EditorMode, MinimalEditor};
 use crate::palette_overlay::{
     handle_palette_key, FocusTarget, PaletteKeyAction, PaletteOverlayState,
 };
+
+use input_types::{KeyCode, KeyEvent, KeyState, Modifiers};
 
 #[cfg(not(test))]
 use crate::bare_metal_editor_io::BareMetalEditorIo;
@@ -50,6 +54,74 @@ impl core::fmt::Display for ComponentType {
             ComponentType::Shell => write!(f, "Shell"),
         }
     }
+}
+
+/// Converts a raw byte to a KeyEvent
+///
+/// This is a temporary bridge function until the full KeyEvent pipeline is integrated.
+/// Handles both uppercase and lowercase ASCII letters, numbers, and basic control keys.
+fn byte_to_key_event(byte: u8) -> Option<KeyEvent> {
+    let key_code = match byte {
+        0x1B => KeyCode::Escape,
+        b'\n' | b'\r' => KeyCode::Enter,
+        0x08 | 0x7F => KeyCode::Backspace,
+        0x09 => KeyCode::Tab,
+        b' ' => KeyCode::Space,
+        // Letters (lowercase)
+        b'a' | b'A' => KeyCode::A,
+        b'b' | b'B' => KeyCode::B,
+        b'c' | b'C' => KeyCode::C,
+        b'd' | b'D' => KeyCode::D,
+        b'e' | b'E' => KeyCode::E,
+        b'f' | b'F' => KeyCode::F,
+        b'g' | b'G' => KeyCode::G,
+        b'h' | b'H' => KeyCode::H,
+        b'i' | b'I' => KeyCode::I,
+        b'j' | b'J' => KeyCode::J,
+        b'k' | b'K' => KeyCode::K,
+        b'l' | b'L' => KeyCode::L,
+        b'm' | b'M' => KeyCode::M,
+        b'n' | b'N' => KeyCode::N,
+        b'o' | b'O' => KeyCode::O,
+        b'p' | b'P' => KeyCode::P,
+        b'q' | b'Q' => KeyCode::Q,
+        b'r' | b'R' => KeyCode::R,
+        b's' | b'S' => KeyCode::S,
+        b't' | b'T' => KeyCode::T,
+        b'u' | b'U' => KeyCode::U,
+        b'v' | b'V' => KeyCode::V,
+        b'w' | b'W' => KeyCode::W,
+        b'x' | b'X' => KeyCode::X,
+        b'y' | b'Y' => KeyCode::Y,
+        b'z' | b'Z' => KeyCode::Z,
+        // Numbers
+        b'0' => KeyCode::Num0,
+        b'1' => KeyCode::Num1,
+        b'2' => KeyCode::Num2,
+        b'3' => KeyCode::Num3,
+        b'4' => KeyCode::Num4,
+        b'5' => KeyCode::Num5,
+        b'6' => KeyCode::Num6,
+        b'7' => KeyCode::Num7,
+        b'8' => KeyCode::Num8,
+        b'9' => KeyCode::Num9,
+        // Symbols
+        b'-' => KeyCode::Minus,
+        b'=' => KeyCode::Equal,
+        b'[' => KeyCode::LeftBracket,
+        b']' => KeyCode::RightBracket,
+        b'\\' => KeyCode::Backslash,
+        b';' => KeyCode::Semicolon,
+        b'\'' => KeyCode::Quote,
+        b',' => KeyCode::Comma,
+        b'.' => KeyCode::Period,
+        b'/' => KeyCode::Slash,
+        b'`' => KeyCode::Grave,
+        // Unknown/unhandled
+        _ => return None,
+    };
+
+    Some(KeyEvent::new(key_code, Modifiers::none(), KeyState::Pressed))
 }
 
 /// Workspace session state
@@ -191,43 +263,49 @@ impl WorkspaceSession {
         if self.palette_overlay.is_open() {
             let _ = writeln!(serial, "  action=palette_input");
 
-            let action = handle_palette_key(&mut self.palette_overlay, &self.command_palette, byte);
+            // Convert byte to KeyEvent
+            if let Some(key_event) = byte_to_key_event(byte) {
+                let action = handle_palette_key(&mut self.palette_overlay, &self.command_palette, &key_event);
 
-            match action {
-                PaletteKeyAction::Close => {
-                    let _ = writeln!(serial, "  palette_action=close");
-                    self.palette_overlay.close();
-                    return true;
-                }
-                PaletteKeyAction::Execute(cmd_id) => {
-                    let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
-
-                    // Execute command
-                    let result = self.command_palette.execute_command(&cmd_id, &[]);
-                    match result {
-                        Ok(msg) => {
-                            let _ = writeln!(serial, "  palette_result=success msg={}", msg);
-                            self.append_output_text(&msg);
-                        }
-                        Err(err) => {
-                            let _ = writeln!(serial, "  palette_result=error err={}", err);
-                            self.append_output_text(&err);
-                        }
+                match action {
+                    PaletteKeyAction::Close => {
+                        let _ = writeln!(serial, "  palette_action=close");
+                        self.palette_overlay.close();
+                        return true;
                     }
+                    PaletteKeyAction::Execute(cmd_id) => {
+                        let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
 
-                    // Close palette after execution
-                    self.palette_overlay.close();
-                    return true;
+                        // Execute command
+                        let result = self.command_palette.execute_command(&cmd_id, &[]);
+                        match result {
+                            Ok(msg) => {
+                                let _ = writeln!(serial, "  palette_result=success msg={}", msg);
+                                self.append_output_text(&msg);
+                            }
+                            Err(err) => {
+                                let _ = writeln!(serial, "  palette_result=error err={}", err);
+                                self.append_output_text(&err);
+                            }
+                        }
+
+                        // Close palette after execution
+                        self.palette_overlay.close();
+                        return true;
+                    }
+                    PaletteKeyAction::Consumed => {
+                        let _ = writeln!(serial, "  palette_action=consumed");
+                        return true;
+                    }
+                    PaletteKeyAction::None => {
+                        let _ = writeln!(serial, "  palette_action=none");
+                        // Fall through - shouldn't happen but handle gracefully
+                        return false;
+                    }
                 }
-                PaletteKeyAction::Consumed => {
-                    let _ = writeln!(serial, "  palette_action=consumed");
-                    return true;
-                }
-                PaletteKeyAction::None => {
-                    let _ = writeln!(serial, "  palette_action=none");
-                    // Fall through - shouldn't happen but handle gracefully
-                    return false;
-                }
+            } else {
+                let _ = writeln!(serial, "  palette_action=unknown_byte");
+                return true; // Consume unknown bytes when palette is open
             }
         }
 
