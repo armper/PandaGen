@@ -2624,6 +2624,64 @@ mod tests {
         // Focus should have switched to first component
         assert_eq!(workspace.get_focused_component(), Some(id1));
     }
+
+    #[test]
+    fn test_launch_file_picker_without_storage() {
+        let mut workspace = create_test_workspace();
+
+        // Try to launch file picker without storage context
+        let config = LaunchConfig::new(
+            ComponentType::FilePicker,
+            "file-picker",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let component_id = workspace.launch_component(config).unwrap();
+
+        // Component should be created but instance will be None
+        assert_eq!(workspace.components.len(), 1);
+        assert!(workspace.get_component(component_id).is_some());
+
+        let component = workspace.get_component(component_id).unwrap();
+        assert_eq!(component.component_type, ComponentType::FilePicker);
+        assert_eq!(component.state, ComponentState::Running);
+    }
+
+    #[test]
+    fn test_launch_file_picker_with_storage() {
+        let mut workspace = create_test_workspace();
+
+        // Set up storage context with root directory
+        let storage = JournaledStorage::new();
+        let fs_view = FileSystemViewService::new();
+        let root = DirectoryView::new(services_storage::ObjectId::new());
+        
+        workspace.set_editor_io_context(EditorIoContext {
+            storage,
+            fs_view: Some(fs_view),
+            root: Some(root),
+        });
+
+        // Launch file picker with storage context
+        let config = LaunchConfig::new(
+            ComponentType::FilePicker,
+            "file-picker",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let component_id = workspace.launch_component(config).unwrap();
+
+        // Component should be created with FilePicker instance
+        assert_eq!(workspace.components.len(), 1);
+        assert!(workspace.get_component(component_id).is_some());
+
+        let component = workspace.get_component(component_id).unwrap();
+        assert_eq!(component.component_type, ComponentType::FilePicker);
+        assert_eq!(component.state, ComponentState::Running);
+        assert!(component.focusable);
+    }
 }
 
 // ============================================================================
