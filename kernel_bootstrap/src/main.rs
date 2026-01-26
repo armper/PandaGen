@@ -32,6 +32,7 @@ use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
+use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 

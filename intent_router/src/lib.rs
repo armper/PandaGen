@@ -9,6 +9,7 @@
 //! - Routable to handlers
 //! - Versioned for compatibility
 
+use core_types::uuid_tools::new_uuid;
 use core_types::ServiceId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,7 +21,7 @@ pub struct IntentId(Uuid);
 impl IntentId {
     /// Creates a new random intent ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 

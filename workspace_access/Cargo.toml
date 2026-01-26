@@ -8,5 +8,10 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
+
+[target.'cfg(target_os = "none")'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["serde"] }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 
