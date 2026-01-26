@@ -83,7 +83,7 @@ ComponentInstance::FilePicker(picker) => {
     // Publish updated views
     if let Some(component) = self.components.get(&component_id) {
         if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
-            let breadcrumb = "/";
+            let breadcrumb = "<root>";
             
             // Render and publish main view
             let main_frame = picker.render_text_buffer(main_view.view_id, 0, timestamp);
@@ -252,11 +252,11 @@ test result: ok. 144 passed; 0 failed; 0 ignored; 0 measured
 
 ### 4. Breadcrumb Tracking
 
-**Decision**: Use placeholder breadcrumb "/" for status line
+**Decision**: Use placeholder breadcrumb "<root>" for status line
 
 **TODO**: Implement actual path tracking in future phase
 
-**Current Limitation**: Status line shows "/" regardless of current directory depth
+**Current Implementation**: Status line shows "<root>" to indicate browsing from root, regardless of current directory depth. This makes it clear to users that path tracking is not yet implemented, unlike "/" which could be confusing as it looks like a real path.
 
 ---
 

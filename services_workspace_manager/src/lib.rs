@@ -1263,8 +1263,9 @@ impl WorkspaceManager {
                         if let (Some(main_view), Some(status_view)) =
                             (&component.main_view, &component.status_view)
                         {
-                            // Get breadcrumb for status line
-                            let breadcrumb = "/"; // TODO: Track actual path
+                            // TODO: Track actual directory path for breadcrumb
+                            // For now, use placeholder to indicate root browsing
+                            let breadcrumb = "<root>";
 
                             // Render and publish main view
                             let main_frame =
