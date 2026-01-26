@@ -224,6 +224,10 @@ pub fn handle_palette_key(
 }
 
 /// Converts a KeyCode to a char if it represents a printable character
+///
+/// Note: This function always returns lowercase letters and does not account for
+/// modifier keys like Shift. For the command palette's search functionality,
+/// case-insensitive search handles both uppercase and lowercase input.
 fn keycode_to_char(code: KeyCode) -> Option<char> {
     match code {
         KeyCode::A => Some('a'),

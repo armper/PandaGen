@@ -59,7 +59,7 @@ impl core::fmt::Display for ComponentType {
 /// Converts a raw byte to a KeyEvent
 ///
 /// This is a temporary bridge function until the full KeyEvent pipeline is integrated.
-/// Currently handles basic ASCII characters and control keys.
+/// Handles both uppercase and lowercase ASCII letters, numbers, and basic control keys.
 fn byte_to_key_event(byte: u8) -> Option<KeyEvent> {
     let key_code = match byte {
         0x1B => KeyCode::Escape,
