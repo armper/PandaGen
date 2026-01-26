@@ -138,12 +138,16 @@ impl GlyphCache {
             slot.fg = fg;
             slot.bg = bg;
             slot.glyphs.clear();
-            slot.glyphs.resize(128, GlyphEntry::empty());
             slot.valid = true;
         }
 
         slot.last_used = self.clock;
         self.clock += 1;
+
+        // Ensure the glyphs vec is large enough for this index
+        if idx >= slot.glyphs.len() {
+            slot.glyphs.resize(idx + 1, GlyphEntry::empty());
+        }
 
         if !slot.glyphs[idx].ready {
             let bitmap = get_char_bitmap(ch);
