@@ -999,6 +999,7 @@ fn workspace_loop(
                             // - explicit invalidate request (output_dirty on entry)
                             // Keep full redraws out of normal typing/cursor movement paths.
                             let force_full = !editor_render_cache.valid || output_dirty;
+                            let current_tick = get_tick_count();
                             let _stats = optimized_render::render_editor_optimized(
                                 sink,
                                 editor,
@@ -1006,6 +1007,7 @@ fn workspace_loop(
                                 normal_attr,
                                 bold_attr,
                                 force_full,
+                                current_tick,
                             );
 
                             #[cfg(debug_assertions)]
@@ -1081,6 +1083,7 @@ fn workspace_loop(
                             // - explicit invalidate request (output_dirty on entry)
                             // Typing, Enter, Esc, cursor moves, and :w must stay incremental.
                             let force_full = !editor_render_cache.is_valid() || output_dirty;
+                            let current_tick = get_tick_count();
                             let _stats = optimized_render::render_editor_optimized(
                                 &mut vga_sink,
                                 editor,
@@ -1088,6 +1091,7 @@ fn workspace_loop(
                                 normal_attr,
                                 bold_attr,
                                 force_full,
+                                current_tick,
                             );
 
                             #[cfg(debug_assertions)]

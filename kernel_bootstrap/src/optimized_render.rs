@@ -289,12 +289,13 @@ pub fn render_editor_optimized(
     normal_attr: u8,
     bold_attr: u8,
     force_full: bool,
+    current_tick: u64,
 ) -> FrameRenderStats {
     let (cols, rows) = sink.dims();
     cache.ensure_size(cols, rows);
 
     #[cfg(debug_assertions)]
-    render_stats::frame_begin(0); // TODO: pass actual tick
+    render_stats::frame_begin(current_tick);
 
     let mut stats = FrameRenderStats::default();
 
@@ -677,7 +678,7 @@ mod tests {
         let editor = MinimalEditor::new(24);
 
         // First render should be full
-        let stats1 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let stats1 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 100);
         #[cfg(debug_assertions)]
         assert!(stats1.full_clear);
         let writes_full = sink.write_count;
@@ -686,7 +687,7 @@ mod tests {
         sink.write_count = 0;
 
         // Second render with no changes should be minimal
-        let stats2 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let stats2 = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 110);
         #[cfg(debug_assertions)]
         assert!(!stats2.full_clear);
         let writes_incremental = sink.write_count;
@@ -715,14 +716,14 @@ mod tests {
         editor.process_byte(b'o');
 
         // First render
-        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 100);
         sink.write_count = 0;
 
         // Move cursor (Escape to normal, then 'h' to move left)
         editor.process_byte(0x1B); // Escape
 
         // Render after mode change - should update status line + minimal
-        let stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 110);
 
         // Should have minimal writes (cursor restore + new cursor + status)
         #[cfg(debug_assertions)]
@@ -745,12 +746,12 @@ mod tests {
         let mut editor = MinimalEditor::new(24);
 
         // Initial render
-        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 0);
         sink.write_count = 0;
 
         // Enter insert mode
         editor.process_byte(b'i');
-        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 10);
         sink.write_count = 0;
 
         // Type 50 characters, render after each
@@ -758,7 +759,7 @@ mod tests {
         for i in 0..50 {
             let ch = b'a' + (i % 26) as u8;
             editor.process_byte(ch);
-            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 20 + i as u64);
             total_writes += sink.write_count;
             sink.write_count = 0;
         }
@@ -801,7 +802,7 @@ mod tests {
         editor.process_byte(0x1B); // Escape to normal mode
 
         // Initial render
-        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+        let _ = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 0);
         sink.write_count = 0;
 
         // Move cursor 20 times with h/j/k/l and measure writes
@@ -811,9 +812,9 @@ mod tests {
         ];
         let mut total_writes = 0usize;
 
-        for &movement in &moves {
+        for (idx, &movement) in moves.iter().enumerate() {
             editor.process_byte(movement);
-            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false);
+            let _stats = render_editor_optimized(&mut sink, &editor, &mut cache, 0x07, 0x0F, false, 10 + idx as u64);
             total_writes += sink.write_count;
             sink.write_count = 0;
         }
