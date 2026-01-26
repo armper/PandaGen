@@ -67,6 +67,9 @@ fn byte_to_key_event(byte: u8) -> Option<KeyEvent> {
         0x08 | 0x7F => KeyCode::Backspace,
         0x09 => KeyCode::Tab,
         b' ' => KeyCode::Space,
+        0x10 => KeyCode::P,
+        0x80 => KeyCode::Up,
+        0x81 => KeyCode::Down,
         // Letters (lowercase)
         b'a' | b'A' => KeyCode::A,
         b'b' | b'B' => KeyCode::B,
@@ -173,7 +176,7 @@ impl WorkspaceSession {
                 "Display available commands",
                 vec!["help".to_string(), "commands".to_string()],
             ),
-            Box::new(|_| Ok("Available commands: help, editor, quit".to_string())),
+            Box::new(|_| Ok("Available commands: help, open editor, quit".to_string())),
         );
 
         command_palette.register_command(
@@ -188,12 +191,129 @@ impl WorkspaceSession {
 
         command_palette.register_command(
             CommandDescriptor::new(
+                "open_cli",
+                "Open CLI",
+                "Open the CLI component",
+                vec!["cli".to_string(), "console".to_string()],
+            )
+            .with_category("Workspace"),
+            Box::new(|_| Ok("Opening CLI...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "list",
+                "List Components",
+                "List active components",
+                vec!["list".to_string(), "components".to_string()],
+            )
+            .with_category("Workspace"),
+            Box::new(|_| Ok("Listing components...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "focus",
+                "Focus Component",
+                "Focus the next component",
+                vec!["focus".to_string(), "cycle".to_string()],
+            )
+            .with_category("Workspace")
+            .requires_args()
+            .with_prompt_pattern("focus "),
+            Box::new(|_| Ok("Focus command ready".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
                 "quit",
                 "Quit",
                 "Exit the workspace",
                 vec!["exit".to_string(), "close".to_string(), "q".to_string()],
-            ),
+            )
+            .with_category("Workspace"),
             Box::new(|_| Ok("Quitting...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "halt",
+                "Halt System",
+                "Halt the system",
+                vec!["halt".to_string(), "shutdown".to_string()],
+            )
+            .with_category("System"),
+            Box::new(|_| Ok("Halting...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "boot",
+                "Show Boot Info",
+                "Display boot information",
+                vec!["boot".to_string(), "info".to_string()],
+            )
+            .with_category("System"),
+            Box::new(|_| Ok("Boot info".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "mem",
+                "Show Memory Info",
+                "Display memory information",
+                vec!["mem".to_string(), "memory".to_string()],
+            )
+            .with_category("System"),
+            Box::new(|_| Ok("Memory info".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "ticks",
+                "Show System Ticks",
+                "Display system tick count",
+                vec!["ticks".to_string(), "time".to_string()],
+            )
+            .with_category("System"),
+            Box::new(|_| Ok("System ticks".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "ls",
+                "List Files",
+                "List filesystem entries",
+                vec!["ls".to_string(), "files".to_string()],
+            )
+            .with_category("File"),
+            Box::new(|_| Ok("Listing files...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "cat",
+                "Show File Contents",
+                "Display a file's contents",
+                vec!["cat".to_string(), "read".to_string()],
+            )
+            .with_category("File")
+            .requires_args()
+            .with_prompt_pattern("cat "),
+            Box::new(|_| Ok("Cat command ready".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "write",
+                "Write File",
+                "Create or update a file",
+                vec!["write".to_string(), "save".to_string()],
+            )
+            .with_category("File")
+            .requires_args()
+            .with_prompt_pattern("write "),
+            Box::new(|_| Ok("Write command ready".to_string())),
         );
 
         Self {
@@ -260,6 +380,8 @@ impl WorkspaceSession {
             };
 
             self.palette_overlay.open(current_focus);
+            self.palette_overlay
+                .update_query(&self.command_palette, String::new());
             return true;
         }
 
@@ -284,6 +406,39 @@ impl WorkspaceSession {
                     PaletteKeyAction::Execute(cmd_id) => {
                         let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
 
+                        match cmd_id.as_str() {
+                            "open_editor" => {
+                                self.open_editor(serial, None);
+                                self.palette_overlay.close();
+                                return true;
+                            }
+                            "open_cli" => {
+                                self.active_component = Some(ComponentType::Cli);
+                                self.emit_line(serial, "CLI component registered");
+                                self.emit_line(
+                                    serial,
+                                    "Note: Full CLI requires services_workspace_manager",
+                                );
+                                self.palette_overlay.close();
+                                return true;
+                            }
+                            "quit" => {
+                                self.active_component = None;
+                                self.emit_line(serial, "Closed component");
+                                self.palette_overlay.close();
+                                return true;
+                            }
+                            _ => {}
+                        }
+
+                        if let Some(descriptor) = self.command_palette.get_command(&cmd_id) {
+                            if let Some(pattern) = descriptor.prompt_pattern.as_deref() {
+                                self.set_command_text(pattern);
+                                self.palette_overlay.close();
+                                return true;
+                            }
+                        }
+
                         // Execute command
                         let result = self.command_palette.execute_command(&cmd_id, &[]);
                         match result {
@@ -295,6 +450,14 @@ impl WorkspaceSession {
                                 let _ = writeln!(serial, "  palette_result=error err={}", err);
                                 self.append_output_text(&err);
                             }
+                        }
+
+                        match cmd_id.as_str() {
+                            "help" | "list" | "halt" | "boot" | "mem" | "ticks" | "ls" => {
+                                self.set_command_text(cmd_id.as_str());
+                                self.execute_command(ctx, serial);
+                            }
+                            _ => {}
                         }
 
                         // Close palette after execution
@@ -533,85 +696,8 @@ impl WorkspaceSession {
                 let what = parts.next();
                 match what {
                     Some("editor") => {
-                        #[cfg(not(test))]
-                        {
-                            // Recover filesystem from any stale editor instance
-                            if self.filesystem.is_none() {
-                                if let Some(mut stale_editor) = self.editor.take() {
-                                    if let Some(io) = stale_editor.editor_io.take() {
-                                        self.filesystem = Some(io.into_filesystem());
-                                    }
-                                }
-                            }
-
-                            // Try to open file from path argument
-                            let path = parts.next();
-                            let mut editor = MinimalEditor::new(23);
-
-                            let mut open_message: Option<String> = None;
-                            let mut open_secondary: Option<String> = None;
-
-                            // If we have a filesystem, create an IO adapter and keep it with the editor
-                            if let Some(fs) = self.filesystem.take() {
-                                let mut io = BareMetalEditorIo::new(fs);
-
-                                // Try to open the file if a path was provided
-                                if let Some(path) = path {
-                                    match io.open(path) {
-                                        Ok((content, handle)) => {
-                                            editor.load_content(&content);
-                                            editor.set_editor_io(io, handle);
-                                            open_message = Some(alloc::format!(
-                                                "Opened: {} [filesystem available]",
-                                                path
-                                            ));
-                                        }
-                                        Err(_) => {
-                                            // File not found - create new buffer with IO for save-as
-                                            let handle = io.new_buffer(Some(path.to_string()));
-                                            editor.set_editor_io(io, handle);
-                                            open_message =
-                                                Some(alloc::format!("File not found: {}", path));
-                                            open_secondary = Some(
-                                                "Starting with empty buffer [filesystem available]"
-                                                    .to_string(),
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // No path provided - new buffer with no default path
-                                    let handle = io.new_buffer(None);
-                                    editor.set_editor_io(io, handle);
-                                    open_message =
-                                        Some("New buffer [filesystem available]".to_string());
-                                }
-                            } else {
-                                // No filesystem available
-                                open_message =
-                                    Some("Warning: No filesystem - :w will not work".to_string());
-                            }
-
-                            if let Some(message) = open_message {
-                                self.emit_line(serial, &message);
-                            }
-                            if let Some(message) = open_secondary {
-                                self.emit_line(serial, &message);
-                            }
-
-                            self.editor = Some(editor);
-                            self.active_component = Some(ComponentType::Editor);
-                            self.emit_line(
-                                serial,
-                                "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :w=save",
-                            );
-                        }
-                        #[cfg(test)]
-                        {
-                            let editor = MinimalEditor::new(23);
-                            self.editor = Some(editor);
-                            self.active_component = Some(ComponentType::Editor);
-                            self.emit_line(serial, "Editor opened (test mode)");
-                        }
+                        let path = parts.next();
+                        self.open_editor(serial, path);
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
@@ -656,6 +742,10 @@ impl WorkspaceSession {
                 self.active_component = None;
                 // self.editor = None;
                 self.emit_line(serial, "Closed component");
+            }
+            "editor" => {
+                let path = parts.next();
+                self.open_editor(serial, path);
             }
             "halt" => {
                 self.emit_line(serial, "Halting system...");
@@ -767,6 +857,82 @@ impl WorkspaceSession {
         let _ = write!(serial, "> ");
     }
 
+    fn open_editor(&mut self, serial: &mut SerialPort, path: Option<&str>) {
+        #[cfg(not(test))]
+        {
+            // Recover filesystem from any stale editor instance
+            if self.filesystem.is_none() {
+                if let Some(mut stale_editor) = self.editor.take() {
+                    if let Some(io) = stale_editor.editor_io.take() {
+                        self.filesystem = Some(io.into_filesystem());
+                    }
+                }
+            }
+
+            let mut editor = MinimalEditor::new(23);
+
+            let mut open_message: Option<String> = None;
+            let mut open_secondary: Option<String> = None;
+
+            // If we have a filesystem, create an IO adapter and keep it with the editor
+            if let Some(fs) = self.filesystem.take() {
+                let mut io = BareMetalEditorIo::new(fs);
+
+                // Try to open the file if a path was provided
+                if let Some(path) = path {
+                    match io.open(path) {
+                        Ok((content, handle)) => {
+                            editor.load_content(&content);
+                            editor.set_editor_io(io, handle);
+                            open_message = Some(alloc::format!(
+                                "Opened: {} [filesystem available]",
+                                path
+                            ));
+                        }
+                        Err(_) => {
+                            // File not found - create new buffer with IO for save-as
+                            let handle = io.new_buffer(Some(path.to_string()));
+                            editor.set_editor_io(io, handle);
+                            open_message = Some(alloc::format!("File not found: {}", path));
+                            open_secondary = Some(
+                                "Starting with empty buffer [filesystem available]".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    // No path provided - new buffer with no default path
+                    let handle = io.new_buffer(None);
+                    editor.set_editor_io(io, handle);
+                    open_message = Some("New buffer [filesystem available]".to_string());
+                }
+            } else {
+                // No filesystem available
+                open_message = Some("Warning: No filesystem - :w will not work".to_string());
+            }
+
+            if let Some(message) = open_message {
+                self.emit_line(serial, &message);
+            }
+            if let Some(message) = open_secondary {
+                self.emit_line(serial, &message);
+            }
+
+            self.editor = Some(editor);
+            self.active_component = Some(ComponentType::Editor);
+            self.emit_line(
+                serial,
+                "Keys: i=insert, Esc=normal, h/j/k/l=move, :q=quit, :w=save",
+            );
+        }
+        #[cfg(test)]
+        {
+            let editor = MinimalEditor::new(23);
+            self.editor = Some(editor);
+            self.active_component = Some(ComponentType::Editor);
+            self.emit_line(serial, "Editor opened (test mode)");
+        }
+    }
+
     /// Delegate command to the existing command service
     fn delegate_to_command_service(
         &mut self,
@@ -806,6 +972,13 @@ impl WorkspaceSession {
     /// Returns command buffer text directly without heap allocation
     pub fn get_command_text(&self) -> &[u8] {
         &self.command_buffer[..self.command_len]
+    }
+
+    fn set_command_text(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let len = bytes.len().min(COMMAND_MAX);
+        self.command_buffer[..len].copy_from_slice(&bytes[..len]);
+        self.command_len = len;
     }
 
     /// Get the cursor column for the current state
