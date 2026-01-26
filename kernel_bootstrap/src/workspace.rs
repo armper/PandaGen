@@ -10,6 +10,8 @@ use core::fmt::Write;
 
 #[cfg(not(test))]
 use alloc::string::{String, ToString};
+#[cfg(not(test))]
+use alloc::boxed::Box;
 #[cfg(test)]
 use std::string::{String, ToString};
 
