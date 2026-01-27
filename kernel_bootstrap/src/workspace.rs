@@ -431,12 +431,14 @@ impl WorkspaceSession {
                             _ => {}
                         }
 
-                        if let Some(descriptor) = self.command_palette.get_command(&cmd_id) {
-                            if let Some(pattern) = descriptor.prompt_pattern.as_deref() {
-                                self.set_command_text(pattern);
-                                self.palette_overlay.close();
-                                return true;
-                            }
+                        let prompt_pattern = self
+                            .command_palette
+                            .get_command(&cmd_id)
+                            .and_then(|descriptor| descriptor.prompt_pattern.clone());
+                        if let Some(pattern) = prompt_pattern {
+                            self.set_command_text(&pattern);
+                            self.palette_overlay.close();
+                            return true;
                         }
 
                         // Execute command

@@ -1,6 +1,6 @@
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
-#![cfg_attr(not(test), feature(alloc_error_handler))]
+#![cfg_attr(all(not(test), target_os = "none"), no_std)]
+#![cfg_attr(all(not(test), target_os = "none"), no_main)]
+#![cfg_attr(all(not(test), target_os = "none"), feature(alloc_error_handler))]
 // Allow unused code - this is infrastructure for future phases
 #![allow(dead_code)]
 // Allow manual div_ceil - explicit for readability in no_std
@@ -38,7 +38,7 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 use core::panic::PanicInfo;
 #[cfg(not(test))]
 use limine::memory_map::EntryType;
@@ -49,7 +49,7 @@ use limine::request::{
 #[cfg(not(test))]
 use limine::BaseRevision;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 // Provide a small, deterministic stack and jump into Rust.
 //
 // This is only needed for bare-metal execution, not for tests.
@@ -136,7 +136,7 @@ const KBD_DEBUG_LOG: bool = cfg!(debug_assertions);
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 global_asm!(
     r#"
 .section .text
@@ -580,7 +580,7 @@ macro_rules! kprintln {
     };
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -733,7 +733,7 @@ pub extern "C" fn rust_main() -> ! {
     )
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -1835,6 +1835,9 @@ fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {
     }
 }
 
+#[cfg(not(target_os = "none"))]
+fn main() {}
+
 #[cfg(debug_assertions)]
 fn is_typing_byte(byte: u8) -> bool {
     matches!(
@@ -2416,7 +2419,7 @@ mod keyboard_scancode_tests {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     let mut info = BootInfo::empty();
     unsafe {
@@ -2533,7 +2536,7 @@ fn print_boot_info(serial: &mut serial::SerialPort, info: &BootInfo) {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn init_memory(
     serial: &mut serial::SerialPort,
     boot: &BootInfo,
@@ -2575,7 +2578,7 @@ fn init_memory(
     (Some(allocator), heap)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn init_heap(
     serial: &mut serial::SerialPort,
     allocator: &mut FrameAllocator,
@@ -2589,7 +2592,8 @@ fn init_heap(
     let virt_base = (hhdm_offset + phys_base) as usize;
     let size = (HEAP_PAGES * PAGE_SIZE) as usize;
 
-    // Initialize the global allocator
+    // Initialize the global allocator (bare-metal only)
+    #[cfg(all(not(test), target_os = "none"))]
     unsafe {
         let heap_ptr = &GLOBAL_HEAP as *const BumpHeap as *mut BumpHeap;
         core::ptr::write((*heap_ptr).next.get(), virt_base);
@@ -2606,39 +2610,39 @@ fn init_heap(
     Some(heap)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static BASE_REVISION: BaseRevision = BaseRevision::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[global_allocator]
 static GLOBAL_HEAP: BumpHeap = BumpHeap::new(0, 0);
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
