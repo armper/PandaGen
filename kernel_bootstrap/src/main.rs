@@ -1153,7 +1153,19 @@ fn workspace_loop(
                     // Render command palette overlay if open
                     if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
                         let palette = workspace.palette_overlay();
-                        let overlay_attr = 0x1F; // White on blue background
+                        // Different colors for CLI vs Workspace context
+                        // CLI: White on green (0x2F), Workspace: White on blue (0x1F)
+                        let overlay_attr = if workspace.is_cli_active() {
+                            console_vga::VgaColor::make_attr(
+                                console_vga::VgaColor::White,
+                                console_vga::VgaColor::Green,
+                            )
+                        } else {
+                            console_vga::VgaColor::make_attr(
+                                console_vga::VgaColor::White,
+                                console_vga::VgaColor::Blue,
+                            )
+                        };
                         let _ = render_palette_overlay_vga(
                             vga,
                             palette,
@@ -1269,7 +1281,19 @@ fn workspace_loop(
 
                     if draw_palette_overlay {
                         let palette = workspace.palette_overlay();
-                        let overlay_attr = 0x1F; // White on blue background
+                        // Different colors for CLI vs Workspace context
+                        // CLI: White on green (0x2F), Workspace: White on blue (0x1F)
+                        let overlay_attr = if workspace.is_cli_active() {
+                            console_vga::VgaColor::make_attr(
+                                console_vga::VgaColor::White,
+                                console_vga::VgaColor::Green,
+                            )
+                        } else {
+                            console_vga::VgaColor::make_attr(
+                                console_vga::VgaColor::White,
+                                console_vga::VgaColor::Blue,
+                            )
+                        };
                         let _ = render_palette_overlay_vga(
                             vga,
                             palette,
@@ -1294,8 +1318,13 @@ fn workspace_loop(
                     // Render command palette overlay if open
                     if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
                         let palette = workspace.palette_overlay();
-                        let overlay_bg = (0x10, 0x40, 0x80);
-                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        // Different colors for CLI vs Workspace context
+                        // CLI: White on green, Workspace: White on blue
+                        let (overlay_bg, overlay_fg) = if workspace.is_cli_active() {
+                            ((0x10, 0x60, 0x20), (0xFF, 0xFF, 0xFF)) // Green background
+                        } else {
+                            ((0x10, 0x40, 0x80), (0xFF, 0xFF, 0xFF)) // Blue background
+                        };
                         let _ = render_palette_overlay_fb(
                             fb,
                             palette,
@@ -1483,8 +1512,13 @@ fn workspace_loop(
 
                     if draw_palette_overlay {
                         let palette = workspace.palette_overlay();
-                        let overlay_bg = (0x10, 0x40, 0x80);
-                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        // Different colors for CLI vs Workspace context
+                        // CLI: White on green, Workspace: White on blue
+                        let (overlay_bg, overlay_fg) = if workspace.is_cli_active() {
+                            ((0x10, 0x60, 0x20), (0xFF, 0xFF, 0xFF)) // Green background
+                        } else {
+                            ((0x10, 0x40, 0x80), (0xFF, 0xFF, 0xFF)) // Blue background
+                        };
                         let _ = render_palette_overlay_fb(
                             fb,
                             palette,
