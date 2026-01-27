@@ -17,7 +17,7 @@ The bare-metal kernel needed an interactive CLI mode that:
 Added CLI-specific state fields to `WorkspaceSession`:
 ```rust
 cli_active: bool,          // CLI mode flag
-cli_buffer: [u8; 256],     // CLI input buffer
+cli_buffer: [u8; 64],      // CLI input buffer (COMMAND_MAX)
 cli_len: usize,            // Buffer length
 cli_cursor: usize,         // Cursor position
 ```

@@ -646,9 +646,11 @@ impl WorkspaceSession {
                 }
                 byte if byte >= 0x20 && byte < 0x7F => {
                     // Printable character - insert at cursor
+                    // Check if we have room (need space for the new character)
                     if self.cli_len < COMMAND_MAX {
-                        if self.cli_cursor < self.cli_len {
+                        if self.cli_cursor < self.cli_len && self.cli_len < COMMAND_MAX {
                             // Cursor not at end - shift remaining chars right
+                            // We already checked cli_len < COMMAND_MAX, so this is safe
                             for i in (self.cli_cursor..self.cli_len).rev() {
                                 self.cli_buffer[i + 1] = self.cli_buffer[i];
                             }
