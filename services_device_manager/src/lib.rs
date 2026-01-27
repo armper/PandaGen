@@ -1,5 +1,6 @@
 //! Device model and driver sandbox framework.
 
+use core_types::uuid_tools::new_uuid;
 use core_types::Cap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ impl Default for DeviceId {
 
 impl DeviceId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 
@@ -32,7 +33,7 @@ impl Default for DriverId {
 
 impl DriverId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 }
 

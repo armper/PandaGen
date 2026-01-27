@@ -53,6 +53,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core_types::uuid_tools::new_uuid;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -63,7 +64,7 @@ pub struct JobId(Uuid);
 impl JobId {
     /// Creates a new job ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a JobId from an existing UUID

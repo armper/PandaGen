@@ -138,3 +138,6 @@ uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 thiserror = { version = "1.0", default-features = false }
 tempfile = "3"
 sha2 = "0.10"
+
+[patch.crates-io]
+serde_core = { path = "third_party/serde_core" }

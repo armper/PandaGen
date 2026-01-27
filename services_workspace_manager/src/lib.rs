@@ -51,6 +51,7 @@ use std::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
+use core_types::uuid_tools::new_uuid;
 use core_types::TaskId;
 use fs_view::DirectoryView;
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
@@ -92,7 +93,7 @@ pub struct ComponentId(Uuid);
 impl ComponentId {
     /// Creates a new unique component ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a ComponentId from an existing UUID

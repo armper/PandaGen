@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_service_id_from_uuid() {
-        let uuid = Uuid::new_v4();
+        let uuid = new_uuid();
         let id = ServiceId::from_uuid(uuid);
         assert_eq!(id.as_uuid(), uuid);
     }
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_task_id_from_uuid() {
-        let uuid = Uuid::new_v4();
+        let uuid = new_uuid();
         let id = TaskId::from_uuid(uuid);
         assert_eq!(id.as_uuid(), uuid);
     }

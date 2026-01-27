@@ -1,6 +1,6 @@
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
-#![cfg_attr(not(test), feature(alloc_error_handler))]
+#![cfg_attr(all(not(test), target_os = "none"), no_std)]
+#![cfg_attr(all(not(test), target_os = "none"), no_main)]
+#![cfg_attr(all(not(test), target_os = "none"), feature(alloc_error_handler))]
 // Allow unused code - this is infrastructure for future phases
 #![allow(dead_code)]
 // Allow manual div_ceil - explicit for readability in no_std
@@ -32,12 +32,13 @@ use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
+use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 use core::panic::PanicInfo;
 #[cfg(not(test))]
 use limine::memory_map::EntryType;
@@ -48,7 +49,7 @@ use limine::request::{
 #[cfg(not(test))]
 use limine::BaseRevision;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 // Provide a small, deterministic stack and jump into Rust.
 //
 // This is only needed for bare-metal execution, not for tests.
@@ -135,7 +136,7 @@ const KBD_DEBUG_LOG: bool = cfg!(debug_assertions);
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 global_asm!(
     r#"
 .section .text
@@ -579,7 +580,7 @@ macro_rules! kprintln {
     };
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -732,7 +733,7 @@ pub extern "C" fn rust_main() -> ! {
     )
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -823,6 +824,10 @@ fn workspace_loop(
     let mut last_view_start = 0usize;
     #[cfg(debug_assertions)]
     let mut last_editor_input: Option<u8> = None;
+    let mut last_palette_open = false;
+    let mut last_palette_query_hash = 0u64;
+    let mut last_palette_result_count = 0usize;
+    let mut last_palette_selection = 0usize;
 
     // Editor render cache for incremental updates (Phase 96 optimization)
     let mut editor_render_cache = optimized_render::EditorRenderCache::new();
@@ -961,6 +966,15 @@ fn workspace_loop(
 
         let editor_active = workspace.is_editor_active();
         let mut clear_terminal = false;
+        let palette_open = workspace.is_palette_open();
+        if last_palette_open && !palette_open {
+            // Palette closed: force a full redraw to clear overlay
+            output_dirty = true;
+            input_dirty = true;
+            prompt_initialized = false;
+            clear_terminal = true;
+        }
+        last_palette_open = palette_open;
         if last_editor_active && !editor_active {
             // Transition from editor to terminal: clear screen + reset caches
             output_dirty = true;
@@ -973,6 +987,7 @@ fn workspace_loop(
 
         // Update display if needed
         if input_dirty || output_dirty || clear_terminal {
+            let draw_palette_overlay = workspace.is_palette_open() && input_dirty;
             let mut rendered_editor = false;
             {
                 use crate::display_sink::{DisplaySink, VgaDisplaySink};
@@ -1136,56 +1151,20 @@ fn workspace_loop(
                     }
 
                     // Render command palette overlay if open
-                    if workspace.is_palette_open() && input_dirty {
+                    if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
                         let palette = workspace.palette_overlay();
                         let overlay_attr = 0x1F; // White on blue background
-
-                        // Simple centered overlay - 3 rows starting from row 10
-                        let overlay_start_row = 10;
-                        let overlay_width = 60.min(cols);
-                        let overlay_col = (cols - overlay_width) / 2;
-
-                        // Row 1: Query line
-                        clear_vga_line(vga, overlay_start_row, overlay_attr);
-                        let query_text = palette.query();
-                        let header = "Command Palette: ";
-                        vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
-                        if !query_text.is_empty() {
-                            vga.write_str_at(
-                                overlay_col + header.len(),
-                                overlay_start_row,
-                                query_text,
-                                overlay_attr,
-                            );
-                        }
-
-                        // Row 2: Selected result or empty
-                        clear_vga_line(vga, overlay_start_row + 1, overlay_attr);
-                        let results = palette.displayed_results();
-                        if !results.is_empty() {
-                            let selected_idx = palette.selection_index();
-                            if let Some(selected) = results.get(selected_idx) {
-                                let selection_indicator = "> ";
-                                vga.write_str_at(
-                                    overlay_col,
-                                    overlay_start_row + 1,
-                                    selection_indicator,
-                                    overlay_attr,
-                                );
-                                vga.write_str_at(
-                                    overlay_col + selection_indicator.len(),
-                                    overlay_start_row + 1,
-                                    &selected.name,
-                                    overlay_attr,
-                                );
-                            }
-                        }
-
-                        // Row 3: Help text
-                        clear_vga_line(vga, overlay_start_row + 2, overlay_attr);
-                        let help = "[ESC] Close  [Enter] Execute";
-                        vga.write_str_at(overlay_col, overlay_start_row + 2, help, overlay_attr);
-
+                        let _ = render_palette_overlay_vga(
+                            vga,
+                            palette,
+                            rows,
+                            cols,
+                            overlay_attr,
+                            last_palette_open,
+                            &mut last_palette_query_hash,
+                            &mut last_palette_result_count,
+                            &mut last_palette_selection,
+                        );
                         input_dirty = false;
                         continue; // Skip normal workspace rendering when palette open
                     }
@@ -1287,6 +1266,23 @@ fn workspace_loop(
                     last_view_start = view_start;
                     last_view_len = view_len;
                     last_cursor_col = cursor_col;
+
+                    if draw_palette_overlay {
+                        let palette = workspace.palette_overlay();
+                        let overlay_attr = 0x1F; // White on blue background
+                        let _ = render_palette_overlay_vga(
+                            vga,
+                            palette,
+                            rows,
+                            cols,
+                            overlay_attr,
+                            last_palette_open,
+                            &mut last_palette_query_hash,
+                            &mut last_palette_result_count,
+                            &mut last_palette_selection,
+                        );
+                        input_dirty = false;
+                    }
                 } else if let Some(ref mut fb) = fb_console {
                     // Render workspace state to framebuffer
                     let bg = (0x00, 0x20, 0x40);
@@ -1294,6 +1290,27 @@ fn workspace_loop(
                     let accent = (0x80, 0xFF, 0x80);
                     let rows = fb.rows();
                     let cols = fb.cols();
+
+                    // Render command palette overlay if open
+                    if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
+                        let palette = workspace.palette_overlay();
+                        let overlay_bg = (0x10, 0x40, 0x80);
+                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        let _ = render_palette_overlay_fb(
+                            fb,
+                            palette,
+                            rows,
+                            cols,
+                            overlay_bg,
+                            overlay_fg,
+                            last_palette_open,
+                            &mut last_palette_query_hash,
+                            &mut last_palette_result_count,
+                            &mut last_palette_selection,
+                        );
+                        input_dirty = false;
+                        continue; // Skip normal workspace rendering when palette open
+                    }
                     let max_output_rows = rows.saturating_sub(1);
                     let total = workspace.output_line_count();
                     let output_rows = total.min(max_output_rows);
@@ -1463,6 +1480,25 @@ fn workspace_loop(
                     last_view_start = view_start;
                     last_view_len = view_len;
                     last_cursor_col = cursor_col;
+
+                    if draw_palette_overlay {
+                        let palette = workspace.palette_overlay();
+                        let overlay_bg = (0x10, 0x40, 0x80);
+                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        let _ = render_palette_overlay_fb(
+                            fb,
+                            palette,
+                            rows,
+                            cols,
+                            overlay_bg,
+                            overlay_fg,
+                            last_palette_open,
+                            &mut last_palette_query_hash,
+                            &mut last_palette_result_count,
+                            &mut last_palette_selection,
+                        );
+                        input_dirty = false;
+                    }
                 }
             } // End !rendered_editor
 
@@ -1577,6 +1613,201 @@ fn clear_fb_line(
     fb.clear_text_row(row, bg);
 }
 
+#[cfg(feature = "console_vga")]
+fn render_palette_overlay_vga(
+    vga: &mut console_vga::VgaConsole,
+    palette: &crate::palette_overlay::PaletteOverlayState,
+    rows: usize,
+    cols: usize,
+    overlay_attr: u8,
+    last_palette_open: bool,
+    last_palette_query_hash: &mut u64,
+    last_palette_result_count: &mut usize,
+    last_palette_selection: &mut usize,
+) -> bool {
+    let overlay_width = 60.min(cols);
+    let overlay_col = (cols - overlay_width) / 2;
+    let results = palette.displayed_results();
+    let max_results = 4usize.min(rows.saturating_sub(3));
+    let overlay_height = 2 + max_results + 1; // header + results + help
+    let overlay_start_row = (rows.saturating_sub(overlay_height)) / 2;
+
+    let query_text = palette.query();
+    let query_hash = palette_query_hash(query_text);
+    let result_count = palette.result_count();
+    let selected_idx = palette.selection_index();
+
+    let palette_stable = last_palette_open
+        && query_hash == *last_palette_query_hash
+        && result_count == *last_palette_result_count;
+
+    if palette_stable && selected_idx == *last_palette_selection {
+        return false;
+    }
+
+    if palette_stable {
+        let prev_idx = *last_palette_selection;
+        for &idx in &[prev_idx, selected_idx] {
+            if idx < max_results {
+                if let Some(result) = results.get(idx) {
+                    let row = overlay_start_row + 1 + idx;
+                    let indicator = if idx == selected_idx { "> " } else { "  " };
+                    vga.write_str_at(overlay_col, row, indicator, overlay_attr);
+                    vga.write_str_at(
+                        overlay_col + indicator.len(),
+                        row,
+                        &result.name,
+                        overlay_attr,
+                    );
+                }
+            }
+        }
+    } else {
+        for row in 0..overlay_height {
+            let target_row = overlay_start_row + row;
+            if target_row < rows {
+                clear_vga_line(vga, target_row, overlay_attr);
+            }
+        }
+
+        let header = "Command Palette: ";
+        vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
+        if !query_text.is_empty() {
+            vga.write_str_at(
+                overlay_col + header.len(),
+                overlay_start_row,
+                query_text,
+                overlay_attr,
+            );
+        }
+
+        for idx in 0..max_results {
+            let row = overlay_start_row + 1 + idx;
+            if let Some(result) = results.get(idx) {
+                let indicator = if idx == selected_idx { "> " } else { "  " };
+                vga.write_str_at(overlay_col, row, indicator, overlay_attr);
+                vga.write_str_at(
+                    overlay_col + indicator.len(),
+                    row,
+                    &result.name,
+                    overlay_attr,
+                );
+            }
+        }
+
+        let help_row = overlay_start_row + 1 + max_results;
+        let help = "[ESC] Close  [Enter] Execute";
+        vga.write_str_at(overlay_col, help_row, help, overlay_attr);
+    }
+
+    *last_palette_query_hash = query_hash;
+    *last_palette_result_count = result_count;
+    *last_palette_selection = selected_idx;
+    true
+}
+
+fn render_palette_overlay_fb(
+    fb: &mut framebuffer::BareMetalFramebuffer,
+    palette: &crate::palette_overlay::PaletteOverlayState,
+    rows: usize,
+    cols: usize,
+    overlay_bg: (u8, u8, u8),
+    overlay_fg: (u8, u8, u8),
+    last_palette_open: bool,
+    last_palette_query_hash: &mut u64,
+    last_palette_result_count: &mut usize,
+    last_palette_selection: &mut usize,
+) -> bool {
+    let overlay_width = 60.min(cols);
+    let overlay_col = (cols.saturating_sub(overlay_width)) / 2;
+    let results = palette.displayed_results();
+    let max_results = 4usize.min(rows.saturating_sub(3));
+    let overlay_height = 2 + max_results + 1; // header + results + help
+    let overlay_start_row = (rows.saturating_sub(overlay_height)) / 2;
+
+    let query_text = palette.query();
+    let query_hash = palette_query_hash(query_text);
+    let result_count = palette.result_count();
+    let selected_idx = palette.selection_index();
+
+    let palette_stable = last_palette_open
+        && query_hash == *last_palette_query_hash
+        && result_count == *last_palette_result_count;
+
+    if palette_stable && selected_idx == *last_palette_selection {
+        return false;
+    }
+
+    if palette_stable {
+        let prev_idx = *last_palette_selection;
+        for &idx in &[prev_idx, selected_idx] {
+            if idx < max_results {
+                if let Some(result) = results.get(idx) {
+                    let row = overlay_start_row + 1 + idx;
+                    let indicator = if idx == selected_idx { "> " } else { "  " };
+                    fb.draw_text_at(overlay_col, row, indicator, overlay_fg, overlay_bg);
+                    fb.draw_text_at(
+                        overlay_col + indicator.len(),
+                        row,
+                        &result.name,
+                        overlay_fg,
+                        overlay_bg,
+                    );
+                }
+            }
+        }
+    } else {
+        for row in 0..overlay_height {
+            let target_row = overlay_start_row + row;
+            if target_row < rows {
+                clear_fb_line(fb, target_row, cols, overlay_bg, overlay_fg);
+            }
+        }
+
+        let header = "Command Palette: ";
+        let max_query_chars = overlay_width.saturating_sub(header.len());
+        let query_display = if query_text.len() > max_query_chars {
+            &query_text[query_text.len().saturating_sub(max_query_chars)..]
+        } else {
+            query_text
+        };
+        fb.draw_text_at(overlay_col, overlay_start_row, header, overlay_fg, overlay_bg);
+        if !query_display.is_empty() {
+            fb.draw_text_at(
+                overlay_col + header.len(),
+                overlay_start_row,
+                query_display,
+                overlay_fg,
+                overlay_bg,
+            );
+        }
+
+        for idx in 0..max_results {
+            let row = overlay_start_row + 1 + idx;
+            if let Some(result) = results.get(idx) {
+                let indicator = if idx == selected_idx { "> " } else { "  " };
+                fb.draw_text_at(overlay_col, row, indicator, overlay_fg, overlay_bg);
+                fb.draw_text_at(
+                    overlay_col + indicator.len(),
+                    row,
+                    &result.name,
+                    overlay_fg,
+                    overlay_bg,
+                );
+            }
+        }
+
+        let help = "[ESC] Close  [Enter] Execute";
+        let help_row = overlay_start_row + 1 + max_results;
+        fb.draw_text_at(overlay_col, help_row, help, overlay_fg, overlay_bg);
+    }
+
+    *last_palette_query_hash = query_hash;
+    *last_palette_result_count = result_count;
+    *last_palette_selection = selected_idx;
+    true
+}
+
 fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {
     if cols < 2 {
         return (0, &[], 0);
@@ -1603,6 +1834,9 @@ fn prompt_view(cmd: &[u8], cols: usize) -> (usize, &[u8], usize) {
         (0, slice, cursor)
     }
 }
+
+#[cfg(not(target_os = "none"))]
+fn main() {}
 
 #[cfg(debug_assertions)]
 fn is_typing_byte(byte: u8) -> bool {
@@ -1789,8 +2023,21 @@ impl Ps2ParserState {
             return None;
         }
 
-        // Ignore E0-prefixed keys and break codes for now
-        if self.pending_e0 || is_break {
+        // Handle E0-prefixed keys (arrows)
+        if self.pending_e0 {
+            self.pending_e0 = false;
+            if !is_break {
+                return match code {
+                    0x48 => Some(0x80), // Up arrow
+                    0x50 => Some(0x81), // Down arrow
+                    _ => None,
+                };
+            }
+            return None;
+        }
+
+        // Ignore break codes for now
+        if is_break {
             if crate::KBD_DEBUG_LOG {
                 let _ = writeln!(
                     serial,
@@ -1798,7 +2045,6 @@ impl Ps2ParserState {
                     self.pending_e0, is_break
                 );
             }
-            self.pending_e0 = false;
             return None;
         }
 
@@ -2173,7 +2419,7 @@ mod keyboard_scancode_tests {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     let mut info = BootInfo::empty();
     unsafe {
@@ -2290,7 +2536,7 @@ fn print_boot_info(serial: &mut serial::SerialPort, info: &BootInfo) {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn init_memory(
     serial: &mut serial::SerialPort,
     boot: &BootInfo,
@@ -2332,13 +2578,13 @@ fn init_memory(
     (Some(allocator), heap)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 fn init_heap(
     serial: &mut serial::SerialPort,
     allocator: &mut FrameAllocator,
     hhdm_offset: u64,
 ) -> Option<BumpHeap> {
-    const HEAP_PAGES: u64 = 64;
+    const HEAP_PAGES: u64 = 256;
     let Some(phys_base) = allocator.allocate_contiguous(HEAP_PAGES) else {
         let _ = writeln!(serial, "heap: allocation failed");
         return None;
@@ -2346,7 +2592,8 @@ fn init_heap(
     let virt_base = (hhdm_offset + phys_base) as usize;
     let size = (HEAP_PAGES * PAGE_SIZE) as usize;
 
-    // Initialize the global allocator
+    // Initialize the global allocator (bare-metal only)
+    #[cfg(all(not(test), target_os = "none"))]
     unsafe {
         let heap_ptr = &GLOBAL_HEAP as *const BumpHeap as *mut BumpHeap;
         core::ptr::write((*heap_ptr).next.get(), virt_base);
@@ -2363,39 +2610,39 @@ fn init_heap(
     Some(heap)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static BASE_REVISION: BaseRevision = BaseRevision::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[used]
 #[link_section = ".limine_requests"]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[global_allocator]
 static GLOBAL_HEAP: BumpHeap = BumpHeap::new(0, 0);
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     let mut serial = serial::SerialPort::new(serial::COM1);
@@ -3730,6 +3977,15 @@ fn align_up_usize(value: usize, align: usize) -> usize {
         return value;
     }
     (value + align - 1) / align * align
+}
+
+fn palette_query_hash(query: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in query.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[cfg(test)]

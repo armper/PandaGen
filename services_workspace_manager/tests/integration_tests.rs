@@ -628,7 +628,7 @@ fn test_error_tracking_in_history() {
     let mut workspace = WorkspaceManager::new(workspace_identity);
 
     // Try to focus non-existent component (will error)
-    let fake_id = services_workspace_manager::ComponentId::from_uuid(Uuid::new_v4());
+    let fake_id = services_workspace_manager::ComponentId::from_uuid(core_types::uuid_tools::new_uuid());
     workspace.execute_command(WorkspaceCommand::Focus {
         component_id: fake_id,
     });

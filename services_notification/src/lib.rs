@@ -50,6 +50,29 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(target_os = "none")]
+fn new_uuid() -> Uuid {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let hi = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let lo = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&hi.to_le_bytes());
+    bytes[8..].copy_from_slice(&lo.to_le_bytes());
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    Uuid::from_bytes(bytes)
+}
+
+#[cfg(not(target_os = "none"))]
+fn new_uuid() -> Uuid {
+    Uuid::new_v4()
+}
+
 /// Maximum number of notifications to keep in history
 const MAX_NOTIFICATION_HISTORY: usize = 100;
 
@@ -60,7 +83,7 @@ pub struct NotificationId(Uuid);
 impl NotificationId {
     /// Creates a new notification ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(new_uuid())
     }
 
     /// Creates a NotificationId from an existing UUID
