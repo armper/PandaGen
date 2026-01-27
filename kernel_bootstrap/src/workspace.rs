@@ -162,6 +162,14 @@ pub struct WorkspaceSession {
     palette_overlay: PaletteOverlayState,
     /// Command palette service
     command_palette: CommandPalette,
+    /// CLI mode active
+    cli_active: bool,
+    /// CLI input buffer
+    cli_buffer: [u8; COMMAND_MAX],
+    /// CLI buffer length
+    cli_len: usize,
+    /// CLI cursor position
+    cli_cursor: usize,
 }
 
 impl WorkspaceSession {
@@ -338,6 +346,10 @@ impl WorkspaceSession {
             filesystem: None,
             palette_overlay: PaletteOverlayState::new(),
             command_palette,
+            cli_active: false,
+            cli_buffer: [0; COMMAND_MAX],
+            cli_len: 0,
+            cli_cursor: 0,
         }
     }
 
@@ -345,6 +357,22 @@ impl WorkspaceSession {
     #[cfg(not(test))]
     pub fn set_filesystem(&mut self, fs: BareMetalFilesystem) {
         self.filesystem = Some(fs);
+    }
+
+    /// Activate or deactivate CLI mode
+    fn set_cli_active(&mut self, active: bool, serial: &mut SerialPort) {
+        self.cli_active = active;
+        if active {
+            self.reset_cli_buffer();
+            self.emit_line(serial, "CLI mode: type commands, `exit` to leave");
+        }
+    }
+
+    /// Reset the CLI input buffer
+    fn reset_cli_buffer(&mut self) {
+        self.cli_buffer = [0; COMMAND_MAX];
+        self.cli_len = 0;
+        self.cli_cursor = 0;
     }
 
     /// Process a single byte of input
@@ -414,11 +442,7 @@ impl WorkspaceSession {
                             }
                             "open_cli" => {
                                 self.active_component = Some(ComponentType::Cli);
-                                self.emit_line(serial, "CLI component registered");
-                                self.emit_line(
-                                    serial,
-                                    "Note: Full CLI requires services_workspace_manager",
-                                );
+                                self.set_cli_active(true, serial);
                                 self.palette_overlay.close();
                                 return true;
                             }
@@ -566,6 +590,80 @@ impl WorkspaceSession {
             }
         }
 
+        // 5. If CLI is active, handle CLI input
+        if self.cli_active {
+            let _ = writeln!(serial, "  action=cli_input");
+            match byte {
+                b'\r' | b'\n' => {
+                    // Execute command from CLI buffer
+                    let _ = serial.write_str("\r\n");
+                    // Copy command to temporary buffer to avoid borrow conflict
+                    let mut cmd_buf = [0u8; COMMAND_MAX];
+                    let cmd_len = self.cli_len;
+                    cmd_buf[..cmd_len].copy_from_slice(&self.cli_buffer[..cmd_len]);
+                    let command = core::str::from_utf8(&cmd_buf[..cmd_len])
+                        .unwrap_or("")
+                        .trim();
+                    if !command.is_empty() {
+                        self.run_command_line(command, ctx, serial);
+                    }
+                    self.reset_cli_buffer();
+                    if self.cli_active {
+                        self.show_prompt(serial);
+                    }
+                    return true;
+                }
+                0x1B => {
+                    // Escape key - exit CLI
+                    let _ = serial.write_str("\r\n");
+                    self.set_cli_active(false, serial);
+                    self.show_prompt(serial);
+                    return true;
+                }
+                0x08 | 0x7F => {
+                    // Backspace
+                    if self.cli_cursor > 0 && self.cli_len > 0 {
+                        // Remove character before cursor
+                        if self.cli_cursor < self.cli_len {
+                            // Cursor not at end - shift remaining chars left
+                            for i in self.cli_cursor..self.cli_len {
+                                self.cli_buffer[i - 1] = self.cli_buffer[i];
+                            }
+                        }
+                        self.cli_len -= 1;
+                        self.cli_cursor -= 1;
+                        let _ = serial.write_str("\x08 \x08");
+                    }
+                    return true;
+                }
+                0x80 => {
+                    // Up arrow - not implemented yet
+                    return true;
+                }
+                0x81 => {
+                    // Down arrow - not implemented yet
+                    return true;
+                }
+                byte if byte >= 0x20 && byte < 0x7F => {
+                    // Printable character - insert at cursor
+                    if self.cli_len < COMMAND_MAX {
+                        if self.cli_cursor < self.cli_len {
+                            // Cursor not at end - shift remaining chars right
+                            for i in (self.cli_cursor..self.cli_len).rev() {
+                                self.cli_buffer[i + 1] = self.cli_buffer[i];
+                            }
+                        }
+                        self.cli_buffer[self.cli_cursor] = byte;
+                        self.cli_cursor += 1;
+                        self.cli_len += 1;
+                        let _ = serial.write_byte(byte);
+                    }
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
         // Otherwise, handle as command input
         match byte {
             b'\r' | b'\n' => {
@@ -654,7 +752,7 @@ impl WorkspaceSession {
                 .trim();
 
             if command.is_empty() {
-                let _ = write!(serial, "> ");
+                self.show_prompt(serial);
                 return;
             }
 
@@ -665,15 +763,27 @@ impl WorkspaceSession {
             (buffer, len)
         };
         let command = core::str::from_utf8(&command_buf.0[..command_buf.1]).unwrap_or("");
+        self.run_command_line(command, ctx, serial);
+        self.show_prompt(serial);
+    }
+
+    /// Run a command line (shared between normal prompt and CLI)
+    fn run_command_line(&mut self, command: &str, ctx: &mut KernelContext, serial: &mut SerialPort) {
         let mut parts = command.split_whitespace();
         let cmd = parts.next().unwrap_or("");
         if cmd.is_empty() {
-            let _ = write!(serial, "> ");
             return;
         }
 
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
+        
+        // Handle special CLI exit commands
+        if self.cli_active && (cmd == "exit" || cmd == "quit") {
+            self.set_cli_active(false, serial);
+            return;
+        }
+        
         match cmd {
             "help" => {
                 self.emit_line(serial, "Workspace Commands:");
@@ -703,11 +813,7 @@ impl WorkspaceSession {
                     }
                     Some("cli") => {
                         self.active_component = Some(ComponentType::Cli);
-                        self.emit_line(serial, "CLI component registered");
-                        self.emit_line(
-                            serial,
-                            "Note: Full CLI requires services_workspace_manager",
-                        );
+                        self.set_cli_active(true, serial);
                     }
                     _ => {
                         self.emit_line(serial, "Usage: open editor [path] | open cli");
@@ -741,9 +847,11 @@ impl WorkspaceSession {
                 self.emit_line(serial, "Focus switching unavailable (no console_vga)");
             }
             "quit" => {
-                self.active_component = None;
-                // self.editor = None;
-                self.emit_line(serial, "Closed component");
+                if !self.cli_active {
+                    self.active_component = None;
+                    // self.editor = None;
+                    self.emit_line(serial, "Closed component");
+                }
             }
             "editor" => {
                 let path = parts.next();
@@ -855,8 +963,6 @@ impl WorkspaceSession {
                 self.emit_unknown_command(serial, cmd);
             }
         }
-
-        let _ = write!(serial, "> ");
     }
 
     fn open_editor(&mut self, serial: &mut SerialPort, path: Option<&str>) {
@@ -967,13 +1073,21 @@ impl WorkspaceSession {
 
     /// Show the initial prompt
     pub fn show_prompt(&self, serial: &mut SerialPort) {
-        let _ = write!(serial, "> ");
+        if self.cli_active {
+            let _ = write!(serial, "$ ");
+        } else {
+            let _ = write!(serial, "> ");
+        }
     }
 
     /// Get a text snapshot of the current workspace state for display
     /// Returns command buffer text directly without heap allocation
     pub fn get_command_text(&self) -> &[u8] {
-        &self.command_buffer[..self.command_len]
+        if self.cli_active {
+            &self.cli_buffer[..self.cli_len]
+        } else {
+            &self.command_buffer[..self.command_len]
+        }
     }
 
     fn set_command_text(&mut self, text: &str) {
@@ -985,8 +1099,13 @@ impl WorkspaceSession {
 
     /// Get the cursor column for the current state
     pub fn get_cursor_col(&self) -> usize {
-        // ">" is at column 0-1, command starts at column 2
-        2 + self.command_len
+        if self.cli_active {
+            // "$ " is at column 0-1, command starts at column 2
+            2 + self.cli_cursor
+        } else {
+            // "> " is at column 0-1, command starts at column 2
+            2 + self.command_len
+        }
     }
 
     pub fn output_line_count(&self) -> usize {
@@ -1086,10 +1205,16 @@ impl WorkspaceSession {
     fn emit_command_line(&mut self, serial: &mut SerialPort, cmd: &[u8]) {
         let mut buffer = [0u8; OUTPUT_LINE_MAX];
         let mut len = 0usize;
-        len = append_bytes(&mut buffer, len, b"> ");
+        let prompt = if self.cli_active { b"$ " } else { b"> " };
+        len = append_bytes(&mut buffer, len, prompt);
         len = append_bytes(&mut buffer, len, cmd);
         let line = core::str::from_utf8(&buffer[..len]).unwrap_or("> ");
         self.emit_line(serial, line);
+    }
+
+    /// Check if CLI is active
+    pub fn is_cli_active(&self) -> bool {
+        self.cli_active
     }
 }
 
