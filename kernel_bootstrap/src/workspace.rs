@@ -170,6 +170,8 @@ pub struct WorkspaceSession {
     cli_len: usize,
     /// CLI cursor position
     cli_cursor: usize,
+    /// Whether the CLI first-run hint has been shown
+    cli_hint_shown: bool,
 }
 
 impl WorkspaceSession {
@@ -200,12 +202,12 @@ impl WorkspaceSession {
         command_palette.register_command(
             CommandDescriptor::new(
                 "open_cli",
-                "Open CLI",
-                "Open the CLI component",
-                vec!["cli".to_string(), "console".to_string()],
+                "Switch to CLI",
+                "Switch to the CLI component",
+                vec!["cli".to_string(), "console".to_string(), "switch".to_string()],
             )
             .with_category("Workspace"),
-            Box::new(|_| Ok("Opening CLI...".to_string())),
+            Box::new(|_| Ok("Switching to CLI...".to_string())),
         );
 
         command_palette.register_command(
@@ -350,6 +352,7 @@ impl WorkspaceSession {
             cli_buffer: [0; COMMAND_MAX],
             cli_len: 0,
             cli_cursor: 0,
+            cli_hint_shown: false,
         }
     }
 
@@ -365,6 +368,12 @@ impl WorkspaceSession {
         if active {
             self.reset_cli_buffer();
             self.emit_line(serial, "CLI mode: type commands, `exit` to leave");
+            
+            // Show first-run hint
+            if !self.cli_hint_shown {
+                self.emit_line(serial, "Tip: Ctrl+P opens Commands.");
+                self.cli_hint_shown = true;
+            }
         }
     }
 
@@ -407,7 +416,7 @@ impl WorkspaceSession {
                 FocusTarget::None
             };
 
-            self.palette_overlay.open(current_focus);
+            self.palette_overlay.open_with_context(current_focus, self.cli_active);
             self.palette_overlay
                 .update_query(&self.command_palette, String::new());
             return true;
@@ -1207,16 +1216,25 @@ impl WorkspaceSession {
     fn emit_command_line(&mut self, serial: &mut SerialPort, cmd: &[u8]) {
         let mut buffer = [0u8; OUTPUT_LINE_MAX];
         let mut len = 0usize;
-        let prompt = if self.cli_active { b"$ " } else { b"> " };
+        let prompt = if self.cli_active { b"CLI  > " } else { b"WS   > " };
         len = append_bytes(&mut buffer, len, prompt);
         len = append_bytes(&mut buffer, len, cmd);
-        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("> ");
+        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("WS   > ");
         self.emit_line(serial, line);
     }
 
     /// Check if CLI is active
     pub fn is_cli_active(&self) -> bool {
         self.cli_active
+    }
+
+    /// Get the current mode indicator string
+    pub fn mode_indicator(&self) -> &str {
+        if self.cli_active {
+            "[CLI Mode] Ctrl+P: Commands"
+        } else {
+            "[Workspace] Ctrl+P: Commands"
+        }
     }
 }
 

@@ -47,6 +47,8 @@ pub struct PaletteOverlayState {
     pub selection_index: usize,
     /// Focus target to restore when closing
     pub prev_focus: FocusTarget,
+    /// Whether the user is currently in CLI mode (for context-aware filtering)
+    pub in_cli_mode: bool,
 }
 
 impl PaletteOverlayState {
@@ -58,6 +60,7 @@ impl PaletteOverlayState {
             results: Vec::new(),
             selection_index: 0,
             prev_focus: FocusTarget::None,
+            in_cli_mode: false,
         }
     }
 
@@ -68,6 +71,16 @@ impl PaletteOverlayState {
         self.results.clear();
         self.selection_index = 0;
         self.prev_focus = prev_focus;
+    }
+
+    /// Opens the palette with CLI mode context
+    pub fn open_with_context(&mut self, prev_focus: FocusTarget, in_cli_mode: bool) {
+        self.open = true;
+        self.query.clear();
+        self.results.clear();
+        self.selection_index = 0;
+        self.prev_focus = prev_focus;
+        self.in_cli_mode = in_cli_mode;
     }
 
     /// Closes the palette
@@ -120,6 +133,12 @@ impl PaletteOverlayState {
             self.results = palette.filter_commands(&self.query);
         }
 
+        // Filter out context-inappropriate commands
+        // Hide "Switch to CLI" when already in CLI mode
+        if self.in_cli_mode {
+            self.results.retain(|cmd| cmd.id.as_str() != "open_cli");
+        }
+
         // Clamp selection index to valid range
         if !self.results.is_empty() {
             self.selection_index = self.selection_index.min(self.results.len() - 1);
@@ -156,6 +175,15 @@ impl PaletteOverlayState {
     /// Gets the current query
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// Gets the context header for display
+    pub fn context_header(&self) -> &str {
+        if self.in_cli_mode {
+            "Commands — CLI"
+        } else {
+            "Commands — Workspace"
+        }
     }
 
     /// Gets the selection index

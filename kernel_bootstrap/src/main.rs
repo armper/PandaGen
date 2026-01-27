@@ -1153,7 +1153,7 @@ fn workspace_loop(
                     // Render command palette overlay if open
                     if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
                         let palette = workspace.palette_overlay();
-                        let overlay_attr = 0x1F; // White on blue background
+                        let overlay_attr = get_palette_vga_attr(workspace.is_cli_active());
                         let _ = render_palette_overlay_vga(
                             vga,
                             palette,
@@ -1269,7 +1269,7 @@ fn workspace_loop(
 
                     if draw_palette_overlay {
                         let palette = workspace.palette_overlay();
-                        let overlay_attr = 0x1F; // White on blue background
+                        let overlay_attr = get_palette_vga_attr(workspace.is_cli_active());
                         let _ = render_palette_overlay_vga(
                             vga,
                             palette,
@@ -1294,8 +1294,7 @@ fn workspace_loop(
                     // Render command palette overlay if open
                     if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
                         let palette = workspace.palette_overlay();
-                        let overlay_bg = (0x10, 0x40, 0x80);
-                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        let (overlay_bg, overlay_fg) = get_palette_fb_colors(workspace.is_cli_active());
                         let _ = render_palette_overlay_fb(
                             fb,
                             palette,
@@ -1483,8 +1482,7 @@ fn workspace_loop(
 
                     if draw_palette_overlay {
                         let palette = workspace.palette_overlay();
-                        let overlay_bg = (0x10, 0x40, 0x80);
-                        let overlay_fg = (0xFF, 0xFF, 0xFF);
+                        let (overlay_bg, overlay_fg) = get_palette_fb_colors(workspace.is_cli_active());
                         let _ = render_palette_overlay_fb(
                             fb,
                             palette,
@@ -1614,6 +1612,27 @@ fn clear_fb_line(
 }
 
 #[cfg(feature = "console_vga")]
+/// Helper function to get palette overlay colors based on CLI mode
+fn get_palette_vga_attr(is_cli_active: bool) -> u8 {
+    if is_cli_active {
+        console_vga::VgaColor::make_attr(console_vga::VgaColor::White, console_vga::VgaColor::Green)
+    } else {
+        console_vga::VgaColor::make_attr(console_vga::VgaColor::White, console_vga::VgaColor::Blue)
+    }
+}
+
+/// Helper function to get palette overlay colors for framebuffer based on CLI mode
+fn get_palette_fb_colors(is_cli_active: bool) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let overlay_fg = (0xFF, 0xFF, 0xFF);
+    let overlay_bg = if is_cli_active {
+        (0x10, 0x60, 0x20) // Green background
+    } else {
+        (0x10, 0x40, 0x80) // Blue background
+    };
+    (overlay_bg, overlay_fg)
+}
+
+#[cfg(feature = "console_vga")]
 fn render_palette_overlay_vga(
     vga: &mut console_vga::VgaConsole,
     palette: &crate::palette_overlay::PaletteOverlayState,
@@ -1628,8 +1647,8 @@ fn render_palette_overlay_vga(
     let overlay_width = 60.min(cols);
     let overlay_col = (cols - overlay_width) / 2;
     let results = palette.displayed_results();
-    let max_results = 4usize.min(rows.saturating_sub(3));
-    let overlay_height = 2 + max_results + 1; // header + results + help
+    let max_results = 4usize.min(rows.saturating_sub(4)); // One more row for context header
+    let overlay_height = 3 + max_results + 1; // context header + query + results + help
     let overlay_start_row = (rows.saturating_sub(overlay_height)) / 2;
 
     let query_text = palette.query();
@@ -1650,7 +1669,7 @@ fn render_palette_overlay_vga(
         for &idx in &[prev_idx, selected_idx] {
             if idx < max_results {
                 if let Some(result) = results.get(idx) {
-                    let row = overlay_start_row + 1 + idx;
+                    let row = overlay_start_row + 2 + idx; // +2 for context and query headers
                     let indicator = if idx == selected_idx { "> " } else { "  " };
                     vga.write_str_at(overlay_col, row, indicator, overlay_attr);
                     vga.write_str_at(
@@ -1670,19 +1689,24 @@ fn render_palette_overlay_vga(
             }
         }
 
-        let header = "Command Palette: ";
-        vga.write_str_at(overlay_col, overlay_start_row, header, overlay_attr);
+        // Context header
+        let context_header = palette.context_header();
+        vga.write_str_at(overlay_col, overlay_start_row, context_header, overlay_attr);
+
+        // Query line
+        let header = "Search: ";
+        vga.write_str_at(overlay_col, overlay_start_row + 1, header, overlay_attr);
         if !query_text.is_empty() {
             vga.write_str_at(
                 overlay_col + header.len(),
-                overlay_start_row,
+                overlay_start_row + 1,
                 query_text,
                 overlay_attr,
             );
         }
 
         for idx in 0..max_results {
-            let row = overlay_start_row + 1 + idx;
+            let row = overlay_start_row + 2 + idx;
             if let Some(result) = results.get(idx) {
                 let indicator = if idx == selected_idx { "> " } else { "  " };
                 vga.write_str_at(overlay_col, row, indicator, overlay_attr);
@@ -1695,7 +1719,7 @@ fn render_palette_overlay_vga(
             }
         }
 
-        let help_row = overlay_start_row + 1 + max_results;
+        let help_row = overlay_start_row + 2 + max_results;
         let help = "[ESC] Close  [Enter] Execute";
         vga.write_str_at(overlay_col, help_row, help, overlay_attr);
     }
@@ -1721,8 +1745,8 @@ fn render_palette_overlay_fb(
     let overlay_width = 60.min(cols);
     let overlay_col = (cols.saturating_sub(overlay_width)) / 2;
     let results = palette.displayed_results();
-    let max_results = 4usize.min(rows.saturating_sub(3));
-    let overlay_height = 2 + max_results + 1; // header + results + help
+    let max_results = 4usize.min(rows.saturating_sub(4)); // One more row for context header
+    let overlay_height = 3 + max_results + 1; // context header + query + results + help
     let overlay_start_row = (rows.saturating_sub(overlay_height)) / 2;
 
     let query_text = palette.query();
@@ -1743,7 +1767,7 @@ fn render_palette_overlay_fb(
         for &idx in &[prev_idx, selected_idx] {
             if idx < max_results {
                 if let Some(result) = results.get(idx) {
-                    let row = overlay_start_row + 1 + idx;
+                    let row = overlay_start_row + 2 + idx; // +2 for context and query headers
                     let indicator = if idx == selected_idx { "> " } else { "  " };
                     fb.draw_text_at(overlay_col, row, indicator, overlay_fg, overlay_bg);
                     fb.draw_text_at(
@@ -1764,18 +1788,23 @@ fn render_palette_overlay_fb(
             }
         }
 
-        let header = "Command Palette: ";
+        // Context header
+        let context_header = palette.context_header();
+        fb.draw_text_at(overlay_col, overlay_start_row, context_header, overlay_fg, overlay_bg);
+
+        // Query line
+        let header = "Search: ";
         let max_query_chars = overlay_width.saturating_sub(header.len());
         let query_display = if query_text.len() > max_query_chars {
             &query_text[query_text.len().saturating_sub(max_query_chars)..]
         } else {
             query_text
         };
-        fb.draw_text_at(overlay_col, overlay_start_row, header, overlay_fg, overlay_bg);
+        fb.draw_text_at(overlay_col, overlay_start_row + 1, header, overlay_fg, overlay_bg);
         if !query_display.is_empty() {
             fb.draw_text_at(
                 overlay_col + header.len(),
-                overlay_start_row,
+                overlay_start_row + 1,
                 query_display,
                 overlay_fg,
                 overlay_bg,
@@ -1783,7 +1812,7 @@ fn render_palette_overlay_fb(
         }
 
         for idx in 0..max_results {
-            let row = overlay_start_row + 1 + idx;
+            let row = overlay_start_row + 2 + idx;
             if let Some(result) = results.get(idx) {
                 let indicator = if idx == selected_idx { "> " } else { "  " };
                 fb.draw_text_at(overlay_col, row, indicator, overlay_fg, overlay_bg);
@@ -1798,7 +1827,7 @@ fn render_palette_overlay_fb(
         }
 
         let help = "[ESC] Close  [Enter] Execute";
-        let help_row = overlay_start_row + 1 + max_results;
+        let help_row = overlay_start_row + 2 + max_results;
         fb.draw_text_at(overlay_col, help_row, help, overlay_fg, overlay_bg);
     }
 
