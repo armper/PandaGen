@@ -820,9 +820,11 @@ fn workspace_loop(
     let mut last_output_seq = 0u64;
     let mut last_output_rows = 0usize;
     let mut prompt_initialized = false;
+    let mut status_initialized = false;
     let mut last_prompt_row = 0usize;
     let mut last_view_start = 0usize;
     let mut last_prompt_cli_active = false;
+    let mut last_status_cli_active = false;
     #[cfg(debug_assertions)]
     let mut last_editor_input: Option<u8> = None;
     let mut last_palette_open = false;
@@ -973,6 +975,7 @@ fn workspace_loop(
             output_dirty = true;
             input_dirty = true;
             prompt_initialized = false;
+            status_initialized = false;
             clear_terminal = true;
         }
         last_palette_open = palette_open;
@@ -981,6 +984,7 @@ fn workspace_loop(
             output_dirty = true;
             output_initialized = false;
             prompt_initialized = false;
+            status_initialized = false;
             editor_render_cache.invalidate();
             clear_terminal = true;
         }
@@ -1172,11 +1176,12 @@ fn workspace_loop(
 
                     // Normal workspace rendering (when editor not active)
 
-                    let max_output_rows = rows.saturating_sub(1);
+                    let max_output_rows = rows.saturating_sub(2);
                     let total = workspace.output_line_count();
                     let output_rows = total.min(max_output_rows);
                     let start = total.saturating_sub(max_output_rows);
-                    let prompt_row = output_rows.min(max_output_rows);
+                    let status_row = rows.saturating_sub(2);
+                    let prompt_row = rows.saturating_sub(1);
                     let output_seq = workspace.output_sequence();
                     let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
                     let can_scroll = output_initialized
@@ -1219,6 +1224,22 @@ fn workspace_loop(
                         last_output_rows = output_rows;
                         last_output_seq = output_seq;
                     }
+                    let status_line = workspace.status_line();
+                    let status_display = if status_line.len() > cols {
+                        &status_line[..cols]
+                    } else {
+                        status_line
+                    };
+                    let status_full = !status_initialized
+                        || output_dirty
+                        || workspace.is_cli_active() != last_status_cli_active;
+                    if status_full {
+                        clear_vga_line(vga, status_row, normal_attr);
+                        vga.write_str_at(0, status_row, status_display, bold_attr);
+                        status_initialized = true;
+                        last_status_cli_active = workspace.is_cli_active();
+                    }
+
                     let prompt_prefix = workspace.prompt_prefix();
                     let prompt_prefix_bytes = prompt_prefix.as_bytes();
                     let prefix_len = prompt_prefix_bytes.len();
@@ -1317,11 +1338,12 @@ fn workspace_loop(
                         input_dirty = false;
                         continue; // Skip normal workspace rendering when palette open
                     }
-                    let max_output_rows = rows.saturating_sub(1);
+                    let max_output_rows = rows.saturating_sub(2);
                     let total = workspace.output_line_count();
                     let output_rows = total.min(max_output_rows);
                     let start = total.saturating_sub(max_output_rows);
-                    let prompt_row = output_rows.min(max_output_rows);
+                    let status_row = rows.saturating_sub(2);
+                    let prompt_row = rows.saturating_sub(1);
                     let output_seq = workspace.output_sequence();
                     let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
 
@@ -1438,6 +1460,22 @@ fn workspace_loop(
                         last_output_rows = output_rows;
                         last_output_seq = output_seq;
                     }
+                    let status_line = workspace.status_line();
+                    let status_display = if status_line.len() > cols {
+                        &status_line[..cols]
+                    } else {
+                        status_line
+                    };
+                    let status_full = !status_initialized
+                        || output_dirty
+                        || workspace.is_cli_active() != last_status_cli_active;
+                    if status_full {
+                        clear_fb_line(fb, status_row, cols, bg, fg);
+                        fb.draw_text_at(0, status_row, status_display, accent, bg);
+                        status_initialized = true;
+                        last_status_cli_active = workspace.is_cli_active();
+                    }
+
                     let prompt_prefix = workspace.prompt_prefix();
                     let prompt_prefix_bytes = prompt_prefix.as_bytes();
                     let prefix_len = prompt_prefix_bytes.len();

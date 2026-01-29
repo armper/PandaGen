@@ -1255,6 +1255,15 @@ impl WorkspaceSession {
             "[Workspace] Ctrl+P: Commands"
         }
     }
+
+    /// Get the status line hint for the workspace footer
+    pub fn status_line(&self) -> &str {
+        if self.cli_active {
+            "CLI: Enter run | Esc exit | Ctrl+P Commands"
+        } else {
+            "WS: Ctrl+P Commands | open editor | open cli | help"
+        }
+    }
 }
 
 const OUTPUT_MAX_LINES: usize = 64;
@@ -1421,5 +1430,15 @@ mod tests {
         session.cli_len = 10;
         session.cli_cursor = 7;
         assert_eq!(session.get_cursor_col(), "CLI> ".len() + 7);
+    }
+
+    #[test]
+    fn test_status_line_changes_with_cli() {
+        let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
+        assert!(session.status_line().starts_with("WS:"));
+
+        let mut serial = crate::serial::SerialPort::new(0x3F8);
+        session.set_cli_active(true, &mut serial);
+        assert!(session.status_line().starts_with("CLI:"));
     }
 }
