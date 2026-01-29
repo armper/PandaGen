@@ -374,6 +374,11 @@ impl WorkspaceSession {
                 self.emit_line(serial, "Tip: Ctrl+P opens Commands.");
                 self.cli_hint_shown = true;
             }
+        } else {
+            if self.active_component == Some(ComponentType::Cli) {
+                self.active_component = None;
+            }
+            self.emit_line(serial, "Returned to workspace");
         }
     }
 
@@ -859,9 +864,13 @@ impl WorkspaceSession {
             }
             "quit" => {
                 if !self.cli_active {
-                    self.active_component = None;
-                    // self.editor = None;
-                    self.emit_line(serial, "Closed component");
+                    if self.active_component.is_some() {
+                        self.active_component = None;
+                        // self.editor = None;
+                        self.emit_line(serial, "Closed component");
+                    } else {
+                        self.emit_line(serial, "No active component (use 'halt' to stop)");
+                    }
                 }
             }
             "editor" => {
@@ -1084,11 +1093,7 @@ impl WorkspaceSession {
 
     /// Show the initial prompt
     pub fn show_prompt(&self, serial: &mut SerialPort) {
-        if self.cli_active {
-            let _ = write!(serial, "$ ");
-        } else {
-            let _ = write!(serial, "> ");
-        }
+        let _ = write!(serial, "{}", self.prompt_prefix());
     }
 
     /// Get a text snapshot of the current workspace state for display
@@ -1110,12 +1115,27 @@ impl WorkspaceSession {
 
     /// Get the cursor column for the current state
     pub fn get_cursor_col(&self) -> usize {
+        let prefix_len = self.prompt_prefix().len();
         if self.cli_active {
-            // "$ " is at column 0-1, command starts at column 2
-            2 + self.cli_cursor
+            prefix_len + self.cli_cursor
         } else {
-            // "> " is at column 0-1, command starts at column 2
-            2 + self.command_len
+            prefix_len + self.command_len
+        }
+    }
+
+    pub fn prompt_prefix(&self) -> &'static str {
+        if self.cli_active {
+            "CLI> "
+        } else {
+            "WS > "
+        }
+    }
+
+    fn prompt_prefix_bytes(&self) -> &'static [u8] {
+        if self.cli_active {
+            b"CLI> "
+        } else {
+            b"WS > "
         }
     }
 
@@ -1216,10 +1236,9 @@ impl WorkspaceSession {
     fn emit_command_line(&mut self, serial: &mut SerialPort, cmd: &[u8]) {
         let mut buffer = [0u8; OUTPUT_LINE_MAX];
         let mut len = 0usize;
-        let prompt = if self.cli_active { b"CLI  > " } else { b"WS   > " };
-        len = append_bytes(&mut buffer, len, prompt);
+        len = append_bytes(&mut buffer, len, self.prompt_prefix_bytes());
         len = append_bytes(&mut buffer, len, cmd);
-        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("WS   > ");
+        let line = core::str::from_utf8(&buffer[..len]).unwrap_or("WS > ");
         self.emit_line(serial, line);
     }
 
@@ -1394,13 +1413,13 @@ mod tests {
         
         // Normal mode: cursor at end of command
         session.command_len = 5;
-        assert_eq!(session.get_cursor_col(), 2 + 5); // "> " + 5
+        assert_eq!(session.get_cursor_col(), "WS > ".len() + 5);
         
         // CLI mode: cursor position tracked separately
         let mut serial = crate::serial::SerialPort::new(0x3F8);
         session.set_cli_active(true, &mut serial);
         session.cli_len = 10;
         session.cli_cursor = 7;
-        assert_eq!(session.get_cursor_col(), 2 + 7); // "$ " + 7
+        assert_eq!(session.get_cursor_col(), "CLI> ".len() + 7);
     }
 }

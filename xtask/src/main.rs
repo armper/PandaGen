@@ -89,12 +89,15 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚═══════════════════════════════════════════════════════════╝");
     println!();
 
+    let display_backend = select_qemu_display();
+
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display cocoa -no-reboot",
+        "qemu-system-x86_64 -machine pc -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
-        serial_log.display()
+        serial_log.display(),
+        display_backend
     );
     println!("Running QEMU with command:");
     println!("  {}", qemu_cmd);
@@ -115,7 +118,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-serial")
         .arg(format!("file:{}", serial_log.display()))
         .arg("-display")
-        .arg("cocoa") // Can also be "gtk", "sdl" depending on platform
+        .arg(display_backend)
         .arg("-no-reboot"))
 }
 
@@ -152,6 +155,8 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚═══════════════════════════════════════════════════════════╝");
     println!();
 
+    let display_backend = select_qemu_display();
+
     run(Command::new("qemu-system-x86_64")
         .current_dir(&root)
         .arg("-machine")
@@ -167,7 +172,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-serial")
         .arg(format!("file:{}", serial_log.display()))
         .arg("-display")
-        .arg("cocoa")
+        .arg(display_backend)
         .arg("-no-reboot"))?;
 
     let log = fs::read_to_string(&serial_log).unwrap_or_default();
@@ -176,6 +181,23 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         Err(io::Error::other("QEMU smoke test: FAIL (no scancode log found)").into())
+    }
+}
+
+fn select_qemu_display() -> String {
+    if let Ok(value) = env::var("QEMU_DISPLAY") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if cfg!(target_os = "macos") {
+        "cocoa".to_string()
+    } else if cfg!(target_os = "linux") {
+        "gtk".to_string()
+    } else {
+        "sdl".to_string()
     }
 }
 
