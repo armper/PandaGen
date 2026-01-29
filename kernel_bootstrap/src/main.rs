@@ -1184,11 +1184,24 @@ fn workspace_loop(
                     let prompt_row = rows.saturating_sub(1);
                     let output_seq = workspace.output_sequence();
                     let delta_lines = output_seq.saturating_sub(last_output_seq) as usize;
-                    let can_scroll = output_initialized
-                        && output_rows == max_output_rows
-                        && last_output_rows == max_output_rows
+
+                    let screen_is_full = output_rows == max_output_rows;
+                    let screen_was_full = last_output_rows == max_output_rows;
+                    let reasonable_delta = delta_lines > 0 && delta_lines < max_output_rows;
+
+                    let can_scroll =
+                        output_initialized && screen_is_full && screen_was_full && reasonable_delta;
+
+                    let can_fill_scroll = output_initialized
+                        && screen_is_full
+                        && !screen_was_full
+                        && last_output_rows > 0
+                        && reasonable_delta;
+
+                    let can_append = output_initialized
+                        && !screen_is_full
                         && delta_lines > 0
-                        && delta_lines < max_output_rows;
+                        && delta_lines <= output_rows;
 
                     if output_dirty {
                         if can_scroll {
@@ -1198,6 +1211,40 @@ fn workspace_loop(
                             for i in 0..delta_lines {
                                 let row = first_row + i;
                                 let line_idx = first_line + i;
+                                clear_vga_line(vga, row, normal_attr);
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        vga.write_str_at(0, row, text, normal_attr);
+                                    }
+                                }
+                            }
+                        } else if can_fill_scroll {
+                            let overflow = total.saturating_sub(max_output_rows);
+                            if overflow > 0 {
+                                vga.scroll_up(overflow, normal_attr);
+                            }
+                            let lines_to_draw = delta_lines.min(max_output_rows);
+                            let first_row = max_output_rows - lines_to_draw;
+                            let first_line = total.saturating_sub(lines_to_draw);
+                            for i in 0..lines_to_draw {
+                                let row = first_row + i;
+                                let line_idx = first_line + i;
+                                clear_vga_line(vga, row, normal_attr);
+                                if let Some(line) = workspace.output_line(line_idx) {
+                                    let bytes = line.as_bytes();
+                                    let len = bytes.len().min(cols);
+                                    if let Ok(text) = core::str::from_utf8(&bytes[..len]) {
+                                        vga.write_str_at(0, row, text, normal_attr);
+                                    }
+                                }
+                            }
+                        } else if can_append {
+                            let first_row = output_rows.saturating_sub(delta_lines);
+                            for i in 0..delta_lines {
+                                let row = first_row + i;
+                                let line_idx = start + row;
                                 clear_vga_line(vga, row, normal_attr);
                                 if let Some(line) = workspace.output_line(line_idx) {
                                     let bytes = line.as_bytes();
