@@ -227,6 +227,19 @@ impl BareMetalFramebuffer {
         })
     }
 
+    /// Create a framebuffer from existing info and buffer memory.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `buffer` is valid for writes and matches `info` size.
+    pub unsafe fn from_info_and_buffer(info: FramebufferInfo, buffer: &'static mut [u8]) -> Self {
+        Self {
+            info,
+            buffer,
+            glyph_cache: None,
+        }
+    }
+
     /// Returns the number of text columns based on the font width
     pub fn cols(&self) -> usize {
         self.info.width / FONT_WIDTH
@@ -245,6 +258,14 @@ impl BareMetalFramebuffer {
     /// Returns a mutable slice to the framebuffer pixel data
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.buffer
+    }
+
+    /// Blit from a source buffer into the framebuffer.
+    pub fn blit_from(&mut self, src: &[u8]) {
+        let len = src.len().min(self.buffer.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.buffer.as_mut_ptr(), len);
+        }
     }
 
     /// Clear the screen with a color (optimized with memset-style fill)

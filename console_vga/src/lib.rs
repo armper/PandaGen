@@ -116,9 +116,67 @@ impl VgaConsole {
     /// Clear the screen with the given attribute
     pub fn clear(&mut self, attr: u8) {
         for row in 0..VGA_HEIGHT {
+            self.clear_row(row, attr);
+        }
+    }
+
+    /// Clear a single row with the given attribute
+    pub fn clear_row(&mut self, row: usize, attr: u8) {
+        if row >= VGA_HEIGHT {
+            return;
+        }
+
+        let cell = ((attr as u16) << 8) | b' ' as u16;
+        let offset = row * VGA_WIDTH * 2;
+        unsafe {
+            let ptr = self.buffer.add(offset) as *mut u16;
             for col in 0..VGA_WIDTH {
-                self.write_at(col, row, b' ', attr);
+                ptr::write_volatile(ptr.add(col), cell);
             }
+        }
+    }
+
+    /// Write a line at the given row and clear the rest of the row
+    ///
+    /// The line does not wrap and is clipped to the screen width.
+    pub fn write_line_at(&mut self, row: usize, text: &str, attr: u8) {
+        if row >= VGA_HEIGHT {
+            return;
+        }
+
+        let offset = row * VGA_WIDTH * 2;
+        let space_cell = ((attr as u16) << 8) | b' ' as u16;
+        let mut col = 0usize;
+
+        unsafe {
+            let ptr = self.buffer.add(offset) as *mut u16;
+            for &byte in text.as_bytes().iter().take(VGA_WIDTH) {
+                let cell = ((attr as u16) << 8) | (byte as u16);
+                ptr::write_volatile(ptr.add(col), cell);
+                col += 1;
+            }
+            for i in col..VGA_WIDTH {
+                ptr::write_volatile(ptr.add(i), space_cell);
+            }
+        }
+    }
+
+    /// Blit a full screen buffer of VGA cells into the VGA text buffer.
+    ///
+    /// Each cell is a u16 with low byte = character, high byte = attribute.
+    pub fn blit_from_cells(&mut self, cells: &[u16]) {
+        let total_cells = VGA_WIDTH * VGA_HEIGHT;
+        if cells.len() < total_cells {
+            return;
+        }
+
+        let total_bytes = total_cells * 2;
+        unsafe {
+            ptr::copy_nonoverlapping(
+                cells.as_ptr() as *const u8,
+                self.buffer,
+                total_bytes,
+            );
         }
     }
 
@@ -247,9 +305,7 @@ impl VgaConsole {
 
         // Clear the bottom rows.
         for row in (VGA_HEIGHT - lines)..VGA_HEIGHT {
-            for col in 0..VGA_WIDTH {
-                self.write_at(col, row, b' ', attr);
-            }
+            self.clear_row(row, attr);
         }
     }
 
