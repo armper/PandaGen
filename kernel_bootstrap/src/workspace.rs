@@ -204,7 +204,11 @@ impl WorkspaceSession {
                 "open_cli",
                 "Switch to CLI",
                 "Switch to the CLI component",
-                vec!["cli".to_string(), "console".to_string(), "switch".to_string()],
+                vec![
+                    "cli".to_string(),
+                    "console".to_string(),
+                    "switch".to_string(),
+                ],
             )
             .with_category("Workspace"),
             Box::new(|_| Ok("Switching to CLI...".to_string())),
@@ -368,7 +372,7 @@ impl WorkspaceSession {
         if active {
             self.reset_cli_buffer();
             self.emit_line(serial, "CLI mode: type commands, `exit` to leave");
-            
+
             // Show first-run hint
             if !self.cli_hint_shown {
                 self.emit_line(serial, "Tip: Ctrl+P opens Commands.");
@@ -421,7 +425,8 @@ impl WorkspaceSession {
                 FocusTarget::None
             };
 
-            self.palette_overlay.open_with_context(current_focus, self.cli_active);
+            self.palette_overlay
+                .open_with_context(current_focus, self.cli_active);
             self.palette_overlay
                 .update_query(&self.command_palette, String::new());
             return true;
@@ -784,7 +789,12 @@ impl WorkspaceSession {
     }
 
     /// Run a command line (shared between normal prompt and CLI)
-    fn run_command_line(&mut self, command: &str, ctx: &mut KernelContext, serial: &mut SerialPort) {
+    fn run_command_line(
+        &mut self,
+        command: &str,
+        ctx: &mut KernelContext,
+        serial: &mut SerialPort,
+    ) {
         let mut parts = command.split_whitespace();
         let cmd = parts.next().unwrap_or("");
         if cmd.is_empty() {
@@ -793,13 +803,13 @@ impl WorkspaceSession {
 
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
-        
+
         // Handle special CLI exit commands
         if self.cli_active && (cmd == "exit" || cmd == "quit") {
             self.set_cli_active(false, serial);
             return;
         }
-        
+
         match cmd {
             "help" => {
                 self.emit_line(serial, "Workspace Commands:");
@@ -1012,10 +1022,8 @@ impl WorkspaceSession {
                         Ok((content, handle)) => {
                             editor.load_content(&content);
                             editor.set_editor_io(io, handle);
-                            open_message = Some(alloc::format!(
-                                "Opened: {} [filesystem available]",
-                                path
-                            ));
+                            open_message =
+                                Some(alloc::format!("Opened: {} [filesystem available]", path));
                         }
                         Err(_) => {
                             // File not found - create new buffer with IO for save-as
@@ -1364,14 +1372,14 @@ mod tests {
     #[test]
     fn test_cli_buffer_management() {
         let mut serial = crate::serial::SerialPort::new(0x3F8);
-        
+
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
-        
+
         // Activate CLI
         session.set_cli_active(true, &mut serial);
         assert!(session.is_cli_active());
         assert_eq!(session.cli_len, 0);
-        
+
         // Reset buffer
         session.cli_buffer[0] = b'x';
         session.cli_len = 1;
@@ -1384,13 +1392,13 @@ mod tests {
     #[test]
     fn test_cli_prompt_display() {
         let mut serial = crate::serial::SerialPort::new(0x3F8);
-        
+
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
-        
+
         // Normal prompt
         session.show_prompt(&mut serial);
         // Can't directly check output in test mode without accessing SerialPort internals
-        
+
         // CLI prompt
         session.set_cli_active(true, &mut serial);
         session.show_prompt(&mut serial);
@@ -1400,18 +1408,18 @@ mod tests {
     #[test]
     fn test_get_command_text_cli_vs_normal() {
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
-        
+
         // Set normal command buffer
         session.command_buffer[0..5].copy_from_slice(b"hello");
         session.command_len = 5;
         assert_eq!(session.get_command_text(), b"hello");
-        
+
         // Activate CLI and set CLI buffer
         let mut serial = crate::serial::SerialPort::new(0x3F8);
         session.set_cli_active(true, &mut serial);
         session.cli_buffer[0..5].copy_from_slice(b"world");
         session.cli_len = 5;
-        
+
         // Should return CLI buffer when CLI is active
         assert_eq!(session.get_command_text(), b"world");
     }
@@ -1419,11 +1427,11 @@ mod tests {
     #[test]
     fn test_get_cursor_col_cli_vs_normal() {
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
-        
+
         // Normal mode: cursor at end of command
         session.command_len = 5;
         assert_eq!(session.get_cursor_col(), "WS > ".len() + 5);
-        
+
         // CLI mode: cursor position tracked separately
         let mut serial = crate::serial::SerialPort::new(0x3F8);
         session.set_cli_active(true, &mut serial);
