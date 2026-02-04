@@ -611,6 +611,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn get_line(&self, row: usize) -> String {
             self.cells[row]
                 .iter()

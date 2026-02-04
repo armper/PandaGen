@@ -28,7 +28,6 @@ mod render_stats;
 mod vga;
 mod workspace;
 
-use crate::minimal_editor::EditorMode;
 use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;

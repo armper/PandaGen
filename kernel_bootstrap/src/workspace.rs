@@ -21,7 +21,7 @@ use alloc::vec;
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-use crate::minimal_editor::{EditorMode, MinimalEditor};
+use crate::minimal_editor::MinimalEditor;
 use crate::palette_overlay::{
     handle_palette_key, FocusTarget, PaletteKeyAction, PaletteOverlayState,
 };
@@ -995,7 +995,7 @@ impl WorkspaceSession {
         }
     }
 
-    fn open_editor(&mut self, serial: &mut SerialPort, path: Option<&str>) {
+    fn open_editor(&mut self, serial: &mut SerialPort, _path: Option<&str>) {
         #[cfg(not(test))]
         {
             // Recover filesystem from any stale editor instance
@@ -1017,7 +1017,7 @@ impl WorkspaceSession {
                 let mut io = BareMetalEditorIo::new(fs);
 
                 // Try to open the file if a path was provided
-                if let Some(path) = path {
+                if let Some(path) = _path {
                     match io.open(path) {
                         Ok((content, handle)) => {
                             editor.load_content(&content);

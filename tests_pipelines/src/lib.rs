@@ -39,6 +39,7 @@ struct CreateBlobOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct TransformBlobInput {
     object_cap_id: u64,
     content: String,
@@ -51,6 +52,7 @@ struct TransformBlobOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct AnnotateMetadataInput {
     object_cap_id: u64,
     content: String,
@@ -188,6 +190,7 @@ impl TestPipelineExecutor {
         }
     }
 
+    #[allow(dead_code)]
     fn add_capabilities(&mut self, caps: Vec<u64>) {
         self.base.add_capabilities(caps);
     }

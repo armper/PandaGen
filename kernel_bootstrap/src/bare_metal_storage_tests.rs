@@ -2,12 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::bare_metal_editor_io::{BareMetalEditorIo, DocumentHandle};
+    use crate::bare_metal_editor_io::BareMetalEditorIo;
     use crate::bare_metal_storage::BareMetalFilesystem;
 
     #[test]
     fn test_create_and_read_file() {
-        let mut fs = BareMetalFilesystem::new().unwrap();
+        let fs = BareMetalFilesystem::new().unwrap();
 
         // Create a file
         let content = b"Hello, PandaGen!";

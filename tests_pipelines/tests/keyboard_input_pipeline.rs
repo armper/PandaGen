@@ -25,7 +25,7 @@ use hal::keyboard_translation::KeyboardTranslator;
 use input_types::{InputEvent, KeyCode, KeyEvent, KeyState, Modifiers};
 use ipc::ChannelId;
 use services_focus_manager::FocusManager;
-use services_input::{InputService, InputSubscriptionCap};
+use services_input::InputService;
 
 /// Simulates the complete keyboard input pipeline
 #[test]
