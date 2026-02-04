@@ -172,11 +172,7 @@ impl VgaConsole {
 
         let total_bytes = total_cells * 2;
         unsafe {
-            ptr::copy_nonoverlapping(
-                cells.as_ptr() as *const u8,
-                self.buffer,
-                total_bytes,
-            );
+            ptr::copy_nonoverlapping(cells.as_ptr() as *const u8, self.buffer, total_bytes);
         }
     }
 

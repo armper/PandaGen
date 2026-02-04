@@ -132,9 +132,9 @@ impl MultiCoreScheduler {
     }
 
     pub fn has_runnable_tasks(&self) -> bool {
-        self.cores.iter().any(|core| {
-            core.current_task.is_some() || !core.run_queue.is_empty()
-        })
+        self.cores
+            .iter()
+            .any(|core| core.current_task.is_some() || !core.run_queue.is_empty())
     }
 
     pub fn enqueue(&mut self, task_id: TaskId) {
@@ -250,11 +250,7 @@ impl MultiCoreScheduler {
     }
 
     pub fn cancel_task_any(&mut self, task_id: TaskId, timestamp_ticks: u64) -> bool {
-        self.exit_task_any(
-            task_id,
-            ExitReason::ResourceExhaustion,
-            timestamp_ticks,
-        )
+        self.exit_task_any(task_id, ExitReason::ResourceExhaustion, timestamp_ticks)
     }
 
     pub fn audit_log(&self) -> &[CoreScheduleEvent] {

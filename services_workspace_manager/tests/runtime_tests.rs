@@ -178,7 +178,7 @@ fn test_runtime_full_cycle() {
 
 #[test]
 fn test_fake_platform_display_tracking() {
-    let mut platform = FakePlatform::new();
+    let platform = FakePlatform::new();
     let identity = IdentityMetadata::new(
         IdentityKind::Service,
         TrustDomain::core(),

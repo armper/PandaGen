@@ -28,11 +28,11 @@ mod render_stats;
 mod vga;
 mod workspace;
 
+use crate::minimal_editor::EditorMode;
 use core::fmt::Write;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::str;
-use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -841,9 +841,8 @@ fn workspace_loop(
     #[cfg(feature = "console_vga")]
     let mut vga_backbuffer = [0u16; console_vga::VGA_WIDTH * console_vga::VGA_HEIGHT];
     #[cfg(feature = "console_vga")]
-    let mut vga_shadow = unsafe {
-        console_vga::VgaConsole::new(vga_backbuffer.as_mut_ptr() as usize)
-    };
+    let mut vga_shadow =
+        unsafe { console_vga::VgaConsole::new(vga_backbuffer.as_mut_ptr() as usize) };
 
     let mut fb_shadow: Option<framebuffer::BareMetalFramebuffer> = None;
     if let Some(ref fb) = fb_console {
@@ -855,7 +854,9 @@ fn workspace_loop(
 
             let buffer = vec![0u8; info.buffer_size()].into_boxed_slice();
             let leaked = Box::leak(buffer);
-            fb_shadow = Some(unsafe { framebuffer::BareMetalFramebuffer::from_info_and_buffer(info, leaked) });
+            fb_shadow = Some(unsafe {
+                framebuffer::BareMetalFramebuffer::from_info_and_buffer(info, leaked)
+            });
         }
     }
 
@@ -1180,7 +1181,11 @@ fn workspace_loop(
                     }
 
                     // Render command palette overlay if open
-                    if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
+                    if draw_palette_overlay
+                        && !clear_terminal
+                        && !output_dirty
+                        && output_initialized
+                    {
                         let palette = workspace.palette_overlay();
                         let overlay_attr = get_palette_vga_attr(workspace.is_cli_active());
                         let _ = render_palette_overlay_vga(
@@ -1362,9 +1367,7 @@ fn workspace_loop(
                                     b' '
                                 }
                             } else {
-                                *prompt_prefix_bytes
-                                    .get(last_cursor_col)
-                                    .unwrap_or(&b' ')
+                                *prompt_prefix_bytes.get(last_cursor_col).unwrap_or(&b' ')
                             };
                             vga_target.write_at(last_cursor_col, prompt_row, ch, normal_attr);
                         }
@@ -1406,9 +1409,14 @@ fn workspace_loop(
                     let cols = fb_target.cols();
 
                     // Render command palette overlay if open
-                    if draw_palette_overlay && !clear_terminal && !output_dirty && output_initialized {
+                    if draw_palette_overlay
+                        && !clear_terminal
+                        && !output_dirty
+                        && output_initialized
+                    {
                         let palette = workspace.palette_overlay();
-                        let (overlay_bg, overlay_fg) = get_palette_fb_colors(workspace.is_cli_active());
+                        let (overlay_bg, overlay_fg) =
+                            get_palette_fb_colors(workspace.is_cli_active());
                         let _ = render_palette_overlay_fb(
                             fb_target,
                             palette,
@@ -1512,7 +1520,7 @@ fn workspace_loop(
                                         fb_target.draw_line(row, text, fg, bg);
                                     }
                                 } else {
-                                        fb_target.draw_line(row, "", fg, bg);
+                                    fb_target.draw_line(row, "", fg, bg);
                                 }
                             }
                         } else if can_append {
@@ -1527,7 +1535,7 @@ fn workspace_loop(
                                         fb_target.draw_line(row, text, fg, bg);
                                     }
                                 } else {
-                                        fb_target.draw_line(row, "", fg, bg);
+                                    fb_target.draw_line(row, "", fg, bg);
                                 }
                             }
                         } else {
@@ -1541,7 +1549,7 @@ fn workspace_loop(
                                         fb_target.draw_line(row, text, fg, bg);
                                     }
                                 } else {
-                                        fb_target.draw_line(row, "", fg, bg);
+                                    fb_target.draw_line(row, "", fg, bg);
                                 }
                             }
                         }
@@ -1604,9 +1612,7 @@ fn workspace_loop(
                                     b' '
                                 }
                             } else {
-                                *prompt_prefix_bytes
-                                    .get(last_cursor_col)
-                                    .unwrap_or(&b' ')
+                                *prompt_prefix_bytes.get(last_cursor_col).unwrap_or(&b' ')
                             };
                             fb_target.draw_char_at(last_cursor_col, prompt_row, ch, fg, bg);
                         }
@@ -1622,7 +1628,8 @@ fn workspace_loop(
 
                     if draw_palette_overlay {
                         let palette = workspace.palette_overlay();
-                        let (overlay_bg, overlay_fg) = get_palette_fb_colors(workspace.is_cli_active());
+                        let (overlay_bg, overlay_fg) =
+                            get_palette_fb_colors(workspace.is_cli_active());
                         let _ = render_palette_overlay_fb(
                             fb_target,
                             palette,
@@ -1932,7 +1939,13 @@ fn render_palette_overlay_fb(
 
         // Context header
         let context_header = palette.context_header();
-        fb.draw_text_at(overlay_col, overlay_start_row, context_header, overlay_fg, overlay_bg);
+        fb.draw_text_at(
+            overlay_col,
+            overlay_start_row,
+            context_header,
+            overlay_fg,
+            overlay_bg,
+        );
 
         // Query line
         let header = "Search: ";
@@ -1942,7 +1955,13 @@ fn render_palette_overlay_fb(
         } else {
             query_text
         };
-        fb.draw_text_at(overlay_col, overlay_start_row + 1, header, overlay_fg, overlay_bg);
+        fb.draw_text_at(
+            overlay_col,
+            overlay_start_row + 1,
+            header,
+            overlay_fg,
+            overlay_bg,
+        );
         if !query_display.is_empty() {
             fb.draw_text_at(
                 overlay_col + header.len(),

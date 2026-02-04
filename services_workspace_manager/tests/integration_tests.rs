@@ -7,7 +7,6 @@ use services_workspace_manager::{
     commands::{parse_command, CommandResult, WorkspaceCommand},
     ComponentType, LaunchConfig, WorkspaceError, WorkspaceManager,
 };
-use uuid::Uuid;
 
 fn create_workspace_with_policy() -> WorkspaceManager {
     let workspace_identity = IdentityMetadata::new(
@@ -73,7 +72,7 @@ fn test_policy_denies_launch() {
 fn test_command_open_with_policy() {
     let mut workspace = create_workspace_with_policy();
 
-    let result = workspace.execute_command(WorkspaceCommand::Open {
+    let _result = workspace.execute_command(WorkspaceCommand::Open {
         component_type: ComponentType::Editor,
         args: vec!["test.txt".to_string()],
     });
@@ -628,7 +627,8 @@ fn test_error_tracking_in_history() {
     let mut workspace = WorkspaceManager::new(workspace_identity);
 
     // Try to focus non-existent component (will error)
-    let fake_id = services_workspace_manager::ComponentId::from_uuid(core_types::uuid_tools::new_uuid());
+    let fake_id =
+        services_workspace_manager::ComponentId::from_uuid(core_types::uuid_tools::new_uuid());
     workspace.execute_command(WorkspaceCommand::Focus {
         component_id: fake_id,
     });

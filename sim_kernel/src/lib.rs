@@ -887,9 +887,7 @@ impl SimulatedKernel {
                 if let Some(execution_id) = self.get_task_identity(task_id) {
                     if self.try_consume_cpu_ticks(execution_id, 1).is_err() {
                         let runtime = self.smp.as_mut().unwrap();
-                        runtime
-                            .scheduler
-                            .cancel_task_any(task_id, timestamp_ticks);
+                        runtime.scheduler.cancel_task_any(task_id, timestamp_ticks);
                         cancelled = true;
                     }
                 }
