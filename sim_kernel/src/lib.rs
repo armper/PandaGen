@@ -853,14 +853,13 @@ impl SimulatedKernel {
                 let runtime = self.smp.as_mut().unwrap();
                 for core_idx in 0..core_count {
                     let core_id = smp::CoreId(core_idx);
-                    if runtime.scheduler.core_current_task(core_id).is_none() {
-                        if runtime
+                    if runtime.scheduler.core_current_task(core_id).is_none()
+                        && runtime
                             .scheduler
                             .dequeue_next(core_id, runtime.time.ticks(core_id))
                             .is_some()
-                        {
-                            scheduling_rounds += 1;
-                        }
+                    {
+                        scheduling_rounds += 1;
                     }
                 }
             }

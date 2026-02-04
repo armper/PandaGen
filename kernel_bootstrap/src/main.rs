@@ -845,18 +845,16 @@ fn workspace_loop(
         console_vga::VgaConsole::new(vga_backbuffer.as_mut_ptr() as usize)
     };
 
-    let mut fb_backbuffer: Option<&'static mut [u8]> = None;
     let mut fb_shadow: Option<framebuffer::BareMetalFramebuffer> = None;
     if let Some(ref fb) = fb_console {
         let info = fb.info();
         #[cfg(not(test))]
         {
             use alloc::boxed::Box;
-            use alloc::vec::Vec;
+            use alloc::vec;
 
             let buffer = vec![0u8; info.buffer_size()].into_boxed_slice();
             let leaked = Box::leak(buffer);
-            fb_backbuffer = Some(leaked);
             fb_shadow = Some(unsafe { framebuffer::BareMetalFramebuffer::from_info_and_buffer(info, leaked) });
         }
     }
@@ -1119,7 +1117,7 @@ fn workspace_loop(
                     // Check if editor is active
                     if workspace.is_editor_active() {
                         // Phase 96: Use optimized renderer via VGA sink wrapper
-                        use crate::display_sink::{DisplaySink, VgaDisplaySink};
+                        use crate::display_sink::VgaDisplaySink;
                         let mut vga_sink = VgaDisplaySink::new(vga);
 
                         if let Some(editor) = workspace.editor() {
@@ -1424,8 +1422,8 @@ fn workspace_loop(
                             &mut last_palette_selection,
                         );
                         input_dirty = false;
-                        if let Some(backbuffer) = fb_backbuffer.as_ref() {
-                            fb.blit_from(backbuffer);
+                        if let Some(backbuffer) = fb_shadow.as_mut() {
+                            fb.blit_from(backbuffer.buffer_mut());
                         }
                         continue; // Skip normal workspace rendering when palette open
                     }
@@ -1640,8 +1638,8 @@ fn workspace_loop(
                         input_dirty = false;
                     }
 
-                    if let Some(backbuffer) = fb_backbuffer.as_ref() {
-                        fb.blit_from(backbuffer);
+                    if let Some(backbuffer) = fb_shadow.as_mut() {
+                        fb.blit_from(backbuffer.buffer_mut());
                     }
                 }
             } // End !rendered_editor
@@ -2202,13 +2200,6 @@ impl Ps2ParserState {
         // Handle E0-prefixed keys (arrows)
         if self.pending_e0 {
             self.pending_e0 = false;
-            if !is_break {
-                return match code {
-                    0x48 => Some(0x80), // Up arrow
-                    0x50 => Some(0x81), // Down arrow
-                    _ => None,
-                };
-            }
             return None;
         }
 
@@ -2598,82 +2589,80 @@ mod keyboard_scancode_tests {
 #[cfg(all(not(test), target_os = "none"))]
 fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     let mut info = BootInfo::empty();
-    unsafe {
-        match HHDM_REQUEST.get_response() {
-            Some(resp) => {
-                info.hhdm_offset = Some(resp.offset());
-            }
-            None => {
-                info.hhdm_offset = None;
+    match HHDM_REQUEST.get_response() {
+        Some(resp) => {
+            info.hhdm_offset = Some(resp.offset());
+        }
+        None => {
+            info.hhdm_offset = None;
+        }
+    }
+
+    match EXECUTABLE_ADDRESS_REQUEST.get_response() {
+        Some(resp) => {
+            info.kernel_phys = Some(resp.physical_base());
+            info.kernel_virt = Some(resp.virtual_base());
+        }
+        None => {
+            info.kernel_phys = None;
+            info.kernel_virt = None;
+        }
+    }
+
+    if let Some(resp) = MEMORY_MAP_REQUEST.get_response() {
+        let map = resp.entries();
+        let mut usable = 0u64;
+        let mut total = 0u64;
+        for entry in map {
+            total = total.saturating_add(entry.length);
+            if entry.entry_type == EntryType::USABLE {
+                usable = usable.saturating_add(entry.length);
             }
         }
+        info.mem_entries = map.len();
+        info.mem_total_kib = total / 1024;
+        info.mem_usable_kib = usable / 1024;
+    }
 
-        match EXECUTABLE_ADDRESS_REQUEST.get_response() {
-            Some(resp) => {
-                info.kernel_phys = Some(resp.physical_base());
-                info.kernel_virt = Some(resp.virtual_base());
-            }
-            None => {
-                info.kernel_phys = None;
-                info.kernel_virt = None;
-            }
-        }
+    // Request framebuffer from Limine
+    match FRAMEBUFFER_REQUEST.get_response() {
+        Some(fb_resp) => {
+            if let Some(fb) = fb_resp.framebuffers().next() {
+                let width = fb.width();
+                let height = fb.height();
+                let pitch = fb.pitch();
+                let bpp = fb.bpp();
 
-        if let Some(resp) = MEMORY_MAP_REQUEST.get_response() {
-            let map = resp.entries();
-            let mut usable = 0u64;
-            let mut total = 0u64;
-            for entry in map {
-                total = total.saturating_add(entry.length);
-                if entry.entry_type == EntryType::USABLE {
-                    usable = usable.saturating_add(entry.length);
-                }
-            }
-            info.mem_entries = map.len();
-            info.mem_total_kib = total / 1024;
-            info.mem_usable_kib = usable / 1024;
-        }
-
-        // Request framebuffer from Limine
-        match FRAMEBUFFER_REQUEST.get_response() {
-            Some(fb_resp) => {
-                if let Some(fb) = fb_resp.framebuffers().next() {
-                    let width = fb.width();
-                    let height = fb.height();
-                    let pitch = fb.pitch();
-                    let bpp = fb.bpp();
-
-                    if width == 0 || height == 0 || pitch == 0 || bpp == 0 {
-                        kprintln!(
-                            serial,
-                            "framebuffer: invalid ({}x{} @ 0x{:x}, {} bpp)",
-                            width,
-                            height,
-                            fb.addr() as usize,
-                            bpp
-                        );
-                    } else {
-                        info.framebuffer_addr = Some(fb.addr());
-                        info.framebuffer_width = width;
-                        info.framebuffer_height = height;
-                        info.framebuffer_pitch = pitch;
-                        info.framebuffer_bpp = bpp;
-                        kprintln!(
-                            serial,
-                            "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
-                            width,
-                            height,
-                            fb.addr() as usize,
-                            bpp
-                        );
-                    }
+                if width == 0 || height == 0 || pitch == 0 || bpp == 0 {
+                    kprintln!(
+                        serial,
+                        "framebuffer: invalid ({}x{} @ 0x{:x}, {} bpp)",
+                        width,
+                        height,
+                        fb.addr() as usize,
+                        bpp
+                    );
                 } else {
-                    kprintln!(serial, "framebuffer: no framebuffer devices available");
+                    info.framebuffer_addr = Some(fb.addr());
+                    info.framebuffer_width = width;
+                    info.framebuffer_height = height;
+                    info.framebuffer_pitch = pitch;
+                    info.framebuffer_bpp = bpp;
+                    kprintln!(
+                        serial,
+                        "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
+                        width,
+                        height,
+                        fb.addr() as usize,
+                        bpp
+                    );
                 }
+            } else {
+                kprintln!(serial, "framebuffer: no framebuffer devices available");
             }
-            None => {
-                kprintln!(serial, "framebuffer: unavailable (no response)");
-            }
+        }
+        None => {
+            kprintln!(serial, "framebuffer: unavailable (no response)");
         }
     }
 
