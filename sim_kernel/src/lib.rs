@@ -868,32 +868,40 @@ impl SimulatedKernel {
             self.advance_time(Duration::from_nanos(self.nanos_per_tick));
             ticks_consumed = ticks_consumed.saturating_add(1);
 
+            let mut ticked_tasks = Vec::new();
             {
                 let runtime = self.smp.as_mut().unwrap();
                 for core_idx in 0..core_count {
                     let core_id = smp::CoreId(core_idx);
                     if let Some(task_id) = runtime.scheduler.core_current_task(core_id) {
                         runtime.advance_core_time(core_id, 1);
-
-                        if let Some(execution_id) = self.get_task_identity(task_id) {
-                            if self.try_consume_cpu_ticks(execution_id, 1).is_err() {
-                                let timestamp_ticks = runtime.time.ticks(core_id);
-                                runtime
-                                    .scheduler
-                                    .cancel_task_any(task_id, timestamp_ticks);
-                                continue;
-                            }
-                        }
-
-                        if runtime.scheduler.should_preempt(core_id) {
-                            let timestamp_ticks = runtime.time.ticks(core_id);
-                            runtime.scheduler.preempt_current(
-                                core_id,
-                                scheduler::PreemptionReason::QuantumExpired,
-                                timestamp_ticks,
-                            );
-                        }
+                        let timestamp_ticks = runtime.time.ticks(core_id);
+                        let should_preempt = runtime.scheduler.should_preempt(core_id);
+                        ticked_tasks.push((core_id, task_id, timestamp_ticks, should_preempt));
                     }
+                }
+            }
+
+            for (core_id, task_id, timestamp_ticks, should_preempt) in ticked_tasks {
+                let mut cancelled = false;
+
+                if let Some(execution_id) = self.get_task_identity(task_id) {
+                    if self.try_consume_cpu_ticks(execution_id, 1).is_err() {
+                        let runtime = self.smp.as_mut().unwrap();
+                        runtime
+                            .scheduler
+                            .cancel_task_any(task_id, timestamp_ticks);
+                        cancelled = true;
+                    }
+                }
+
+                if !cancelled && should_preempt {
+                    let runtime = self.smp.as_mut().unwrap();
+                    runtime.scheduler.preempt_current(
+                        core_id,
+                        scheduler::PreemptionReason::QuantumExpired,
+                        timestamp_ticks,
+                    );
                 }
             }
         }
@@ -1106,6 +1114,13 @@ impl SimulatedKernel {
     /// Creates an exit notification with the specified reason and cleans up
     /// task resources including capabilities.
     pub fn terminate_task_with_reason(&mut self, task_id: TaskId, reason: ExitReason) {
+        let scheduler_reason = match &reason {
+            ExitReason::Normal => scheduler::ExitReason::Normal,
+            ExitReason::Failure { .. } => scheduler::ExitReason::Failed,
+            ExitReason::Cancelled { .. } => scheduler::ExitReason::Failed,
+            ExitReason::Timeout => scheduler::ExitReason::Failed,
+        };
+
         // Get execution ID and create exit notification
         if let Some(execution_id) = self.task_to_identity.get(&task_id).copied() {
             let notification = ExitNotification {
@@ -1134,12 +1149,6 @@ impl SimulatedKernel {
 
         // Phase 23: Notify scheduler that task has exited
         if let Some(smp) = self.smp.as_mut() {
-            let scheduler_reason = match &reason {
-                ExitReason::Normal => scheduler::ExitReason::Normal,
-                ExitReason::Failure { .. } => scheduler::ExitReason::Failed,
-                ExitReason::Cancelled { .. } => scheduler::ExitReason::Failed,
-                ExitReason::Timeout => scheduler::ExitReason::Failed,
-            };
             let timestamp_ticks = self.timer.current_ticks();
             smp.scheduler
                 .exit_task_any(task_id, scheduler_reason, timestamp_ticks);
