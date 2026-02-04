@@ -7,7 +7,7 @@ mod tests {
 
     #[test]
     fn test_create_and_read_file() {
-        let fs = BareMetalFilesystem::new().unwrap();
+        let mut fs = BareMetalFilesystem::new().unwrap();
 
         // Create a file
         let content = b"Hello, PandaGen!";
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_file_not_found() {
-        let mut fs = BareMetalFilesystem::new().unwrap();
+        let fs = BareMetalFilesystem::new().unwrap();
         let result = fs.read_file_by_name("nonexistent.txt");
         assert!(result.is_err());
     }

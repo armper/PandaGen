@@ -18,7 +18,7 @@ fn test_capability_invalid_after_crash() {
     let cap: Cap<()> = Cap::new(42);
 
     // Spawn a task and grant it the capability
-    let descriptor = TaskDescriptor::new("test_task".to_string()).with_capability(cap.clone());
+    let descriptor = TaskDescriptor::new("test_task".to_string()).with_capability(cap);
 
     let handle = kernel.spawn_task(descriptor).expect("Failed to spawn task");
     let _task_id = handle.task_id;
@@ -55,7 +55,7 @@ fn test_explicit_capability_grant() {
 
     // Grant capability to task1
     kernel
-        .grant_capability(task1.task_id, cap.clone())
+        .grant_capability(task1.task_id, cap)
         .expect("Failed to grant to task1");
 
     // Task2 should NOT have the capability unless explicitly granted
@@ -145,7 +145,7 @@ fn test_capability_cleanup_after_task_exit() {
     let cap: Cap<()> = Cap::new(999);
 
     // Spawn task with capability
-    let descriptor = TaskDescriptor::new("temporary_task".to_string()).with_capability(cap.clone());
+    let descriptor = TaskDescriptor::new("temporary_task".to_string()).with_capability(cap);
 
     let handle = kernel.spawn_task(descriptor).expect("Failed to spawn task");
     let _task_id = handle.task_id;
@@ -170,7 +170,7 @@ fn test_no_ambient_capability_authority() {
     // Create parent task with capability
     let cap: Cap<()> = Cap::new(555);
     let _parent = kernel
-        .spawn_task(TaskDescriptor::new("parent".to_string()).with_capability(cap.clone()))
+        .spawn_task(TaskDescriptor::new("parent".to_string()).with_capability(cap))
         .expect("Failed to spawn parent");
 
     // Create child task WITHOUT the capability
@@ -202,7 +202,7 @@ fn test_capability_grant_requires_authorization() {
 
     // Task 1 has the capability
     let _task1 = kernel
-        .spawn_task(TaskDescriptor::new("task1".to_string()).with_capability(cap.clone()))
+        .spawn_task(TaskDescriptor::new("task1".to_string()).with_capability(cap))
         .expect("Failed to spawn task1");
 
     // Task 2 does NOT have the capability

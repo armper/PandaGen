@@ -21,7 +21,7 @@ use alloc::vec;
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(test)))]
 use crate::minimal_editor::EditorMode;
 use crate::minimal_editor::MinimalEditor;
 use crate::palette_overlay::{

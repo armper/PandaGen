@@ -34,7 +34,8 @@ use core::mem::MaybeUninit;
 use core::str;
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-
+#[cfg(all(debug_assertions, not(test), target_os = "none"))]
+use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;
 #[cfg(all(not(test), target_os = "none"))]
@@ -49,8 +50,6 @@ use limine::request::{
 };
 #[cfg(all(not(test), target_os = "none"))]
 use limine::BaseRevision;
-#[cfg(debug_assertions)]
-use crate::minimal_editor::EditorMode;
 
 #[cfg(all(not(test), target_os = "none"))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -4431,7 +4430,7 @@ pub extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
 }
 
 // Rust language item for unwinding (we don't support it, but it's required)
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[no_mangle]
 pub extern "C" fn rust_eh_personality() {
     // No-op: we don't support unwinding in bare-metal
