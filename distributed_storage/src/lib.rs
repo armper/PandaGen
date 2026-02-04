@@ -1,5 +1,12 @@
 //! Distributed storage sync for versioned objects.
 
+pub mod consensus;
+
+pub use consensus::{
+    AppendEntriesRequest, AppendEntriesResponse, ConsensusCluster, ConsensusError,
+    ConsensusNode, ConsensusNodeId, LogEntry, NodeState, VoteRequest, VoteResponse,
+};
+
 use serde::{Deserialize, Serialize};
 use services_storage::{ObjectId, VersionId};
 use std::collections::{HashMap, HashSet};
