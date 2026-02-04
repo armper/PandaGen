@@ -30,7 +30,7 @@ impl PixelFormat {
     }
 
     /// Converts RGB color to the pixel format's byte representation
-    pub fn to_bytes(&self, r: u8, g: u8, b: u8) -> [u8; 4] {
+    pub fn to_bytes(self, r: u8, g: u8, b: u8) -> [u8; 4] {
         match self {
             PixelFormat::Rgb32 => [b, g, r, 0],
         }

@@ -21,6 +21,8 @@ use alloc::vec;
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
 
+#[cfg(debug_assertions)]
+use crate::minimal_editor::EditorMode;
 use crate::minimal_editor::MinimalEditor;
 use crate::palette_overlay::{
     handle_palette_key, FocusTarget, PaletteKeyAction, PaletteOverlayState,
@@ -663,7 +665,7 @@ impl WorkspaceSession {
                     // Down arrow - not implemented yet
                     return true;
                 }
-                byte if byte >= 0x20 && byte < 0x7F => {
+                byte if (0x20..0x7F).contains(&byte) => {
                     // Printable character - insert at cursor
                     // Check if we have room (need space for the new character)
                     if self.cli_len < COMMAND_MAX {
@@ -701,7 +703,7 @@ impl WorkspaceSession {
                 }
                 true
             }
-            byte if byte >= 0x20 && byte < 0x7F => {
+            byte if (0x20..0x7F).contains(&byte) => {
                 // Printable character
                 if self.command_len < self.command_buffer.len() {
                     self.command_buffer[self.command_len] = byte;

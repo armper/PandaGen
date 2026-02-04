@@ -31,7 +31,7 @@ fn main() {
     println!("Simulating typing 'test' character by character...\n");
 
     // Scenario: Start with empty buffer, type "test" one char at a time
-    let scenarios = vec![
+    let scenarios = [
         (
             vec!["".to_string()],
             Some(CursorPosition::new(0, 0)),

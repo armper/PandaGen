@@ -68,7 +68,7 @@ impl BareMetalOutput {
                     if col >= line_bytes.len() {
                         let _ = write!(serial, "|");
                     }
-                    let _ = writeln!(serial, "");
+                    let _ = writeln!(serial);
                 } else {
                     let _ = writeln!(serial, "{}", line);
                 }
@@ -81,7 +81,7 @@ impl BareMetalOutput {
         if let (Some(cline), Some(ccol)) = (cursor_line, cursor_col) {
             if cline >= text_lines.len() {
                 for _ in text_lines.len()..cline {
-                    let _ = writeln!(serial, "");
+                    let _ = writeln!(serial);
                 }
                 for _ in 0..ccol {
                     let _ = write!(serial, " ");
@@ -91,9 +91,9 @@ impl BareMetalOutput {
         }
 
         // Separator (fixed width for no_std)
-        let _ = writeln!(serial, "");
+        let _ = writeln!(serial);
         let _ = writeln!(serial, "----------------------------------------");
-        let _ = writeln!(serial, "");
+        let _ = writeln!(serial);
 
         // Render status view if present
         if let Some(status) = status_text {

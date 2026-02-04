@@ -36,17 +36,21 @@ use core::str;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(test))]
-use core::arch::{asm, global_asm};
+use core::arch::asm;
+#[cfg(all(not(test), target_os = "none"))]
+use core::arch::global_asm;
 #[cfg(all(not(test), target_os = "none"))]
 use core::panic::PanicInfo;
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 use limine::memory_map::EntryType;
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 use limine::request::{
     ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
 };
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 use limine::BaseRevision;
+#[cfg(debug_assertions)]
+use crate::minimal_editor::EditorMode;
 
 #[cfg(all(not(test), target_os = "none"))]
 // Provide a small, deterministic stack and jump into Rust.
@@ -1781,6 +1785,7 @@ fn get_palette_fb_colors(is_cli_active: bool) -> ((u8, u8, u8), (u8, u8, u8)) {
 }
 
 #[cfg(feature = "console_vga")]
+#[allow(clippy::too_many_arguments)]
 fn render_palette_overlay_vga(
     vga: &mut console_vga::VgaConsole,
     palette: &crate::palette_overlay::PaletteOverlayState,
@@ -1878,6 +1883,7 @@ fn render_palette_overlay_vga(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_palette_overlay_fb(
     fb: &mut framebuffer::BareMetalFramebuffer,
     palette: &crate::palette_overlay::PaletteOverlayState,
