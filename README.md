@@ -322,8 +322,8 @@ The system now includes:
 - **Comprehensive testing**: Unit tests, integration tests, and resilience tests
 
 ### Phase 118+: Future Work
-- [ ] Multi-core support
-- [ ] Graphics/UI framework beyond text mode
+- [x] Multi-core support
+- [x] Graphics/UI framework beyond text mode
 - [ ] Advanced network protocols
 - [ ] Distributed consensus algorithms
 - [ ] Real-time scheduling guarantees
