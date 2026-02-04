@@ -49,6 +49,8 @@ pub struct SchedulerConfig {
     pub quantum_ticks: u64,
     /// Maximum steps per tick to guard against infinite loops (optional)
     pub max_steps_per_tick: Option<u64>,
+    /// Real-time scheduling policy
+    pub realtime_policy: RealTimePolicy,
 }
 
 impl Default for SchedulerConfig {
@@ -56,8 +58,55 @@ impl Default for SchedulerConfig {
         Self {
             quantum_ticks: 10, // Small quantum for testing
             max_steps_per_tick: Some(1000),
+            realtime_policy: RealTimePolicy::None,
         }
     }
+}
+
+/// Real-time scheduling policy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealTimePolicy {
+    None,
+    EarliestDeadlineFirst,
+}
+
+/// Real-time task parameters
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealTimeParams {
+    pub period_ticks: u64,
+    pub budget_ticks: u64,
+}
+
+/// Real-time task state tracked by scheduler
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealTimeTask {
+    pub params: RealTimeParams,
+    pub next_deadline: u64,
+    pub remaining_budget: u64,
+    pub deadline_misses: u64,
+}
+
+impl RealTimeTask {
+    fn new(params: RealTimeParams, current_ticks: u64) -> Self {
+        Self {
+            params,
+            next_deadline: current_ticks.saturating_add(params.period_ticks),
+            remaining_budget: params.budget_ticks,
+            deadline_misses: 0,
+        }
+    }
+
+    fn reset_for_next_period(&mut self) {
+        self.remaining_budget = self.params.budget_ticks;
+        self.next_deadline = self.next_deadline.saturating_add(self.params.period_ticks);
+    }
+}
+
+/// Scheduler error for real-time admission and configuration
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchedulerError {
+    TaskNotFound(TaskId),
+    AdmissionControlFailed,
 }
 
 /// Scheduling event for audit trail
@@ -80,6 +129,12 @@ pub enum ScheduleEvent {
         reason: ExitReason,
         timestamp_ticks: u64,
     },
+    /// Real-time deadline missed
+    DeadlineMissed {
+        task_id: TaskId,
+        deadline_tick: u64,
+        timestamp_ticks: u64,
+    },
 }
 
 /// Reason for preemption
@@ -91,6 +146,8 @@ pub enum PreemptionReason {
     Yielded,
     /// Task blocked on I/O or other resource
     Blocked,
+    /// Task exhausted its real-time budget
+    BudgetExhausted,
 }
 
 /// Reason for task exit
@@ -110,6 +167,7 @@ struct TaskInfo {
     state: TaskState,
     /// Ticks consumed since last scheduling
     ticks_in_quantum: u64,
+    realtime: Option<RealTimeTask>,
 }
 
 /// Run queue for tasks
@@ -134,6 +192,29 @@ impl RunQueue {
 
     fn dequeue(&mut self) -> Option<TaskId> {
         self.queue.pop_front()
+    }
+
+    fn dequeue_earliest_deadline<F>(&mut self, mut deadline_of: F) -> Option<TaskId>
+    where
+        F: FnMut(TaskId) -> Option<u64>,
+    {
+        let mut best_index: Option<usize> = None;
+        let mut best_deadline: u64 = u64::MAX;
+
+        for (index, task_id) in self.queue.iter().copied().enumerate() {
+            if let Some(deadline) = deadline_of(task_id) {
+                if deadline < best_deadline {
+                    best_deadline = deadline;
+                    best_index = Some(index);
+                }
+            }
+        }
+
+        if let Some(index) = best_index {
+            return self.queue.remove(index);
+        }
+
+        self.dequeue()
     }
 
     fn is_empty(&self) -> bool {
@@ -187,16 +268,24 @@ impl Scheduler {
         let task_info = TaskInfo {
             state: TaskState::Runnable,
             ticks_in_quantum: 0,
+            realtime: None,
         };
         self.tasks.insert(task_id, task_info);
-        self.run_queue.enqueue(task_id);
+        self.enqueue_runnable(task_id);
     }
 
     /// Dequeues the next task to run
     ///
     /// Returns None if no tasks are runnable.
     pub fn dequeue_next(&mut self) -> Option<TaskId> {
-        if let Some(task_id) = self.run_queue.dequeue() {
+        let next = match self.config.realtime_policy {
+            RealTimePolicy::None => self.run_queue.dequeue(),
+            RealTimePolicy::EarliestDeadlineFirst => self
+                .run_queue
+                .dequeue_earliest_deadline(|task_id| self.task_deadline(task_id)),
+        };
+
+        if let Some(task_id) = next {
             // Reset quantum counter for this task
             if let Some(task_info) = self.tasks.get_mut(&task_id) {
                 task_info.ticks_in_quantum = 0;
@@ -227,11 +316,70 @@ impl Scheduler {
         if let Some(task_id) = self.current_task {
             if let Some(task_info) = self.tasks.get_mut(&task_id) {
                 task_info.ticks_in_quantum += delta_ticks;
+                if let Some(realtime) = task_info.realtime.as_mut() {
+                    realtime.remaining_budget =
+                        realtime.remaining_budget.saturating_sub(delta_ticks);
+                }
             }
         }
 
+        self.refresh_deadlines();
+
         // Wake up blocked tasks whose wake_tick has been reached
         self.wake_ready_tasks();
+    }
+
+    /// Sets real-time scheduling parameters for a task.
+    pub fn set_real_time_params(
+        &mut self,
+        task_id: TaskId,
+        params: RealTimeParams,
+    ) -> Result<(), SchedulerError> {
+        if params.period_ticks == 0
+            || params.budget_ticks == 0
+            || params.budget_ticks > params.period_ticks
+        {
+            return Err(SchedulerError::AdmissionControlFailed);
+        }
+
+        let utilization = self.utilization_ppm_with(task_id, params);
+        if utilization > 1_000_000 {
+            return Err(SchedulerError::AdmissionControlFailed);
+        }
+
+        let task_info = self
+            .tasks
+            .get_mut(&task_id)
+            .ok_or(SchedulerError::TaskNotFound(task_id))?;
+        task_info.realtime = Some(RealTimeTask::new(params, self.current_ticks));
+
+        if task_info.state == TaskState::Runnable && self.current_task != Some(task_id) {
+            self.run_queue.remove(task_id);
+            self.enqueue_runnable(task_id);
+        }
+
+        Ok(())
+    }
+
+    /// Returns the real-time parameters for a task.
+    pub fn real_time_params(&self, task_id: TaskId) -> Option<RealTimeParams> {
+        self.tasks
+            .get(&task_id)
+            .and_then(|info| info.realtime.as_ref().map(|rt| rt.params))
+    }
+
+    /// Returns the current real-time utilization in parts-per-million.
+    pub fn real_time_utilization_ppm(&self) -> u64 {
+        let mut total: u128 = 0;
+        for info in self.tasks.values() {
+            if let Some(rt) = info.realtime.as_ref() {
+                if rt.params.period_ticks > 0 {
+                    total += (rt.params.budget_ticks as u128 * 1_000_000u128)
+                        / rt.params.period_ticks as u128;
+                }
+            }
+        }
+        total as u64
     }
 
     /// Wakes up tasks that have reached their wake_tick
@@ -263,6 +411,11 @@ impl Scheduler {
     /// Returns true if the task has exceeded its quantum.
     pub fn should_preempt(&self, task_id: TaskId) -> bool {
         if let Some(task_info) = self.tasks.get(&task_id) {
+            if let Some(realtime) = task_info.realtime.as_ref() {
+                if realtime.remaining_budget == 0 {
+                    return true;
+                }
+            }
             task_info.ticks_in_quantum >= self.config.quantum_ticks
         } else {
             false
@@ -277,9 +430,23 @@ impl Scheduler {
         if let Some(task_id) = self.current_task.take() {
             if let Some(task_info) = self.tasks.get_mut(&task_id) {
                 if task_info.state == TaskState::Runnable {
+                    if let Some(realtime) = task_info.realtime.as_ref() {
+                        if realtime.remaining_budget == 0 {
+                            let wake_tick = realtime.next_deadline;
+                            task_info.state = TaskState::Blocked { wake_tick };
+                            task_info.ticks_in_quantum = 0;
+                            self.audit_log.push(ScheduleEvent::TaskPreempted {
+                                task_id,
+                                reason: PreemptionReason::BudgetExhausted,
+                                timestamp_ticks: self.current_ticks,
+                            });
+                            return true;
+                        }
+                    }
+
                     // Reset quantum and re-enqueue
                     task_info.ticks_in_quantum = 0;
-                    self.run_queue.enqueue(task_id);
+                    self.enqueue_runnable(task_id);
 
                     // Record audit event
                     self.audit_log.push(ScheduleEvent::TaskPreempted {
@@ -320,7 +487,7 @@ impl Scheduler {
             if matches!(task_info.state, TaskState::Blocked { .. }) {
                 task_info.state = TaskState::Runnable;
                 task_info.ticks_in_quantum = 0;
-                self.run_queue.enqueue(task_id);
+                self.enqueue_runnable(task_id);
             }
         }
     }
@@ -405,6 +572,81 @@ impl Scheduler {
     pub fn clear_audit_log(&mut self) {
         self.audit_log.clear();
     }
+
+    fn task_deadline(&self, task_id: TaskId) -> Option<u64> {
+        self.tasks
+            .get(&task_id)
+            .and_then(|info| info.realtime.as_ref().map(|rt| rt.next_deadline))
+    }
+
+    fn enqueue_runnable(&mut self, task_id: TaskId) {
+        match self.config.realtime_policy {
+            RealTimePolicy::None => self.run_queue.enqueue(task_id),
+            RealTimePolicy::EarliestDeadlineFirst => {
+                if let Some(deadline) = self.task_deadline(task_id) {
+                    let mut insert_pos = self.run_queue.queue.len();
+                    for (index, existing) in self.run_queue.queue.iter().copied().enumerate() {
+                        if let Some(existing_deadline) = self.task_deadline(existing) {
+                            if deadline < existing_deadline {
+                                insert_pos = index;
+                                break;
+                            }
+                        }
+                    }
+                    self.run_queue.queue.insert(insert_pos, task_id);
+                } else {
+                    self.run_queue.enqueue(task_id);
+                }
+            }
+        }
+    }
+
+    fn refresh_deadlines(&mut self) {
+        let current_ticks = self.current_ticks;
+        for (task_id, info) in self.tasks.iter_mut() {
+            if let Some(realtime) = info.realtime.as_mut() {
+                if realtime.params.period_ticks == 0 {
+                    continue;
+                }
+                while current_ticks >= realtime.next_deadline {
+                    if realtime.remaining_budget > 0 {
+                        realtime.deadline_misses += 1;
+                        self.audit_log.push(ScheduleEvent::DeadlineMissed {
+                            task_id: *task_id,
+                            deadline_tick: realtime.next_deadline,
+                            timestamp_ticks: current_ticks,
+                        });
+                    }
+                    realtime.reset_for_next_period();
+                }
+            }
+        }
+    }
+
+    fn utilization_ppm_with(&self, task_id: TaskId, params: RealTimeParams) -> u64 {
+        let mut total: u128 = 0;
+        for (id, info) in self.tasks.iter() {
+            if *id == task_id {
+                if params.period_ticks > 0 {
+                    total += (params.budget_ticks as u128 * 1_000_000u128)
+                        / params.period_ticks as u128;
+                }
+                continue;
+            }
+            if let Some(rt) = info.realtime.as_ref() {
+                if rt.params.period_ticks > 0 {
+                    total += (rt.params.budget_ticks as u128 * 1_000_000u128)
+                        / rt.params.period_ticks as u128;
+                }
+            }
+        }
+
+        if params.period_ticks == 0 {
+            return total as u64;
+        }
+
+        total as u64
+    }
 }
 
 impl Default for Scheduler {
@@ -473,6 +715,7 @@ mod tests {
         let config = SchedulerConfig {
             quantum_ticks: 10,
             max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task = TaskId::new();
@@ -501,6 +744,7 @@ mod tests {
         let config = SchedulerConfig {
             quantum_ticks: 5,
             max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task1 = TaskId::new();
@@ -608,6 +852,7 @@ mod tests {
         let config = SchedulerConfig {
             quantum_ticks: 10,
             max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task = TaskId::new();
@@ -713,6 +958,7 @@ mod tests {
         let config = SchedulerConfig {
             quantum_ticks: 5,
             max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task1 = TaskId::new();
@@ -819,5 +1065,109 @@ mod tests {
         scheduler.on_tick_advanced(10);
         assert_eq!(scheduler.task_state(task3), Some(TaskState::Runnable));
         assert_eq!(scheduler.runnable_count(), 3);
+    }
+
+    #[test]
+    fn test_real_time_admission_control() {
+        let mut scheduler = Scheduler::new();
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+
+        scheduler.enqueue(task1);
+        scheduler.enqueue(task2);
+
+        scheduler
+            .set_real_time_params(
+                task1,
+                RealTimeParams {
+                    period_ticks: 10,
+                    budget_ticks: 6,
+                },
+            )
+            .unwrap();
+
+        let result = scheduler.set_real_time_params(
+            task2,
+            RealTimeParams {
+                period_ticks: 10,
+                budget_ticks: 6,
+            },
+        );
+
+        assert_eq!(result, Err(SchedulerError::AdmissionControlFailed));
+    }
+
+    #[test]
+    fn test_edf_orders_by_deadline() {
+        let config = SchedulerConfig {
+            quantum_ticks: 10,
+            max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
+        };
+        let mut scheduler = Scheduler::with_config(config);
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+
+        scheduler.enqueue(task1);
+        scheduler.enqueue(task2);
+
+        scheduler
+            .set_real_time_params(
+                task1,
+                RealTimeParams {
+                    period_ticks: 50,
+                    budget_ticks: 10,
+                },
+            )
+            .unwrap();
+        scheduler
+            .set_real_time_params(
+                task2,
+                RealTimeParams {
+                    period_ticks: 20,
+                    budget_ticks: 5,
+                },
+            )
+            .unwrap();
+
+        let first = scheduler.dequeue_next();
+        assert_eq!(first, Some(task2));
+        let second = scheduler.dequeue_next();
+        assert_eq!(second, Some(task1));
+    }
+
+    #[test]
+    fn test_real_time_budget_blocks_until_deadline() {
+        let config = SchedulerConfig {
+            quantum_ticks: 10,
+            max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
+        };
+        let mut scheduler = Scheduler::with_config(config);
+        let task = TaskId::new();
+
+        scheduler.enqueue(task);
+        scheduler
+            .set_real_time_params(
+                task,
+                RealTimeParams {
+                    period_ticks: 20,
+                    budget_ticks: 5,
+                },
+            )
+            .unwrap();
+
+        scheduler.dequeue_next();
+        scheduler.on_tick_advanced(5);
+        assert!(scheduler.should_preempt(task));
+        scheduler.preempt_current();
+
+        assert_eq!(
+            scheduler.task_state(task),
+            Some(TaskState::Blocked { wake_tick: 20 })
+        );
+
+        scheduler.on_tick_advanced(15);
+        assert_eq!(scheduler.task_state(task), Some(TaskState::Runnable));
     }
 }

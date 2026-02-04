@@ -206,7 +206,6 @@ impl SimulatedKernel {
             smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
             channel_capacity: 64,
-            syscall_gate: syscall_gate::SyscallGate::new(),
         }
     }
 
@@ -3347,6 +3346,7 @@ mod tests {
         let config = scheduler::SchedulerConfig {
             quantum_ticks: 5,
             max_steps_per_tick: None,
+            realtime_policy: scheduler::RealTimePolicy::None,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3424,6 +3424,7 @@ mod tests {
         let config = scheduler::SchedulerConfig {
             quantum_ticks: 3,
             max_steps_per_tick: None,
+            realtime_policy: scheduler::RealTimePolicy::None,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3458,6 +3459,7 @@ mod tests {
         let config = scheduler::SchedulerConfig {
             quantum_ticks: 5,
             max_steps_per_tick: None,
+            realtime_policy: scheduler::RealTimePolicy::None,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3523,6 +3525,7 @@ mod tests {
         let config = scheduler::SchedulerConfig {
             quantum_ticks: 5,
             max_steps_per_tick: None,
+            realtime_policy: scheduler::RealTimePolicy::None,
         };
 
         let mut kernel1 = SimulatedKernel::new().with_scheduler_config(config.clone());
