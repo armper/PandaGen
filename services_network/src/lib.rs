@@ -72,6 +72,219 @@ pub enum PacketProtocol {
     Custom,
 }
 
+/// Advanced protocol families supported by PandaGen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvancedProtocol {
+    ReliableDatagram,
+    StreamMux,
+    SecureChannel,
+}
+
+/// Protocol framing errors.
+#[derive(Debug, Error)]
+pub enum ProtocolError {
+    #[error("unsupported protocol: {0:?}")]
+    UnsupportedProtocol(AdvancedProtocol),
+
+    #[error("invalid protocol frame: {0}")]
+    InvalidFrame(String),
+
+    #[error("protocol validation failed: {0}")]
+    ValidationFailed(String),
+}
+
+/// Header for advanced protocol frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolHeader {
+    pub protocol: AdvancedProtocol,
+    pub session_id: u64,
+    pub sequence: u64,
+}
+
+/// Advanced protocol frame with deterministic encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolFrame {
+    pub header: ProtocolHeader,
+    pub payload: Vec<u8>,
+}
+
+impl ProtocolFrame {
+    const MAGIC: [u8; 4] = *b"PGNP";
+    const VERSION: u8 = 1;
+    const HEADER_LEN: usize = 4 + 1 + 1 + 2 + 8 + 8 + 4;
+
+    pub fn new(protocol: AdvancedProtocol, session_id: u64, sequence: u64, payload: Vec<u8>) -> Self {
+        Self {
+            header: ProtocolHeader {
+                protocol,
+                session_id,
+                sequence,
+            },
+            payload,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::HEADER_LEN + self.payload.len());
+        out.extend_from_slice(&Self::MAGIC);
+        out.push(Self::VERSION);
+        out.push(self.header.protocol as u8);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&self.header.session_id.to_le_bytes());
+        out.extend_from_slice(&self.header.sequence.to_le_bytes());
+        out.extend_from_slice(&(self.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() < Self::HEADER_LEN {
+            return Err(ProtocolError::InvalidFrame("frame too short".to_string()));
+        }
+
+        if bytes[0..4] != Self::MAGIC {
+            return Err(ProtocolError::InvalidFrame("bad magic".to_string()));
+        }
+
+        if bytes[4] != Self::VERSION {
+            return Err(ProtocolError::InvalidFrame("unsupported version".to_string()));
+        }
+
+        let protocol = match bytes[5] {
+            0 => AdvancedProtocol::ReliableDatagram,
+            1 => AdvancedProtocol::StreamMux,
+            2 => AdvancedProtocol::SecureChannel,
+            other => {
+                return Err(ProtocolError::InvalidFrame(format!(
+                    "unknown protocol tag {other}"
+                )))
+            }
+        };
+
+        let session_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let sequence = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let payload_len = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
+
+        let expected_len = Self::HEADER_LEN + payload_len;
+        if bytes.len() != expected_len {
+            return Err(ProtocolError::InvalidFrame(
+                "payload length mismatch".to_string(),
+            ));
+        }
+
+        let payload = bytes[28..].to_vec();
+
+        Ok(Self {
+            header: ProtocolHeader {
+                protocol,
+                session_id,
+                sequence,
+            },
+            payload,
+        })
+    }
+}
+
+/// Protocol-specific validation hook.
+pub trait ProtocolHandler: Send + Sync {
+    fn protocol(&self) -> AdvancedProtocol;
+    fn validate(&self, frame: &ProtocolFrame) -> Result<(), ProtocolError>;
+}
+
+struct ReliableDatagramHandler;
+struct StreamMuxHandler;
+struct SecureChannelHandler;
+
+impl ProtocolHandler for ReliableDatagramHandler {
+    fn protocol(&self) -> AdvancedProtocol {
+        AdvancedProtocol::ReliableDatagram
+    }
+
+    fn validate(&self, frame: &ProtocolFrame) -> Result<(), ProtocolError> {
+        if frame.payload.len() > 1200 {
+            return Err(ProtocolError::ValidationFailed(
+                "reliable datagram payload exceeds 1200 bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ProtocolHandler for StreamMuxHandler {
+    fn protocol(&self) -> AdvancedProtocol {
+        AdvancedProtocol::StreamMux
+    }
+
+    fn validate(&self, frame: &ProtocolFrame) -> Result<(), ProtocolError> {
+        if frame.header.session_id == 0 {
+            return Err(ProtocolError::ValidationFailed(
+                "stream mux session id must be non-zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ProtocolHandler for SecureChannelHandler {
+    fn protocol(&self) -> AdvancedProtocol {
+        AdvancedProtocol::SecureChannel
+    }
+
+    fn validate(&self, frame: &ProtocolFrame) -> Result<(), ProtocolError> {
+        if frame.payload.len() < 16 {
+            return Err(ProtocolError::ValidationFailed(
+                "secure channel payload must be at least 16 bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Registry of advanced protocol handlers.
+pub struct ProtocolRegistry {
+    handlers: HashMap<AdvancedProtocol, Box<dyn ProtocolHandler>>,
+}
+
+impl ProtocolRegistry {
+    pub fn new() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(ReliableDatagramHandler));
+        registry.register(Box::new(StreamMuxHandler));
+        registry.register(Box::new(SecureChannelHandler));
+        registry
+    }
+
+    pub fn register(&mut self, handler: Box<dyn ProtocolHandler>) {
+        self.handlers.insert(handler.protocol(), handler);
+    }
+
+    pub fn validate(&self, frame: &ProtocolFrame) -> Result<(), ProtocolError> {
+        let handler = self
+            .handlers
+            .get(&frame.header.protocol)
+            .ok_or(ProtocolError::UnsupportedProtocol(frame.header.protocol))?;
+        handler.validate(frame)
+    }
+
+    pub fn encode_frame(&self, frame: &ProtocolFrame) -> Result<Vec<u8>, ProtocolError> {
+        self.validate(frame)?;
+        Ok(frame.encode())
+    }
+
+    pub fn decode_frame(&self, bytes: &[u8]) -> Result<ProtocolFrame, ProtocolError> {
+        let frame = ProtocolFrame::decode(bytes)?;
+        self.validate(&frame)?;
+        Ok(frame)
+    }
+}
+
 /// Network packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Packet {
@@ -355,5 +568,55 @@ mod tests {
 
         let result = service.send_packet(&mut budget, exec_id, iface, packet);
         assert!(matches!(result, Err(NetworkError::PolicyDenied(_))));
+    }
+
+    #[test]
+    fn test_protocol_frame_roundtrip() {
+        let frame = ProtocolFrame::new(
+            AdvancedProtocol::ReliableDatagram,
+            42,
+            7,
+            vec![1, 2, 3, 4],
+        );
+        let bytes = frame.encode();
+        let decoded = ProtocolFrame::decode(&bytes).unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_protocol_registry_validation() {
+        let registry = ProtocolRegistry::with_defaults();
+
+        let too_large = ProtocolFrame::new(
+            AdvancedProtocol::ReliableDatagram,
+            1,
+            1,
+            vec![0u8; 1201],
+        );
+        assert!(matches!(
+            registry.encode_frame(&too_large),
+            Err(ProtocolError::ValidationFailed(_))
+        ));
+
+        let missing_session = ProtocolFrame::new(
+            AdvancedProtocol::StreamMux,
+            0,
+            1,
+            vec![9, 9],
+        );
+        assert!(matches!(
+            registry.encode_frame(&missing_session),
+            Err(ProtocolError::ValidationFailed(_))
+        ));
+
+        let secure = ProtocolFrame::new(
+            AdvancedProtocol::SecureChannel,
+            9,
+            9,
+            vec![1u8; 16],
+        );
+        let encoded = registry.encode_frame(&secure).unwrap();
+        let decoded = registry.decode_frame(&encoded).unwrap();
+        assert_eq!(decoded, secure);
     }
 }
