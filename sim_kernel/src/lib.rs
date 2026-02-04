@@ -315,6 +315,9 @@ impl SimulatedKernel {
     }
 
     /// Enables SMP runtime with the given core count.
+    ///
+    /// Call before spawning tasks to ensure new tasks are scheduled
+    /// on SMP cores (tasks are not migrated from the single-core scheduler).
     pub fn enable_smp(&mut self, core_count: usize) {
         let config = smp::SmpConfig {
             core_count,
@@ -714,7 +717,12 @@ impl SimulatedKernel {
             .iter()
             .find(|(_, &exec_id)| exec_id == execution_id)
         {
-            self.scheduler.cancel_task(task_id);
+            if let Some(smp) = self.smp.as_mut() {
+                let timestamp_ticks = self.timer.current_ticks();
+                smp.scheduler.cancel_task_any(task_id, timestamp_ticks);
+            } else {
+                self.scheduler.cancel_task(task_id);
+            }
         }
     }
 
@@ -821,6 +829,99 @@ impl SimulatedKernel {
         }
     }
 
+    fn run_for_ticks_smp(&mut self, ticks: u64) -> usize {
+        let mut scheduling_rounds = 0;
+        let mut ticks_consumed = 0;
+
+        let core_count = match self.smp.as_ref() {
+            Some(runtime) => runtime.scheduler.core_count(),
+            None => return 0,
+        };
+
+        while ticks_consumed < ticks {
+            let has_work = self
+                .smp
+                .as_ref()
+                .map(|runtime| runtime.scheduler.has_runnable_tasks())
+                .unwrap_or(false);
+
+            if !has_work {
+                break;
+            }
+
+            {
+                let runtime = self.smp.as_mut().unwrap();
+                for core_idx in 0..core_count {
+                    let core_id = smp::CoreId(core_idx);
+                    if runtime.scheduler.core_current_task(core_id).is_none() {
+                        if runtime
+                            .scheduler
+                            .dequeue_next(core_id, runtime.time.ticks(core_id))
+                            .is_some()
+                        {
+                            scheduling_rounds += 1;
+                        }
+                    }
+                }
+            }
+
+            self.advance_time(Duration::from_nanos(self.nanos_per_tick));
+            ticks_consumed = ticks_consumed.saturating_add(1);
+
+            {
+                let runtime = self.smp.as_mut().unwrap();
+                for core_idx in 0..core_count {
+                    let core_id = smp::CoreId(core_idx);
+                    if let Some(task_id) = runtime.scheduler.core_current_task(core_id) {
+                        runtime.advance_core_time(core_id, 1);
+
+                        if let Some(execution_id) = self.get_task_identity(task_id) {
+                            if self.try_consume_cpu_ticks(execution_id, 1).is_err() {
+                                let timestamp_ticks = runtime.time.ticks(core_id);
+                                runtime
+                                    .scheduler
+                                    .cancel_task_any(task_id, timestamp_ticks);
+                                continue;
+                            }
+                        }
+
+                        if runtime.scheduler.should_preempt(core_id) {
+                            let timestamp_ticks = runtime.time.ticks(core_id);
+                            runtime.scheduler.preempt_current(
+                                core_id,
+                                scheduler::PreemptionReason::QuantumExpired,
+                                timestamp_ticks,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        scheduling_rounds
+    }
+
+    fn run_for_steps_smp(&mut self, steps: usize) -> usize {
+        let mut steps_executed = 0;
+
+        for _ in 0..steps {
+            let has_work = self
+                .smp
+                .as_ref()
+                .map(|runtime| runtime.scheduler.has_runnable_tasks())
+                .unwrap_or(false);
+
+            if !has_work {
+                break;
+            }
+
+            self.run_for_ticks_smp(1);
+            steps_executed += 1;
+        }
+
+        steps_executed
+    }
+
     /// Runs the scheduler for a specified number of ticks
     ///
     /// Phase 23: Executes scheduled tasks with preemption based on tick counts.
@@ -834,6 +935,10 @@ impl SimulatedKernel {
     ///
     /// Returns the number of task scheduling rounds executed.
     pub fn run_for_ticks(&mut self, ticks: u64) -> usize {
+        if self.smp.is_some() {
+            return self.run_for_ticks_smp(ticks);
+        }
+
         let mut scheduling_rounds = 0;
         let mut ticks_consumed = 0;
 
@@ -899,6 +1004,10 @@ impl SimulatedKernel {
     ///
     /// Returns the number of steps actually executed.
     pub fn run_for_steps(&mut self, steps: usize) -> usize {
+        if self.smp.is_some() {
+            return self.run_for_steps_smp(steps);
+        }
+
         let mut steps_executed = 0;
 
         for _ in 0..steps {
@@ -1024,7 +1133,19 @@ impl SimulatedKernel {
         self.invalidate_task_capabilities(task_id);
 
         // Phase 23: Notify scheduler that task has exited
-        self.scheduler.exit_task(task_id);
+        if let Some(smp) = self.smp.as_mut() {
+            let scheduler_reason = match &reason {
+                ExitReason::Normal => scheduler::ExitReason::Normal,
+                ExitReason::Failure { .. } => scheduler::ExitReason::Failed,
+                ExitReason::Cancelled { .. } => scheduler::ExitReason::Failed,
+                ExitReason::Timeout => scheduler::ExitReason::Failed,
+            };
+            let timestamp_ticks = self.timer.current_ticks();
+            smp.scheduler
+                .exit_task_any(task_id, scheduler_reason, timestamp_ticks);
+        } else {
+            self.scheduler.exit_task(task_id);
+        }
     }
 
     /// Invalidates all capabilities owned by a task
@@ -1700,7 +1821,11 @@ impl SimulatedKernel {
         self.tasks.insert(task_id, task_info);
 
         // Phase 23: Enqueue task in scheduler
-        self.scheduler.enqueue(task_id);
+        if let Some(smp) = self.smp.as_mut() {
+            smp.scheduler.enqueue(task_id);
+        } else {
+            self.scheduler.enqueue(task_id);
+        }
 
         // Phase 24: Create address space for this task
         // Result is intentionally discarded - address space creation cannot fail
@@ -1875,7 +2000,11 @@ impl KernelApi for SimulatedKernel {
         self.tasks.insert(task_id, task_info);
 
         // Phase 23: Enqueue task in scheduler
-        self.scheduler.enqueue(task_id);
+        if let Some(smp) = self.smp.as_mut() {
+            smp.scheduler.enqueue(task_id);
+        } else {
+            self.scheduler.enqueue(task_id);
+        }
 
         // Phase 24: Create address space for this task
         // Result intentionally discarded (see spawn_task_with_identity for details)
@@ -3151,6 +3280,26 @@ mod tests {
 
         assert_eq!(smp.time.ticks(smp::CoreId(0)), 5);
         assert_eq!(smp.time.ticks(smp::CoreId(1)), 8);
+    }
+
+    #[test]
+    fn test_smp_run_for_ticks_advances_cores() {
+        let mut kernel = SimulatedKernel::new();
+        kernel.enable_smp(2);
+
+        let _t1 = kernel
+            .spawn_task(TaskDescriptor::new("task-1".to_string()))
+            .unwrap();
+        let _t2 = kernel
+            .spawn_task(TaskDescriptor::new("task-2".to_string()))
+            .unwrap();
+
+        let rounds = kernel.run_for_ticks(5);
+        assert!(rounds >= 2);
+
+        let smp = kernel.smp().unwrap();
+        assert_eq!(smp.time.ticks(smp::CoreId(0)), 5);
+        assert_eq!(smp.time.ticks(smp::CoreId(1)), 5);
     }
 
     #[test]

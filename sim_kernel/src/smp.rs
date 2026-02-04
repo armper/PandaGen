@@ -123,6 +123,20 @@ impl MultiCoreScheduler {
         self.cores.len()
     }
 
+    pub fn core_current_task(&self, core_id: CoreId) -> Option<TaskId> {
+        self.cores[core_id.0].current_task
+    }
+
+    pub fn core_has_runnable(&self, core_id: CoreId) -> bool {
+        !self.cores[core_id.0].run_queue.is_empty()
+    }
+
+    pub fn has_runnable_tasks(&self) -> bool {
+        self.cores.iter().any(|core| {
+            core.current_task.is_some() || !core.run_queue.is_empty()
+        })
+    }
+
     pub fn enqueue(&mut self, task_id: TaskId) {
         let task_info = TaskInfo {
             _state: TaskState::Runnable,
@@ -196,6 +210,51 @@ impl MultiCoreScheduler {
             reason,
             timestamp_ticks,
         });
+    }
+
+    pub fn exit_task_any(
+        &mut self,
+        task_id: TaskId,
+        reason: ExitReason,
+        timestamp_ticks: u64,
+    ) -> bool {
+        let mut found_core = None;
+
+        for (idx, core) in self.cores.iter_mut().enumerate() {
+            if core.current_task == Some(task_id) {
+                core.current_task = None;
+                found_core = Some(CoreId(idx));
+            }
+            let before = core.run_queue.len();
+            core.run_queue.retain(|id| *id != task_id);
+            if before != core.run_queue.len() && found_core.is_none() {
+                found_core = Some(CoreId(idx));
+            }
+        }
+
+        if found_core.is_some() {
+            self.tasks.remove(&task_id);
+        }
+
+        if let Some(core_id) = found_core {
+            self.audit_log.push(CoreScheduleEvent::TaskExited {
+                core_id,
+                task_id,
+                reason,
+                timestamp_ticks,
+            });
+            return true;
+        }
+
+        false
+    }
+
+    pub fn cancel_task_any(&mut self, task_id: TaskId, timestamp_ticks: u64) -> bool {
+        self.exit_task_any(
+            task_id,
+            ExitReason::ResourceExhaustion,
+            timestamp_ticks,
+        )
     }
 
     pub fn audit_log(&self) -> &[CoreScheduleEvent] {
