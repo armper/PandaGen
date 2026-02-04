@@ -592,7 +592,7 @@ impl WorkspaceSession {
 
                     // Extract filesystem from editor if it had one
                     if let Some(mut editor_instance) = self.editor.take() {
-                        if let Some(mut io) = editor_instance.editor_io.take() {
+                        if let Some(io) = editor_instance.editor_io.take() {
                             self.filesystem = Some(io.into_filesystem());
                         }
                     }
@@ -999,7 +999,7 @@ impl WorkspaceSession {
 
             let mut editor = MinimalEditor::new(23);
 
-            let mut open_message: Option<String> = None;
+            let open_message: Option<String>;
             let mut open_secondary: Option<String> = None;
 
             // If we have a filesystem, create an IO adapter and keep it with the editor
