@@ -133,7 +133,7 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
-const KBD_DEBUG_LOG: bool = cfg!(debug_assertions);
+const KBD_DEBUG_LOG: bool = false;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -2772,7 +2772,7 @@ fn init_heap(
     allocator: &mut FrameAllocator,
     hhdm_offset: u64,
 ) -> Option<BumpHeap> {
-    const HEAP_PAGES: u64 = 256;
+    const HEAP_PAGES: u64 = 2048;
     let Some(phys_base) = allocator.allocate_contiguous(HEAP_PAGES) else {
         let _ = writeln!(serial, "heap: allocation failed");
         return None;

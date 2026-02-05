@@ -304,13 +304,13 @@ impl BareMetalFramebuffer {
 
             // Write 2 pixels at a time (8 bytes)
             for i in 0..pairs {
-                ptr64.add(i).write(double_pixel);
+                core::ptr::write_unaligned(ptr64.add(i), double_pixel);
             }
 
             // Handle odd pixel if width is odd
             if row_pixels % 2 == 1 {
                 let ptr32 = ptr as *mut u32;
-                ptr32.add(row_pixels - 1).write(pixel);
+                core::ptr::write_unaligned(ptr32.add(row_pixels - 1), pixel);
             }
         }
     }
@@ -582,7 +582,7 @@ impl BareMetalFramebuffer {
                     for bit_idx in 0..FONT_WIDTH {
                         let bit = (row_data >> (7 - bit_idx)) & 1;
                         let pixel = if bit == 1 { fg_pixel } else { bg_pixel };
-                        ptr.add(bit_idx).write(pixel);
+                        core::ptr::write_unaligned(ptr.add(bit_idx), pixel);
                     }
                 }
             }
@@ -603,13 +603,13 @@ impl BareMetalFramebuffer {
 
                     // Write 2 pixels at a time
                     for i in 0..pairs {
-                        ptr64.add(i).write(bg_double);
+                        core::ptr::write_unaligned(ptr64.add(i), bg_double);
                     }
 
                     // Handle odd pixel if any
                     if pixels_to_clear % 2 == 1 {
                         let ptr32 = ptr as *mut u32;
-                        ptr32.add(pixels_to_clear - 1).write(bg_pixel);
+                        core::ptr::write_unaligned(ptr32.add(pixels_to_clear - 1), bg_pixel);
                     }
                 }
             }

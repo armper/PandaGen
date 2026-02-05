@@ -163,6 +163,8 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("pc")
         .arg("-m")
         .arg("512M")
+        .arg("-vga")
+        .arg("std")
         .arg("-cdrom")
         .arg(&iso)
         .arg("-drive")
