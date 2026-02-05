@@ -74,6 +74,26 @@ pub struct MemoryRegionModel {
     pub len: u64,
 }
 
+/// Real-time scheduling model input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealTimeScheduleModel {
+    pub utilization_ppm: u64,
+    pub deadline_misses: u64,
+}
+
+/// Consensus log entry model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusLogEntryModel {
+    pub index: u64,
+    pub term: u64,
+}
+
+/// Consensus log model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusLogModel {
+    pub entries: Vec<ConsensusLogEntryModel>,
+}
+
 pub fn verify_memory_regions(regions: &[MemoryRegionModel]) -> VerificationResult {
     for (i, a) in regions.iter().enumerate() {
         for b in regions.iter().skip(i + 1) {
@@ -96,6 +116,84 @@ pub fn verify_memory_regions(regions: &[MemoryRegionModel]) -> VerificationResul
     }
 }
 
+/// Real-time invariant: utilization must be <= 100% (1_000_000 ppm).
+pub fn verify_real_time_utilization(model: &RealTimeScheduleModel) -> VerificationResult {
+    if model.utilization_ppm > 1_000_000 {
+        return VerificationResult {
+            name: "scheduler.realtime.utilization".to_string(),
+            passed: false,
+            details: Some(format!(
+                "utilization_ppm {} exceeds 1_000_000",
+                model.utilization_ppm
+            )),
+        };
+    }
+    VerificationResult {
+        name: "scheduler.realtime.utilization".to_string(),
+        passed: true,
+        details: None,
+    }
+}
+
+/// Real-time invariant: admitted schedules should not miss deadlines.
+pub fn verify_real_time_deadlines(model: &RealTimeScheduleModel) -> VerificationResult {
+    if model.utilization_ppm <= 1_000_000 && model.deadline_misses > 0 {
+        return VerificationResult {
+            name: "scheduler.realtime.deadlines".to_string(),
+            passed: false,
+            details: Some(format!(
+                "deadline_misses {} despite admissible utilization",
+                model.deadline_misses
+            )),
+        };
+    }
+    VerificationResult {
+        name: "scheduler.realtime.deadlines".to_string(),
+        passed: true,
+        details: None,
+    }
+}
+
+/// Consensus invariant: log indices strictly increase and terms are non-decreasing.
+pub fn verify_consensus_log(model: &ConsensusLogModel) -> VerificationResult {
+    let mut last_index = 0;
+    let mut last_term = 0;
+    for entry in &model.entries {
+        if entry.index <= last_index {
+            return VerificationResult {
+                name: "consensus.log.monotonic".to_string(),
+                passed: false,
+                details: Some(format!("non-monotonic index {}", entry.index)),
+            };
+        }
+        if entry.term < last_term {
+            return VerificationResult {
+                name: "consensus.log.monotonic".to_string(),
+                passed: false,
+                details: Some(format!("term regression at index {}", entry.index)),
+            };
+        }
+        last_index = entry.index;
+        last_term = entry.term;
+    }
+
+    VerificationResult {
+        name: "consensus.log.monotonic".to_string(),
+        passed: true,
+        details: None,
+    }
+}
+
+/// Composite inputs for critical path verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CriticalPathInputs {
+    pub capabilities: Vec<CapabilityMetadata>,
+    pub scheduler_tasks: Vec<u64>,
+    pub regions: Vec<MemoryRegionModel>,
+    pub realtime: RealTimeScheduleModel,
+    pub consensus: ConsensusLogModel,
+}
+
 pub fn run_verification(
     capabilities: &[CapabilityMetadata],
     scheduler_tasks: &[u64],
@@ -106,6 +204,20 @@ pub fn run_verification(
             verify_capabilities(capabilities),
             verify_scheduler_tasks(scheduler_tasks),
             verify_memory_regions(regions),
+        ],
+    }
+}
+
+/// Runs verification across critical paths (capabilities, scheduler, memory, real-time, consensus).
+pub fn run_critical_path_verification(inputs: &CriticalPathInputs) -> VerificationReport {
+    VerificationReport {
+        results: vec![
+            verify_capabilities(&inputs.capabilities),
+            verify_scheduler_tasks(&inputs.scheduler_tasks),
+            verify_memory_regions(&inputs.regions),
+            verify_real_time_utilization(&inputs.realtime),
+            verify_real_time_deadlines(&inputs.realtime),
+            verify_consensus_log(&inputs.consensus),
         ],
     }
 }
@@ -145,5 +257,41 @@ mod tests {
             MemoryRegionModel { base: 5, len: 10 },
         ]);
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn test_real_time_verification() {
+        let model = RealTimeScheduleModel {
+            utilization_ppm: 800_000,
+            deadline_misses: 0,
+        };
+        assert!(verify_real_time_utilization(&model).passed);
+        assert!(verify_real_time_deadlines(&model).passed);
+
+        let failing = RealTimeScheduleModel {
+            utilization_ppm: 900_000,
+            deadline_misses: 2,
+        };
+        assert!(!verify_real_time_deadlines(&failing).passed);
+    }
+
+    #[test]
+    fn test_consensus_log_verification() {
+        let model = ConsensusLogModel {
+            entries: vec![
+                ConsensusLogEntryModel { index: 1, term: 1 },
+                ConsensusLogEntryModel { index: 2, term: 1 },
+                ConsensusLogEntryModel { index: 3, term: 2 },
+            ],
+        };
+        assert!(verify_consensus_log(&model).passed);
+
+        let bad = ConsensusLogModel {
+            entries: vec![
+                ConsensusLogEntryModel { index: 2, term: 2 },
+                ConsensusLogEntryModel { index: 1, term: 2 },
+            ],
+        };
+        assert!(!verify_consensus_log(&bad).passed);
     }
 }
