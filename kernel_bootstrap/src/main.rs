@@ -1017,6 +1017,17 @@ fn workspace_loop(
         }
         last_editor_active = editor_active;
 
+        if workspace.consume_clear_request() {
+            output_dirty = true;
+            input_dirty = true;
+            output_initialized = false;
+            prompt_initialized = false;
+            status_initialized = false;
+            last_output_rows = 0;
+            last_output_seq = 0;
+            clear_terminal = true;
+        }
+
         // Update display if needed
         if input_dirty || output_dirty || clear_terminal {
             let draw_palette_overlay = workspace.is_palette_open() && input_dirty;

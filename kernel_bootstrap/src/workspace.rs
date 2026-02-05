@@ -174,6 +174,8 @@ pub struct WorkspaceSession {
     cli_cursor: usize,
     /// Whether the CLI first-run hint has been shown
     cli_hint_shown: bool,
+    /// Clear screen requested (CLI/workspace)
+    clear_requested: bool,
 }
 
 impl WorkspaceSession {
@@ -199,6 +201,17 @@ impl WorkspaceSession {
                 vec!["editor".to_string(), "edit".to_string(), "vim".to_string()],
             ),
             Box::new(|_| Ok("Opening editor...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "clear",
+                "Clear Screen",
+                "Clear workspace output",
+                vec!["clear".to_string(), "cls".to_string()],
+            )
+            .with_category("Workspace"),
+            Box::new(|_| Ok("Clearing screen...".to_string())),
         );
 
         command_palette.register_command(
@@ -359,6 +372,7 @@ impl WorkspaceSession {
             cli_len: 0,
             cli_cursor: 0,
             cli_hint_shown: false,
+            clear_requested: false,
         }
     }
 
@@ -803,6 +817,11 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "clear" || cmd == "cls" {
+            self.request_clear();
+            return;
+        }
+
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
 
@@ -819,6 +838,7 @@ impl WorkspaceSession {
                 self.emit_line(serial, "open <what>    - Open editor or CLI");
                 self.emit_line(serial, "list           - List components");
                 self.emit_line(serial, "focus <id>     - Focus component");
+                self.emit_line(serial, "clear | cls    - Clear the screen");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
@@ -1177,6 +1197,22 @@ impl WorkspaceSession {
             let line = line.trim_end_matches('\r');
             self.push_output_bytes(line.as_bytes());
         }
+    }
+
+    pub fn consume_clear_request(&mut self) -> bool {
+        if self.clear_requested {
+            self.clear_requested = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn request_clear(&mut self) {
+        self.clear_requested = true;
+        self.output_head = 0;
+        self.output_count = 0;
+        self.output_seq = self.output_seq.wrapping_add(1);
     }
 
     /// Check if editor is active
