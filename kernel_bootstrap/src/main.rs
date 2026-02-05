@@ -134,6 +134,7 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
 const KBD_DEBUG_LOG: bool = false;
+const FB_SHADOW_ENABLED: bool = false;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -847,18 +848,20 @@ fn workspace_loop(
         unsafe { console_vga::VgaConsole::new(vga_backbuffer.as_mut_ptr() as usize) };
 
     let mut fb_shadow: Option<framebuffer::BareMetalFramebuffer> = None;
-    if let Some(ref fb) = fb_console {
-        let info = fb.info();
-        #[cfg(not(test))]
-        {
-            use alloc::boxed::Box;
-            use alloc::vec;
+    if FB_SHADOW_ENABLED {
+        if let Some(ref fb) = fb_console {
+            let info = fb.info();
+            #[cfg(not(test))]
+            {
+                use alloc::boxed::Box;
+                use alloc::vec;
 
-            let buffer = vec![0u8; info.buffer_size()].into_boxed_slice();
-            let leaked = Box::leak(buffer);
-            fb_shadow = Some(unsafe {
-                framebuffer::BareMetalFramebuffer::from_info_and_buffer(info, leaked)
-            });
+                let buffer = vec![0u8; info.buffer_size()].into_boxed_slice();
+                let leaked = Box::leak(buffer);
+                fb_shadow = Some(unsafe {
+                    framebuffer::BareMetalFramebuffer::from_info_and_buffer(info, leaked)
+                });
+            }
         }
     }
 
