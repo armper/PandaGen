@@ -15,8 +15,25 @@ use services_workspace_manager::{
     WorkspaceRenderSnapshot,
 };
 use sim_kernel::SimulatedKernel;
+#[cfg(feature = "hal_mode")]
+use std::collections::VecDeque;
+#[cfg(feature = "hal_mode")]
+use std::sync::{Arc, Mutex};
 use text_renderer_host::TextRenderer;
 use thiserror::Error;
+
+#[cfg(feature = "hal_mode")]
+use core_types::TaskId;
+#[cfg(feature = "hal_mode")]
+use hal::{HalKeyEvent, KeyboardDevice};
+#[cfg(feature = "hal_mode")]
+use identity::ExecutionId;
+#[cfg(feature = "hal_mode")]
+use ipc::ChannelId;
+#[cfg(feature = "hal_mode")]
+use services_input::{InputService, INPUT_EVENT_ACTION};
+#[cfg(feature = "hal_mode")]
+use services_input_hal_bridge::{BridgeError, InputHalBridge, KernelInputSink, PollResult};
 
 /// Host runtime error types
 #[derive(Debug, Error)]
@@ -32,6 +49,10 @@ pub enum HostRuntimeError {
 
     #[error("No running components")]
     NoRunningComponents,
+
+    #[cfg(feature = "hal_mode")]
+    #[error("HAL input error: {0}")]
+    HalInputError(String),
 }
 
 /// Host mode
@@ -78,6 +99,38 @@ enum HostState {
     Shutdown,
 }
 
+#[cfg(feature = "hal_mode")]
+#[derive(Clone)]
+struct SharedQueueKeyboard {
+    queue: Arc<Mutex<VecDeque<HalKeyEvent>>>,
+}
+
+#[cfg(feature = "hal_mode")]
+impl SharedQueueKeyboard {
+    fn new(queue: Arc<Mutex<VecDeque<HalKeyEvent>>>) -> Self {
+        Self { queue }
+    }
+}
+
+#[cfg(feature = "hal_mode")]
+impl KeyboardDevice for SharedQueueKeyboard {
+    fn poll_event(&mut self) -> Option<HalKeyEvent> {
+        match self.queue.lock() {
+            Ok(mut guard) => guard.pop_front(),
+            Err(_) => None,
+        }
+    }
+}
+
+#[cfg(feature = "hal_mode")]
+struct HalInputContext {
+    bridge: InputHalBridge,
+    input_service: InputService,
+    input_channel: ChannelId,
+    source_task: TaskId,
+    keyboard_queue: Arc<Mutex<VecDeque<HalKeyEvent>>>,
+}
+
 /// Host runtime
 pub struct HostRuntime {
     /// Configuration
@@ -96,6 +149,9 @@ pub struct HostRuntime {
     steps: usize,
     /// Host command buffer (for control mode)
     command_buffer: String,
+    /// HAL input integration (only used in hal mode)
+    #[cfg(feature = "hal_mode")]
+    hal_input: Option<HalInputContext>,
 }
 
 impl HostRuntime {
@@ -142,6 +198,16 @@ impl HostRuntime {
             None
         };
 
+        #[cfg(feature = "hal_mode")]
+        let hal_mode_enabled = config.mode == HostMode::Hal;
+
+        #[cfg(feature = "hal_mode")]
+        let hal_input = if hal_mode_enabled {
+            Some(Self::build_hal_input_context(&mut kernel)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             kernel,
@@ -151,6 +217,8 @@ impl HostRuntime {
             state: HostState::Running,
             steps: 0,
             command_buffer: String::new(),
+            #[cfg(feature = "hal_mode")]
+            hal_input,
         })
     }
 
@@ -251,14 +319,98 @@ impl HostRuntime {
     }
 
     /// Pumps input from HAL (hal mode)
-    ///
-    /// **NOTE**: HAL mode is currently a stub and not functional.
-    /// This is a placeholder for future HAL keyboard integration.
-    /// Use sim mode for current functionality.
     #[cfg(feature = "hal_mode")]
     fn pump_hal_input(&mut self) -> Result<(), HostRuntimeError> {
-        // TODO: Integrate with services_input_hal_bridge
-        // For now, HAL mode is a stub
+        let mut hal = self.hal_input.take().ok_or_else(|| {
+            HostRuntimeError::HalInputError("HAL mode active without HAL input context".to_string())
+        })?;
+
+        let poll_result = {
+            let mut sink = KernelInputSink::new(&mut self.kernel, Some(hal.source_task));
+            hal.bridge
+                .poll_with_sink(&hal.input_service, &mut sink)
+                .map_err(Self::map_hal_bridge_error)?
+        };
+
+        if poll_result == PollResult::EventDelivered {
+            let envelope = kernel_api::KernelApiV0::recv(&mut self.kernel, hal.input_channel)
+                .map_err(|e| HostRuntimeError::HalInputError(e.to_string()))?;
+
+            if envelope.action != INPUT_EVENT_ACTION {
+                self.hal_input = Some(hal);
+                return Err(HostRuntimeError::HalInputError(format!(
+                    "unexpected HAL input action: {}",
+                    envelope.action
+                )));
+            }
+
+            let event: InputEvent = envelope.payload.deserialize().map_err(|e| {
+                HostRuntimeError::HalInputError(format!(
+                    "failed to deserialize HAL input event: {}",
+                    e
+                ))
+            })?;
+
+            // Keep host-control hotkey behavior consistent with sim mode.
+            if let InputEvent::Key(ref key) = event {
+                if key.code == input_types::KeyCode::Space
+                    && key.modifiers.contains(input_types::Modifiers::CTRL)
+                    && key.state == input_types::KeyState::Pressed
+                {
+                    self.toggle_host_control();
+                    self.hal_input = Some(hal);
+                    return Ok(());
+                }
+            }
+
+            self.handle_input_event(event)?;
+        }
+
+        self.hal_input = Some(hal);
+        Ok(())
+    }
+
+    #[cfg(feature = "hal_mode")]
+    fn build_hal_input_context(
+        kernel: &mut SimulatedKernel,
+    ) -> Result<HalInputContext, HostRuntimeError> {
+        let input_channel = kernel_api::KernelApiV0::create_channel(kernel)
+            .map_err(|e| HostRuntimeError::HalInputError(e.to_string()))?;
+        let source_task = TaskId::new();
+        let mut input_service = InputService::new();
+        let subscription = input_service
+            .subscribe_keyboard(source_task, input_channel)
+            .map_err(|e| HostRuntimeError::HalInputError(e.to_string()))?;
+
+        let keyboard_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let keyboard: Box<dyn KeyboardDevice> =
+            Box::new(SharedQueueKeyboard::new(keyboard_queue.clone()));
+
+        let bridge = InputHalBridge::new(ExecutionId::new(), source_task, subscription, keyboard);
+
+        Ok(HalInputContext {
+            bridge,
+            input_service,
+            input_channel,
+            source_task,
+            keyboard_queue,
+        })
+    }
+
+    #[cfg(feature = "hal_mode")]
+    fn map_hal_bridge_error(err: BridgeError) -> HostRuntimeError {
+        HostRuntimeError::HalInputError(err.to_string())
+    }
+
+    #[cfg(feature = "hal_mode")]
+    pub fn inject_hal_event(&mut self, event: HalKeyEvent) -> Result<(), HostRuntimeError> {
+        let hal = self.hal_input.as_mut().ok_or_else(|| {
+            HostRuntimeError::HalInputError("HAL input context not initialized".to_string())
+        })?;
+        let mut queue = hal.keyboard_queue.lock().map_err(|_| {
+            HostRuntimeError::HalInputError("HAL keyboard queue lock poisoned".to_string())
+        })?;
+        queue.push_back(event);
         Ok(())
     }
 
@@ -512,6 +664,8 @@ impl HostRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "hal_mode")]
+    use hal::HalKeyEvent;
 
     #[test]
     fn test_runtime_creation() {
@@ -596,5 +750,58 @@ mod tests {
         assert!(matches!(runtime.state, HostState::HostControl));
         runtime.toggle_host_control();
         assert!(matches!(runtime.state, HostState::Running));
+    }
+
+    #[cfg(feature = "hal_mode")]
+    #[test]
+    fn test_hal_mode_ctrl_space_toggles_host_control() {
+        let config = HostRuntimeConfig {
+            mode: HostMode::Hal,
+            script: None,
+            max_steps: 0,
+            exit_on_idle: false,
+        };
+
+        let mut runtime = HostRuntime::new(config).unwrap();
+        assert!(matches!(runtime.state, HostState::Running));
+
+        // Ctrl down, then Space down => Ctrl+Space hotkey
+        runtime
+            .inject_hal_event(HalKeyEvent::new(0x1D, true))
+            .unwrap();
+        runtime.step().unwrap();
+        runtime
+            .inject_hal_event(HalKeyEvent::new(0x39, true))
+            .unwrap();
+        runtime.step().unwrap();
+
+        assert!(matches!(runtime.state, HostState::HostControl));
+    }
+
+    #[cfg(feature = "hal_mode")]
+    #[test]
+    fn test_hal_mode_routes_input_to_workspace() {
+        let config = HostRuntimeConfig {
+            mode: HostMode::Hal,
+            script: None,
+            max_steps: 0,
+            exit_on_idle: false,
+        };
+
+        let mut runtime = HostRuntime::new(config).unwrap();
+        runtime.execute_command("open editor").unwrap();
+
+        // 'i' key press
+        runtime
+            .inject_hal_event(HalKeyEvent::new(0x17, true))
+            .unwrap();
+        runtime.step().unwrap();
+
+        let snapshot = runtime.snapshot();
+        let debug = snapshot.debug_info.expect("expected debug info");
+        assert!(
+            debug.last_key_event.is_some(),
+            "HAL key event should be routed into workspace input pipeline"
+        );
     }
 }

@@ -5,8 +5,8 @@ This list is ordered by product/system value if completed, not by implementation
 1. [x] `services_pipeline_executor/src/lib.rs:571` and `services_pipeline_executor/src/lib.rs:494`
    Implemented: stage execution now uses real IPC/service invocation (`lookup_service` + `send_message` + `receive_message` + correlation check + deserialize).
 
-2. `pandagend/src/runtime.rs:255` and `pandagend/src/runtime.rs:260`
-   Implement functional HAL input pumping in host runtime. HAL mode is explicitly non-functional today, so this blocks real hardware-mode usability.
+2. [x] `pandagend/src/runtime.rs:255` and `pandagend/src/runtime.rs:260`
+   Implemented: HAL mode now pumps input through `services_input_hal_bridge` + `InputService` into workspace routing, with deterministic HAL event injection support for tests.
 
 3. `services_input_hal_bridge/src/lib.rs:177` and `services_input_hal_bridge/src/lib.rs:240`
    Replace placeholder delivery path with real kernel/message delivery, budget checks, and policy enforcement in the default polling flow. This closes a major correctness/security gap in input delivery semantics.

@@ -87,7 +87,7 @@ fn print_usage(program: &str) {
     eprintln!("Options:");
     eprintln!("  -m, --mode <MODE>        Host mode: sim (default)");
     #[cfg(feature = "hal_mode")]
-    eprintln!("                           or hal (NOTE: hal mode is not yet functional)");
+    eprintln!("                           or hal");
     eprintln!("  -s, --script <FILE>      Input script file (for sim mode)");
     eprintln!("  --max-steps <N>          Maximum steps to run (0 = unlimited)");
     eprintln!("  --exit-on-idle           Exit when no components are running");
