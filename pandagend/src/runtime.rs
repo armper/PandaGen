@@ -33,7 +33,7 @@ use ipc::ChannelId;
 #[cfg(feature = "hal_mode")]
 use services_input::{InputService, INPUT_EVENT_ACTION};
 #[cfg(feature = "hal_mode")]
-use services_input_hal_bridge::{BridgeError, InputHalBridge, KernelInputSink, PollResult};
+use services_input_hal_bridge::{BridgeError, InputHalBridge, PollResult};
 
 /// Host runtime error types
 #[derive(Debug, Error)]
@@ -127,7 +127,6 @@ struct HalInputContext {
     bridge: InputHalBridge,
     input_service: InputService,
     input_channel: ChannelId,
-    source_task: TaskId,
     keyboard_queue: Arc<Mutex<VecDeque<HalKeyEvent>>>,
 }
 
@@ -326,9 +325,8 @@ impl HostRuntime {
         })?;
 
         let poll_result = {
-            let mut sink = KernelInputSink::new(&mut self.kernel, Some(hal.source_task));
             hal.bridge
-                .poll_with_sink(&hal.input_service, &mut sink)
+                .poll(&hal.input_service, &mut self.kernel)
                 .map_err(Self::map_hal_bridge_error)?
         };
 
@@ -392,7 +390,6 @@ impl HostRuntime {
             bridge,
             input_service,
             input_channel,
-            source_task,
             keyboard_queue,
         })
     }

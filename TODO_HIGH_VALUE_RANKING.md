@@ -8,8 +8,8 @@ This list is ordered by product/system value if completed, not by implementation
 2. [x] `pandagend/src/runtime.rs:255` and `pandagend/src/runtime.rs:260`
    Implemented: HAL mode now pumps input through `services_input_hal_bridge` + `InputService` into workspace routing, with deterministic HAL event injection support for tests.
 
-3. `services_input_hal_bridge/src/lib.rs:177` and `services_input_hal_bridge/src/lib.rs:240`
-   Replace placeholder delivery path with real kernel/message delivery, budget checks, and policy enforcement in the default polling flow. This closes a major correctness/security gap in input delivery semantics.
+3. [x] `services_input_hal_bridge/src/lib.rs:177` and `services_input_hal_bridge/src/lib.rs:240`
+   Implemented: default `poll()` now performs real kernel message delivery with subscription validation and kernel error mapping (including budget/policy/channel failures), instead of placeholder counter-only behavior.
 
 4. `kernel_bootstrap/src/bare_metal_storage.rs:22`
    Replace RAM-disk boot storage with `VirtioBlkDevice` initialization path. This is the key step from demo/in-memory behavior to durable bare-metal persistence.
