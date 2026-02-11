@@ -19,13 +19,15 @@
 //! - Enforces retry policies with backoff
 
 use identity::IdentityMetadata;
+use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{Duration, KernelApi};
 use lifecycle::{CancellationToken, Deadline};
 use pipeline::{
-    ExecutionTrace, PayloadSchemaId, PipelineError, PipelineExecutionResult, PipelineSpec,
-    StageExecutionResult, StageResult, StageTraceEntry, TypedPayload,
+    ExecutionTrace, PipelineError, PipelineExecutionResult, PipelineSpec, StageExecutionResult,
+    StageResult, StageTraceEntry, TypedPayload,
 };
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -81,6 +83,18 @@ pub struct PipelineExecutor {
     policy_engine: Option<Box<dyn PolicyEngine>>,
     /// Execution identity (for policy context)
     identity: Option<IdentityMetadata>,
+}
+
+/// Request payload sent to a stage handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StageInvokeRequest {
+    input: TypedPayload,
+}
+
+/// Response payload expected from a stage handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StageInvokeResponse {
+    result: StageResult,
 }
 
 impl PipelineExecutor {
@@ -562,29 +576,69 @@ impl PipelineExecutor {
 
     /// Executes a stage once (no retry logic)
     ///
-    /// In a real implementation, this would:
-    /// 1. Look up handler service in registry
-    /// 2. Send message with input payload
-    /// 3. Wait for response
-    /// 4. Deserialize result
+    /// This implementation:
+    /// 1. Looks up the handler service in registry
+    /// 2. Sends a stage invocation request with typed input
+    /// 3. Waits for a correlated response
+    /// 4. Deserializes the returned stage result
     ///
-    /// For now, this is a stub that handlers will override via dependency injection.
+    /// Contract:
+    /// - Request payload: `StageInvokeRequest`
+    /// - Response payload: `StageInvokeResponse`
     fn execute_stage_once<K: KernelApi>(
         &self,
-        _kernel: &mut K,
-        _stage: &pipeline::StageSpec,
-        _input: TypedPayload,
+        kernel: &mut K,
+        stage: &pipeline::StageSpec,
+        input: TypedPayload,
     ) -> Result<StageResult, ExecutorError> {
-        // Stub implementation - real version would use IPC
-        // This will be overridden by test implementations
-        Ok(StageResult::Success {
-            output: TypedPayload::new(
-                PayloadSchemaId::new("stub"),
-                pipeline::PayloadSchemaVersion::new(1, 0),
-                vec![],
-            ),
-            capabilities: vec![],
-        })
+        let channel = kernel
+            .lookup_service(stage.handler)
+            .map_err(|err| match err {
+                kernel_api::KernelError::ServiceNotFound(_) => {
+                    ExecutorError::HandlerNotFound(stage.handler.to_string())
+                }
+                _ => ExecutorError::KernelError(format!(
+                    "Failed to lookup stage handler {}: {}",
+                    stage.handler, err
+                )),
+            })?;
+
+        let input_schema_version = input.schema_version;
+        let request_payload = StageInvokeRequest { input };
+        let message_payload = MessagePayload::new(&request_payload).map_err(|e| {
+            ExecutorError::Serialization(format!("Failed to serialize request: {}", e))
+        })?;
+
+        let schema_version =
+            SchemaVersion::new(input_schema_version.major, input_schema_version.minor);
+        let request = MessageEnvelope::new(
+            stage.handler,
+            stage.action.clone(),
+            schema_version,
+            message_payload,
+        );
+        let request_id = request.id;
+
+        kernel.send_message(channel, request).map_err(|e| {
+            ExecutorError::KernelError(format!("Failed to send stage request: {}", e))
+        })?;
+
+        let timeout = stage.timeout_ms.map(Duration::from_millis);
+        let response = kernel.receive_message(channel, timeout).map_err(|e| {
+            ExecutorError::KernelError(format!("Failed to receive stage response: {}", e))
+        })?;
+
+        if response.correlation_id != Some(request_id) {
+            return Err(ExecutorError::KernelError(format!(
+                "Stage response correlation mismatch: expected {}, got {:?}",
+                request_id, response.correlation_id
+            )));
+        }
+
+        let decoded: StageInvokeResponse = response.payload.deserialize().map_err(|e| {
+            ExecutorError::Serialization(format!("Failed to deserialize stage response: {}", e))
+        })?;
+        Ok(decoded.result)
     }
 
     /// Builds policy context for pipeline-level events
@@ -657,8 +711,10 @@ impl Default for PipelineExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ipc::{ChannelId, MessageEnvelope};
+    use core_types::ServiceId;
+    use ipc::{ChannelId, MessageEnvelope, MessagePayload, SchemaVersion};
     use pipeline::{PayloadSchemaId, PayloadSchemaVersion};
+    use std::collections::HashMap;
 
     #[test]
     fn test_executor_creation() {
@@ -699,14 +755,158 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_execute_stage_once_invokes_handler_over_ipc() {
+        let executor = PipelineExecutor::new();
+        let mut mock_kernel = MockKernel::new();
+        let handler_id = ServiceId::from_u128(0xA11CE);
+        let channel = ChannelId::new();
+        mock_kernel.register_handler(handler_id, channel);
+
+        let output = TypedPayload::new(
+            PayloadSchemaId::new("out"),
+            PayloadSchemaVersion::new(1, 0),
+            b"{\"ok\":true}".to_vec(),
+        );
+        mock_kernel.set_next_stage_result(StageResult::Success {
+            output: output.clone(),
+            capabilities: vec![42],
+        });
+
+        let stage = pipeline::StageSpec::new(
+            "test-stage".to_string(),
+            handler_id,
+            "transform".to_string(),
+            PayloadSchemaId::new("in"),
+            PayloadSchemaId::new("out"),
+        );
+        let input = TypedPayload::new(
+            PayloadSchemaId::new("in"),
+            PayloadSchemaVersion::new(1, 0),
+            b"{\"value\":1}".to_vec(),
+        );
+
+        let result = executor
+            .execute_stage_once(&mut mock_kernel, &stage, input.clone())
+            .unwrap();
+
+        match result {
+            StageResult::Success {
+                output: returned_output,
+                capabilities,
+            } => {
+                assert_eq!(returned_output.schema_id, output.schema_id);
+                assert_eq!(capabilities, vec![42]);
+            }
+            other => panic!("Expected success response, got {:?}", other),
+        }
+
+        let (sent_channel, sent_message) = mock_kernel.last_sent().expect("message was sent");
+        assert_eq!(sent_channel, channel);
+        assert_eq!(sent_message.destination, handler_id);
+        assert_eq!(sent_message.action, "transform");
+        assert_eq!(sent_message.schema_version, SchemaVersion::new(1, 0));
+
+        let request: StageInvokeRequest = sent_message.payload.deserialize().unwrap();
+        assert_eq!(request.input.schema_id.as_str(), "in");
+    }
+
+    #[test]
+    fn test_execute_stage_once_returns_handler_not_found() {
+        let executor = PipelineExecutor::new();
+        let mut mock_kernel = MockKernel::new();
+        let missing_handler = ServiceId::from_u128(0xDEAD);
+
+        let stage = pipeline::StageSpec::new(
+            "missing".to_string(),
+            missing_handler,
+            "do_work".to_string(),
+            PayloadSchemaId::new("in"),
+            PayloadSchemaId::new("out"),
+        );
+        let input = TypedPayload::new(
+            PayloadSchemaId::new("in"),
+            PayloadSchemaVersion::new(1, 0),
+            vec![],
+        );
+
+        let result = executor.execute_stage_once(&mut mock_kernel, &stage, input);
+        match result {
+            Err(ExecutorError::HandlerNotFound(handler)) => {
+                assert_eq!(handler, missing_handler.to_string());
+            }
+            other => panic!("Expected HandlerNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_execute_stage_once_rejects_mismatched_correlation() {
+        let executor = PipelineExecutor::new();
+        let mut mock_kernel = MockKernel::new();
+        let handler_id = ServiceId::from_u128(0xBEEF);
+        let channel = ChannelId::new();
+        mock_kernel.register_handler(handler_id, channel);
+        mock_kernel.set_force_bad_correlation(true);
+        mock_kernel.set_next_stage_result(StageResult::Failure {
+            error: "should not decode".to_string(),
+        });
+
+        let stage = pipeline::StageSpec::new(
+            "correlation".to_string(),
+            handler_id,
+            "check".to_string(),
+            PayloadSchemaId::new("in"),
+            PayloadSchemaId::new("out"),
+        );
+        let input = TypedPayload::new(
+            PayloadSchemaId::new("in"),
+            PayloadSchemaVersion::new(1, 0),
+            vec![],
+        );
+
+        let result = executor.execute_stage_once(&mut mock_kernel, &stage, input);
+        match result {
+            Err(ExecutorError::KernelError(msg)) => {
+                assert!(msg.contains("correlation mismatch"));
+            }
+            other => panic!("Expected correlation mismatch KernelError, got {:?}", other),
+        }
+    }
+
     // Mock kernel for testing
     struct MockKernel {
         time_ms: u64,
+        handlers: HashMap<ServiceId, ChannelId>,
+        sent: Vec<(ChannelId, MessageEnvelope)>,
+        next_stage_result: Option<StageResult>,
+        force_bad_correlation: bool,
     }
 
     impl MockKernel {
         fn new() -> Self {
-            Self { time_ms: 0 }
+            Self {
+                time_ms: 0,
+                handlers: HashMap::new(),
+                sent: Vec::new(),
+                next_stage_result: None,
+                force_bad_correlation: false,
+            }
+        }
+
+        fn register_handler(&mut self, service_id: ServiceId, channel: ChannelId) {
+            self.handlers.insert(service_id, channel);
+        }
+
+        fn set_next_stage_result(&mut self, result: StageResult) {
+            self.next_stage_result = Some(result);
+        }
+
+        fn set_force_bad_correlation(&mut self, enabled: bool) {
+            self.force_bad_correlation = enabled;
+        }
+
+        fn last_sent(&self) -> Option<(ChannelId, MessageEnvelope)> {
+            self.sent.last().cloned()
         }
     }
 
@@ -715,27 +915,63 @@ mod tests {
             &mut self,
             _descriptor: kernel_api::TaskDescriptor,
         ) -> Result<kernel_api::TaskHandle, kernel_api::KernelError> {
-            unimplemented!()
+            Err(kernel_api::KernelError::SpawnFailed(
+                "not implemented in test mock".to_string(),
+            ))
         }
 
         fn create_channel(&mut self) -> Result<ChannelId, kernel_api::KernelError> {
-            unimplemented!()
+            Ok(ChannelId::new())
         }
 
         fn send_message(
             &mut self,
-            _channel: ChannelId,
-            _message: MessageEnvelope,
+            channel: ChannelId,
+            message: MessageEnvelope,
         ) -> Result<(), kernel_api::KernelError> {
-            unimplemented!()
+            self.sent.push((channel, message));
+            Ok(())
         }
 
         fn receive_message(
             &mut self,
-            _channel: ChannelId,
+            channel: ChannelId,
             _timeout: Option<Duration>,
         ) -> Result<MessageEnvelope, kernel_api::KernelError> {
-            unimplemented!()
+            let (_, last_request) = self
+                .sent
+                .iter()
+                .rev()
+                .find(|(sent_channel, _)| *sent_channel == channel)
+                .ok_or_else(|| {
+                    kernel_api::KernelError::ReceiveFailed("no request sent".to_string())
+                })?;
+
+            let result = self.next_stage_result.clone().ok_or_else(|| {
+                kernel_api::KernelError::ReceiveFailed("no staged response configured".to_string())
+            })?;
+            let response_payload = StageInvokeResponse { result };
+            let payload = MessagePayload::new(&response_payload).map_err(|e| {
+                kernel_api::KernelError::ReceiveFailed(format!(
+                    "failed to encode test response payload: {}",
+                    e
+                ))
+            })?;
+
+            let correlation_id = if self.force_bad_correlation {
+                Some(ipc::MessageId::new())
+            } else {
+                Some(last_request.id)
+            };
+
+            let mut response = MessageEnvelope::new(
+                last_request.destination,
+                last_request.action.clone(),
+                last_request.schema_version,
+                payload,
+            );
+            response.correlation_id = correlation_id;
+            Ok(response)
         }
 
         fn now(&self) -> kernel_api::Instant {
@@ -753,22 +989,26 @@ mod tests {
             _task: core_types::TaskId,
             _capability: core_types::Cap<()>,
         ) -> Result<(), kernel_api::KernelError> {
-            unimplemented!()
+            Ok(())
         }
 
         fn register_service(
             &mut self,
-            _service_id: core_types::ServiceId,
-            _channel: ChannelId,
+            service_id: core_types::ServiceId,
+            channel: ChannelId,
         ) -> Result<(), kernel_api::KernelError> {
-            unimplemented!()
+            self.handlers.insert(service_id, channel);
+            Ok(())
         }
 
         fn lookup_service(
             &self,
-            _service_id: core_types::ServiceId,
+            service_id: core_types::ServiceId,
         ) -> Result<ChannelId, kernel_api::KernelError> {
-            unimplemented!()
+            self.handlers
+                .get(&service_id)
+                .copied()
+                .ok_or_else(|| kernel_api::KernelError::ServiceNotFound(service_id.to_string()))
         }
     }
 }
