@@ -28,20 +28,20 @@ mod render_stats;
 mod vga;
 mod workspace;
 
-use core::fmt::Write;
-use core::marker::PhantomData;
-use core::mem::MaybeUninit;
-use core::str;
-#[cfg(not(test))]
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(all(debug_assertions, not(test), target_os = "none"))]
 use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;
 #[cfg(all(not(test), target_os = "none"))]
 use core::arch::global_asm;
+use core::fmt::Write;
+use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 #[cfg(all(not(test), target_os = "none"))]
 use core::panic::PanicInfo;
+use core::str;
+#[cfg(not(test))]
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(all(not(test), target_os = "none"))]
 use limine::memory_map::EntryType;
 #[cfg(all(not(test), target_os = "none"))]
@@ -689,23 +689,24 @@ pub extern "C" fn rust_main() -> ! {
 
     // Initialize filesystem with example files
     kprintln!(serial, "Initializing filesystem...");
-    let mut filesystem = match bare_metal_storage::BareMetalFilesystem::new() {
-        Ok(fs) => {
-            kprintln!(serial, "Filesystem ready");
-            fs
-        }
-        Err(_) => {
-            kprintln!(serial, "Warning: failed to initialize filesystem");
-            // Continue without filesystem
-            workspace_loop(
-                &mut serial,
-                kernel,
-                vga_console.as_mut(),
-                fb_console.as_mut(),
-                None,
-            )
-        }
-    };
+    let mut filesystem =
+        match bare_metal_storage::BareMetalFilesystem::new_with_hhdm(kernel.boot.hhdm_offset) {
+            Ok(fs) => {
+                kprintln!(serial, "Filesystem ready (backend: {})", fs.backend_name());
+                fs
+            }
+            Err(_) => {
+                kprintln!(serial, "Warning: failed to initialize filesystem");
+                // Continue without filesystem
+                workspace_loop(
+                    &mut serial,
+                    kernel,
+                    vga_console.as_mut(),
+                    fb_console.as_mut(),
+                    None,
+                )
+            }
+        };
 
     // Create some example files
     {

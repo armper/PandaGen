@@ -3,7 +3,13 @@
 #[cfg(test)]
 mod tests {
     use crate::bare_metal_editor_io::BareMetalEditorIo;
-    use crate::bare_metal_storage::BareMetalFilesystem;
+    use crate::bare_metal_storage::{BareMetalFilesystem, StorageBackendKind};
+
+    #[test]
+    fn test_storage_backend_kind_is_ramdisk_in_tests() {
+        let fs = BareMetalFilesystem::new().unwrap();
+        assert_eq!(fs.backend_kind(), StorageBackendKind::RamDisk);
+    }
 
     #[test]
     fn test_create_and_read_file() {

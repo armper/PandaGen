@@ -11,8 +11,8 @@ This list is ordered by product/system value if completed, not by implementation
 3. [x] `services_input_hal_bridge/src/lib.rs:177` and `services_input_hal_bridge/src/lib.rs:240`
    Implemented: default `poll()` now performs real kernel message delivery with subscription validation and kernel error mapping (including budget/policy/channel failures), instead of placeholder counter-only behavior.
 
-4. `kernel_bootstrap/src/bare_metal_storage.rs:22`
-   Replace RAM-disk boot storage with `VirtioBlkDevice` initialization path. This is the key step from demo/in-memory behavior to durable bare-metal persistence.
+4. [x] `kernel_bootstrap/src/bare_metal_storage.rs:22`
+   Implemented: boot storage now uses a typed backend that attempts `VirtioBlkDevice` MMIO initialization on bare-metal (with HHDM mapping + bounded probe), and falls back to `RamDisk` when unavailable.
 
 5. `services_workspace_manager/src/lib.rs:1501` and `services_workspace_manager/src/lib.rs:1514`
    Wire `save_settings()` / `load_settings()` to `StorageService` (actual read/write + safe import). Current behavior only validates/announces without persistence.
