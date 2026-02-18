@@ -26,5 +26,5 @@ This list is ordered by product/system value if completed, not by implementation
 8. [x] `services_workspace_manager/src/boot_profile.rs:173` and `services_workspace_manager/src/boot_profile.rs:188`
    Implemented: boot profile manager now loads/saves `BootConfig` through transactional `JournaledStorage` using a deterministic object ID, with safe default fallback when storage is absent/missing/corrupt.
 
-9. `cli_console/src/commands.rs:187`
-   Implement real `cat` content reads instead of returning object IDs. This is lower-level than the platform/runtime items above but high leverage for CLI usability and debugging.
+9. [x] `cli_console/src/commands.rs:187`
+   Implemented: `CommandHandler::cat` now performs real content reads via `JournaledStorage` transactions (`read_data`) and returns file contents instead of object IDs.
