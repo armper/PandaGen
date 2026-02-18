@@ -17,8 +17,8 @@ This list is ordered by product/system value if completed, not by implementation
 5. [x] `services_workspace_manager/src/lib.rs:1501` and `services_workspace_manager/src/lib.rs:1514`
    Implemented: `save_settings()` / `load_settings()` now perform transactional `JournaledStorage` writes/reads with deterministic settings object resolution, optional fs-view path linking at `settings/user_overrides.json`, and corruption-safe load via `load_overrides_safe()` + `import_overrides()`.
 
-6. `services_workspace_manager/src/lib.rs:1088`
-   Replace placeholder `Action::Save` behavior with real focused-editor document save. Current save action can report success while only saving settings.
+6. [x] `services_workspace_manager/src/lib.rs:1088`
+   Implemented: `Action::Save` now performs a real save on the focused editor instance (`save_current_document`), publishes updated editor views, reports concrete save failures, and no longer falls back to settings-only success.
 
 7. `services_workspace_manager/src/lib.rs:1297` and `services_workspace_manager/src/lib.rs:1267`
    Complete file picker/editor handoff by mapping `ObjectId` to path and real breadcrumbs. This closes an important UX/data-model gap in file workflows.

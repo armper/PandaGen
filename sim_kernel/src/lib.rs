@@ -206,6 +206,7 @@ impl SimulatedKernel {
             smp: None,
             address_space_manager: address_space::AddressSpaceManager::new(),
             channel_capacity: 64,
+            syscall_gate: syscall_gate::SyscallGate::new(),
         }
     }
 

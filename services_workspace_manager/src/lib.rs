@@ -1086,29 +1086,60 @@ impl WorkspaceManager {
                 }
             }
             Action::Save => {
-                // Save current document (if focused component is an editor)
-                if let Some(focused_id) = self.get_focused_component() {
-                    if let Some(component) = self.components.get(&focused_id) {
-                        if component.component_type == ComponentType::Editor {
-                            // Editor save logic would go here
-                            // For now, we save settings as a placeholder
-                            if let Err(e) = self.save_settings() {
-                                eprintln!("Failed to save: {}", e);
-                                return false;
-                            }
-                            self.workspace_status.set_last_action("Saved".to_string());
-                            return true;
-                        }
+                // Save the currently focused editor document.
+                let focused_id = match self.get_focused_component() {
+                    Some(id) => id,
+                    None => {
+                        self.workspace_status
+                            .set_last_action("Save failed: no focused component".to_string());
+                        return false;
                     }
-                }
-                // No editor focused, just save settings
-                if let Err(e) = self.save_settings() {
-                    eprintln!("Failed to save settings: {}", e);
+                };
+
+                let is_focused_editor = self
+                    .components
+                    .get(&focused_id)
+                    .map(|component| component.component_type == ComponentType::Editor)
+                    .unwrap_or(false);
+                if !is_focused_editor {
+                    self.workspace_status.set_last_action(
+                        "Save failed: focused component is not an editor".to_string(),
+                    );
                     return false;
                 }
-                self.workspace_status
-                    .set_last_action("Settings saved".to_string());
-                true
+
+                let timestamp = self.next_timestamp();
+                let (instances, view_host) = (&mut self.component_instances, &mut self.view_host);
+                let instance = match instances.get_mut(&focused_id) {
+                    Some(instance) => instance,
+                    None => {
+                        self.workspace_status
+                            .set_last_action("Save failed: editor instance missing".to_string());
+                        return false;
+                    }
+                };
+
+                match instance {
+                    ComponentInstance::Editor(editor) => match editor.save_current_document() {
+                        Ok(version_id) => {
+                            let _ = editor.publish_views(view_host, timestamp);
+                            self.workspace_status
+                                .set_last_action(format!("Saved version {}", version_id));
+                            true
+                        }
+                        Err(err) => {
+                            self.workspace_status
+                                .set_last_action(format!("Save failed: {}", err));
+                            false
+                        }
+                    },
+                    _ => {
+                        self.workspace_status.set_last_action(
+                            "Save failed: focused component is not an editor".to_string(),
+                        );
+                        false
+                    }
+                }
             }
             Action::Quit => {
                 // Quit application by terminating all components
@@ -2725,6 +2756,77 @@ mod tests {
         assert!(status.is_some());
         let status_text = status.as_ref().unwrap();
         assert!(status_text.contains("Saved") || status_text.contains("saved"));
+    }
+
+    #[test]
+    fn test_action_save_clears_dirty_editor_state() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Editor,
+            "editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let editor_id = workspace.launch_component(config).unwrap();
+
+        if let Some(ComponentInstance::Editor(editor)) =
+            workspace.component_instances.get_mut(&editor_id)
+        {
+            editor.state_mut().mark_dirty();
+            assert!(editor.state().is_dirty());
+        } else {
+            panic!("Expected editor instance");
+        }
+
+        let result = workspace.execute_action(&Action::Save);
+        assert!(result);
+
+        if let Some(ComponentInstance::Editor(editor)) =
+            workspace.component_instances.get(&editor_id)
+        {
+            assert!(!editor.state().is_dirty());
+        } else {
+            panic!("Expected editor instance");
+        }
+    }
+
+    #[test]
+    fn test_action_save_fails_when_focused_component_is_not_editor() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let editor_config = LaunchConfig::new(
+            ComponentType::Editor,
+            "editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let _editor_id = workspace.launch_component(editor_config).unwrap();
+        let cli_id = workspace.launch_component(cli_config).unwrap();
+
+        // Last launched focusable component is focused.
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
+
+        let result = workspace.execute_action(&Action::Save);
+        assert!(!result);
+
+        let status = &workspace.workspace_status.last_action;
+        assert!(status.is_some());
+        assert!(status
+            .as_ref()
+            .unwrap()
+            .contains("focused component is not an editor"));
     }
 
     #[test]

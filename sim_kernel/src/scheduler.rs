@@ -280,9 +280,20 @@ impl Scheduler {
     pub fn dequeue_next(&mut self) -> Option<TaskId> {
         let next = match self.config.realtime_policy {
             RealTimePolicy::None => self.run_queue.dequeue(),
-            RealTimePolicy::EarliestDeadlineFirst => self
-                .run_queue
-                .dequeue_earliest_deadline(|task_id| self.task_deadline(task_id)),
+            RealTimePolicy::EarliestDeadlineFirst => {
+                let deadlines: std::collections::HashMap<TaskId, u64> = self
+                    .tasks
+                    .iter()
+                    .filter_map(|(task_id, info)| {
+                        info.realtime
+                            .as_ref()
+                            .map(|realtime| (*task_id, realtime.next_deadline))
+                    })
+                    .collect();
+
+                self.run_queue
+                    .dequeue_earliest_deadline(|task_id| deadlines.get(&task_id).copied())
+            }
         };
 
         if let Some(task_id) = next {
@@ -628,8 +639,8 @@ impl Scheduler {
         for (id, info) in self.tasks.iter() {
             if *id == task_id {
                 if params.period_ticks > 0 {
-                    total += (params.budget_ticks as u128 * 1_000_000u128)
-                        / params.period_ticks as u128;
+                    total +=
+                        (params.budget_ticks as u128 * 1_000_000u128) / params.period_ticks as u128;
                 }
                 continue;
             }

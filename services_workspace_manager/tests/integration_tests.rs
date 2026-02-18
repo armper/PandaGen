@@ -89,7 +89,7 @@ fn test_command_open_with_policy() {
 fn test_command_open_denied_by_policy() {
     let mut workspace = create_workspace_with_deny_policy();
 
-    let _result = workspace.execute_command(WorkspaceCommand::Open {
+    let result = workspace.execute_command(WorkspaceCommand::Open {
         component_type: ComponentType::Editor,
         args: vec!["test.txt".to_string()],
     });
@@ -602,7 +602,7 @@ fn test_status_updates_on_command() {
     let mut workspace = WorkspaceManager::new(workspace_identity);
 
     // Open editor
-    let result = workspace.execute_command(WorkspaceCommand::Open {
+    let _result = workspace.execute_command(WorkspaceCommand::Open {
         component_type: ComponentType::Editor,
         args: vec!["test.txt".to_string()],
     });
