@@ -23,8 +23,8 @@ This list is ordered by product/system value if completed, not by implementation
 7. [x] `services_workspace_manager/src/lib.rs:1297` and `services_workspace_manager/src/lib.rs:1267`
    Implemented: file picker now resolves selected `ObjectId` to a root-relative path before launching the editor (fallback to filename when unresolved), and breadcrumb rendering uses actual directory location (`ROOT/...`) instead of the `<root>` placeholder.
 
-8. `services_workspace_manager/src/boot_profile.rs:173` and `services_workspace_manager/src/boot_profile.rs:188`
-   Implement persistent boot profile load/save instead of default/no-op behavior. This enables stable boot preferences across sessions.
+8. [x] `services_workspace_manager/src/boot_profile.rs:173` and `services_workspace_manager/src/boot_profile.rs:188`
+   Implemented: boot profile manager now loads/saves `BootConfig` through transactional `JournaledStorage` using a deterministic object ID, with safe default fallback when storage is absent/missing/corrupt.
 
 9. `cli_console/src/commands.rs:187`
    Implement real `cat` content reads instead of returning object IDs. This is lower-level than the platform/runtime items above but high leverage for CLI usability and debugging.
