@@ -40,12 +40,12 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 #[cfg(feature = "std")]
 use std::boxed::Box;
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 #[cfg(feature = "std")]
@@ -53,7 +53,7 @@ use std::vec::Vec;
 
 use core_types::uuid_tools::new_uuid;
 use core_types::TaskId;
-use fs_view::DirectoryView;
+use fs_view::{DirectoryResolver, DirectoryView};
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::InputEvent;
 use keybindings::KeyBindingManager;
@@ -1289,11 +1289,15 @@ impl WorkspaceManager {
                     }
                 }
                 ComponentInstance::FilePicker(picker) => {
-                    // Process input with directory resolver from editor I/O context
-                    let resolver = self
-                        .editor_io_context
-                        .as_ref()
-                        .and_then(|ctx| ctx.fs_view.as_ref());
+                    let picker_context = self.editor_io_context.as_ref().and_then(|ctx| {
+                        match (&ctx.fs_view, &ctx.root) {
+                            (Some(fs_view), Some(root)) => Some((fs_view.clone(), root.clone())),
+                            _ => None,
+                        }
+                    });
+
+                    // Process input with directory resolver from editor I/O context.
+                    let resolver = picker_context.as_ref().map(|(fs_view, _)| fs_view);
                     let result = picker.process_input(event.clone(), resolver);
 
                     // Publish updated views
@@ -1301,9 +1305,8 @@ impl WorkspaceManager {
                         if let (Some(main_view), Some(status_view)) =
                             (&component.main_view, &component.status_view)
                         {
-                            // TODO: Track actual directory path for breadcrumb
-                            // For now, use placeholder to indicate root browsing
-                            let breadcrumb = "<root>";
+                            let breadcrumb =
+                                Self::build_file_picker_breadcrumb(picker, picker_context.as_ref());
 
                             // Render and publish main view
                             let main_frame =
@@ -1315,7 +1318,7 @@ impl WorkspaceManager {
                                 status_view.view_id,
                                 0,
                                 timestamp,
-                                breadcrumb,
+                                &breadcrumb,
                             );
                             let _ = self.view_host.publish_frame(status_view, status_frame);
                         }
@@ -1324,17 +1327,21 @@ impl WorkspaceManager {
                     // Handle file selection or cancellation
                     match result {
                         services_file_picker::FilePickerResult::FileSelected {
-                            object_id: _,
+                            object_id,
                             name,
                         } => {
                             // File selected - close picker and open in editor
                             let _ = self.terminate_component(component_id, ExitReason::Normal);
 
-                            // Launch editor with the selected file
-                            // TODO: Map ObjectId to path for editor
+                            // Launch editor with resolved path when available.
+                            let resolved_path = Self::resolve_relative_path_from_context(
+                                picker_context.as_ref(),
+                                object_id,
+                            )
+                            .unwrap_or(name);
                             let _ = self.execute_command(WorkspaceCommand::Open {
                                 component_type: ComponentType::Editor,
-                                args: vec![name],
+                                args: vec![resolved_path],
                             });
                         }
                         services_file_picker::FilePickerResult::Cancelled => {
@@ -1353,6 +1360,77 @@ impl WorkspaceManager {
         }
 
         Some(component_id)
+    }
+
+    fn build_file_picker_breadcrumb(
+        picker: &services_file_picker::FilePicker,
+        context: Option<&(FileSystemViewService, DirectoryView)>,
+    ) -> String {
+        let Some((_, root)) = context else {
+            return "ROOT".to_string();
+        };
+
+        if picker.current_directory().id == root.id {
+            return "ROOT".to_string();
+        }
+
+        match Self::resolve_relative_path_from_context(context, picker.current_directory().id) {
+            Some(path) if !path.is_empty() => format!("ROOT/{}", path),
+            _ => "ROOT".to_string(),
+        }
+    }
+
+    fn resolve_relative_path_from_context(
+        context: Option<&(FileSystemViewService, DirectoryView)>,
+        target: ObjectId,
+    ) -> Option<String> {
+        let (resolver, root) = context?;
+
+        if target == root.id {
+            return Some(String::new());
+        }
+
+        let mut visited = HashSet::new();
+        Self::resolve_relative_path_recursive(resolver, root, target, "", &mut visited)
+    }
+
+    fn resolve_relative_path_recursive<R: DirectoryResolver>(
+        resolver: &R,
+        directory: &DirectoryView,
+        target: ObjectId,
+        prefix: &str,
+        visited: &mut HashSet<ObjectId>,
+    ) -> Option<String> {
+        if !visited.insert(directory.id) {
+            return None;
+        }
+
+        let mut entries = directory.list_entries();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for entry in entries {
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", prefix, entry.name)
+            };
+
+            if entry.object_id == target {
+                return Some(path);
+            }
+
+            if entry.kind == ObjectKind::Map {
+                if let Some(subdir) = resolver.resolve_directory(&entry.object_id) {
+                    if let Some(found) = Self::resolve_relative_path_recursive(
+                        resolver, &subdir, target, &path, visited,
+                    ) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Returns the audit trail
@@ -3053,6 +3131,125 @@ mod tests {
         let root = context.root.as_ref().unwrap();
         let object_id = fs_view.open(root, SETTINGS_OVERRIDES_PATH).unwrap();
         assert_eq!(object_id, WorkspaceManager::settings_object_id());
+    }
+
+    #[test]
+    fn test_file_picker_status_breadcrumb_tracks_directory_path() {
+        use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        let root_id = services_storage::ObjectId::new();
+        let docs_id = services_storage::ObjectId::new();
+
+        let mut root = DirectoryView::new(root_id);
+        root.add_entry(fs_view::DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            services_storage::ObjectKind::Map,
+        ));
+
+        let mut docs = DirectoryView::new(docs_id);
+        docs.add_entry(fs_view::DirectoryEntry::new(
+            "readme.md".to_string(),
+            services_storage::ObjectId::new(),
+            services_storage::ObjectKind::Blob,
+        ));
+
+        let mut fs_view = FileSystemViewService::new();
+        fs_view.register_directory(docs);
+
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            fs_view,
+            root,
+        ));
+
+        let picker_id = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::FilePicker,
+                "file-picker",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let enter = InputEvent::key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
+        workspace.route_input(&enter);
+
+        let context =
+            workspace
+                .editor_io_context
+                .as_ref()
+                .and_then(|ctx| match (&ctx.fs_view, &ctx.root) {
+                    (Some(fs_view), Some(root)) => Some((fs_view.clone(), root.clone())),
+                    _ => None,
+                });
+        let breadcrumb = if let Some(ComponentInstance::FilePicker(picker)) =
+            workspace.component_instances.get(&picker_id)
+        {
+            WorkspaceManager::build_file_picker_breadcrumb(picker, context.as_ref())
+        } else {
+            panic!("Expected file picker instance");
+        };
+
+        assert_eq!(breadcrumb, "ROOT/docs");
+        assert!(!breadcrumb.contains("<root>"));
+    }
+
+    #[test]
+    fn test_file_picker_selection_opens_editor_with_resolved_path() {
+        use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        let root_id = services_storage::ObjectId::new();
+        let docs_id = services_storage::ObjectId::new();
+        let readme_id = services_storage::ObjectId::new();
+
+        let mut root = DirectoryView::new(root_id);
+        root.add_entry(fs_view::DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            services_storage::ObjectKind::Map,
+        ));
+
+        let mut docs = DirectoryView::new(docs_id);
+        docs.add_entry(fs_view::DirectoryEntry::new(
+            "readme.md".to_string(),
+            readme_id,
+            services_storage::ObjectKind::Blob,
+        ));
+
+        let mut fs_view = FileSystemViewService::new();
+        fs_view.register_directory(docs);
+
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            fs_view,
+            root,
+        ));
+
+        workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::FilePicker,
+                "file-picker",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let enter = InputEvent::key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
+        workspace.route_input(&enter); // enter docs/
+        workspace.route_input(&enter); // select readme.md
+
+        let focused_id = workspace.get_focused_component().unwrap();
+        let focused = workspace.get_component(focused_id).unwrap();
+        assert_eq!(focused.component_type, ComponentType::Editor);
+        assert_eq!(
+            focused.metadata.get("arg0"),
+            Some(&"docs/readme.md".to_string())
+        );
     }
 }
 

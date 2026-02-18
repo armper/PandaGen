@@ -20,8 +20,8 @@ This list is ordered by product/system value if completed, not by implementation
 6. [x] `services_workspace_manager/src/lib.rs:1088`
    Implemented: `Action::Save` now performs a real save on the focused editor instance (`save_current_document`), publishes updated editor views, reports concrete save failures, and no longer falls back to settings-only success.
 
-7. `services_workspace_manager/src/lib.rs:1297` and `services_workspace_manager/src/lib.rs:1267`
-   Complete file picker/editor handoff by mapping `ObjectId` to path and real breadcrumbs. This closes an important UX/data-model gap in file workflows.
+7. [x] `services_workspace_manager/src/lib.rs:1297` and `services_workspace_manager/src/lib.rs:1267`
+   Implemented: file picker now resolves selected `ObjectId` to a root-relative path before launching the editor (fallback to filename when unresolved), and breadcrumb rendering uses actual directory location (`ROOT/...`) instead of the `<root>` placeholder.
 
 8. `services_workspace_manager/src/boot_profile.rs:173` and `services_workspace_manager/src/boot_profile.rs:188`
    Implement persistent boot profile load/save instead of default/no-op behavior. This enables stable boot preferences across sessions.
