@@ -64,10 +64,12 @@ use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
 use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
 use services_focus_manager::{FocusError, FocusManager};
-use services_fs_view::FileSystemViewService;
+use services_fs_view::{FileSystemOperations, FileSystemViewService};
 use services_input::InputSubscriptionCap;
 use services_settings::{self, SettingKey, SettingValue, SettingsRegistry};
-use services_storage::JournaledStorage;
+use services_storage::{
+    JournaledStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage,
+};
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
 #[cfg(feature = "std")]
 use thiserror::Error;
@@ -85,6 +87,10 @@ pub use workspace_status::{
     generate_suggestions, validate_command, ActionableError, CommandSuggestion, FsStatus,
     PromptValidation,
 };
+
+const SETTINGS_DIR_PATH: &str = "settings";
+const SETTINGS_OVERRIDES_PATH: &str = "settings/user_overrides.json";
+const SETTINGS_OBJECT_UUID: u128 = 0x9f2f_51d4_3f87_42f8_92d4_e6f2_56af_ea20;
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1498,27 +1504,185 @@ impl WorkspaceManager {
         let bytes = services_settings::persistence::serialize_overrides(&data)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        // TODO(Phase 113): Integrate with StorageService
-        // - Add settings path constant (e.g., "/settings/user_overrides.json")
-        // - Use editor_io_context.storage.write() with proper capabilities
-        // - Wrap in transaction for atomicity
-        // For now, just validate serialization works
-        self.workspace_status
-            .set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
+        let result = {
+            let context = match self.editor_io_context.as_mut() {
+                Some(context) => context,
+                None => {
+                    self.workspace_status
+                        .set_last_action("Settings saved (in-memory only)".to_string());
+                    return Ok(());
+                }
+            };
+
+            let object_id = Self::resolve_settings_object_for_write(context)?;
+            let mut tx = context
+                .storage
+                .begin_transaction()
+                .map_err(|e| format!("Failed to start settings transaction: {}", e))?;
+
+            context
+                .storage
+                .write(&mut tx, object_id, &bytes)
+                .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+            context
+                .storage
+                .commit(&mut tx)
+                .map_err(|e| format!("Failed to commit settings: {}", e))
+        };
+
+        if let Err(error) = result {
+            self.workspace_status
+                .set_last_action(format!("Settings save failed: {}", error));
+            return Err(error);
+        }
+
+        self.workspace_status.set_last_action(format!(
+            "Settings saved ({} bytes) to {}",
+            bytes.len(),
+            SETTINGS_OVERRIDES_PATH
+        ));
 
         Ok(())
     }
 
     /// Loads settings from storage (if storage context is available)
     pub fn load_settings(&mut self) -> Result<(), String> {
-        // TODO(Phase 113): Integrate with StorageService
-        // - Read from settings path
-        // - Use load_overrides_safe() for corruption handling
-        // - Call import_overrides() to apply
-        // - Emit notification on success/failure
-        self.workspace_status
-            .set_last_action("Settings loaded".to_string());
+        let (overrides, recovered_from_corruption, bytes_len) = {
+            let context = match self.editor_io_context.as_mut() {
+                Some(context) => context,
+                None => {
+                    self.workspace_status
+                        .set_last_action("Settings loaded (no storage context)".to_string());
+                    return Ok(());
+                }
+            };
+
+            let object_id = match Self::resolve_settings_object_for_read(context)? {
+                Some(id) => id,
+                None => {
+                    self.workspace_status.set_last_action(
+                        "Settings loaded (defaults; no persisted overrides)".to_string(),
+                    );
+                    return Ok(());
+                }
+            };
+
+            let mut tx = context
+                .storage
+                .begin_transaction()
+                .map_err(|e| format!("Failed to start settings read transaction: {}", e))?;
+
+            let bytes = match context.storage.read_data(&tx, object_id) {
+                Ok(bytes) => bytes,
+                Err(TransactionError::ObjectNotFound(_)) => {
+                    let _ = context.storage.rollback(&mut tx);
+                    self.workspace_status.set_last_action(
+                        "Settings loaded (defaults; no persisted overrides)".to_string(),
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    let _ = context.storage.rollback(&mut tx);
+                    return Err(format!("Failed to read settings data: {}", err));
+                }
+            };
+            let _ = context.storage.rollback(&mut tx);
+
+            let recovered_from_corruption =
+                services_settings::persistence::deserialize_overrides(&bytes).is_err();
+            let loaded = services_settings::persistence::load_overrides_safe(&bytes);
+            (
+                loaded.to_overrides(),
+                recovered_from_corruption,
+                bytes.len(),
+            )
+        };
+
+        self.settings_registry.import_overrides(overrides);
+
+        let active_keys = self
+            .settings_registry
+            .list_user_overrides(&self.current_user);
+        for key in active_keys {
+            self.apply_setting(key.as_str());
+        }
+
+        if recovered_from_corruption {
+            self.workspace_status.set_last_action(
+                "Settings loaded with recovery (invalid data reset to defaults)".to_string(),
+            );
+        } else {
+            self.workspace_status.set_last_action(format!(
+                "Settings loaded ({} bytes) from {}",
+                bytes_len, SETTINGS_OVERRIDES_PATH
+            ));
+        }
+
         Ok(())
+    }
+
+    fn settings_object_id() -> ObjectId {
+        ObjectId::from_uuid(Uuid::from_u128(SETTINGS_OBJECT_UUID))
+    }
+
+    fn resolve_settings_object_for_read(
+        context: &EditorIoContext,
+    ) -> Result<Option<ObjectId>, String> {
+        match (&context.fs_view, &context.root) {
+            (Some(fs_view), Some(root)) => match fs_view.open(root, SETTINGS_OVERRIDES_PATH) {
+                Ok(object_id) => Ok(Some(object_id)),
+                Err(services_fs_view::OperationError::NotFound(_)) => Ok(None),
+                Err(err) => Err(format!(
+                    "Failed to resolve settings path {}: {}",
+                    SETTINGS_OVERRIDES_PATH, err
+                )),
+            },
+            _ => Ok(Some(Self::settings_object_id())),
+        }
+    }
+
+    fn resolve_settings_object_for_write(
+        context: &mut EditorIoContext,
+    ) -> Result<ObjectId, String> {
+        match (&mut context.fs_view, &mut context.root) {
+            (Some(fs_view), Some(root)) => match fs_view.open(root, SETTINGS_OVERRIDES_PATH) {
+                Ok(object_id) => Ok(object_id),
+                Err(services_fs_view::OperationError::NotFound(_)) => {
+                    match fs_view.mkdir(root, SETTINGS_DIR_PATH) {
+                        Ok(_) | Err(services_fs_view::OperationError::AlreadyExists(_)) => {}
+                        Err(err) => {
+                            return Err(format!(
+                                "Failed to create settings directory {}: {}",
+                                SETTINGS_DIR_PATH, err
+                            ));
+                        }
+                    }
+
+                    let object_id = Self::settings_object_id();
+                    match fs_view.link(root, SETTINGS_OVERRIDES_PATH, object_id, ObjectKind::Blob) {
+                        Ok(()) => Ok(object_id),
+                        Err(services_fs_view::OperationError::AlreadyExists(_)) => {
+                            fs_view.open(root, SETTINGS_OVERRIDES_PATH).map_err(|err| {
+                                format!(
+                                    "Failed to resolve settings path {} after link race: {}",
+                                    SETTINGS_OVERRIDES_PATH, err
+                                )
+                            })
+                        }
+                        Err(err) => Err(format!(
+                            "Failed to link settings path {}: {}",
+                            SETTINGS_OVERRIDES_PATH, err
+                        )),
+                    }
+                }
+                Err(err) => Err(format!(
+                    "Failed to resolve settings path {}: {}",
+                    SETTINGS_OVERRIDES_PATH, err
+                )),
+            },
+            _ => Ok(Self::settings_object_id()),
+        }
     }
 
     /// Updates workspace status based on current state (deterministic)
@@ -2697,6 +2861,96 @@ mod tests {
         assert_eq!(component.component_type, ComponentType::FilePicker);
         assert_eq!(component.state, ComponentState::Running);
         assert!(component.focusable);
+    }
+
+    #[test]
+    fn test_settings_save_load_roundtrip_with_storage_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(JournaledStorage::new()));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        workspace.set_setting(
+            "ui.theme".to_string(),
+            SettingValue::String("dark".to_string()),
+        );
+
+        workspace.save_settings().unwrap();
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(8));
+        workspace.set_setting(
+            "ui.theme".to_string(),
+            SettingValue::String("light".to_string()),
+        );
+
+        workspace.load_settings().unwrap();
+
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(2)
+        );
+        assert_eq!(
+            workspace.get_setting("ui.theme").unwrap().as_string(),
+            Some("dark")
+        );
+    }
+
+    #[test]
+    fn test_settings_load_recovers_from_corrupt_data() {
+        let mut storage = JournaledStorage::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(
+                &mut tx,
+                WorkspaceManager::settings_object_id(),
+                b"{ not valid json ",
+            )
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(storage));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(2)
+        );
+
+        workspace.load_settings().unwrap();
+
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn test_settings_save_links_path_when_fs_view_available() {
+        use services_fs_view::FileSystemOperations;
+
+        let mut workspace = create_test_workspace();
+        let storage = JournaledStorage::new();
+        let fs_view = FileSystemViewService::new();
+        let root = DirectoryView::new(services_storage::ObjectId::new());
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(storage, fs_view, root));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        workspace.save_settings().unwrap();
+
+        let context = workspace.editor_io_context.as_ref().unwrap();
+        let fs_view = context.fs_view.as_ref().unwrap();
+        let root = context.root.as_ref().unwrap();
+        let object_id = fs_view.open(root, SETTINGS_OVERRIDES_PATH).unwrap();
+        assert_eq!(object_id, WorkspaceManager::settings_object_id());
     }
 }
 

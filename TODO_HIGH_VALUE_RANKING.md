@@ -14,8 +14,8 @@ This list is ordered by product/system value if completed, not by implementation
 4. [x] `kernel_bootstrap/src/bare_metal_storage.rs:22`
    Implemented: boot storage now uses a typed backend that attempts `VirtioBlkDevice` MMIO initialization on bare-metal (with HHDM mapping + bounded probe), and falls back to `RamDisk` when unavailable.
 
-5. `services_workspace_manager/src/lib.rs:1501` and `services_workspace_manager/src/lib.rs:1514`
-   Wire `save_settings()` / `load_settings()` to `StorageService` (actual read/write + safe import). Current behavior only validates/announces without persistence.
+5. [x] `services_workspace_manager/src/lib.rs:1501` and `services_workspace_manager/src/lib.rs:1514`
+   Implemented: `save_settings()` / `load_settings()` now perform transactional `JournaledStorage` writes/reads with deterministic settings object resolution, optional fs-view path linking at `settings/user_overrides.json`, and corruption-safe load via `load_overrides_safe()` + `import_overrides()`.
 
 6. `services_workspace_manager/src/lib.rs:1088`
    Replace placeholder `Action::Save` behavior with real focused-editor document save. Current save action can report success while only saving settings.
