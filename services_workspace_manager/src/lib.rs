@@ -379,6 +379,15 @@ pub enum WorkspaceError {
 
     #[cfg_attr(feature = "std", error("Focus error: {0}"))]
     FocusError(String),
+
+    #[cfg_attr(
+        feature = "std",
+        error("Missing launch context for {component_type}: {reason}")
+    )]
+    MissingLaunchContext {
+        component_type: ComponentType,
+        reason: String,
+    },
 }
 
 impl From<FocusError> for WorkspaceError {
@@ -428,6 +437,22 @@ impl WorkspaceError {
                 format!("Focus error: {}", msg),
                 vec!["list".to_string(), "next".to_string()],
             ),
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                let actions = match component_type {
+                    ComponentType::FilePicker => vec![
+                        "open editor <path>".to_string(),
+                        "help workspace".to_string(),
+                    ],
+                    _ => vec!["help workspace".to_string()],
+                };
+                (
+                    format!("Cannot launch {}: {}", component_type, reason),
+                    actions,
+                )
+            }
         }
     }
 
@@ -1070,6 +1095,8 @@ impl WorkspaceManager {
         &mut self,
         config: LaunchConfig,
     ) -> Result<ComponentId, WorkspaceError> {
+        self.validate_launch_config(&config)?;
+
         let timestamp = self.next_timestamp();
 
         // Create identity for the component
@@ -1235,19 +1262,14 @@ impl WorkspaceManager {
                 ComponentInstance::Cli(Box::new(cli))
             }
             ComponentType::FilePicker => {
-                // Create file picker with root directory from editor I/O context
-                if let Some(context) = &self.editor_io_context {
-                    if let Some(root) = &context.root {
-                        let picker = services_file_picker::FilePicker::new(root.clone());
-                        ComponentInstance::FilePicker(Box::new(picker))
-                    } else {
-                        // No root directory available
-                        ComponentInstance::None
-                    }
-                } else {
-                    // No editor I/O context available
-                    ComponentInstance::None
-                }
+                // Preconditions are validated in validate_launch_config.
+                let root = self
+                    .editor_io_context
+                    .as_ref()
+                    .and_then(|context| context.root.as_ref())
+                    .expect("file picker launch requires root directory context");
+                let picker = services_file_picker::FilePicker::new(root.clone());
+                ComponentInstance::FilePicker(Box::new(picker))
             }
             ComponentType::PipelineExecutor => {
                 #[cfg(feature = "std")]
@@ -1295,6 +1317,27 @@ impl WorkspaceManager {
         }
 
         Ok(component_id)
+    }
+
+    fn validate_launch_config(&self, config: &LaunchConfig) -> Result<(), WorkspaceError> {
+        match config.component_type {
+            ComponentType::FilePicker => {
+                let Some(context) = self.editor_io_context.as_ref() else {
+                    return Err(WorkspaceError::MissingLaunchContext {
+                        component_type: ComponentType::FilePicker,
+                        reason: "storage context unavailable".to_string(),
+                    });
+                };
+                if context.root.is_none() {
+                    return Err(WorkspaceError::MissingLaunchContext {
+                        component_type: ComponentType::FilePicker,
+                        reason: "root directory context unavailable".to_string(),
+                    });
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Launches all components described in a package manifest.
@@ -3698,6 +3741,20 @@ mod tests {
     }
 
     #[test]
+    fn test_actionable_error_missing_launch_context_for_file_picker() {
+        let err = WorkspaceError::MissingLaunchContext {
+            component_type: ComponentType::FilePicker,
+            reason: "storage context unavailable".to_string(),
+        };
+        let (message, actions) = err.actionable_message();
+        let formatted = err.format_with_actions();
+
+        assert!(message.contains("Cannot launch FilePicker"));
+        assert!(actions.iter().any(|a| a.contains("open editor")));
+        assert!(formatted.contains("Try:"));
+    }
+
+    #[test]
     fn test_actionable_error_format() {
         let err = WorkspaceError::NoComponents;
         let formatted = err.format_with_actions();
@@ -4050,15 +4107,46 @@ mod tests {
             TrustDomain::user(),
         );
 
-        let component_id = workspace.launch_component(config).unwrap();
+        let err = workspace.launch_component(config).unwrap_err();
+        match err {
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                assert_eq!(component_type, ComponentType::FilePicker);
+                assert!(reason.contains("storage context"));
+            }
+            other => panic!("expected MissingLaunchContext, got {:?}", other),
+        }
+        assert_eq!(workspace.components.len(), 0);
+        assert_eq!(workspace.component_instances.len(), 0);
+    }
 
-        // Component should be created but instance will be None
-        assert_eq!(workspace.components.len(), 1);
-        assert!(workspace.get_component(component_id).is_some());
+    #[test]
+    fn test_launch_file_picker_without_root_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(JournaledStorage::new()));
 
-        let component = workspace.get_component(component_id).unwrap();
-        assert_eq!(component.component_type, ComponentType::FilePicker);
-        assert_eq!(component.state, ComponentState::Running);
+        let config = LaunchConfig::new(
+            ComponentType::FilePicker,
+            "file-picker",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let err = workspace.launch_component(config).unwrap_err();
+        match err {
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                assert_eq!(component_type, ComponentType::FilePicker);
+                assert!(reason.contains("root directory"));
+            }
+            other => panic!("expected MissingLaunchContext, got {:?}", other),
+        }
+        assert_eq!(workspace.components.len(), 0);
+        assert_eq!(workspace.component_instances.len(), 0);
     }
 
     #[test]

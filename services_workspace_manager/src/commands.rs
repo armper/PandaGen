@@ -422,7 +422,7 @@ impl WorkspaceManager {
                 name: "File Picker".to_string(),
             },
             Err(err) => CommandResult::Error {
-                message: format!("Failed to open file picker: {}", err),
+                message: format!("Failed to open file picker: {}", err.format_with_actions()),
             },
         }
     }
@@ -690,7 +690,10 @@ fn format_command(command: &WorkspaceCommand) -> String {
 mod tests {
     use super::*;
     use crate::boot_profile::BootProfile;
-    use crate::IdentityMetadata;
+    use crate::{EditorIoContext, IdentityMetadata};
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+    use services_storage::JournaledStorage;
 
     fn create_test_workspace() -> WorkspaceManager {
         let workspace_identity = IdentityMetadata::new(
@@ -768,6 +771,44 @@ mod tests {
                 assert!(workspace.get_component(component_id).is_some());
             }
             _ => panic!("Expected Opened result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_open_file_picker_without_storage_context() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::OpenFilePicker);
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Failed to open file picker"));
+                assert!(message.contains("storage context unavailable"));
+                assert!(message.contains("Try:"));
+            }
+            other => panic!("Expected Error result, got {:?}", other),
+        }
+
+        assert!(workspace.list_components().is_empty());
+    }
+
+    #[test]
+    fn test_execute_open_file_picker_with_storage_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            FileSystemViewService::new(),
+            DirectoryView::new(services_storage::ObjectId::new()),
+        ));
+
+        let result = workspace.execute_command(WorkspaceCommand::OpenFilePicker);
+
+        match result {
+            CommandResult::Opened { component_id, name } => {
+                assert_eq!(name, "File Picker");
+                let component = workspace.get_component(component_id).unwrap();
+                assert_eq!(component.component_type, ComponentType::FilePicker);
+            }
+            other => panic!("Expected Opened result, got {:?}", other),
         }
     }
 

@@ -44,5 +44,8 @@ This list is ordered by product/system value if completed, not by implementation
 14. [x] `services_workspace_manager/src/lib.rs:1662` and `services_workspace_manager/src/lib.rs:1673`
    Implemented: `Action::CommandMode` now enters a real command palette flow by opening/focusing CLI, rendering deterministic command-palette previews (`name/category/keybinding -> invocation pattern`), and updating workspace status with shown/total command counts.
 
-15. [ ] `services_workspace_manager/src/lib.rs:1245` and `services_workspace_manager/src/lib.rs:1249`
-   Track next: remove `FilePicker` launch fallback to `ComponentInstance::None` when storage/root context is missing; fail launch with actionable error (and command-surface feedback) instead of creating a running component shell with no instance.
+15. [x] `services_workspace_manager/src/lib.rs:1110` and `services_workspace_manager/src/lib.rs:1284`
+   Implemented: `launch_component()` now validates `FilePicker` launch prerequisites up-front and fails fast with `WorkspaceError::MissingLaunchContext` when storage/root context is missing, preventing partial component/view creation and replacing `ComponentInstance::None` fallback behavior; command-path feedback now surfaces actionable recovery hints.
+
+16. [ ] `services_workspace_manager/src/lib.rs:1307` and `services_workspace_manager/src/lib.rs:1342`
+   Track next: make `launch_package()` resilient to partial launch failure by returning created component IDs plus structured per-component errors (instead of aborting at first failure), so package startup can degrade gracefully when optional components are unavailable.
