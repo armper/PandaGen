@@ -55,7 +55,11 @@ use core_types::uuid_tools::new_uuid;
 use core_types::{ServiceId, TaskId};
 use fs_view::{DirectoryResolver, DirectoryView};
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
+#[cfg(feature = "std")]
+use ipc::{MessageEnvelope, MessagePayload};
 use input_types::{InputEvent, KeyCode, KeyEvent};
+#[cfg(feature = "std")]
+use kernel_api::{Duration, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use keybindings::KeyBindingManager;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use packages::{ComponentLoader, PackageComponentType, PackageManifest};
@@ -697,25 +701,183 @@ impl InlineConsole {
 }
 
 #[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy)]
+enum PipelineStageHandler {
+    Echo,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Deserialize)]
+struct StageInvokeRequestWire {
+    input: TypedPayload,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Serialize)]
+struct StageInvokeResponseWire {
+    result: pipeline::StageResult,
+}
+
+#[cfg(feature = "std")]
+struct PipelineHarnessKernel {
+    inner: SimulatedKernel,
+    handlers_by_channel: HashMap<ipc::ChannelId, PipelineStageHandler>,
+    service_to_channel: HashMap<ServiceId, ipc::ChannelId>,
+}
+
+#[cfg(feature = "std")]
+impl PipelineHarnessKernel {
+    fn new() -> Self {
+        Self {
+            inner: SimulatedKernel::new(),
+            handlers_by_channel: HashMap::new(),
+            service_to_channel: HashMap::new(),
+        }
+    }
+
+    fn ensure_echo_handler(&mut self, service_id: ServiceId) -> Result<(), KernelError> {
+        if self.service_to_channel.contains_key(&service_id) {
+            return Ok(());
+        }
+        let channel = self.inner.create_channel()?;
+        self.inner.register_service(service_id, channel)?;
+        self.handlers_by_channel
+            .insert(channel, PipelineStageHandler::Echo);
+        self.service_to_channel.insert(service_id, channel);
+        Ok(())
+    }
+
+    fn maybe_handle_stage_invoke(
+        &mut self,
+        channel: ipc::ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<Option<MessageEnvelope>, KernelError> {
+        let Some(handler) = self.handlers_by_channel.get(&channel).copied() else {
+            return Ok(None);
+        };
+
+        let result = match handler {
+            PipelineStageHandler::Echo => {
+                let request: StageInvokeRequestWire = message
+                    .payload
+                    .deserialize()
+                    .map_err(|e| KernelError::SendFailed(format!("Invalid stage request: {}", e)))?;
+                let output = TypedPayload::new(
+                    PayloadSchemaId::new("pipeline/output"),
+                    request.input.schema_version,
+                    request.input.data,
+                );
+                pipeline::StageResult::Success {
+                    output,
+                    capabilities: vec![0x1D],
+                }
+            }
+        };
+
+        let response = StageInvokeResponseWire { result };
+        let payload = MessagePayload::new(&response)
+            .map_err(|e| KernelError::SendFailed(format!("Failed to serialize response: {}", e)))?;
+        Ok(Some(
+            MessageEnvelope::new(
+                message.destination,
+                message.action,
+                message.schema_version,
+                payload,
+            )
+            .with_correlation(message.id),
+        ))
+    }
+
+    fn handler_count(&self) -> usize {
+        self.handlers_by_channel.len()
+    }
+}
+
+#[cfg(feature = "std")]
+impl KernelApi for PipelineHarnessKernel {
+    fn spawn_task(&mut self, descriptor: TaskDescriptor) -> Result<TaskHandle, KernelError> {
+        self.inner.spawn_task(descriptor)
+    }
+
+    fn create_channel(&mut self) -> Result<ipc::ChannelId, KernelError> {
+        self.inner.create_channel()
+    }
+
+    fn send_message(
+        &mut self,
+        channel: ipc::ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<(), KernelError> {
+        if let Some(response) = self.maybe_handle_stage_invoke(channel, message.clone())? {
+            self.inner.send_message(channel, response)
+        } else {
+            self.inner.send_message(channel, message)
+        }
+    }
+
+    fn receive_message(
+        &mut self,
+        channel: ipc::ChannelId,
+        timeout: Option<Duration>,
+    ) -> Result<MessageEnvelope, KernelError> {
+        self.inner.receive_message(channel, timeout)
+    }
+
+    fn now(&self) -> kernel_api::Instant {
+        self.inner.now()
+    }
+
+    fn sleep(&mut self, duration: Duration) -> Result<(), KernelError> {
+        self.inner.sleep(duration)
+    }
+
+    fn grant_capability(
+        &mut self,
+        task: TaskId,
+        capability: core_types::Cap<()>,
+    ) -> Result<(), KernelError> {
+        self.inner.grant_capability(task, capability)
+    }
+
+    fn register_service(
+        &mut self,
+        service_id: ServiceId,
+        channel: ipc::ChannelId,
+    ) -> Result<(), KernelError> {
+        self.inner.register_service(service_id, channel)
+    }
+
+    fn lookup_service(&self, service_id: ServiceId) -> Result<ipc::ChannelId, KernelError> {
+        self.inner.lookup_service(service_id)
+    }
+}
+
+#[cfg(feature = "std")]
 struct PipelineRuntime {
     console: InlineConsole,
     executor: PipelineExecutor,
-    kernel: SimulatedKernel,
+    kernel: PipelineHarnessKernel,
+    default_handler_service: ServiceId,
 }
 
 #[cfg(feature = "std")]
 impl PipelineRuntime {
     fn new() -> Self {
+        const DEFAULT_PIPELINE_HANDLER_SERVICE_ID: u128 = 0x1;
+        let default_handler_service = ServiceId::from_u128(DEFAULT_PIPELINE_HANDLER_SERVICE_ID);
+        let mut kernel = PipelineHarnessKernel::new();
+        let _ = kernel.ensure_echo_handler(default_handler_service);
         Self {
             console: InlineConsole::new(
                 "pipeline> ",
                 vec![
                     "Pipeline executor ready".to_string(),
-                    "Type `run` to execute a test pipeline".to_string(),
+                    "Type `run` to execute a pipeline stage".to_string(),
                 ],
             ),
             executor: PipelineExecutor::new(),
-            kernel: SimulatedKernel::new(),
+            kernel,
+            default_handler_service,
         }
     }
 }
@@ -1498,11 +1660,7 @@ impl WorkspaceManager {
                 true
             }
             Action::CommandMode => {
-                // Enter command mode - this would typically show the command palette
-                // For now, we just set a status message
-                self.workspace_status
-                    .set_last_action("Command mode (not yet implemented)".to_string());
-                true
+                self.enter_command_mode()
             }
             Action::Custom(name) => {
                 // Custom actions not yet supported
@@ -1510,6 +1668,102 @@ impl WorkspaceManager {
                 false
             }
         }
+    }
+
+    fn enter_command_mode(&mut self) -> bool {
+        const PALETTE_PREVIEW_LIMIT: usize = 8;
+        let (preview_lines, shown, total) = self.command_palette_preview("", PALETTE_PREVIEW_LIMIT);
+        if total == 0 {
+            self.workspace_status
+                .set_last_action("Command palette has no registered commands".to_string());
+            return false;
+        }
+
+        let cli_id = self
+            .find_running_component_of_type(ComponentType::Cli)
+            .or_else(|| {
+                self.launch_component(LaunchConfig::new(
+                    ComponentType::Cli,
+                    "command-palette",
+                    IdentityKind::Component,
+                    TrustDomain::user(),
+                ))
+                .ok()
+            });
+
+        let Some(cli_id) = cli_id else {
+            self.workspace_status
+                .set_last_action("Command mode failed: unable to open CLI".to_string());
+            return false;
+        };
+
+        let _ = self.focus_component(cli_id);
+        self.append_cli_output(cli_id, preview_lines);
+        self.workspace_status.set_last_action(format!(
+            "Command palette ready: showing {}/{} commands",
+            shown, total
+        ));
+        true
+    }
+
+    fn find_running_component_of_type(&self, component_type: ComponentType) -> Option<ComponentId> {
+        let mut ids: Vec<ComponentId> = self
+            .components
+            .iter()
+            .filter_map(|(id, component)| {
+                if component.state == ComponentState::Running
+                    && component.component_type == component_type
+                {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ids.sort_by_key(|id| id.to_string());
+        ids.into_iter().next()
+    }
+
+    fn command_palette_preview(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> (Vec<String>, usize, usize) {
+        let mut commands = if query.trim().is_empty() {
+            self.command_palette.list_commands()
+        } else {
+            self.command_palette.filter_commands(query)
+        };
+        commands.retain(|command| command.enabled);
+
+        if query.trim().is_empty() {
+            commands.sort_by(|a, b| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            });
+        }
+
+        let total = commands.len();
+        let shown = core::cmp::min(total, limit);
+        let mut lines = vec![format!("Command Palette ({})", total)];
+
+        for command in commands.into_iter().take(limit) {
+            let invocation = command
+                .prompt_pattern
+                .as_deref()
+                .unwrap_or(command.id.as_str());
+            lines.push(format!("  {} -> `{}`", command.format_for_palette(), invocation));
+        }
+
+        if shown < total {
+            lines.push(format!(
+                "  ... {} more commands (type `help` for full command docs)",
+                total - shown
+            ));
+        }
+
+        (lines, shown, total)
     }
 
     /// Routes an input event to the focused component and processes it
@@ -1890,14 +2144,30 @@ impl WorkspaceManager {
             "help" => vec![
                 "Pipeline commands:".to_string(),
                 "  run [service_id_u128|0xhex] [payload]".to_string(),
+                "    (auto-registers echo handler for requested service)".to_string(),
                 "  status".to_string(),
             ],
-            "status" => vec!["Pipeline runtime online".to_string()],
+            "status" => vec![format!(
+                "Pipeline runtime online (registered handlers: {})",
+                runtime.kernel.handler_count()
+            )],
             "run" => {
-                let service_token = parts.next().unwrap_or("1");
-                let service_id = Self::parse_service_id_token(service_token)
-                    .unwrap_or_else(|| ServiceId::from_u128(1));
-                let payload_text = parts.collect::<Vec<&str>>().join(" ");
+                let mut rest = parts.collect::<Vec<&str>>();
+                let mut service_id = runtime.default_handler_service;
+                if let Some(first) = rest.first().copied() {
+                    if let Some(parsed) = Self::parse_service_id_token(first) {
+                        service_id = parsed;
+                        rest.remove(0);
+                    }
+                }
+                if let Err(err) = runtime.kernel.ensure_echo_handler(service_id) {
+                    return vec![format!(
+                        "Pipeline failed: unable to register handler {} ({})",
+                        service_id, err
+                    )];
+                }
+
+                let payload_text = rest.join(" ");
                 let payload_bytes = if payload_text.is_empty() {
                     b"{}".to_vec()
                 } else {
@@ -2990,16 +3260,16 @@ mod tests {
             .get_latest(main_view_id)
             .unwrap()
             .unwrap();
-        let mut found_outcome = false;
+        let mut found_success = false;
         for idx in 0..frame.content.line_count() {
             if let Some(line) = frame.content.get_line(idx) {
-                if line.contains("Pipeline failed:") || line.contains("Pipeline succeeded:") {
-                    found_outcome = true;
+                if line.contains("Pipeline succeeded:") {
+                    found_success = true;
                     break;
                 }
             }
         }
-        assert!(found_outcome);
+        assert!(found_success);
     }
 
     #[test]
@@ -3683,11 +3953,56 @@ mod tests {
         let result = workspace.execute_action(&Action::CommandMode);
         assert!(result);
 
-        // Check that status was updated (placeholder implementation)
+        let focused_id = workspace.get_focused_component().unwrap();
+        let focused = workspace.get_component(focused_id).unwrap();
+        assert_eq!(focused.component_type, ComponentType::Cli);
+
+        let main_view_id = focused.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let mut found_palette_line = false;
+        let mut found_command_entry = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Command Palette (") {
+                    found_palette_line = true;
+                }
+                if line.contains(" -> `") {
+                    found_command_entry = true;
+                }
+            }
+        }
+        assert!(found_palette_line);
+        assert!(found_command_entry);
+
         let status = &workspace.workspace_status.last_action;
         assert!(status.is_some());
         let status_text = status.as_ref().unwrap();
-        assert!(status_text.contains("Command mode"));
+        assert!(status_text.contains("Command palette ready:"));
+    }
+
+    #[test]
+    fn test_action_command_mode_reuses_existing_cli() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let cli_config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_id = workspace.launch_component(cli_config).unwrap();
+
+        let before = workspace.list_components().len();
+        let result = workspace.execute_action(&Action::CommandMode);
+        assert!(result);
+        assert_eq!(workspace.list_components().len(), before);
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
     }
 
     #[test]

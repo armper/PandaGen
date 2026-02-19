@@ -38,5 +38,11 @@ This list is ordered by product/system value if completed, not by implementation
 12. [x] `services_workspace_manager/src/lib.rs:1024` and `services_workspace_manager/src/lib.rs:1304`
    Implemented: `ComponentType::Cli` and `ComponentType::PipelineExecutor` now create real interactive runtime instances (line input + view rendering + command/event processing) instead of `ComponentInstance::None`; CLI commands are parsed/executed through workspace command routing, and pipeline console drives real `PipelineExecutor::execute()` attempts with deterministic outcome logging.
 
-13. [ ] `services_workspace_manager/src/lib.rs` (pipeline runtime service loop)
-   Track next: wire pipeline console `run` to actual registered stage handlers (service-side response path) instead of the current no-handler execution path, so `run` can produce successful stage outputs and capability propagation traces.
+13. [x] `services_workspace_manager/src/lib.rs:722` and `services_workspace_manager/src/lib.rs:2137`
+   Implemented: pipeline runtime now uses a service-side harness kernel with registered echo stage handlers, so `run` auto-registers handler channels, executes real request/response IPC correlation, and returns successful stage outputs through `PipelineExecutor::execute()`.
+
+14. [x] `services_workspace_manager/src/lib.rs:1662` and `services_workspace_manager/src/lib.rs:1673`
+   Implemented: `Action::CommandMode` now enters a real command palette flow by opening/focusing CLI, rendering deterministic command-palette previews (`name/category/keybinding -> invocation pattern`), and updating workspace status with shown/total command counts.
+
+15. [ ] `services_workspace_manager/src/lib.rs:1245` and `services_workspace_manager/src/lib.rs:1249`
+   Track next: remove `FilePicker` launch fallback to `ComponentInstance::None` when storage/root context is missing; fail launch with actionable error (and command-surface feedback) instead of creating a running component shell with no instance.
