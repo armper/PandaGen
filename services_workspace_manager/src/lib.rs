@@ -52,13 +52,15 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use core_types::uuid_tools::new_uuid;
-use core_types::TaskId;
+use core_types::{ServiceId, TaskId};
 use fs_view::{DirectoryResolver, DirectoryView};
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
-use input_types::InputEvent;
+use input_types::{InputEvent, KeyCode, KeyEvent};
 use keybindings::KeyBindingManager;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use packages::{ComponentLoader, PackageComponentType, PackageManifest};
+#[cfg(feature = "std")]
+use pipeline::{PayloadSchemaId, PayloadSchemaVersion, PipelineSpec, StageSpec, TypedPayload};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
@@ -66,11 +68,15 @@ use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
 use services_focus_manager::{FocusError, FocusManager};
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
 use services_input::InputSubscriptionCap;
+#[cfg(feature = "std")]
+use services_pipeline_executor::PipelineExecutor;
 use services_settings::{self, SettingKey, SettingValue, SettingsRegistry};
 use services_storage::{
     JournaledStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage,
 };
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
+#[cfg(feature = "std")]
+use sim_kernel::SimulatedKernel;
 #[cfg(feature = "std")]
 use thiserror::Error;
 use uuid::Uuid;
@@ -489,14 +495,299 @@ impl LaunchConfig {
     }
 }
 
+/// Lightweight line-oriented console used by interactive component instances.
+struct InlineConsole {
+    prompt: String,
+    input_buffer: String,
+    cursor_pos: usize,
+    history: Vec<String>,
+    history_pos: Option<usize>,
+    output_lines: Vec<String>,
+    max_output_lines: usize,
+    next_main_revision: u64,
+    next_status_revision: u64,
+}
+
+impl InlineConsole {
+    fn new(prompt: impl Into<String>, welcome_lines: Vec<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            input_buffer: String::new(),
+            cursor_pos: 0,
+            history: Vec::new(),
+            history_pos: None,
+            output_lines: welcome_lines,
+            max_output_lines: 256,
+            next_main_revision: 1,
+            next_status_revision: 1,
+        }
+    }
+
+    fn process_input(&mut self, event: InputEvent) -> Option<String> {
+        let key = event.as_key()?;
+        if !key.is_pressed() {
+            return None;
+        }
+
+        if key.modifiers.is_ctrl() {
+            match key.code {
+                KeyCode::C => {
+                    self.input_buffer.clear();
+                    self.cursor_pos = 0;
+                    self.history_pos = None;
+                    return None;
+                }
+                KeyCode::L => {
+                    self.output_lines.clear();
+                    self.trim_output();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                let command = self.input_buffer.clone();
+                if !command.trim().is_empty() {
+                    self.history.push(command.clone());
+                }
+                self.input_buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                return Some(command);
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 && self.cursor_pos <= self.input_buffer.len() {
+                    self.input_buffer.remove(self.cursor_pos - 1);
+                    self.cursor_pos -= 1;
+                }
+                return None;
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.input_buffer.remove(self.cursor_pos);
+                }
+                return None;
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+                return None;
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.cursor_pos += 1;
+                }
+                return None;
+            }
+            KeyCode::Home => {
+                self.cursor_pos = 0;
+                return None;
+            }
+            KeyCode::End => {
+                self.cursor_pos = self.input_buffer.len();
+                return None;
+            }
+            KeyCode::Escape => {
+                self.input_buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                return None;
+            }
+            KeyCode::Up => {
+                if !self.history.is_empty() {
+                    let pos = match self.history_pos {
+                        None => self.history.len() - 1,
+                        Some(p) if p > 0 => p - 1,
+                        Some(p) => p,
+                    };
+                    self.history_pos = Some(pos);
+                    self.input_buffer = self.history[pos].clone();
+                    self.cursor_pos = self.input_buffer.len();
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if let Some(pos) = self.history_pos {
+                    if pos + 1 < self.history.len() {
+                        self.history_pos = Some(pos + 1);
+                        self.input_buffer = self.history[pos + 1].clone();
+                        self.cursor_pos = self.input_buffer.len();
+                    } else {
+                        self.history_pos = None;
+                        self.input_buffer.clear();
+                        self.cursor_pos = 0;
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        if let Some(ch) = key_event_to_char(key) {
+            self.input_buffer.insert(self.cursor_pos, ch);
+            self.cursor_pos += 1;
+            self.history_pos = None;
+        }
+
+        None
+    }
+
+    fn push_output_lines(&mut self, lines: Vec<String>) {
+        for line in lines {
+            self.output_lines.push(line);
+        }
+        self.trim_output();
+    }
+
+    fn publish_views(
+        &mut self,
+        view_host: &mut ViewHost,
+        main_view: &ViewHandleCap,
+        status_view: &ViewHandleCap,
+        timestamp_ns: u64,
+        component_id: ComponentId,
+        status_label: &str,
+    ) {
+        let mut lines = self.output_lines.clone();
+        lines.push(format!("{}{}", self.prompt, self.input_buffer));
+
+        let main_frame = ViewFrame::new(
+            main_view.view_id,
+            ViewKind::TextBuffer,
+            self.next_main_revision,
+            view_types::ViewContent::text_buffer(lines),
+            timestamp_ns,
+        )
+        .with_cursor(view_types::CursorPosition::new(
+            self.output_lines.len(),
+            self.prompt.len() + self.cursor_pos,
+        ))
+        .with_component_id(component_id.to_string());
+        self.next_main_revision += 1;
+        let _ = view_host.publish_frame(main_view, main_frame);
+
+        let status_text = format!(
+            "{} | lines:{} | history:{}",
+            status_label,
+            self.output_lines.len(),
+            self.history.len()
+        );
+        let status_frame = ViewFrame::new(
+            status_view.view_id,
+            ViewKind::StatusLine,
+            self.next_status_revision,
+            view_types::ViewContent::status_line(status_text),
+            timestamp_ns,
+        )
+        .with_component_id(component_id.to_string());
+        self.next_status_revision += 1;
+        let _ = view_host.publish_frame(status_view, status_frame);
+    }
+
+    fn trim_output(&mut self) {
+        if self.output_lines.len() > self.max_output_lines {
+            let keep = self.max_output_lines;
+            let start = self.output_lines.len() - keep;
+            self.output_lines = self.output_lines[start..].to_vec();
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+struct PipelineRuntime {
+    console: InlineConsole,
+    executor: PipelineExecutor,
+    kernel: SimulatedKernel,
+}
+
+#[cfg(feature = "std")]
+impl PipelineRuntime {
+    fn new() -> Self {
+        Self {
+            console: InlineConsole::new(
+                "pipeline> ",
+                vec![
+                    "Pipeline executor ready".to_string(),
+                    "Type `run` to execute a test pipeline".to_string(),
+                ],
+            ),
+            executor: PipelineExecutor::new(),
+            kernel: SimulatedKernel::new(),
+        }
+    }
+}
+
+fn key_event_to_char(event: &KeyEvent) -> Option<char> {
+    let shifted = event.modifiers.is_shift();
+    match event.code {
+        KeyCode::A => Some(if shifted { 'A' } else { 'a' }),
+        KeyCode::B => Some(if shifted { 'B' } else { 'b' }),
+        KeyCode::C => Some(if shifted { 'C' } else { 'c' }),
+        KeyCode::D => Some(if shifted { 'D' } else { 'd' }),
+        KeyCode::E => Some(if shifted { 'E' } else { 'e' }),
+        KeyCode::F => Some(if shifted { 'F' } else { 'f' }),
+        KeyCode::G => Some(if shifted { 'G' } else { 'g' }),
+        KeyCode::H => Some(if shifted { 'H' } else { 'h' }),
+        KeyCode::I => Some(if shifted { 'I' } else { 'i' }),
+        KeyCode::J => Some(if shifted { 'J' } else { 'j' }),
+        KeyCode::K => Some(if shifted { 'K' } else { 'k' }),
+        KeyCode::L => Some(if shifted { 'L' } else { 'l' }),
+        KeyCode::M => Some(if shifted { 'M' } else { 'm' }),
+        KeyCode::N => Some(if shifted { 'N' } else { 'n' }),
+        KeyCode::O => Some(if shifted { 'O' } else { 'o' }),
+        KeyCode::P => Some(if shifted { 'P' } else { 'p' }),
+        KeyCode::Q => Some(if shifted { 'Q' } else { 'q' }),
+        KeyCode::R => Some(if shifted { 'R' } else { 'r' }),
+        KeyCode::S => Some(if shifted { 'S' } else { 's' }),
+        KeyCode::T => Some(if shifted { 'T' } else { 't' }),
+        KeyCode::U => Some(if shifted { 'U' } else { 'u' }),
+        KeyCode::V => Some(if shifted { 'V' } else { 'v' }),
+        KeyCode::W => Some(if shifted { 'W' } else { 'w' }),
+        KeyCode::X => Some(if shifted { 'X' } else { 'x' }),
+        KeyCode::Y => Some(if shifted { 'Y' } else { 'y' }),
+        KeyCode::Z => Some(if shifted { 'Z' } else { 'z' }),
+        KeyCode::Num0 => Some(if shifted { ')' } else { '0' }),
+        KeyCode::Num1 => Some(if shifted { '!' } else { '1' }),
+        KeyCode::Num2 => Some(if shifted { '@' } else { '2' }),
+        KeyCode::Num3 => Some(if shifted { '#' } else { '3' }),
+        KeyCode::Num4 => Some(if shifted { '$' } else { '4' }),
+        KeyCode::Num5 => Some(if shifted { '%' } else { '5' }),
+        KeyCode::Num6 => Some(if shifted { '^' } else { '6' }),
+        KeyCode::Num7 => Some(if shifted { '&' } else { '7' }),
+        KeyCode::Num8 => Some(if shifted { '*' } else { '8' }),
+        KeyCode::Num9 => Some(if shifted { '(' } else { '9' }),
+        KeyCode::Space => Some(' '),
+        KeyCode::Minus => Some(if shifted { '_' } else { '-' }),
+        KeyCode::Equal => Some(if shifted { '+' } else { '=' }),
+        KeyCode::LeftBracket => Some(if shifted { '{' } else { '[' }),
+        KeyCode::RightBracket => Some(if shifted { '}' } else { ']' }),
+        KeyCode::Backslash => Some(if shifted { '|' } else { '\\' }),
+        KeyCode::Semicolon => Some(if shifted { ':' } else { ';' }),
+        KeyCode::Quote => Some(if shifted { '"' } else { '\'' }),
+        KeyCode::Comma => Some(if shifted { '<' } else { ',' }),
+        KeyCode::Period => Some(if shifted { '>' } else { '.' }),
+        KeyCode::Slash => Some(if shifted { '?' } else { '/' }),
+        KeyCode::Grave => Some(if shifted { '~' } else { '`' }),
+        _ => None,
+    }
+}
+
 /// Component instance holder
 ///
 /// Stores the actual running component instance
 enum ComponentInstance {
     /// Editor component
     Editor(Box<Editor>),
+    /// CLI component
+    Cli(Box<InlineConsole>),
     /// File picker component
     FilePicker(Box<services_file_picker::FilePicker>),
+    /// Pipeline executor component
+    #[cfg(feature = "std")]
+    Pipeline(Box<PipelineRuntime>),
     /// No instance (placeholder for components not yet implemented)
     None,
 }
@@ -759,6 +1050,28 @@ impl WorkspaceManager {
                 }
                 ComponentInstance::Editor(Box::new(editor))
             }
+            ComponentType::Cli => {
+                let mut cli = InlineConsole::new(
+                    "pg> ",
+                    vec![
+                        "PandaGen CLI ready".to_string(),
+                        "Type `help` for built-in hints".to_string(),
+                    ],
+                );
+                if let (Some(main_view), Some(status_view)) =
+                    (&component.main_view, &component.status_view)
+                {
+                    cli.publish_views(
+                        &mut self.view_host,
+                        main_view,
+                        status_view,
+                        timestamp,
+                        component_id,
+                        "CLI",
+                    );
+                }
+                ComponentInstance::Cli(Box::new(cli))
+            }
             ComponentType::FilePicker => {
                 // Create file picker with root directory from editor I/O context
                 if let Some(context) = &self.editor_io_context {
@@ -774,7 +1087,30 @@ impl WorkspaceManager {
                     ComponentInstance::None
                 }
             }
-            _ => ComponentInstance::None,
+            ComponentType::PipelineExecutor => {
+                #[cfg(feature = "std")]
+                {
+                    let mut pipeline_runtime = PipelineRuntime::new();
+                    if let (Some(main_view), Some(status_view)) =
+                        (&component.main_view, &component.status_view)
+                    {
+                        pipeline_runtime.console.publish_views(
+                            &mut self.view_host,
+                            main_view,
+                            status_view,
+                            timestamp,
+                            component_id,
+                            "PIPELINE",
+                        );
+                    }
+                    ComponentInstance::Pipeline(Box::new(pipeline_runtime))
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    ComponentInstance::None
+                }
+            }
+            ComponentType::Custom => ComponentInstance::None,
         };
 
         // Record event
@@ -1277,6 +1613,9 @@ impl WorkspaceManager {
 
         // Get timestamp before borrowing instances mutably
         let timestamp = self.next_timestamp();
+        let mut pending_cli_command: Option<String> = None;
+        #[cfg(feature = "std")]
+        let mut pending_pipeline_command: Option<String> = None;
 
         // Process input in the component instance
         if let Some(instance) = self.component_instances.get_mut(&component_id) {
@@ -1290,6 +1629,23 @@ impl WorkspaceManager {
                         }
                         Err(_e) => {
                             // Error processing input - could log here
+                        }
+                    }
+                }
+                ComponentInstance::Cli(cli) => {
+                    pending_cli_command = cli.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            cli.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "CLI",
+                            );
                         }
                     }
                 }
@@ -1358,13 +1714,241 @@ impl WorkspaceManager {
                         }
                     }
                 }
+                #[cfg(feature = "std")]
+                ComponentInstance::Pipeline(runtime) => {
+                    pending_pipeline_command = runtime.console.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            runtime.console.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "PIPELINE",
+                            );
+                        }
+                    }
+                }
                 ComponentInstance::None => {
                     // No instance to process
                 }
             }
         }
 
+        if let Some(command) = pending_cli_command {
+            self.execute_cli_component_command(component_id, command);
+        }
+        #[cfg(feature = "std")]
+        if let Some(command) = pending_pipeline_command {
+            self.execute_pipeline_component_command(component_id, command);
+        }
+
         Some(component_id)
+    }
+
+    fn execute_cli_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let mut lines = vec![format!("pg> {}", trimmed)];
+        if trimmed == "help" {
+            lines.extend(vec![
+                "Workspace commands:".to_string(),
+                "  open <editor|cli|pipeline> [args...]".to_string(),
+                "  list | next | prev | focus <comp:id>".to_string(),
+                "  settings <list|set|reset|save> ...".to_string(),
+                "  boot profile <show|set|save>".to_string(),
+            ]);
+            self.append_cli_output(component_id, lines);
+            return;
+        }
+
+        match crate::commands::parse_command(trimmed) {
+            Ok(parsed) => {
+                let result = self.execute_command(parsed);
+                lines.extend(Self::format_command_result_lines(&result));
+            }
+            Err(err) => {
+                lines.push(err.format_with_actions());
+            }
+        }
+
+        self.append_cli_output(component_id, lines);
+    }
+
+    fn append_cli_output(&mut self, component_id: ComponentId, lines: Vec<String>) {
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Cli(cli)) = self.component_instances.get_mut(&component_id) {
+            cli.push_output_lines(lines);
+            if let Some((main_view, status_view)) = handles {
+                cli.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "CLI",
+                );
+            }
+        }
+    }
+
+    fn format_command_result_lines(result: &crate::commands::CommandResult) -> Vec<String> {
+        match result {
+            crate::commands::CommandResult::Opened { component_id, name } => {
+                vec![format!("Opened {} ({})", name, component_id)]
+            }
+            crate::commands::CommandResult::List { components } => {
+                let mut lines = vec![format!("Components ({})", components.len())];
+                for component in components {
+                    lines.push(format!(
+                        "- {} {} [{}]{}",
+                        component.id,
+                        component.name,
+                        component.component_type,
+                        if component.has_focus { " <focus>" } else { "" }
+                    ));
+                }
+                lines
+            }
+            crate::commands::CommandResult::FocusChanged { component_id } => {
+                vec![format!("Focus -> {}", component_id)]
+            }
+            crate::commands::CommandResult::Closed { component_id } => {
+                vec![format!("Closed {}", component_id)]
+            }
+            crate::commands::CommandResult::Status { summary } => {
+                vec![format!(
+                    "{} {} [{}] state={:?}",
+                    summary.id, summary.name, summary.component_type, summary.state
+                )]
+            }
+            crate::commands::CommandResult::FocusInfo { component_id } => match component_id {
+                Some(id) => vec![format!("Focused: {}", id)],
+                None => vec!["Focused: none".to_string()],
+            },
+            crate::commands::CommandResult::Success { message } => {
+                message.lines().map(|line| line.to_string()).collect()
+            }
+            crate::commands::CommandResult::Error { message } => {
+                vec![format!("Error: {}", message)]
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn execute_pipeline_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Pipeline(runtime)) =
+            self.component_instances.get_mut(&component_id)
+        {
+            let mut lines = vec![format!("pipeline> {}", trimmed)];
+            lines.extend(Self::run_pipeline_command(runtime, trimmed));
+            runtime.console.push_output_lines(lines);
+
+            if let Some((main_view, status_view)) = handles {
+                runtime.console.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "PIPELINE",
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn run_pipeline_command(runtime: &mut PipelineRuntime, command: &str) -> Vec<String> {
+        let mut parts = command.split_whitespace();
+        let Some(op) = parts.next() else {
+            return Vec::new();
+        };
+
+        match op {
+            "help" => vec![
+                "Pipeline commands:".to_string(),
+                "  run [service_id_u128|0xhex] [payload]".to_string(),
+                "  status".to_string(),
+            ],
+            "status" => vec!["Pipeline runtime online".to_string()],
+            "run" => {
+                let service_token = parts.next().unwrap_or("1");
+                let service_id = Self::parse_service_id_token(service_token)
+                    .unwrap_or_else(|| ServiceId::from_u128(1));
+                let payload_text = parts.collect::<Vec<&str>>().join(" ");
+                let payload_bytes = if payload_text.is_empty() {
+                    b"{}".to_vec()
+                } else {
+                    payload_text.into_bytes()
+                };
+
+                let input_schema = PayloadSchemaId::new("pipeline/input");
+                let output_schema = PayloadSchemaId::new("pipeline/output");
+                let stage = StageSpec::new(
+                    "stage1".to_string(),
+                    service_id,
+                    "invoke".to_string(),
+                    input_schema.clone(),
+                    output_schema.clone(),
+                );
+                let spec = PipelineSpec::new(
+                    "interactive-pipeline".to_string(),
+                    input_schema.clone(),
+                    output_schema,
+                )
+                .add_stage(stage);
+                let input =
+                    TypedPayload::new(input_schema, PayloadSchemaVersion::new(1, 0), payload_bytes);
+
+                match runtime.executor.execute(
+                    &mut runtime.kernel,
+                    &spec,
+                    input,
+                    CancellationToken::none(),
+                ) {
+                    Ok((output, trace)) => vec![format!(
+                        "Pipeline succeeded: schema={} bytes={} stages={}",
+                        output.schema_id.as_str(),
+                        output.data.len(),
+                        trace.entries.len()
+                    )],
+                    Err(err) => vec![format!("Pipeline failed: {}", err)],
+                }
+            }
+            other => vec![format!("Unknown pipeline command: {}", other)],
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn parse_service_id_token(token: &str) -> Option<ServiceId> {
+        let value = if let Some(hex) = token.strip_prefix("0x") {
+            u128::from_str_radix(hex, 16).ok()?
+        } else {
+            token.parse::<u128>().ok()?
+        };
+        Some(ServiceId::from_u128(value))
     }
 
     fn build_file_picker_breadcrumb(
@@ -2254,6 +2838,7 @@ fn remap_frame(mut frame: ViewFrame, new_view_id: ViewId, component_id: Componen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
     use packages::{ComponentSpec, PackageComponentType, PackageFormatVersion, PackageManifest};
 
     fn create_test_workspace() -> WorkspaceManager {
@@ -2264,6 +2849,52 @@ mod tests {
             0,
         );
         WorkspaceManager::new(workspace_identity)
+    }
+
+    fn key_event_for_char(ch: char) -> Option<KeyEvent> {
+        let (code, modifiers) = match ch {
+            'a' => (KeyCode::A, Modifiers::none()),
+            'b' => (KeyCode::B, Modifiers::none()),
+            'c' => (KeyCode::C, Modifiers::none()),
+            'd' => (KeyCode::D, Modifiers::none()),
+            'e' => (KeyCode::E, Modifiers::none()),
+            'f' => (KeyCode::F, Modifiers::none()),
+            'g' => (KeyCode::G, Modifiers::none()),
+            'h' => (KeyCode::H, Modifiers::none()),
+            'i' => (KeyCode::I, Modifiers::none()),
+            'j' => (KeyCode::J, Modifiers::none()),
+            'k' => (KeyCode::K, Modifiers::none()),
+            'l' => (KeyCode::L, Modifiers::none()),
+            'm' => (KeyCode::M, Modifiers::none()),
+            'n' => (KeyCode::N, Modifiers::none()),
+            'o' => (KeyCode::O, Modifiers::none()),
+            'p' => (KeyCode::P, Modifiers::none()),
+            'q' => (KeyCode::Q, Modifiers::none()),
+            'r' => (KeyCode::R, Modifiers::none()),
+            's' => (KeyCode::S, Modifiers::none()),
+            't' => (KeyCode::T, Modifiers::none()),
+            'u' => (KeyCode::U, Modifiers::none()),
+            'v' => (KeyCode::V, Modifiers::none()),
+            'w' => (KeyCode::W, Modifiers::none()),
+            'x' => (KeyCode::X, Modifiers::none()),
+            'y' => (KeyCode::Y, Modifiers::none()),
+            'z' => (KeyCode::Z, Modifiers::none()),
+            ' ' => (KeyCode::Space, Modifiers::none()),
+            _ => return None,
+        };
+        Some(KeyEvent::pressed(code, modifiers))
+    }
+
+    fn type_command(workspace: &mut WorkspaceManager, command: &str) {
+        for ch in command.chars() {
+            if let Some(event) = key_event_for_char(ch) {
+                workspace.route_input(&InputEvent::key(event));
+            }
+        }
+        workspace.route_input(&InputEvent::key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        )));
     }
 
     #[test]
@@ -2293,6 +2924,82 @@ mod tests {
         assert_eq!(component.component_type, ComponentType::Editor);
         assert_eq!(component.state, ComponentState::Running);
         assert!(component.focusable);
+    }
+
+    #[test]
+    fn test_cli_component_executes_workspace_commands() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
+
+        type_command(&mut workspace, "list");
+
+        let component = workspace.get_component(cli_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let lines = frame.content.line_count();
+        assert!(lines > 0);
+        assert!(frame
+            .content
+            .get_line(0)
+            .unwrap_or_default()
+            .contains("PandaGen CLI ready"));
+        let mut found_components_line = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Components (") {
+                    found_components_line = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_components_line);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_pipeline_component_runs_executor_path() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::PipelineExecutor,
+            "pipeline",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let pipeline_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(pipeline_id));
+
+        type_command(&mut workspace, "run");
+
+        let component = workspace.get_component(pipeline_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let mut found_outcome = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Pipeline failed:") || line.contains("Pipeline succeeded:") {
+                    found_outcome = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_outcome);
     }
 
     #[test]

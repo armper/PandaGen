@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["std"]
-std = []
+std = ["dep:services_pipeline_executor", "dep:pipeline", "dep:sim_kernel"]
 
 [dependencies]
 core_types = { workspace = true }
@@ -23,6 +23,7 @@ services_editor_vi = { workspace = true }
 services_file_picker = { workspace = true }
 services_command_palette = { workspace = true }
 services_settings = { workspace = true }
+services_pipeline_executor = { workspace = true, optional = true }
 input_types = { workspace = true }
 services_input = { workspace = true }
 view_types = { workspace = true }
@@ -30,6 +31,8 @@ services_view_host = { workspace = true }
 services_fs_view = { workspace = true }
 services_storage = { workspace = true }
 fs_view = { workspace = true }
+pipeline = { workspace = true, optional = true }
+sim_kernel = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

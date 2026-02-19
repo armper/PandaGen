@@ -34,3 +34,9 @@ This list is ordered by product/system value if completed, not by implementation
 
 11. [x] `services_workspace_manager/src/commands.rs:36` and `services_workspace_manager/src/commands.rs:539`
    Implemented: workspace command surface now supports boot profile management (`boot profile show|set|save`) with parser + formatter + execution handlers wired to `WorkspaceManager` boot-profile persistence APIs, plus command-registry/help updates and tests for parse, execute, and save/reload behavior.
+
+12. [x] `services_workspace_manager/src/lib.rs:1024` and `services_workspace_manager/src/lib.rs:1304`
+   Implemented: `ComponentType::Cli` and `ComponentType::PipelineExecutor` now create real interactive runtime instances (line input + view rendering + command/event processing) instead of `ComponentInstance::None`; CLI commands are parsed/executed through workspace command routing, and pipeline console drives real `PipelineExecutor::execute()` attempts with deterministic outcome logging.
+
+13. [ ] `services_workspace_manager/src/lib.rs` (pipeline runtime service loop)
+   Track next: wire pipeline console `run` to actual registered stage handlers (service-side response path) instead of the current no-handler execution path, so `run` can produce successful stage outputs and capability propagation traces.
