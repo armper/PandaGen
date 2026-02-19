@@ -28,3 +28,9 @@ This list is ordered by product/system value if completed, not by implementation
 
 9. [x] `cli_console/src/commands.rs:187`
    Implemented: `CommandHandler::cat` now performs real content reads via `JournaledStorage` transactions (`read_data`) and returns file contents instead of object IDs.
+
+10. [x] `services_workspace_manager/src/lib.rs:3320` and `services_workspace_manager/tests/runtime_tests.rs:140`
+   Implemented: `WorkspaceRuntime::new` now loads persisted `BootConfig` through `BootProfileManager` and applies startup behavior deterministically (`Workspace` = no auto-launch, `Editor` = open editor at boot file, `Kiosk` = launch tagged custom kiosk component), with integration tests validating storage-backed profile activation.
+
+11. [x] `services_workspace_manager/src/commands.rs:36` and `services_workspace_manager/src/commands.rs:539`
+   Implemented: workspace command surface now supports boot profile management (`boot profile show|set|save`) with parser + formatter + execution handlers wired to `WorkspaceManager` boot-profile persistence APIs, plus command-registry/help updates and tests for parse, execute, and save/reload behavior.

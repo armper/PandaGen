@@ -3,6 +3,7 @@
 //! This module provides a minimal command surface for workspace operations.
 //! It is NOT a shell - just component orchestration commands.
 
+use crate::boot_profile::BootProfile;
 use crate::{ComponentId, ComponentType, LaunchConfig, WorkspaceError, WorkspaceManager};
 use identity::{ExitReason, IdentityKind, TrustDomain};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ pub enum WorkspaceCommand {
     OpenFilePicker,
     /// Open recent files
     RecentFiles,
+    /// Boot profile: show current configuration
+    BootProfileShow,
+    /// Boot profile: set active profile (workspace/editor/kiosk)
+    BootProfileSet { profile: BootProfile },
+    /// Boot profile: persist current configuration
+    BootProfileSave,
 }
 
 /// Result of executing a workspace command
@@ -137,6 +144,9 @@ impl WorkspaceManager {
             WorkspaceCommand::SettingsSave => self.cmd_settings_save(),
             WorkspaceCommand::OpenFilePicker => self.cmd_open_file_picker(),
             WorkspaceCommand::RecentFiles => self.cmd_recent_files(),
+            WorkspaceCommand::BootProfileShow => self.cmd_boot_profile_show(),
+            WorkspaceCommand::BootProfileSet { profile } => self.cmd_boot_profile_set(profile),
+            WorkspaceCommand::BootProfileSave => self.cmd_boot_profile_save(),
         }
     }
 
@@ -431,6 +441,43 @@ impl WorkspaceManager {
             }
         }
     }
+
+    fn cmd_boot_profile_show(&self) -> CommandResult {
+        let config = self.boot_profile_config();
+        let profile = config.profile;
+        let editor_file = config.editor_file.as_deref().unwrap_or("<none>");
+        let kiosk_app = config.kiosk_app.as_deref().unwrap_or("<none>");
+        let message = format!(
+            "Boot profile: {}\nDescription: {}\nEditor file: {}\nKiosk app: {}\nAuto-start services: {}",
+            profile.name(),
+            profile.description(),
+            editor_file,
+            kiosk_app,
+            config.auto_start.join(", ")
+        );
+        CommandResult::Success { message }
+    }
+
+    fn cmd_boot_profile_set(&mut self, profile: BootProfile) -> CommandResult {
+        self.set_boot_profile(profile);
+        CommandResult::Success {
+            message: format!(
+                "Boot profile set to {} (run `boot profile save` to persist)",
+                profile.name()
+            ),
+        }
+    }
+
+    fn cmd_boot_profile_save(&mut self) -> CommandResult {
+        match self.save_boot_profile() {
+            Ok(()) => CommandResult::Success {
+                message: "Boot profile saved successfully".to_string(),
+            },
+            Err(err) => CommandResult::Error {
+                message: format!("Failed to save boot profile: {}", err),
+            },
+        }
+    }
 }
 
 /// Parses a command string into a WorkspaceCommand
@@ -524,6 +571,50 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
                 ))),
             }
         }
+        "boot" => {
+            if parts.len() < 2 {
+                return Err(WorkspaceError::InvalidCommand(
+                    "Usage: boot profile <show|set|save>".to_string(),
+                ));
+            }
+
+            match parts[1] {
+                "profile" => {
+                    if parts.len() < 3 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: boot profile <show|set|save>".to_string(),
+                        ));
+                    }
+
+                    match parts[2] {
+                        "show" => Ok(WorkspaceCommand::BootProfileShow),
+                        "set" => {
+                            if parts.len() < 4 {
+                                return Err(WorkspaceError::InvalidCommand(
+                                    "Usage: boot profile set <workspace|editor|kiosk>".to_string(),
+                                ));
+                            }
+                            let profile = BootProfile::parse(parts[3]).ok_or_else(|| {
+                                WorkspaceError::InvalidCommand(format!(
+                                    "Unknown boot profile: {}",
+                                    parts[3]
+                                ))
+                            })?;
+                            Ok(WorkspaceCommand::BootProfileSet { profile })
+                        }
+                        "save" => Ok(WorkspaceCommand::BootProfileSave),
+                        other => Err(WorkspaceError::InvalidCommand(format!(
+                            "Unknown boot profile command: {}",
+                            other
+                        ))),
+                    }
+                }
+                other => Err(WorkspaceError::InvalidCommand(format!(
+                    "Unknown boot command: {}",
+                    other
+                ))),
+            }
+        }
         unknown => Err(WorkspaceError::InvalidCommand(format!(
             "Unknown command: {}",
             unknown
@@ -587,12 +678,18 @@ fn format_command(command: &WorkspaceCommand) -> String {
         WorkspaceCommand::SettingsSave => "settings save".to_string(),
         WorkspaceCommand::OpenFilePicker => "open file".to_string(),
         WorkspaceCommand::RecentFiles => "recent files".to_string(),
+        WorkspaceCommand::BootProfileShow => "boot profile show".to_string(),
+        WorkspaceCommand::BootProfileSet { profile } => {
+            format!("boot profile set {}", profile.name().to_lowercase())
+        }
+        WorkspaceCommand::BootProfileSave => "boot profile save".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot_profile::BootProfile;
     use crate::IdentityMetadata;
 
     fn create_test_workspace() -> WorkspaceManager {
@@ -806,6 +903,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_boot_profile_show_command() {
+        let cmd = parse_command("boot profile show").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::BootProfileShow);
+    }
+
+    #[test]
+    fn test_parse_boot_profile_set_command() {
+        let cmd = parse_command("boot profile set editor").unwrap();
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::BootProfileSet {
+                profile: BootProfile::Editor
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_boot_profile_save_command() {
+        let cmd = parse_command("boot profile save").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::BootProfileSave);
+    }
+
+    #[test]
     fn test_execute_settings_list() {
         let mut workspace = create_test_workspace();
         let result = workspace.execute_command(WorkspaceCommand::SettingsList);
@@ -911,6 +1031,52 @@ mod tests {
             }
             _ => panic!("Expected Success result"),
         }
+    }
+
+    #[test]
+    fn test_execute_boot_profile_set_and_show() {
+        let mut workspace = create_test_workspace();
+
+        let set_result = workspace.execute_command(WorkspaceCommand::BootProfileSet {
+            profile: BootProfile::Kiosk,
+        });
+        match set_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile set to Kiosk"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        let show_result = workspace.execute_command(WorkspaceCommand::BootProfileShow);
+        match show_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile: Kiosk"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_boot_profile_save_persists_to_storage() {
+        use services_storage::JournaledStorage;
+
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(crate::EditorIoContext::new(JournaledStorage::new()));
+
+        workspace.execute_command(WorkspaceCommand::BootProfileSet {
+            profile: BootProfile::Editor,
+        });
+        let save_result = workspace.execute_command(WorkspaceCommand::BootProfileSave);
+        match save_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile saved"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        workspace.set_boot_profile(BootProfile::Workspace);
+        workspace.load_boot_profile().unwrap();
+        assert_eq!(workspace.boot_profile_config().profile, BootProfile::Editor);
     }
 
     #[test]

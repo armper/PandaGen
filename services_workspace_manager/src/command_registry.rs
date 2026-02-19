@@ -193,6 +193,54 @@ pub fn build_command_registry() -> CommandPalette {
         Box::new(|_args| Ok("Quit command - handled by workspace".to_string())),
     );
 
+    // Boot Profile - Show
+    palette.register_command(
+        CommandDescriptor::new(
+            "boot_profile_show",
+            "Boot Profile: Show",
+            "Show current boot profile configuration",
+            vec![
+                "boot".to_string(),
+                "profile".to_string(),
+                "show".to_string(),
+            ],
+        )
+        .with_category("System")
+        .with_prompt_pattern("boot profile show"),
+        Box::new(|_args| Ok("Boot profile show - handled by workspace".to_string())),
+    );
+
+    // Boot Profile - Set (parametric)
+    palette.register_command(
+        CommandDescriptor::new(
+            "boot_profile_set",
+            "Boot Profile: Set",
+            "Set boot profile (workspace/editor/kiosk)",
+            vec!["boot".to_string(), "profile".to_string(), "set".to_string()],
+        )
+        .with_category("System")
+        .requires_args()
+        .with_prompt_pattern("boot profile set "),
+        Box::new(|_args| Ok("Boot profile set - handled by workspace".to_string())),
+    );
+
+    // Boot Profile - Save
+    palette.register_command(
+        CommandDescriptor::new(
+            "boot_profile_save",
+            "Boot Profile: Save",
+            "Persist current boot profile configuration",
+            vec![
+                "boot".to_string(),
+                "profile".to_string(),
+                "save".to_string(),
+            ],
+        )
+        .with_category("System")
+        .with_prompt_pattern("boot profile save"),
+        Box::new(|_args| Ok("Boot profile save - handled by workspace".to_string())),
+    );
+
     palette
 }
 
@@ -283,5 +331,18 @@ mod tests {
 
         // Should have multiple help commands
         assert!(commands.len() >= 5);
+    }
+
+    #[test]
+    fn test_registry_has_boot_profile_commands() {
+        let registry = build_command_registry();
+        let commands = registry.filter_commands("boot profile");
+        assert!(commands
+            .iter()
+            .any(|c| c.id.as_str() == "boot_profile_show"));
+        assert!(commands.iter().any(|c| c.id.as_str() == "boot_profile_set"));
+        assert!(commands
+            .iter()
+            .any(|c| c.id.as_str() == "boot_profile_save"));
     }
 }

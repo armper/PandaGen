@@ -78,6 +78,7 @@ use view_types::{ViewFrame, ViewId, ViewKind};
 use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 
 // Re-export public types from modules
+use crate::boot_profile::{BootConfig, BootProfile, BootProfileManager};
 pub use commands::WorkspaceCommand;
 pub use help::HelpCategory;
 pub use platform::{
@@ -565,6 +566,8 @@ pub struct WorkspaceManager {
     settings_registry: SettingsRegistry,
     /// Current user ID for settings (default "default")
     current_user: String,
+    /// Boot profile manager for startup mode configuration
+    boot_profile_manager: BootProfileManager,
 }
 
 impl WorkspaceManager {
@@ -590,11 +593,13 @@ impl WorkspaceManager {
             command_palette: command_registry::build_command_registry(),
             settings_registry: services_settings::create_default_registry(),
             current_user: "default".to_string(),
+            boot_profile_manager: BootProfileManager::new(),
         }
     }
 
     /// Sets the editor I/O context used to configure new editor components.
-    pub fn set_editor_io_context(&mut self, context: EditorIoContext) {
+    pub fn set_editor_io_context(&mut self, mut context: EditorIoContext) {
+        let _ = self.boot_profile_manager.load(Some(&mut context.storage));
         self.editor_io_context = Some(context);
     }
 
@@ -1729,6 +1734,32 @@ impl WorkspaceManager {
         }
 
         Ok(())
+    }
+
+    /// Gets the current boot profile configuration.
+    pub fn boot_profile_config(&self) -> &BootConfig {
+        self.boot_profile_manager.config()
+    }
+
+    /// Sets the active boot profile in memory.
+    pub fn set_boot_profile(&mut self, profile: BootProfile) {
+        self.boot_profile_manager.set_profile(profile);
+    }
+
+    /// Loads boot profile from storage if available.
+    pub fn load_boot_profile(&mut self) -> Result<(), String> {
+        match self.editor_io_context.as_mut() {
+            Some(context) => self.boot_profile_manager.load(Some(&mut context.storage)),
+            None => self.boot_profile_manager.load(None),
+        }
+    }
+
+    /// Saves boot profile to storage if available.
+    pub fn save_boot_profile(&mut self) -> Result<(), String> {
+        match self.editor_io_context.as_mut() {
+            Some(context) => self.boot_profile_manager.save(Some(&mut context.storage)),
+            None => self.boot_profile_manager.save(None),
+        }
     }
 
     fn settings_object_id() -> ObjectId {
@@ -3297,6 +3328,8 @@ pub struct WorkspaceRuntime<P: WorkspacePlatform> {
     workspace: WorkspaceManager,
     /// Current tick number
     tick_count: u64,
+    /// Loaded boot configuration used to initialize startup behavior
+    boot_config: BootConfig,
 }
 
 impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
@@ -3310,20 +3343,40 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     pub fn new(
         platform: P,
         workspace_identity: IdentityMetadata,
-        initial_caps: WorkspaceCaps,
+        mut initial_caps: WorkspaceCaps,
     ) -> Self {
         let mut workspace = WorkspaceManager::new(workspace_identity);
+        let mut boot_profile_manager = BootProfileManager::new();
+        let boot_profile_load = match initial_caps.storage.as_mut() {
+            Some(storage_context) => boot_profile_manager.load(Some(&mut storage_context.storage)),
+            None => boot_profile_manager.load(None),
+        };
+        let boot_config = boot_profile_manager.config().clone();
 
         // Set editor I/O context if storage capability is provided
         if let Some(storage_context) = initial_caps.storage {
             workspace.set_editor_io_context(storage_context);
         }
 
-        Self {
+        let mut runtime = Self {
             platform,
             workspace,
             tick_count: 0,
+            boot_config,
+        };
+
+        if let Err(err) = boot_profile_load {
+            runtime
+                .workspace
+                .workspace_status_mut()
+                .set_last_action(format!(
+                    "Boot profile load failed: {}; defaults applied",
+                    err
+                ));
         }
+
+        runtime.apply_boot_profile();
+        runtime
     }
 
     /// Creates a new workspace runtime with policy
@@ -3400,5 +3453,70 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     /// Get the current tick count
     pub fn tick_count(&self) -> u64 {
         self.tick_count
+    }
+
+    /// Returns the loaded boot configuration.
+    pub fn boot_config(&self) -> &BootConfig {
+        &self.boot_config
+    }
+
+    /// Applies startup behavior from the loaded boot profile.
+    fn apply_boot_profile(&mut self) {
+        match self.boot_config.profile {
+            BootProfile::Workspace => {
+                self.workspace
+                    .workspace_status_mut()
+                    .set_last_action("Boot profile: workspace".to_string());
+            }
+            BootProfile::Editor => {
+                let mut args = Vec::new();
+                if let Some(path) = self
+                    .boot_config
+                    .editor_file
+                    .as_ref()
+                    .filter(|path| !path.is_empty())
+                {
+                    args.push(path.clone());
+                }
+
+                let result = self.workspace.execute_command(WorkspaceCommand::Open {
+                    component_type: ComponentType::Editor,
+                    args,
+                });
+                if let commands::CommandResult::Error { message } = result {
+                    self.workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile (editor) failed: {}", message));
+                }
+            }
+            BootProfile::Kiosk => {
+                let app_name = self
+                    .boot_config
+                    .kiosk_app
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "kiosk".to_string());
+
+                let config = LaunchConfig::new(
+                    ComponentType::Custom,
+                    format!("kiosk-{}", app_name),
+                    IdentityKind::Component,
+                    TrustDomain::user(),
+                )
+                .with_metadata("boot.profile", "kiosk")
+                .with_metadata("kiosk.app", app_name.clone());
+
+                match self.workspace.launch_component(config) {
+                    Ok(_) => self
+                        .workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile: kiosk ({})", app_name)),
+                    Err(err) => self
+                        .workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile (kiosk) failed: {}", err)),
+                }
+            }
+        }
     }
 }

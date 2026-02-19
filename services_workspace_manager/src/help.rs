@@ -108,6 +108,9 @@ impl HelpCategory {
              - reboot       — Restart system\n\
              - mem          — Show memory usage\n\
              - ticks        — Show scheduler ticks\n\
+             - boot profile show       — Show startup mode configuration\n\
+             - boot profile set <mode> — Set startup mode (workspace/editor/kiosk)\n\
+             - boot profile save       — Persist startup mode\n\
              \n\
              Tip: Press Ctrl+P to find commands faster"
             .to_string()
