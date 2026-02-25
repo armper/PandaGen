@@ -22,6 +22,7 @@
 //! - A monolithic "god shell"
 
 pub mod boot_profile;
+pub(crate) mod command_surface;
 pub mod command_registry;
 pub mod commands;
 pub mod help;
@@ -351,7 +352,7 @@ pub enum WorkspaceEvent {
 
 /// Workspace manager errors
 #[cfg_attr(feature = "std", derive(Error))]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceError {
     #[cfg_attr(feature = "std", error("Component not found: {0}"))]
     ComponentNotFound(ComponentId),
@@ -465,6 +466,28 @@ impl WorkspaceError {
         } else {
             format!("{} — Try: {}", message, actions.join(" | "))
         }
+    }
+}
+
+/// Structured failure for a single component within a package launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageLaunchFailure {
+    pub component_name: String,
+    pub component_type: ComponentType,
+    pub entry: String,
+    pub error: WorkspaceError,
+}
+
+/// Result report for launching a package.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackageLaunchReport {
+    pub created_component_ids: Vec<ComponentId>,
+    pub failures: Vec<PackageLaunchFailure>,
+}
+
+impl PackageLaunchReport {
+    pub fn is_success(&self) -> bool {
+        self.failures.is_empty()
     }
 }
 
@@ -907,6 +930,111 @@ impl PipelineRuntime {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomHostKind {
+    Generic,
+    Kiosk,
+    PackageEntry,
+}
+
+impl CustomHostKind {
+    fn label(self) -> &'static str {
+        match self {
+            CustomHostKind::Generic => "generic",
+            CustomHostKind::Kiosk => "kiosk",
+            CustomHostKind::PackageEntry => "package-entry",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CustomComponentDescriptor {
+    entry: String,
+    host_kind: CustomHostKind,
+}
+
+struct CustomComponentRuntime {
+    console: InlineConsole,
+    descriptor: CustomComponentDescriptor,
+    metadata_snapshot: Vec<(String, String)>,
+}
+
+impl CustomComponentRuntime {
+    fn new(
+        descriptor: CustomComponentDescriptor,
+        component_name: &str,
+        metadata: &HashMap<String, String>,
+    ) -> Self {
+        let mut metadata_snapshot: Vec<(String, String)> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        metadata_snapshot.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        Self {
+            console: InlineConsole::new(
+                "custom> ",
+                vec![
+                    format!("Custom component host ready: {}", component_name),
+                    format!(
+                        "entry={} handler={}",
+                        descriptor.entry,
+                        descriptor.host_kind.label()
+                    ),
+                    "Type `help` for custom host commands".to_string(),
+                ],
+            ),
+            descriptor,
+            metadata_snapshot,
+        }
+    }
+}
+
+struct CustomComponentRegistry {
+    handlers: HashMap<String, CustomHostKind>,
+}
+
+impl CustomComponentRegistry {
+    fn with_defaults() -> Self {
+        let mut handlers = HashMap::new();
+        handlers.insert("kiosk".to_string(), CustomHostKind::Kiosk);
+        handlers.insert("dashboard".to_string(), CustomHostKind::Kiosk);
+        handlers.insert("shell".to_string(), CustomHostKind::PackageEntry);
+        Self { handlers }
+    }
+
+    fn resolve(&self, metadata: &HashMap<String, String>) -> CustomComponentDescriptor {
+        if let Some(entry) = metadata.get("package.entry") {
+            let host_kind = self
+                .handlers
+                .get(entry)
+                .copied()
+                .unwrap_or(CustomHostKind::PackageEntry);
+            return CustomComponentDescriptor {
+                entry: entry.clone(),
+                host_kind,
+            };
+        }
+
+        if let Some(app) = metadata.get("kiosk.app") {
+            let host_kind = self
+                .handlers
+                .get(app)
+                .copied()
+                .unwrap_or(CustomHostKind::Kiosk);
+            return CustomComponentDescriptor {
+                entry: app.clone(),
+                host_kind,
+            };
+        }
+
+        CustomComponentDescriptor {
+            entry: "custom.generic".to_string(),
+            host_kind: CustomHostKind::Generic,
+        }
+    }
+}
+
 fn key_event_to_char(event: &KeyEvent) -> Option<char> {
     let shifted = event.modifiers.is_shift();
     match event.code {
@@ -975,7 +1103,10 @@ enum ComponentInstance {
     /// Pipeline executor component
     #[cfg(feature = "std")]
     Pipeline(Box<PipelineRuntime>),
+    /// Custom component host
+    Custom(Box<CustomComponentRuntime>),
     /// No instance (placeholder for components not yet implemented)
+    #[cfg(not(feature = "std"))]
     None,
 }
 
@@ -1040,6 +1171,8 @@ pub struct WorkspaceManager {
     breadcrumbs: ContextBreadcrumbs,
     /// Command palette for command discovery
     command_palette: services_command_palette::CommandPalette,
+    /// Registry for custom component host resolution
+    custom_component_registry: CustomComponentRegistry,
     /// Settings registry for user preferences
     settings_registry: SettingsRegistry,
     /// Current user ID for settings (default "default")
@@ -1069,6 +1202,7 @@ impl WorkspaceManager {
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
             command_palette: command_registry::build_command_registry(),
+            custom_component_registry: CustomComponentRegistry::with_defaults(),
             settings_registry: services_settings::create_default_registry(),
             current_user: "default".to_string(),
             boot_profile_manager: BootProfileManager::new(),
@@ -1294,7 +1428,22 @@ impl WorkspaceManager {
                     ComponentInstance::None
                 }
             }
-            ComponentType::Custom => ComponentInstance::None,
+            ComponentType::Custom => {
+                let descriptor = self.custom_component_registry.resolve(&component.metadata);
+                let mut runtime =
+                    CustomComponentRuntime::new(descriptor, &component.name, &component.metadata);
+                if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
+                    runtime.console.publish_views(
+                        &mut self.view_host,
+                        main_view,
+                        status_view,
+                        timestamp,
+                        component_id,
+                        "CUSTOM",
+                    );
+                }
+                ComponentInstance::Custom(Box::new(runtime))
+            }
         };
 
         // Record event
@@ -1342,16 +1491,20 @@ impl WorkspaceManager {
 
     /// Launches all components described in a package manifest.
     ///
-    /// Returns the list of created component IDs in manifest order.
+    /// Returns created component IDs and per-component launch failures.
     pub fn launch_package(
         &mut self,
         manifest: &PackageManifest,
-    ) -> Result<Vec<ComponentId>, WorkspaceError> {
+    ) -> Result<PackageLaunchReport, WorkspaceError> {
         let launch_plan = ComponentLoader::build_launch_plan(manifest).map_err(|err| {
             WorkspaceError::InvalidCommand(format!("Package manifest error: {}", err))
         })?;
 
-        let mut created = Vec::with_capacity(launch_plan.len());
+        let mut report = PackageLaunchReport {
+            created_component_ids: Vec::with_capacity(launch_plan.len()),
+            failures: Vec::new(),
+        };
+
         for spec in launch_plan {
             let component_type = match spec.component_type {
                 PackageComponentType::Editor => ComponentType::Editor,
@@ -1359,6 +1512,8 @@ impl WorkspaceManager {
                 PackageComponentType::PipelineExecutor => ComponentType::PipelineExecutor,
                 PackageComponentType::Custom => ComponentType::Custom,
             };
+            let component_name = spec.name.clone();
+            let component_entry = spec.entry.clone();
 
             let mut config = LaunchConfig::new(
                 component_type,
@@ -1369,7 +1524,7 @@ impl WorkspaceManager {
             .with_focusable(spec.focusable)
             .with_metadata("package.name", manifest.name.clone())
             .with_metadata("package.version", manifest.version.clone())
-            .with_metadata("package.entry", spec.entry);
+            .with_metadata("package.entry", component_entry.clone());
 
             if let Some(budget) = spec.budget {
                 config = config.with_budget(budget);
@@ -1379,10 +1534,18 @@ impl WorkspaceManager {
                 config = config.with_metadata(key, value);
             }
 
-            created.push(self.launch_component(config)?);
+            match self.launch_component(config) {
+                Ok(component_id) => report.created_component_ids.push(component_id),
+                Err(error) => report.failures.push(PackageLaunchFailure {
+                    component_name,
+                    component_type,
+                    entry: component_entry,
+                    error,
+                }),
+            }
         }
 
-        Ok(created)
+        Ok(report)
     }
 
     /// Grants focus to a component
@@ -1911,6 +2074,7 @@ impl WorkspaceManager {
         // Get timestamp before borrowing instances mutably
         let timestamp = self.next_timestamp();
         let mut pending_cli_command: Option<String> = None;
+        let mut pending_custom_command: Option<String> = None;
         #[cfg(feature = "std")]
         let mut pending_pipeline_command: Option<String> = None;
 
@@ -2011,6 +2175,23 @@ impl WorkspaceManager {
                         }
                     }
                 }
+                ComponentInstance::Custom(runtime) => {
+                    pending_custom_command = runtime.console.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            runtime.console.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "CUSTOM",
+                            );
+                        }
+                    }
+                }
                 #[cfg(feature = "std")]
                 ComponentInstance::Pipeline(runtime) => {
                     pending_pipeline_command = runtime.console.process_input(event.clone());
@@ -2029,6 +2210,7 @@ impl WorkspaceManager {
                         }
                     }
                 }
+                #[cfg(not(feature = "std"))]
                 ComponentInstance::None => {
                     // No instance to process
                 }
@@ -2037,6 +2219,9 @@ impl WorkspaceManager {
 
         if let Some(command) = pending_cli_command {
             self.execute_cli_component_command(component_id, command);
+        }
+        if let Some(command) = pending_custom_command {
+            self.execute_custom_component_command(component_id, command);
         }
         #[cfg(feature = "std")]
         if let Some(command) = pending_pipeline_command {
@@ -2053,17 +2238,6 @@ impl WorkspaceManager {
         }
 
         let mut lines = vec![format!("pg> {}", trimmed)];
-        if trimmed == "help" {
-            lines.extend(vec![
-                "Workspace commands:".to_string(),
-                "  open <editor|cli|pipeline> [args...]".to_string(),
-                "  list | next | prev | focus <comp:id>".to_string(),
-                "  settings <list|set|reset|save> ...".to_string(),
-                "  boot profile <show|set|save>".to_string(),
-            ]);
-            self.append_cli_output(component_id, lines);
-            return;
-        }
 
         match crate::commands::parse_command(trimmed) {
             Ok(parsed) => {
@@ -2097,6 +2271,86 @@ impl WorkspaceManager {
                     "CLI",
                 );
             }
+        }
+    }
+
+    fn execute_custom_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Custom(runtime)) = self.component_instances.get_mut(&component_id)
+        {
+            let mut lines = vec![format!("custom> {}", trimmed)];
+            lines.extend(Self::run_custom_host_command(runtime, trimmed));
+            runtime.console.push_output_lines(lines);
+
+            if let Some((main_view, status_view)) = handles {
+                runtime.console.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "CUSTOM",
+                );
+            }
+        }
+    }
+
+    fn run_custom_host_command(runtime: &CustomComponentRuntime, command: &str) -> Vec<String> {
+        let mut parts = command.split_whitespace();
+        let Some(op) = parts.next() else {
+            return Vec::new();
+        };
+
+        match op {
+            "help" => vec![
+                "Custom host commands:".to_string(),
+                "  status".to_string(),
+                "  meta".to_string(),
+                "  ping [payload]".to_string(),
+            ],
+            "status" => vec![format!(
+                "Custom host online: handler={} entry={} metadata={}",
+                runtime.descriptor.host_kind.label(),
+                runtime.descriptor.entry,
+                runtime.metadata_snapshot.len()
+            )],
+            "meta" => {
+                if runtime.metadata_snapshot.is_empty() {
+                    vec!["No metadata entries".to_string()]
+                } else {
+                    let mut lines = vec![format!(
+                        "Metadata entries ({})",
+                        runtime.metadata_snapshot.len()
+                    )];
+                    for (key, value) in &runtime.metadata_snapshot {
+                        lines.push(format!("  {}={}", key, value));
+                    }
+                    lines
+                }
+            }
+            "ping" => {
+                let payload = parts.collect::<Vec<&str>>().join(" ");
+                if payload.is_empty() {
+                    vec!["pong".to_string()]
+                } else {
+                    vec![format!(
+                        "pong [{}] via {}",
+                        payload,
+                        runtime.descriptor.host_kind.label()
+                    )]
+                }
+            }
+            other => vec![format!("Unknown custom command: {}", other)],
         }
     }
 
@@ -3316,6 +3570,91 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_component_launches_runtime_host() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Custom,
+            "custom-widget",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_metadata("package.entry", "widgets/clock");
+        let custom_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(custom_id));
+
+        let component = workspace.get_component(custom_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+
+        let mut found_ready = false;
+        let mut found_entry = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Custom component host ready") {
+                    found_ready = true;
+                }
+                if line.contains("entry=widgets/clock handler=package-entry") {
+                    found_entry = true;
+                }
+            }
+        }
+        assert!(found_ready);
+        assert!(found_entry);
+    }
+
+    #[test]
+    fn test_custom_component_host_handles_commands() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Custom,
+            "kiosk-dashboard",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_metadata("kiosk.app", "dashboard");
+        let custom_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(custom_id));
+
+        type_command(&mut workspace, "status");
+        type_command(&mut workspace, "meta");
+        type_command(&mut workspace, "ping hello");
+
+        let component = workspace.get_component(custom_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+
+        let mut found_status = false;
+        let mut found_meta = false;
+        let mut found_ping = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Custom host online: handler=kiosk") {
+                    found_status = true;
+                }
+                if line.contains("kiosk.app=dashboard") {
+                    found_meta = true;
+                }
+                if line.contains("pong [hello] via kiosk") {
+                    found_ping = true;
+                }
+            }
+        }
+        assert!(found_status);
+        assert!(found_meta);
+        assert!(found_ping);
+    }
+
+    #[test]
     fn test_launch_package_components() {
         let mut workspace = create_test_workspace();
 
@@ -3345,10 +3684,12 @@ mod tests {
             ],
         };
 
-        let ids = workspace.launch_package(&manifest).unwrap();
-        assert_eq!(ids.len(), 2);
+        let report = workspace.launch_package(&manifest).unwrap();
+        assert!(report.is_success());
+        assert_eq!(report.created_component_ids.len(), 2);
+        assert!(report.failures.is_empty());
 
-        let first = workspace.get_component(ids[0]).unwrap();
+        let first = workspace.get_component(report.created_component_ids[0]).unwrap();
         assert_eq!(
             first.metadata.get("package.name"),
             Some(&"demo".to_string())
@@ -3357,6 +3698,77 @@ mod tests {
             first.metadata.get("package.entry"),
             Some(&"services_editor_vi".to_string())
         );
+    }
+
+    #[test]
+    fn test_launch_package_reports_partial_failures() {
+        use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+
+        struct DenyCliLaunchPolicy;
+        impl PolicyEngine for DenyCliLaunchPolicy {
+            fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+                if event == PolicyEvent::OnSpawn
+                    && context
+                        .target_identity
+                        .as_ref()
+                        .map(|target| target.name == "CLI")
+                        .unwrap_or(false)
+                {
+                    PolicyDecision::deny("CLI disabled by policy")
+                } else {
+                    PolicyDecision::allow()
+                }
+            }
+
+            fn name(&self) -> &str {
+                "DenyCliLaunchPolicy"
+            }
+        }
+
+        let workspace_identity = IdentityMetadata::new(
+            IdentityKind::Service,
+            TrustDomain::core(),
+            "test-workspace",
+            0,
+        );
+        let mut workspace = WorkspaceManager::new(workspace_identity)
+            .with_policy(Box::new(DenyCliLaunchPolicy));
+
+        let manifest = PackageManifest {
+            format_version: PackageFormatVersion::new(1, 0),
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            components: vec![
+                ComponentSpec {
+                    id: "editor".to_string(),
+                    name: "Editor".to_string(),
+                    component_type: PackageComponentType::Editor,
+                    entry: "services_editor_vi".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+                ComponentSpec {
+                    id: "cli".to_string(),
+                    name: "CLI".to_string(),
+                    component_type: PackageComponentType::Cli,
+                    entry: "cli_console".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+            ],
+        };
+
+        let report = workspace.launch_package(&manifest).unwrap();
+        assert_eq!(report.created_component_ids.len(), 1);
+        assert_eq!(report.failures.len(), 1);
+
+        let failure = &report.failures[0];
+        assert_eq!(failure.component_name, "CLI");
+        assert_eq!(failure.component_type, ComponentType::Cli);
+        assert_eq!(failure.entry, "cli_console");
+        assert!(matches!(failure.error, WorkspaceError::LaunchDenied { .. }));
     }
 
     #[test]

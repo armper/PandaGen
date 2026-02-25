@@ -47,5 +47,41 @@ This list is ordered by product/system value if completed, not by implementation
 15. [x] `services_workspace_manager/src/lib.rs:1110` and `services_workspace_manager/src/lib.rs:1284`
    Implemented: `launch_component()` now validates `FilePicker` launch prerequisites up-front and fails fast with `WorkspaceError::MissingLaunchContext` when storage/root context is missing, preventing partial component/view creation and replacing `ComponentInstance::None` fallback behavior; command-path feedback now surfaces actionable recovery hints.
 
-16. [ ] `services_workspace_manager/src/lib.rs:1307` and `services_workspace_manager/src/lib.rs:1342`
-   Track next: make `launch_package()` resilient to partial launch failure by returning created component IDs plus structured per-component errors (instead of aborting at first failure), so package startup can degrade gracefully when optional components are unavailable.
+16. [x] `services_workspace_manager/src/lib.rs:1368` and `services_workspace_manager/src/lib.rs:1411`
+   Implemented: `launch_package()` now returns `PackageLaunchReport` with `created_component_ids` plus structured `PackageLaunchFailure` entries, so component failures are recorded per-spec and package startup degrades gracefully instead of aborting at first error.
+
+17. [x] `services_workspace_manager/src/lib.rs:1430` and `services_workspace_manager/src/lib.rs:1105`
+   Implemented: `ComponentType::Custom` now resolves through a typed `CustomComponentRegistry` into a real interactive `CustomComponentRuntime` host (`ComponentInstance::Custom`) with rendered views, command handling (`status|meta|ping`), and metadata-aware handler selection instead of inert `None` shells.
+
+18. [x] `services_workspace_manager/src/commands.rs:505` and `services_workspace_manager/src/lib.rs:2239`
+   Implemented: command parsing/help now supports `open custom <entry>`; parser validates required entry, command execution maps entry into explicit custom metadata routing (`package.entry` + `custom.entry`), and CLI help advertises the custom launch pattern.
+
+19. [x] `services_workspace_manager/src/command_registry.rs:11` and `services_workspace_manager/src/lib.rs:1806`
+   Implemented: command palette registry now includes `Open Custom` (`open_custom`) as a first-class parametric descriptor with workspace category, keybinding hint, and prompt pattern (`open custom `), so command-mode previews expose custom-host launch discovery alongside existing open commands.
+
+20. [x] `services_workspace_manager/src/command_registry.rs:14` and `services_workspace_manager/src/lib.rs:1806`
+   Implemented: command palette registry now includes first-class `Open CLI` (`open_cli`) and `Open Pipeline` (`open_pipeline`) launch descriptors, and `open_editor` prompt metadata now reflects optional args (`requires_args = false`) while retaining `open editor ` invocation hints; launch-command prompt patterns are now aligned with accepted parser syntax and covered by registry tests.
+
+21. [x] `services_workspace_manager/src/commands.rs:506` and `services_workspace_manager/src/workspace_status.rs:246`
+   Implemented: command-surface parity now includes executable aliases for non-launch helpers (`recent`, `recent files`, `open recent`, `open file`, `open file-picker`), prompt validation now mirrors parser semantics (including `open custom` prefix/complete behavior), and suggestion output now advertises only executable helper variants; command-palette registry parity was tightened with explicit `open_file_picker` and canonical `recent` prompt patterns.
+
+22. [x] `services_workspace_manager/src/commands.rs:506` and `services_workspace_manager/src/command_registry.rs:9`
+   Implemented: introduced shared command-surface specs in `services_workspace_manager/src/command_surface.rs` (launch targets, helper aliases, palette metadata, suggestion specs, and validation prefix groups), and wired parser (`parse_command`), command-palette registry descriptor generation, and prompt suggestion/validation (`workspace_status`) to consume that single source of truth for invocation patterns, aliases, arg requirements, and categories.
+
+23. [x] `services_workspace_manager/src/command_surface.rs:1` and `services_workspace_manager/src/command_registry.rs:13`
+   Implemented: migrated all remaining non-launch palette descriptors (`help*`, `save`, `quit`, `boot profile*`, `list`, navigation, `close`) into shared `NON_LAUNCH_PALETTE_SPECS` and removed manual registration blocks, making command-palette registry composition fully data-driven from command-surface specs.
+
+24. [x] `services_workspace_manager/src/commands.rs:510` and `services_workspace_manager/src/command_surface.rs:29`
+   Implemented: extended shared command-surface grammar with non-launch executable rules (`help` topic aliases + `focus|close|status` component-id requirements), then wired parser and prompt validator to consume those grammar functions; CLI `help` now executes through parsed `WorkspaceCommand::Help` and category content instead of a hardcoded local output block.
+
+25. [x] `services_workspace_manager/src/command_surface.rs:146` and `services_workspace_manager/src/help.rs:45`
+   Implemented: `HelpCategory::workspace_help()` now generates its command section from shared command-surface descriptors and grammar (`LAUNCH_COMMAND_SPECS`, `HELPER_COMMAND_SPECS`, `NON_LAUNCH_PALETTE_SPECS`, `COMPONENT_ID_COMMAND_SPECS`, help-topic grammar), including alias/usage forms; parser help-usage errors also derive from shared help-topic grammar.
+
+26. [x] `services_workspace_manager/src/help.rs:24` and `services_workspace_manager/src/command_surface.rs:356`
+   Implemented: `Overview` and `System` help sections now render from shared command-surface metadata/grammar (`HELP_TOPIC_SPECS`, `help_usage_pattern()`, and `NON_LAUNCH_PALETTE_SPECS` system entries), removing stale static entries (`halt`, `reboot`, `mem`, `ticks`) and keeping docs synchronized with available command grammar.
+
+27. [x] `services_workspace_manager/src/help.rs:24` and `services_workspace_manager/src/command_surface.rs:493`
+   Implemented: eliminated help-topic parsing duplication by making `HelpCategory::parse()` delegate to shared `command_surface::parse_help_topic()` resolution, while `parse_help_topic()` remains canonical for alias decoding (including case-insensitive alias support and explicit `overview` mapping).
+
+28. [ ] `services_workspace_manager/src/command_surface.rs:146` and `services_workspace_manager/src/workspace_status.rs:243`
+   Track next: derive all static prompt suggestions (`list`, `next`, `prev`, `close <id>`) from shared command-surface descriptors/grammar so `generate_suggestions()` no longer contains hand-maintained non-help/non-open literals.
