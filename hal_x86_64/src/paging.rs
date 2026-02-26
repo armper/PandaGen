@@ -307,7 +307,12 @@ impl PageTableManager {
     /// Creates a new page table manager
     pub fn new() -> Self {
         Self {
-            // Start allocating at 1MB to avoid low memory
+            // Start allocating at 1MB to avoid low memory regions on x86:
+            // - 0x00000-0x003FF: Real mode IVT (Interrupt Vector Table)
+            // - 0x00400-0x004FF: BIOS Data Area
+            // - 0x00500-0x9FFFF: Conventional memory (DOS/BIOS)
+            // - 0xA0000-0xFFFFF: Video memory and ROM
+            // Starting at 1MB (0x100000) is safe for page table storage
             next_phys_addr: 0x10_0000,
             tables: alloc::collections::BTreeMap::new(),
         }

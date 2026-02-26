@@ -232,13 +232,20 @@ impl AddressSpaceManager {
 
         // Map region in hardware page tables if bridge is enabled
         if let Some(bridge) = &mut self.page_table_bridge {
-            // For simplicity, map at a fixed virtual address based on region_id hash
+            // Simplified virtual address allocation for Phase 170
             // Real implementation would use a proper virtual address allocator
+            //
+            // Layout (user space, lower half):
+            // - 0x10000: Base offset (64 KiB, avoids NULL and low memory)
+            // - Hash region_id to get a slot (0-4095)
+            // - Each slot is 1 MiB apart
+            // - Max addressable: 0x10000 + 4095 * 0x100000 = ~4 GiB
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
             region_id.hash(&mut hasher);
-            let virtual_base = 0x10000 + ((hasher.finish() % 0x1000) * 0x100000);
+            let slot = hasher.finish() % 0x1000; // 4096 possible slots
+            let virtual_base = 0x10000 + (slot * 0x100000); // 1 MiB per slot
             let _ = bridge.map_region(
                 space_cap.space_id,
                 region_id,
