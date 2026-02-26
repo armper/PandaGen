@@ -31,7 +31,8 @@ pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;
 pub use paging::{
     AddressSpaceHandle, PageTable, PageTableEntry, PageTableFlags, PageTableManager, Permissions,
-    PhysAddr, VirtAddr, ENTRIES_PER_TABLE, PAGE_SIZE, PAGE_TABLE_LEVELS,
+    PhysAddr, VirtAddr, ENTRIES_PER_TABLE, KERNEL_SPACE_START, PAGE_SIZE, PAGE_TABLE_LEVELS,
+    USER_SPACE_END,
 };
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
 pub use tick::{KernelTickCounter, TickSource};

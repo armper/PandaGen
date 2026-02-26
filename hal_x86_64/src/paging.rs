@@ -16,6 +16,12 @@
 //! - `AddressSpace` → CR3 (page table root)
 //! - `MemoryRegion` → page table entries
 //! - `MemoryPerms` → page table flags (R/W/X)
+//!
+//! ## Memory Layout
+//!
+//! Following x86_64 canonical address conventions:
+//! - Kernel space: `0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF` (higher half)
+//! - User space:   `0x0000_0000_0000_0000 - 0x0000_7FFF_FFFF_FFFF` (lower half)
 
 extern crate alloc;
 
@@ -29,6 +35,12 @@ pub const PAGE_TABLE_LEVELS: usize = 4;
 
 /// Entries per page table
 pub const ENTRIES_PER_TABLE: usize = 512;
+
+/// Kernel space start (higher half)
+pub const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+
+/// User space end (lower half, canonical)
+pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
 /// Physical address type (explicit to avoid confusion)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,6 +89,16 @@ impl VirtAddr {
     /// Checks if the address is page-aligned
     pub const fn is_aligned(self) -> bool {
         self.0 % PAGE_SIZE as u64 == 0
+    }
+
+    /// Checks if this is a kernel address (higher half)
+    pub const fn is_kernel(self) -> bool {
+        self.0 >= KERNEL_SPACE_START
+    }
+
+    /// Checks if this is a user address (lower half, canonical)
+    pub const fn is_user(self) -> bool {
+        self.0 <= USER_SPACE_END
     }
 
     /// Extracts the PML4 index (bits 39-47)
@@ -487,6 +509,30 @@ mod tests {
         assert_eq!(addr.pt_index(), 0x189);
         // Bits 0-11: page offset
         assert_eq!(addr.page_offset(), 0xABC);
+    }
+
+    #[test]
+    fn test_virt_addr_kernel_user_separation() {
+        // User space addresses
+        let user_low = VirtAddr::new(0x0000_0000_0000_1000);
+        let user_high = VirtAddr::new(0x0000_7FFF_FFFF_F000);
+        assert!(user_low.is_user());
+        assert!(!user_low.is_kernel());
+        assert!(user_high.is_user());
+        assert!(!user_high.is_kernel());
+
+        // Kernel space addresses
+        let kernel_low = VirtAddr::new(0xFFFF_8000_0000_0000);
+        let kernel_high = VirtAddr::new(0xFFFF_FFFF_FFFF_F000);
+        assert!(kernel_low.is_kernel());
+        assert!(!kernel_low.is_user());
+        assert!(kernel_high.is_kernel());
+        assert!(!kernel_high.is_user());
+
+        // Non-canonical addresses (gap in the middle)
+        let non_canonical = VirtAddr::new(0x0000_8000_0000_0000);
+        assert!(!non_canonical.is_user());
+        assert!(!non_canonical.is_kernel());
     }
 
     #[test]
