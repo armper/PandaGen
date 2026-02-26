@@ -124,6 +124,8 @@ pub struct AddressSpaceManager {
     current_space: Option<AddressSpaceId>,
     /// Audit log (test-only)
     audit_log: AddressSpaceAuditLog,
+    /// Page table bridge (optional hardware integration)
+    page_table_bridge: Option<crate::page_table_bridge::PageTableBridge>,
 }
 
 impl AddressSpaceManager {
@@ -137,6 +139,21 @@ impl AddressSpaceManager {
             region_caps: HashMap::new(),
             current_space: None,
             audit_log: AddressSpaceAuditLog::new(),
+            page_table_bridge: None,
+        }
+    }
+
+    /// Creates a new address space manager with page table integration
+    pub fn with_page_tables(mode: crate::page_table_bridge::PageTableMode) -> Self {
+        Self {
+            spaces: HashMap::new(),
+            execution_to_space: HashMap::new(),
+            next_cap_id: 1,
+            space_caps: HashMap::new(),
+            region_caps: HashMap::new(),
+            current_space: None,
+            audit_log: AddressSpaceAuditLog::new(),
+            page_table_bridge: Some(crate::page_table_bridge::PageTableBridge::new(mode)),
         }
     }
 
@@ -153,6 +170,11 @@ impl AddressSpaceManager {
 
         self.spaces.insert(space_id, space);
         self.execution_to_space.insert(execution_id, space_id);
+
+        // Create hardware page tables if bridge is enabled
+        if let Some(bridge) = &mut self.page_table_bridge {
+            let _ = bridge.create_page_table(space_id);
+        }
 
         // Grant capability to the execution
         let cap_id = self.next_cap_id;
@@ -207,6 +229,31 @@ impl AddressSpaceManager {
 
         // Add region to space
         space.add_region(region)?;
+
+        // Map region in hardware page tables if bridge is enabled
+        if let Some(bridge) = &mut self.page_table_bridge {
+            // Simplified virtual address allocation for Phase 170
+            // Real implementation would use a proper virtual address allocator
+            //
+            // Layout (user space, lower half):
+            // - 0x10000: Base offset (64 KiB, avoids NULL and low memory)
+            // - Hash region_id to get a slot (0-4095)
+            // - Each slot is 1 MiB apart
+            // - Max addressable: 0x10000 + 4095 * 0x100000 = ~4 GiB
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            region_id.hash(&mut hasher);
+            let slot = hasher.finish() % 0x1000; // 4096 possible slots
+            let virtual_base = 0x10000 + (slot * 0x100000); // 1 MiB per slot
+            let _ = bridge.map_region(
+                space_cap.space_id,
+                region_id,
+                virtual_base,
+                size_bytes,
+                permissions,
+            );
+        }
 
         // Create region capability
         let cap_id = self.next_cap_id;

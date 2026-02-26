@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_file_not_found() {
-        let fs = BareMetalFilesystem::new().unwrap();
+        let mut fs = BareMetalFilesystem::new().unwrap();
         let result = fs.read_file_by_name("nonexistent.txt");
         assert!(result.is_err());
     }

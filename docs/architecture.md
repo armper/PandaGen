@@ -359,28 +359,34 @@ In POSIX, address spaces are attributes of processes. In PandaGen, they're first
 - Can be audited and inspected
 - Prepare for future features (address space sharing for IPC buffers)
 
-**Hardware Integration Seam** (Future):
+**Hardware Integration Seam** (Phase 170):
 
-Though not implemented yet, Phase 24 provides clear mapping to MMU:
+Phase 170 implements the foundation for hardware MMU integration:
 
-| Simulation Concept | Hardware Mapping |
-|--------------------|------------------|
-| AddressSpace | Page table (CR3 on x86) |
-| MemoryRegion | Page table entries for range |
-| MemoryPerms | MMU flags (R/W/X bits) |
-| MemoryBacking::Anonymous | Normal RAM pages |
-| MemoryBacking::Shared | Shared memory pages |
-| MemoryBacking::Device | Memory-mapped I/O |
-| access_region() check | Page fault handler validation |
-| activate_address_space() | Context switch + CR3 load |
+| Simulation Concept | Hardware Mapping | Implementation Status |
+|--------------------|------------------|----------------------|
+| AddressSpace | Page table (CR3 on x86) | ✅ AddressSpaceHandle |
+| MemoryRegion | Page table entries for range | ✅ PageTable + entries |
+| MemoryPerms | MMU flags (R/W/X bits) | ✅ PageTableFlags |
+| MemoryBacking::Anonymous | Normal RAM pages | ✅ PageTableManager |
+| MemoryBacking::Shared | Shared memory pages | ⏳ Future |
+| MemoryBacking::Device | Memory-mapped I/O | ⏳ Future |
+| access_region() check | Page fault handler validation | ⏳ Future |
+| activate_address_space() | Context switch + CR3 load | ⏳ Future |
+
+**Page Table Bridge** (Phase 170):
+- `PageTableBridge` connects logical AddressSpace to hardware page tables
+- Optional integration: disabled by default for testing
+- When enabled: creates actual page table structures on address space operations
+- Memory layout: Kernel (0xFFFF_8000_0000_0000+), User (0x0000_0000_0000_0000-0x0000_7FFF_FFFF_FFFF)
 
 **Future Hardware Integration**:
-1. Map AddressSpace to page table root
-2. Map MemoryRegion to page table entries
-3. Map MemoryPerms to MMU protection bits
-4. Trigger page faults on illegal access
-5. Validate access via MemoryRegionCap in fault handler
-6. Keep simulation and hardware semantics identical
+1. ✅ Map AddressSpace to page table root (Phase 170)
+2. ✅ Map MemoryRegion to page table entries (Phase 170)
+3. ✅ Map MemoryPerms to MMU protection bits (Phase 170)
+4. ⏳ Trigger page faults on illegal access (Future)
+5. ⏳ Validate access via MemoryRegionCap in fault handler (Future)
+6. ⏳ Keep simulation and hardware semantics identical (Future)
 
 **Integration with Previous Phases**:
 - **Phase 1-6**: Memory operations respect capability model

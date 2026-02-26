@@ -34,7 +34,7 @@ use core::mem::MaybeUninit;
 use core::str;
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-#[cfg(all(debug_assertions, not(test), target_os = "none"))]
+#[cfg(not(test))]
 use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;
