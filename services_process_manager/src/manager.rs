@@ -66,6 +66,7 @@ impl ProcessManager {
         let task_desc = TaskDescriptor {
             name: descriptor.name.clone(),
             capabilities: descriptor.capabilities.clone(),
+            priority: None,
         };
         let handle = kernel.spawn_task(task_desc)?;
         let service_handle = ServiceHandle::new(handle.task_id, LifecycleState::Running);
@@ -148,6 +149,7 @@ impl ProcessManager {
         let task_desc = TaskDescriptor {
             name: service.descriptor.name.clone(),
             capabilities: service.descriptor.capabilities.clone(),
+            priority: None,
         };
         let handle = kernel.spawn_task(task_desc)?;
         service.handle = ServiceHandle::new(handle.task_id, LifecycleState::Running);

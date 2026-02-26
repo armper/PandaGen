@@ -2221,7 +2221,11 @@ impl KernelApiV0 for SimulatedKernel {
         name: String,
         capabilities: Vec<Cap<()>>,
     ) -> Result<TaskId, KernelError> {
-        let descriptor = TaskDescriptor { name, capabilities };
+        let descriptor = TaskDescriptor {
+            name,
+            capabilities,
+            priority: None,
+        };
         let handle = self.spawn_task(descriptor)?;
         Ok(handle.task_id)
     }
