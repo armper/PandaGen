@@ -738,7 +738,10 @@ mod tests {
             validate_command("open editor"),
             PromptValidation::ValidComplete
         );
-        assert_eq!(validate_command("open custom"), PromptValidation::ValidPrefix);
+        assert_eq!(
+            validate_command("open custom"),
+            PromptValidation::ValidPrefix
+        );
     }
 
     #[test]

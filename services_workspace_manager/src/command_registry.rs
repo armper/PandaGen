@@ -4,7 +4,7 @@
 //! Single source of truth for all workspace commands.
 
 use crate::command_surface::{
-    HELPER_COMMAND_SPECS, LAUNCH_COMMAND_SPECS, NON_LAUNCH_PALETTE_SPECS, PaletteDescriptorSpec,
+    PaletteDescriptorSpec, HELPER_COMMAND_SPECS, LAUNCH_COMMAND_SPECS, NON_LAUNCH_PALETTE_SPECS,
 };
 use services_command_palette::{CommandDescriptor, CommandPalette};
 
@@ -98,9 +98,7 @@ mod tests {
         let registry = build_command_registry();
         let commands = registry.filter_commands("file picker");
 
-        assert!(commands
-            .iter()
-            .any(|c| c.id.as_str() == "open_file_picker"));
+        assert!(commands.iter().any(|c| c.id.as_str() == "open_file_picker"));
     }
 
     #[test]
@@ -117,7 +115,10 @@ mod tests {
         assert_eq!(open_editor.prompt_pattern, Some("open editor ".to_string()));
 
         // Check open_cli prompt mirrors parser syntax: args optional.
-        let open_cli = commands.iter().find(|c| c.id.as_str() == "open_cli").unwrap();
+        let open_cli = commands
+            .iter()
+            .find(|c| c.id.as_str() == "open_cli")
+            .unwrap();
         assert!(!open_cli.requires_args);
         assert_eq!(open_cli.prompt_pattern, Some("open cli ".to_string()));
 
@@ -127,7 +128,10 @@ mod tests {
             .find(|c| c.id.as_str() == "open_pipeline")
             .unwrap();
         assert!(!open_pipeline.requires_args);
-        assert_eq!(open_pipeline.prompt_pattern, Some("open pipeline ".to_string()));
+        assert_eq!(
+            open_pipeline.prompt_pattern,
+            Some("open pipeline ".to_string())
+        );
 
         // Check open_custom is parametric
         let open_custom = commands

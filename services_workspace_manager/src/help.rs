@@ -57,7 +57,10 @@ impl HelpCategory {
                 ));
             }
         }
-        content.push_str(&format!("- {}  — Show help by topic\n", help_usage_pattern()));
+        content.push_str(&format!(
+            "- {}  — Show help by topic\n",
+            help_usage_pattern()
+        ));
         content.push_str("\nTip: Press Ctrl+P to find commands faster");
         content
     }
@@ -90,8 +93,7 @@ impl HelpCategory {
 
         // Workspace command descriptors are sourced from shared palette specs.
         for spec in NON_LAUNCH_PALETTE_SPECS.iter().filter(|spec| {
-            spec.category == "Workspace"
-                && matches!(spec.id, "list" | "focus_next" | "focus_prev")
+            spec.category == "Workspace" && matches!(spec.id, "list" | "focus_next" | "focus_prev")
         }) {
             let pattern = match spec.id {
                 "focus_next" => "next",
@@ -112,7 +114,10 @@ impl HelpCategory {
             lines.push(format_help_line(pattern, description));
         }
 
-        lines.push(format_help_line(&help_usage_pattern(), "Show help by topic"));
+        lines.push(format_help_line(
+            &help_usage_pattern(),
+            "Show help by topic",
+        ));
 
         let mut content = String::from("Workspace Commands\n\n");
         for line in lines {
@@ -156,16 +161,20 @@ impl HelpCategory {
 
     fn system_help(&self) -> String {
         let mut lines = Vec::new();
-        for spec in NON_LAUNCH_PALETTE_SPECS.iter().filter(|spec| {
-            spec.category == "System" && !matches!(spec.id, "help_system")
-        }) {
+        for spec in NON_LAUNCH_PALETTE_SPECS
+            .iter()
+            .filter(|spec| spec.category == "System" && !matches!(spec.id, "help_system"))
+        {
             let pattern = spec
                 .prompt_pattern
                 .map(|pattern| pattern.trim_end())
                 .unwrap_or(spec.id);
             lines.push(format_help_line(pattern, spec.description));
         }
-        lines.push(format_help_line(&help_usage_pattern(), "Show help by topic"));
+        lines.push(format_help_line(
+            &help_usage_pattern(),
+            "Show help by topic",
+        ));
 
         let mut content = String::from("System Commands\n\n");
         for line in lines {

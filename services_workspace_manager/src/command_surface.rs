@@ -122,7 +122,12 @@ const OPEN_FILE_ALIAS_2: &[&str] = &["open", "file-picker"];
 pub(crate) const HELPER_COMMAND_SPECS: &[HelperCommandSpec] = &[
     HelperCommandSpec {
         kind: HelperCommandKind::RecentFiles,
-        aliases: &[RECENT_ALIAS_1, RECENT_ALIAS_2, RECENT_ALIAS_3, RECENT_ALIAS_4],
+        aliases: &[
+            RECENT_ALIAS_1,
+            RECENT_ALIAS_2,
+            RECENT_ALIAS_3,
+            RECENT_ALIAS_4,
+        ],
         usage: "Usage: recent",
         palette: PaletteDescriptorSpec {
             id: "recent",
@@ -450,11 +455,9 @@ pub(crate) fn launch_command_by_token(token: &str) -> Option<&'static LaunchComm
 }
 
 pub(crate) fn helper_command_by_alias(parts: &[&str]) -> Option<&'static HelperCommandSpec> {
-    HELPER_COMMAND_SPECS.iter().find(|spec| {
-        spec.aliases
-            .iter()
-            .any(|alias_parts| *alias_parts == parts)
-    })
+    HELPER_COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.aliases.iter().any(|alias_parts| *alias_parts == parts))
 }
 
 pub(crate) fn helper_command_by_open_token(token: &str) -> Option<&'static HelperCommandSpec> {
@@ -465,7 +468,9 @@ pub(crate) fn helper_command_by_open_token(token: &str) -> Option<&'static Helpe
     })
 }
 
-pub(crate) fn component_id_command_by_token(token: &str) -> Option<&'static ComponentIdCommandSpec> {
+pub(crate) fn component_id_command_by_token(
+    token: &str,
+) -> Option<&'static ComponentIdCommandSpec> {
     COMPONENT_ID_COMMAND_SPECS
         .iter()
         .find(|spec| spec.token == token)
@@ -620,14 +625,8 @@ mod tests {
 
     #[test]
     fn test_help_validation_and_parse() {
-        assert_eq!(
-            parse_help_topic(None),
-            Some(HelpCategory::Overview)
-        );
-        assert_eq!(
-            parse_help_topic(Some("keyboard")),
-            Some(HelpCategory::Keys)
-        );
+        assert_eq!(parse_help_topic(None), Some(HelpCategory::Overview));
+        assert_eq!(parse_help_topic(Some("keyboard")), Some(HelpCategory::Keys));
         assert_eq!(
             validate_help_invocation(&["help", "workspace"]),
             CommandInvocationValidation::ValidComplete

@@ -5,10 +5,12 @@
 
 use crate::boot_profile::BootProfile;
 use crate::command_surface::{
-    component_id_command_by_token, helper_command_by_alias, helper_command_by_open_token,
-    help_usage_pattern, launch_command_by_token, parse_help_topic, HelperCommandKind,
+    component_id_command_by_token, help_usage_pattern, helper_command_by_alias,
+    helper_command_by_open_token, launch_command_by_token, parse_help_topic, HelperCommandKind,
 };
-use crate::{ComponentId, ComponentType, HelpCategory, LaunchConfig, WorkspaceError, WorkspaceManager};
+use crate::{
+    ComponentId, ComponentType, HelpCategory, LaunchConfig, WorkspaceError, WorkspaceManager,
+};
 use identity::{ExitReason, IdentityKind, TrustDomain};
 use serde::{Deserialize, Serialize};
 
@@ -159,7 +161,10 @@ impl WorkspaceManager {
 
     fn cmd_open(&mut self, component_type: ComponentType, args: Vec<String>) -> CommandResult {
         if component_type == ComponentType::Custom
-            && args.first().map(|arg| arg.trim().is_empty()).unwrap_or(true)
+            && args
+                .first()
+                .map(|arg| arg.trim().is_empty())
+                .unwrap_or(true)
         {
             return CommandResult::Error {
                 message: "Custom component requires an entry: usage `open custom <entry>`"
@@ -540,7 +545,9 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
 
             let Some(open_spec) = launch_command_by_token(parts[1]) else {
                 if let Some(helper_spec) = helper_command_by_open_token(parts[1]) {
-                    return Err(WorkspaceError::InvalidCommand(helper_spec.usage.to_string()));
+                    return Err(WorkspaceError::InvalidCommand(
+                        helper_spec.usage.to_string(),
+                    ));
                 }
                 return Err(WorkspaceError::InvalidCommand(format!(
                     "Unknown component type: {}",
@@ -670,10 +677,7 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
 /// Helper function to parse non-launch commands that target a component ID.
 fn parse_component_id_surface_command(parts: &[&str]) -> Result<WorkspaceCommand, WorkspaceError> {
     let spec = component_id_command_by_token(parts[0]).ok_or_else(|| {
-        WorkspaceError::InvalidCommand(format!(
-            "Unknown component target command: {}",
-            parts[0]
-        ))
+        WorkspaceError::InvalidCommand(format!("Unknown component target command: {}", parts[0]))
     })?;
 
     if parts.len() < 2 {
@@ -847,7 +851,10 @@ mod tests {
 
     #[test]
     fn test_parse_recent_command_variants() {
-        assert_eq!(parse_command("recent").unwrap(), WorkspaceCommand::RecentFiles);
+        assert_eq!(
+            parse_command("recent").unwrap(),
+            WorkspaceCommand::RecentFiles
+        );
         assert_eq!(
             parse_command("recent files").unwrap(),
             WorkspaceCommand::RecentFiles

@@ -114,7 +114,12 @@ impl ProtocolFrame {
     const VERSION: u8 = 1;
     const HEADER_LEN: usize = 4 + 1 + 1 + 2 + 8 + 8 + 4;
 
-    pub fn new(protocol: AdvancedProtocol, session_id: u64, sequence: u64, payload: Vec<u8>) -> Self {
+    pub fn new(
+        protocol: AdvancedProtocol,
+        session_id: u64,
+        sequence: u64,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             header: ProtocolHeader {
                 protocol,
@@ -148,7 +153,9 @@ impl ProtocolFrame {
         }
 
         if bytes[4] != Self::VERSION {
-            return Err(ProtocolError::InvalidFrame("unsupported version".to_string()));
+            return Err(ProtocolError::InvalidFrame(
+                "unsupported version".to_string(),
+            ));
         }
 
         let protocol = match bytes[5] {
@@ -572,12 +579,7 @@ mod tests {
 
     #[test]
     fn test_protocol_frame_roundtrip() {
-        let frame = ProtocolFrame::new(
-            AdvancedProtocol::ReliableDatagram,
-            42,
-            7,
-            vec![1, 2, 3, 4],
-        );
+        let frame = ProtocolFrame::new(AdvancedProtocol::ReliableDatagram, 42, 7, vec![1, 2, 3, 4]);
         let bytes = frame.encode();
         let decoded = ProtocolFrame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
@@ -587,34 +589,20 @@ mod tests {
     fn test_protocol_registry_validation() {
         let registry = ProtocolRegistry::with_defaults();
 
-        let too_large = ProtocolFrame::new(
-            AdvancedProtocol::ReliableDatagram,
-            1,
-            1,
-            vec![0u8; 1201],
-        );
+        let too_large =
+            ProtocolFrame::new(AdvancedProtocol::ReliableDatagram, 1, 1, vec![0u8; 1201]);
         assert!(matches!(
             registry.encode_frame(&too_large),
             Err(ProtocolError::ValidationFailed(_))
         ));
 
-        let missing_session = ProtocolFrame::new(
-            AdvancedProtocol::StreamMux,
-            0,
-            1,
-            vec![9, 9],
-        );
+        let missing_session = ProtocolFrame::new(AdvancedProtocol::StreamMux, 0, 1, vec![9, 9]);
         assert!(matches!(
             registry.encode_frame(&missing_session),
             Err(ProtocolError::ValidationFailed(_))
         ));
 
-        let secure = ProtocolFrame::new(
-            AdvancedProtocol::SecureChannel,
-            9,
-            9,
-            vec![1u8; 16],
-        );
+        let secure = ProtocolFrame::new(AdvancedProtocol::SecureChannel, 9, 9, vec![1u8; 16]);
         let encoded = registry.encode_frame(&secure).unwrap();
         let decoded = registry.decode_frame(&encoded).unwrap();
         assert_eq!(decoded, secure);

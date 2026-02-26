@@ -22,8 +22,8 @@
 //! - A monolithic "god shell"
 
 pub mod boot_profile;
-pub(crate) mod command_surface;
 pub mod command_registry;
+pub(crate) mod command_surface;
 pub mod commands;
 pub mod help;
 pub mod keybindings;
@@ -56,9 +56,9 @@ use core_types::uuid_tools::new_uuid;
 use core_types::{ServiceId, TaskId};
 use fs_view::{DirectoryResolver, DirectoryView};
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
+use input_types::{InputEvent, KeyCode, KeyEvent};
 #[cfg(feature = "std")]
 use ipc::{MessageEnvelope, MessagePayload};
-use input_types::{InputEvent, KeyCode, KeyEvent};
 #[cfg(feature = "std")]
 use kernel_api::{Duration, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use keybindings::KeyBindingManager;
@@ -103,6 +103,8 @@ pub use workspace_status::{
 const SETTINGS_DIR_PATH: &str = "settings";
 const SETTINGS_OVERRIDES_PATH: &str = "settings/user_overrides.json";
 const SETTINGS_OBJECT_UUID: u128 = 0x9f2f_51d4_3f87_42f8_92d4_e6f2_56af_ea20;
+const COMPOSED_MAIN_VIEW_UUID: u128 = 0xb1e8_54c5_2be7_4f1f_9f6f_78be_bf5d_8d51;
+const COMPOSED_STATUS_VIEW_UUID: u128 = 0xa8bd_4d66_7a5f_4cb2_bf3d_8e20_1024_a9c2;
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -313,6 +315,254 @@ impl ComponentInfo {
             false
         }
     }
+}
+
+/// Axis for a split workspace layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitAxis {
+    /// Tiles are stacked top/bottom.
+    Horizontal,
+    /// Tiles are arranged side-by-side.
+    Vertical,
+}
+
+impl SplitAxis {
+    fn as_label(self) -> &'static str {
+        match self {
+            SplitAxis::Horizontal => "horizontal",
+            SplitAxis::Vertical => "vertical",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowTileState {
+    tabs: Vec<ComponentId>,
+    active_tab: usize,
+}
+
+impl WindowTileState {
+    fn new() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active_tab: 0,
+        }
+    }
+
+    fn with_tabs(tabs: Vec<ComponentId>) -> Self {
+        let active_tab = if tabs.is_empty() { 0 } else { tabs.len() - 1 };
+        Self { tabs, active_tab }
+    }
+
+    fn active_component(&self) -> Option<ComponentId> {
+        self.tabs.get(self.active_tab).copied()
+    }
+
+    fn add_tab(&mut self, component_id: ComponentId) {
+        if let Some(position) = self.tabs.iter().position(|id| *id == component_id) {
+            self.active_tab = position;
+            return;
+        }
+        self.tabs.push(component_id);
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    fn set_active_component(&mut self, component_id: ComponentId) -> bool {
+        if let Some(position) = self.tabs.iter().position(|id| *id == component_id) {
+            self.active_tab = position;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_component(&mut self, component_id: ComponentId) -> bool {
+        let Some(position) = self.tabs.iter().position(|id| *id == component_id) else {
+            return false;
+        };
+        self.tabs.remove(position);
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if position <= self.active_tab && self.active_tab > 0 {
+            self.active_tab -= 1;
+        }
+        true
+    }
+
+    fn focus_next_tab(&mut self) -> Option<ComponentId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.active_component()
+    }
+
+    fn focus_previous_tab(&mut self) -> Option<ComponentId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
+        self.active_tab = if self.active_tab == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab - 1
+        };
+        self.active_component()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowLayoutState {
+    split_axis: Option<SplitAxis>,
+    focused_tile: usize,
+    tiles: Vec<WindowTileState>,
+}
+
+impl WindowLayoutState {
+    fn new() -> Self {
+        Self {
+            split_axis: None,
+            focused_tile: 0,
+            tiles: vec![WindowTileState::new()],
+        }
+    }
+
+    fn normalize(&mut self) {
+        if self.tiles.is_empty() {
+            self.tiles.push(WindowTileState::new());
+        }
+        if self.focused_tile >= self.tiles.len() {
+            self.focused_tile = self.tiles.len().saturating_sub(1);
+        }
+        if self.tiles.len() <= 1 {
+            self.split_axis = None;
+        }
+    }
+
+    fn add_component_tab(&mut self, component_id: ComponentId) {
+        if self.set_focused_component(component_id) {
+            return;
+        }
+        self.normalize();
+        if let Some(tile) = self.tiles.get_mut(self.focused_tile) {
+            tile.add_tab(component_id);
+        }
+    }
+
+    fn set_focused_component(&mut self, component_id: ComponentId) -> bool {
+        for (tile_index, tile) in self.tiles.iter_mut().enumerate() {
+            if tile.set_active_component(component_id) {
+                self.focused_tile = tile_index;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn remove_component(&mut self, component_id: ComponentId) {
+        for tile in &mut self.tiles {
+            tile.remove_component(component_id);
+        }
+
+        if self.tiles.len() > 1 {
+            self.tiles.retain(|tile| !tile.tabs.is_empty());
+        }
+        self.normalize();
+    }
+
+    fn split_focused_tile(&mut self, axis: SplitAxis) {
+        self.normalize();
+        let source_index = self.focused_tile;
+        let moved_tabs = if let Some(tile) = self.tiles.get_mut(source_index) {
+            if tile.tabs.len() > 1 {
+                let active_index = tile.active_tab.min(tile.tabs.len() - 1);
+                let moved = tile.tabs.remove(active_index);
+                if tile.active_tab >= tile.tabs.len() {
+                    tile.active_tab = tile.tabs.len().saturating_sub(1);
+                }
+                vec![moved]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let target_index = source_index + 1;
+        self.tiles
+            .insert(target_index, WindowTileState::with_tabs(moved_tabs));
+        self.focused_tile = target_index;
+        self.split_axis = Some(axis);
+        self.normalize();
+    }
+
+    fn focus_next_tab(&mut self) -> Option<ComponentId> {
+        self.normalize();
+        self.tiles
+            .get_mut(self.focused_tile)
+            .and_then(WindowTileState::focus_next_tab)
+    }
+
+    fn focus_previous_tab(&mut self) -> Option<ComponentId> {
+        self.normalize();
+        self.tiles
+            .get_mut(self.focused_tile)
+            .and_then(WindowTileState::focus_previous_tab)
+    }
+
+    fn focused_active_component(&self) -> Option<ComponentId> {
+        self.tiles
+            .get(self.focused_tile)
+            .and_then(WindowTileState::active_component)
+    }
+
+    fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+}
+
+/// Snapshot of a window tile layout state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceTileLayoutSnapshot {
+    pub tile_index: usize,
+    pub is_focused: bool,
+    pub active_component: Option<ComponentId>,
+    pub tabs: Vec<ComponentId>,
+}
+
+/// Snapshot of workspace layout topology (splits + tabs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceLayoutSnapshot {
+    pub split_axis: Option<SplitAxis>,
+    pub focused_tile: usize,
+    pub tiles: Vec<WorkspaceTileLayoutSnapshot>,
+}
+
+impl Default for WorkspaceLayoutSnapshot {
+    fn default() -> Self {
+        Self {
+            split_axis: None,
+            focused_tile: 0,
+            tiles: vec![WorkspaceTileLayoutSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: None,
+                tabs: Vec::new(),
+            }],
+        }
+    }
+}
+
+/// Render payload for a single visible tile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTileRenderSnapshot {
+    pub tile_index: usize,
+    pub is_focused: bool,
+    pub active_component: Option<ComponentId>,
+    pub tabs: Vec<ComponentId>,
+    pub main_view: Option<ViewFrame>,
+    pub status_view: Option<ViewFrame>,
 }
 
 /// Workspace lifecycle event
@@ -806,10 +1056,10 @@ impl PipelineHarnessKernel {
 
         let result = match handler {
             PipelineStageHandler::Echo => {
-                let request: StageInvokeRequestWire = message
-                    .payload
-                    .deserialize()
-                    .map_err(|e| KernelError::SendFailed(format!("Invalid stage request: {}", e)))?;
+                let request: StageInvokeRequestWire =
+                    message.payload.deserialize().map_err(|e| {
+                        KernelError::SendFailed(format!("Invalid stage request: {}", e))
+                    })?;
                 let output = TypedPayload::new(
                     PayloadSchemaId::new("pipeline/output"),
                     request.input.schema_version,
@@ -1169,6 +1419,8 @@ pub struct WorkspaceManager {
     recent_history: RecentHistory,
     /// Context breadcrumbs
     breadcrumbs: ContextBreadcrumbs,
+    /// Workspace window layout state (tabs and splits)
+    window_layout: WindowLayoutState,
     /// Command palette for command discovery
     command_palette: services_command_palette::CommandPalette,
     /// Registry for custom component host resolution
@@ -1201,6 +1453,7 @@ impl WorkspaceManager {
             workspace_status: WorkspaceStatus::new(),
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
+            window_layout: WindowLayoutState::new(),
             command_palette: command_registry::build_command_registry(),
             custom_component_registry: CustomComponentRegistry::with_defaults(),
             settings_registry: services_settings::create_default_registry(),
@@ -1432,7 +1685,9 @@ impl WorkspaceManager {
                 let descriptor = self.custom_component_registry.resolve(&component.metadata);
                 let mut runtime =
                     CustomComponentRuntime::new(descriptor, &component.name, &component.metadata);
-                if let (Some(main_view), Some(status_view)) = (&component.main_view, &component.status_view) {
+                if let (Some(main_view), Some(status_view)) =
+                    (&component.main_view, &component.status_view)
+                {
                     runtime.console.publish_views(
                         &mut self.view_host,
                         main_view,
@@ -1459,6 +1714,7 @@ impl WorkspaceManager {
 
         // Store component instance
         self.component_instances.insert(component_id, instance);
+        self.window_layout.add_component_tab(component_id);
 
         // Grant focus if focusable and no other component has focus
         if config.focusable {
@@ -1580,6 +1836,7 @@ impl WorkspaceManager {
 
         // Request focus
         self.focus_manager.request_focus(*subscription)?;
+        self.window_layout.set_focused_component(component_id);
 
         // Record event
         let timestamp = self.next_timestamp();
@@ -1591,71 +1848,170 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Switches focus to the next component
-    pub fn focus_next(&mut self) -> Result<(), WorkspaceError> {
-        let running_focusable: Vec<ComponentId> = self
-            .components
-            .values()
-            .filter(|c| c.is_running() && c.focusable)
-            .map(|c| c.id)
-            .collect();
-
-        if running_focusable.is_empty() {
-            return Err(WorkspaceError::NoComponents);
-        }
-
-        // Find currently focused component
-        let current_focus = self.get_focused_component();
-
-        let next_id = if let Some(current_id) = current_focus {
-            // Find next component after current
-            let current_pos = running_focusable
-                .iter()
-                .position(|&id| id == current_id)
-                .unwrap_or(0);
-            running_focusable[(current_pos + 1) % running_focusable.len()]
-        } else {
-            // No focus, take first
-            running_focusable[0]
-        };
-
-        self.focus_component(next_id)
+    fn is_focusable_running_component(&self, component_id: ComponentId) -> bool {
+        self.components
+            .get(&component_id)
+            .map(|component| component.is_running() && component.focusable)
+            .unwrap_or(false)
     }
 
-    /// Switches focus to the previous component
-    pub fn focus_previous(&mut self) -> Result<(), WorkspaceError> {
-        let running_focusable: Vec<ComponentId> = self
+    fn ordered_focusable_components(&self) -> Vec<ComponentId> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+
+        for tile in &self.window_layout.tiles {
+            for component_id in &tile.tabs {
+                if seen.contains(component_id) {
+                    continue;
+                }
+                if self.is_focusable_running_component(*component_id) {
+                    seen.insert(*component_id);
+                    ordered.push(*component_id);
+                }
+            }
+        }
+
+        let mut remaining: Vec<ComponentId> = self
             .components
             .values()
-            .filter(|c| c.is_running() && c.focusable)
-            .map(|c| c.id)
+            .filter(|component| component.is_running() && component.focusable)
+            .map(|component| component.id)
+            .filter(|component_id| !seen.contains(component_id))
             .collect();
+        remaining.sort_by_key(|component_id| component_id.to_string());
+        ordered.extend(remaining);
 
-        if running_focusable.is_empty() {
+        ordered
+    }
+
+    fn ordered_visible_focusable_components(&self) -> Vec<ComponentId> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+
+        for tile in &self.window_layout.tiles {
+            if let Some(component_id) = tile.active_component() {
+                if !seen.contains(&component_id)
+                    && self.is_focusable_running_component(component_id)
+                {
+                    seen.insert(component_id);
+                    ordered.push(component_id);
+                }
+            }
+        }
+
+        if ordered.is_empty() {
+            self.ordered_focusable_components()
+        } else {
+            ordered
+        }
+    }
+
+    fn cycle_focus_in_order(
+        &mut self,
+        ordered: Vec<ComponentId>,
+        forward: bool,
+    ) -> Result<(), WorkspaceError> {
+        if ordered.is_empty() {
             return Err(WorkspaceError::NoComponents);
         }
 
-        // Find currently focused component
         let current_focus = self.get_focused_component();
-
-        let prev_id = if let Some(current_id) = current_focus {
-            // Find previous component before current
-            let current_pos = running_focusable
-                .iter()
-                .position(|&id| id == current_id)
-                .unwrap_or(0);
-            let prev_pos = if current_pos == 0 {
-                running_focusable.len() - 1
+        let target = if let Some(current_id) = current_focus {
+            let current_pos = ordered.iter().position(|id| *id == current_id).unwrap_or(0);
+            if forward {
+                ordered[(current_pos + 1) % ordered.len()]
+            } else if current_pos == 0 {
+                ordered[ordered.len() - 1]
             } else {
-                current_pos - 1
-            };
-            running_focusable[prev_pos]
+                ordered[current_pos - 1]
+            }
+        } else if forward {
+            ordered[0]
         } else {
-            // No focus, take last
-            running_focusable[running_focusable.len() - 1]
+            ordered[ordered.len() - 1]
         };
 
-        self.focus_component(prev_id)
+        self.focus_component(target)
+    }
+
+    /// Switches focus to the next component in layout order.
+    pub fn focus_next(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_focusable_components(), true)
+    }
+
+    /// Switches focus to the previous component in layout order.
+    pub fn focus_previous(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_focusable_components(), false)
+    }
+
+    /// Focuses the next visible tile (active tab per tile).
+    pub fn focus_next_tile(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_visible_focusable_components(), true)
+    }
+
+    /// Focuses the previous visible tile (active tab per tile).
+    pub fn focus_previous_tile(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_visible_focusable_components(), false)
+    }
+
+    /// Focuses the next tab in the current tile.
+    pub fn focus_next_tab(&mut self) -> Result<(), WorkspaceError> {
+        let candidate = self.window_layout.focus_next_tab();
+        if let Some(component_id) = candidate {
+            if self.is_focusable_running_component(component_id) {
+                return self.focus_component(component_id);
+            }
+        }
+        self.focus_next()
+    }
+
+    /// Focuses the previous tab in the current tile.
+    pub fn focus_previous_tab(&mut self) -> Result<(), WorkspaceError> {
+        let candidate = self.window_layout.focus_previous_tab();
+        if let Some(component_id) = candidate {
+            if self.is_focusable_running_component(component_id) {
+                return self.focus_component(component_id);
+            }
+        }
+        self.focus_previous()
+    }
+
+    /// Splits the currently focused tile and creates a new pane.
+    ///
+    /// If the source tile has multiple tabs, the active tab is moved into the
+    /// newly created tile so both panes render useful content immediately.
+    pub fn split_focused_tile(&mut self, axis: SplitAxis) -> Result<(), WorkspaceError> {
+        self.window_layout.split_focused_tile(axis);
+        if let Some(component_id) = self.window_layout.focused_active_component() {
+            if self.is_focusable_running_component(component_id) {
+                let _ = self.focus_component(component_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the current window layout (tabs/splits).
+    pub fn window_layout_snapshot(&self) -> WorkspaceLayoutSnapshot {
+        let focused_tile = self
+            .window_layout
+            .focused_tile
+            .min(self.window_layout.tiles.len().saturating_sub(1));
+
+        let mut tiles = Vec::new();
+        for (tile_index, tile) in self.window_layout.tiles.iter().enumerate() {
+            tiles.push(WorkspaceTileLayoutSnapshot {
+                tile_index,
+                is_focused: tile_index == focused_tile,
+                active_component: tile.active_component(),
+                tabs: tile.tabs.clone(),
+            });
+        }
+
+        WorkspaceLayoutSnapshot {
+            split_axis: self.window_layout.split_axis,
+            focused_tile,
+            tiles,
+        }
     }
 
     /// Terminates a component
@@ -1703,6 +2059,7 @@ impl WorkspaceManager {
 
         // Clean up component instance
         self.component_instances.remove(&component_id);
+        self.window_layout.remove_component(component_id);
 
         // Record event
         let timestamp = self.next_timestamp();
@@ -1749,23 +2106,20 @@ impl WorkspaceManager {
 
         match action {
             Action::SwitchTile => {
-                // Cycle to next focusable component
-                if let Err(e) = self.focus_next() {
+                let result = if self.window_layout.tile_count() > 1 {
+                    self.focus_next_tile()
+                } else {
+                    self.focus_next()
+                };
+                if let Err(e) = result {
                     eprintln!("Failed to switch tile: {}", e);
                     return false;
                 }
                 true
             }
             Action::FocusTop => {
-                // Focus first focusable component
-                let running_focusable: Vec<ComponentId> = self
-                    .components
-                    .values()
-                    .filter(|c| c.is_running() && c.focusable)
-                    .map(|c| c.id)
-                    .collect();
-
-                if let Some(&first_id) = running_focusable.first() {
+                let ordered = self.ordered_visible_focusable_components();
+                if let Some(&first_id) = ordered.first() {
                     if let Err(e) = self.focus_component(first_id) {
                         eprintln!("Failed to focus top: {}", e);
                         return false;
@@ -1776,15 +2130,8 @@ impl WorkspaceManager {
                 }
             }
             Action::FocusBottom => {
-                // Focus last focusable component
-                let running_focusable: Vec<ComponentId> = self
-                    .components
-                    .values()
-                    .filter(|c| c.is_running() && c.focusable)
-                    .map(|c| c.id)
-                    .collect();
-
-                if let Some(&last_id) = running_focusable.last() {
+                let ordered = self.ordered_visible_focusable_components();
+                if let Some(&last_id) = ordered.last() {
                     if let Err(e) = self.focus_component(last_id) {
                         eprintln!("Failed to focus bottom: {}", e);
                         return false;
@@ -1865,9 +2212,7 @@ impl WorkspaceManager {
                     .set_last_action("Quitting...".to_string());
                 true
             }
-            Action::CommandMode => {
-                self.enter_command_mode()
-            }
+            Action::CommandMode => self.enter_command_mode(),
             Action::Custom(name) => {
                 // Custom actions not yet supported
                 eprintln!("Custom action '{}' not implemented", name);
@@ -1930,11 +2275,7 @@ impl WorkspaceManager {
         ids.into_iter().next()
     }
 
-    fn command_palette_preview(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> (Vec<String>, usize, usize) {
+    fn command_palette_preview(&self, query: &str, limit: usize) -> (Vec<String>, usize, usize) {
         let mut commands = if query.trim().is_empty() {
             self.command_palette.list_commands()
         } else {
@@ -1959,7 +2300,11 @@ impl WorkspaceManager {
                 .prompt_pattern
                 .as_deref()
                 .unwrap_or(command.id.as_str());
-            lines.push(format!("  {} -> `{}`", command.format_for_palette(), invocation));
+            lines.push(format!(
+                "  {} -> `{}`",
+                command.format_for_palette(),
+                invocation
+            ));
         }
 
         if shown < total {
@@ -2286,7 +2631,8 @@ impl WorkspaceManager {
             .and_then(|component| component.main_view.zip(component.status_view));
         let timestamp = self.next_timestamp();
 
-        if let Some(ComponentInstance::Custom(runtime)) = self.component_instances.get_mut(&component_id)
+        if let Some(ComponentInstance::Custom(runtime)) =
+            self.component_instances.get_mut(&component_id)
         {
             let mut lines = vec![format!("custom> {}", trimmed)];
             lines.extend(Self::run_custom_host_command(runtime, trimmed));
@@ -3062,28 +3408,251 @@ impl WorkspaceManager {
         }
     }
 
+    fn component_frames(
+        &self,
+        component_id: ComponentId,
+    ) -> (Option<ViewFrame>, Option<ViewFrame>) {
+        let Some(component) = self.components.get(&component_id) else {
+            return (None, None);
+        };
+
+        let main_view = component
+            .main_view
+            .as_ref()
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+        let status_view = component
+            .status_view
+            .as_ref()
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+        (main_view, status_view)
+    }
+
+    fn build_tile_render_snapshots(&self) -> Vec<WorkspaceTileRenderSnapshot> {
+        let fallback_tile = WindowTileState::new();
+        let tiles: Vec<&WindowTileState> = if self.window_layout.tiles.is_empty() {
+            vec![&fallback_tile]
+        } else {
+            self.window_layout.tiles.iter().collect()
+        };
+
+        let focused_tile = self
+            .window_layout
+            .focused_tile
+            .min(tiles.len().saturating_sub(1));
+
+        let mut snapshots = Vec::with_capacity(tiles.len());
+        for (tile_index, tile) in tiles.into_iter().enumerate() {
+            let tabs: Vec<ComponentId> = tile
+                .tabs
+                .iter()
+                .copied()
+                .filter(|component_id| {
+                    self.components
+                        .get(component_id)
+                        .map(|component| component.is_running())
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let active_component = tile
+                .active_component()
+                .filter(|component_id| tabs.contains(component_id))
+                .or_else(|| tabs.first().copied());
+
+            let (main_view, status_view) = if let Some(component_id) = active_component {
+                self.component_frames(component_id)
+            } else {
+                (None, None)
+            };
+
+            snapshots.push(WorkspaceTileRenderSnapshot {
+                tile_index,
+                is_focused: tile_index == focused_tile,
+                active_component,
+                tabs,
+                main_view,
+                status_view,
+            });
+        }
+
+        snapshots
+    }
+
+    fn frame_to_lines(frame: &ViewFrame) -> Vec<String> {
+        match &frame.content {
+            view_types::ViewContent::TextBuffer { lines } => {
+                if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines.clone()
+                }
+            }
+            view_types::ViewContent::StatusLine { text } => vec![text.clone()],
+            view_types::ViewContent::Panel { metadata } => vec![metadata.clone()],
+        }
+    }
+
+    fn compose_vertical_tiles(tile_sections: &[(String, Vec<String>)]) -> Vec<String> {
+        if tile_sections.len() != 2 {
+            return Self::compose_horizontal_tiles(tile_sections);
+        }
+
+        let left_lines = &tile_sections[0].1;
+        let right_lines = &tile_sections[1].1;
+        let left_width = left_lines.iter().map(|line| line.len()).max().unwrap_or(0);
+        let total_lines = core::cmp::max(left_lines.len(), right_lines.len());
+
+        let mut lines = Vec::with_capacity(total_lines);
+        for index in 0..total_lines {
+            let left = left_lines.get(index).map(|s| s.as_str()).unwrap_or("");
+            let right = right_lines.get(index).map(|s| s.as_str()).unwrap_or("");
+            lines.push(format!("{:<width$} || {}", left, right, width = left_width));
+        }
+        lines
+    }
+
+    fn compose_horizontal_tiles(tile_sections: &[(String, Vec<String>)]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (index, (_, tile_lines)) in tile_sections.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+                lines.push("----------------".to_string());
+            }
+            lines.extend(tile_lines.iter().cloned());
+        }
+        lines
+    }
+
+    fn compose_main_view(
+        &self,
+        split_axis: Option<SplitAxis>,
+        tile_snapshots: &[WorkspaceTileRenderSnapshot],
+    ) -> Option<ViewFrame> {
+        if tile_snapshots.len() <= 1 {
+            return None;
+        }
+
+        let mut tile_sections: Vec<(String, Vec<String>)> = Vec::new();
+        let mut max_revision = 1;
+        for tile in tile_snapshots {
+            let title = format!(
+                "Tile {}{}",
+                tile.tile_index + 1,
+                if tile.is_focused { " [focused]" } else { "" }
+            );
+            let mut lines = vec![format!(
+                "{} tabs={}",
+                title,
+                tile.tabs
+                    .iter()
+                    .map(|component_id| {
+                        let marker = if tile.active_component == Some(*component_id) {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        format!("{}{}", marker, component_id)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            )];
+
+            if let Some(main_view) = &tile.main_view {
+                max_revision = core::cmp::max(max_revision, main_view.revision);
+                lines.extend(Self::frame_to_lines(main_view));
+            } else {
+                lines.push("[empty tile]".to_string());
+            }
+            tile_sections.push((title, lines));
+        }
+
+        let mut composed_lines = vec![format!(
+            "Workspace layout: {} split",
+            split_axis.unwrap_or(SplitAxis::Horizontal).as_label()
+        )];
+        let section_lines = match split_axis {
+            Some(SplitAxis::Vertical) => Self::compose_vertical_tiles(&tile_sections),
+            _ => Self::compose_horizontal_tiles(&tile_sections),
+        };
+        composed_lines.extend(section_lines);
+
+        Some(
+            ViewFrame::new(
+                ViewId::from_uuid(Uuid::from_u128(COMPOSED_MAIN_VIEW_UUID)),
+                ViewKind::TextBuffer,
+                max_revision,
+                view_types::ViewContent::text_buffer(composed_lines),
+                self.next_timestamp,
+            )
+            .with_title("Workspace Composite"),
+        )
+    }
+
+    fn compose_status_view(
+        &self,
+        split_axis: Option<SplitAxis>,
+        tile_snapshots: &[WorkspaceTileRenderSnapshot],
+    ) -> Option<ViewFrame> {
+        if tile_snapshots.len() <= 1 {
+            return None;
+        }
+
+        let mut status_segments = Vec::new();
+        let mut max_revision = 1;
+        for tile in tile_snapshots {
+            let tile_label = format!("T{}", tile.tile_index + 1);
+            let suffix = if tile.is_focused { "*" } else { "" };
+            let status = tile
+                .status_view
+                .as_ref()
+                .and_then(|frame| {
+                    max_revision = core::cmp::max(max_revision, frame.revision);
+                    frame.content.get_line(0).map(|line| line.to_string())
+                })
+                .unwrap_or_else(|| "idle".to_string());
+            status_segments.push(format!("{}{}: {}", tile_label, suffix, status));
+        }
+
+        let summary = format!(
+            "[{} split] {}",
+            split_axis.unwrap_or(SplitAxis::Horizontal).as_label(),
+            status_segments.join(" | ")
+        );
+
+        Some(ViewFrame::new(
+            ViewId::from_uuid(Uuid::from_u128(COMPOSED_STATUS_VIEW_UUID)),
+            ViewKind::StatusLine,
+            max_revision,
+            view_types::ViewContent::status_line(summary),
+            self.next_timestamp,
+        ))
+    }
+
     /// Renders the current workspace state
     ///
-    /// Returns a snapshot of the focused component's views and status.
+    /// Returns focused views and composed multi-tile views when splits are active.
     pub fn render_snapshot(&self) -> WorkspaceRenderSnapshot {
         let focused_component_id = self.get_focused_component();
-
         let focused_component = focused_component_id.and_then(|id| self.get_component(id));
+        let (main_view_frame, status_view_frame) = focused_component_id
+            .map(|component_id| self.component_frames(component_id))
+            .unwrap_or((None, None));
 
-        let main_view_frame = focused_component
-            .and_then(|c| c.main_view.as_ref())
-            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
-            .flatten();
-
-        let status_view_frame = focused_component
-            .and_then(|c| c.status_view.as_ref())
-            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
-            .flatten();
+        let tile_snapshots = self.build_tile_render_snapshots();
+        let layout = self.window_layout_snapshot();
+        let composed_main_view = self.compose_main_view(layout.split_axis, &tile_snapshots);
+        let composed_status_view = self.compose_status_view(layout.split_axis, &tile_snapshots);
 
         WorkspaceRenderSnapshot {
             focused_component: focused_component_id,
             main_view: main_view_frame,
             status_view: status_view_frame,
+            composed_main_view,
+            composed_status_view,
+            layout,
+            tiles: tile_snapshots,
             component_count: self.components.len(),
             running_count: self.components.values().filter(|c| c.is_running()).count(),
             status_strip: self.workspace_status.format_status_strip_with_action(),
@@ -3158,6 +3727,7 @@ impl WorkspaceManager {
         self.view_host = ViewHost::new();
         self.view_subscriptions.clear();
         self.audit_trail.clear();
+        self.window_layout = WindowLayoutState::new();
         self.next_timestamp = snapshot.next_timestamp;
 
         for component_snapshot in snapshot.components {
@@ -3272,6 +3842,7 @@ impl WorkspaceManager {
             }
 
             self.components.insert(component.id, component);
+            self.window_layout.add_component_tab(component_id);
         }
 
         if let Some(focused) = snapshot.focused_component {
@@ -3324,6 +3895,18 @@ pub struct WorkspaceRenderSnapshot {
     pub main_view: Option<ViewFrame>,
     /// Status view frame of focused component
     pub status_view: Option<ViewFrame>,
+    /// Composed main view containing all visible tiles when splits are active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_main_view: Option<ViewFrame>,
+    /// Composed status line containing all visible tiles when splits are active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_status_view: Option<ViewFrame>,
+    /// Workspace split/tab layout metadata.
+    #[serde(default)]
+    pub layout: WorkspaceLayoutSnapshot,
+    /// Per-tile render details.
+    #[serde(default)]
+    pub tiles: Vec<WorkspaceTileRenderSnapshot>,
     /// Total number of components
     pub component_count: usize,
     /// Number of running components
@@ -3689,7 +4272,9 @@ mod tests {
         assert_eq!(report.created_component_ids.len(), 2);
         assert!(report.failures.is_empty());
 
-        let first = workspace.get_component(report.created_component_ids[0]).unwrap();
+        let first = workspace
+            .get_component(report.created_component_ids[0])
+            .unwrap();
         assert_eq!(
             first.metadata.get("package.name"),
             Some(&"demo".to_string())
@@ -3731,8 +4316,8 @@ mod tests {
             "test-workspace",
             0,
         );
-        let mut workspace = WorkspaceManager::new(workspace_identity)
-            .with_policy(Box::new(DenyCliLaunchPolicy));
+        let mut workspace =
+            WorkspaceManager::new(workspace_identity).with_policy(Box::new(DenyCliLaunchPolicy));
 
         let manifest = PackageManifest {
             format_version: PackageFormatVersion::new(1, 0),
@@ -4804,6 +5389,154 @@ mod tests {
             Some(&"docs/readme.md".to_string())
         );
     }
+
+    #[test]
+    fn test_window_layout_launches_into_tabs() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let layout = workspace.window_layout_snapshot();
+        assert_eq!(layout.tiles.len(), 1);
+        assert_eq!(layout.tiles[0].tabs, vec![id1, id2]);
+        assert_eq!(layout.tiles[0].active_component, Some(id2));
+    }
+
+    #[test]
+    fn test_split_focused_tile_produces_composed_views() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        workspace.split_focused_tile(SplitAxis::Vertical).unwrap();
+
+        let snapshot = workspace.render_snapshot();
+        assert_eq!(snapshot.layout.split_axis, Some(SplitAxis::Vertical));
+        assert_eq!(snapshot.layout.tiles.len(), 2);
+        assert_eq!(snapshot.tiles.len(), 2);
+        assert!(snapshot.composed_main_view.is_some());
+        assert!(snapshot.composed_status_view.is_some());
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+        assert!(snapshot
+            .layout
+            .tiles
+            .iter()
+            .any(|tile| tile.active_component == Some(id1)));
+        assert!(snapshot
+            .layout
+            .tiles
+            .iter()
+            .any(|tile| tile.active_component == Some(id2)));
+
+        let first_line = snapshot
+            .composed_main_view
+            .as_ref()
+            .and_then(|frame| frame.content.get_line(0))
+            .unwrap_or("");
+        assert!(first_line.contains("vertical split"));
+    }
+
+    #[test]
+    fn test_focus_next_tile_cycles_across_split_tiles() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        workspace.split_focused_tile(SplitAxis::Vertical).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+
+        workspace.focus_next_tile().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
+
+        workspace.focus_next_tile().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+    }
+
+    #[test]
+    fn test_focus_next_tab_cycles_within_tile() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor2",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id3 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor3",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        assert_eq!(workspace.get_focused_component(), Some(id3));
+
+        workspace.focus_next_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
+
+        workspace.focus_next_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+
+        workspace.focus_previous_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
+    }
 }
 
 // ============================================================================
@@ -4939,13 +5672,20 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
         // Clear display before rendering new content
         display.clear();
 
-        // Render main view if available
-        if let Some(ref main_view) = snapshot.main_view {
+        // Render composed multi-window view when present; otherwise focused view.
+        if let Some(main_view) = snapshot
+            .composed_main_view
+            .as_ref()
+            .or(snapshot.main_view.as_ref())
+        {
             display.render_main_view(main_view);
         }
 
-        // Render status view if available
-        if let Some(ref status_view) = snapshot.status_view {
+        if let Some(status_view) = snapshot
+            .composed_status_view
+            .as_ref()
+            .or(snapshot.status_view.as_ref())
+        {
             display.render_status_view(status_view);
         }
 

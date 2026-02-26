@@ -83,5 +83,8 @@ This list is ordered by product/system value if completed, not by implementation
 27. [x] `services_workspace_manager/src/help.rs:24` and `services_workspace_manager/src/command_surface.rs:493`
    Implemented: eliminated help-topic parsing duplication by making `HelpCategory::parse()` delegate to shared `command_surface::parse_help_topic()` resolution, while `parse_help_topic()` remains canonical for alias decoding (including case-insensitive alias support and explicit `overview` mapping).
 
-28. [ ] `services_workspace_manager/src/command_surface.rs:146` and `services_workspace_manager/src/workspace_status.rs:243`
+28. [x] `services_workspace_manager/src/lib.rs:322` and `services_workspace_manager/src/lib.rs:3631`
+   Implemented: added first-class windowing primitives (`SplitAxis`, tile/tab layout state, split/tab/tile focus APIs) and extended `render_snapshot()` with layout-aware tile snapshots plus composed main/status frames; runtime rendering now prefers composed multi-tile views when splits are active, enabling side-by-side/panel-style workspace UX while preserving focused-view compatibility.
+
+29. [ ] `services_workspace_manager/src/command_surface.rs:146` and `services_workspace_manager/src/workspace_status.rs:243`
    Track next: derive all static prompt suggestions (`list`, `next`, `prev`, `close <id>`) from shared command-surface descriptors/grammar so `generate_suggestions()` no longer contains hand-maintained non-help/non-open literals.
