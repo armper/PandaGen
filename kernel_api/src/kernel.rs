@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// - What code to run (entry point)
 /// - What capabilities the task has
 /// - Resource limits (future)
+/// - Priority level for scheduling
 ///
 /// This is construction, not duplication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,8 @@ pub struct TaskDescriptor {
     pub name: String,
     /// Initial capabilities granted to the task
     pub capabilities: Vec<Cap<()>>, // Type-erased for simplicity
+    /// Optional priority level (None = default/normal priority)
+    pub priority: Option<u8>,
 }
 
 impl TaskDescriptor {
@@ -29,12 +32,19 @@ impl TaskDescriptor {
         Self {
             name,
             capabilities: Vec::new(),
+            priority: None,
         }
     }
 
     /// Adds a capability to the task descriptor
     pub fn with_capability(mut self, cap: Cap<()>) -> Self {
         self.capabilities.push(cap);
+        self
+    }
+
+    /// Sets the priority for the task
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = Some(priority);
         self
     }
 }

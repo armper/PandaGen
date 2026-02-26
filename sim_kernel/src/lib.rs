@@ -3348,6 +3348,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3426,6 +3427,7 @@ mod tests {
             quantum_ticks: 3,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3461,6 +3463,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3527,6 +3530,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
 
         let mut kernel1 = SimulatedKernel::new().with_scheduler_config(config.clone());
