@@ -29,6 +29,14 @@ use services_input::InputSubscriptionCap;
 #[cfg(feature = "hal_mode")]
 use services_input_hal_bridge::InputHalBridge;
 
+/// Subscription ID for HAL bridge input events
+///
+/// This is a synthetic subscription ID used to identify input events
+/// coming from the HAL bridge. In a full implementation, this would be
+/// allocated by the input service during subscription registration.
+#[cfg(feature = "hal_mode")]
+const HAL_BRIDGE_SUBSCRIPTION_ID: u64 = 1;
+
 /// Host runtime error types
 #[derive(Debug, Error)]
 pub enum HostRuntimeError {
@@ -184,7 +192,11 @@ impl HostRuntime {
             let execution_id = identity::ExecutionId::new();
             let task_id = TaskId::new();
             let channel_id = ChannelId::new();
-            let subscription = InputSubscriptionCap::new(1, task_id, channel_id);
+            let subscription = InputSubscriptionCap::new(
+                HAL_BRIDGE_SUBSCRIPTION_ID,
+                task_id,
+                channel_id,
+            );
             let keyboard = Box::new(StubKeyboard) as Box<dyn KeyboardDevice>;
             
             Some(InputHalBridge::new(
