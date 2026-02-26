@@ -694,10 +694,9 @@ mod tests {
             exit_on_idle: false,
         };
 
-        let runtime = HostRuntime::new(config);
-        assert!(runtime.is_ok());
+        let runtime = HostRuntime::new(config)
+            .expect("Failed to create HAL mode runtime");
 
-        let runtime = runtime.unwrap();
         // Verify HAL bridge was initialized
         assert!(runtime.hal_bridge.is_some());
     }
@@ -713,8 +712,9 @@ mod tests {
             exit_on_idle: false,
         };
 
-        let mut runtime = HostRuntime::new(config).unwrap();
-        
+        let mut runtime = HostRuntime::new(config)
+            .expect("Failed to create HAL mode runtime for pump test");
+
         // Pump input should not error with stub keyboard
         let result = runtime.pump_hal_input();
         assert!(result.is_ok());
