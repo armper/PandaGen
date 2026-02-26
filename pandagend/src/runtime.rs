@@ -198,7 +198,7 @@ impl HostRuntime {
                 channel_id,
             );
             let keyboard = Box::new(StubKeyboard) as Box<dyn KeyboardDevice>;
-            
+
             Some(InputHalBridge::new(
                 execution_id,
                 task_id,
