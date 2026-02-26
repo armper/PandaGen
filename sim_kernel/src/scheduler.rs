@@ -262,22 +262,22 @@ impl RunQueue {
     where
         F: FnMut(TaskId) -> Priority,
     {
-        let mut best_index: Option<usize> = None;
-        let mut best_priority: Priority = Priority::LOWEST;
+        if self.queue.is_empty() {
+            return None;
+        }
 
-        for (index, task_id) in self.queue.iter().copied().enumerate() {
+        let mut best_index: usize = 0;
+        let mut best_priority: Priority = priority_of(*self.queue.get(0)?);
+
+        for (index, task_id) in self.queue.iter().copied().enumerate().skip(1) {
             let priority = priority_of(task_id);
             if priority < best_priority {
                 best_priority = priority;
-                best_index = Some(index);
+                best_index = index;
             }
         }
 
-        if let Some(index) = best_index {
-            return self.queue.remove(index);
-        }
-
-        self.dequeue()
+        self.queue.remove(best_index)
     }
 
     fn is_empty(&self) -> bool {
@@ -373,6 +373,12 @@ impl Scheduler {
     /// Dequeues the next task to run
     ///
     /// Returns None if no tasks are runnable.
+    ///
+    /// # Performance Note
+    ///
+    /// Priority-based scheduling performs an O(n) linear scan of the run queue.
+    /// For systems with many runnable tasks, consider using a priority queue
+    /// data structure (e.g., BinaryHeap) for O(log n) operations.
     pub fn dequeue_next(&mut self) -> Option<TaskId> {
         let next = match self.config.realtime_policy {
             RealTimePolicy::None => match self.config.scheduling_policy {
@@ -718,6 +724,10 @@ impl Scheduler {
     }
 
     /// Suspends a task (will not be scheduled until resumed)
+    ///
+    /// Only suspends tasks that are currently in the Runnable state.
+    /// Tasks in other states (Blocked, Waiting, Exited, etc.) are not affected.
+    /// This is intentional to avoid interfering with task synchronization and lifecycle.
     pub fn suspend_task(&mut self, task_id: TaskId) {
         if let Some(task_info) = self.tasks.get_mut(&task_id) {
             if task_info.state == TaskState::Runnable {
@@ -733,6 +743,9 @@ impl Scheduler {
     }
 
     /// Resumes a suspended task
+    ///
+    /// Only resumes tasks that are currently in the Suspended state.
+    /// Has no effect on tasks in other states.
     pub fn resume_task(&mut self, task_id: TaskId) {
         if let Some(task_info) = self.tasks.get_mut(&task_id) {
             if task_info.state == TaskState::Suspended {
@@ -743,6 +756,12 @@ impl Scheduler {
     }
 
     /// Returns scheduler statistics
+    ///
+    /// # Performance Note
+    ///
+    /// This method performs an O(n) scan of all tasks and O(m) scan of the audit log
+    /// where n is the number of tasks and m is the audit log size. For production use,
+    /// consider maintaining running counters instead of scanning on each call.
     pub fn statistics(&self) -> SchedulerStatistics {
         let mut stats = SchedulerStatistics::default();
         
