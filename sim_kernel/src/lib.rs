@@ -26,6 +26,7 @@ pub mod capability_audit;
 pub mod executable;
 pub mod fault_injection;
 pub mod message_queue;
+pub mod page_table_bridge;
 pub mod policy_audit;
 pub mod resource_audit;
 pub mod scheduler;
