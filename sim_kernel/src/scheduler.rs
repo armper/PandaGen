@@ -280,9 +280,21 @@ impl Scheduler {
     pub fn dequeue_next(&mut self) -> Option<TaskId> {
         let next = match self.config.realtime_policy {
             RealTimePolicy::None => self.run_queue.dequeue(),
-            RealTimePolicy::EarliestDeadlineFirst => self
-                .run_queue
-                .dequeue_earliest_deadline(|task_id| self.task_deadline(task_id)),
+            RealTimePolicy::EarliestDeadlineFirst => {
+                // Build a map of deadlines to avoid borrowing self in the closure
+                let deadlines: std::collections::HashMap<TaskId, u64> = self
+                    .run_queue
+                    .queue
+                    .iter()
+                    .copied()
+                    .filter_map(|task_id| {
+                        self.task_deadline(task_id)
+                            .map(|deadline| (task_id, deadline))
+                    })
+                    .collect();
+                self.run_queue
+                    .dequeue_earliest_deadline(|task_id| deadlines.get(&task_id).copied())
+            }
         };
 
         if let Some(task_id) = next {
