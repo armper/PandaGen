@@ -2221,7 +2221,11 @@ impl KernelApiV0 for SimulatedKernel {
         name: String,
         capabilities: Vec<Cap<()>>,
     ) -> Result<TaskId, KernelError> {
-        let descriptor = TaskDescriptor { name, capabilities };
+        let descriptor = TaskDescriptor {
+            name,
+            capabilities,
+            priority: None,
+        };
         let handle = self.spawn_task(descriptor)?;
         Ok(handle.task_id)
     }
@@ -3348,6 +3352,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3426,6 +3431,7 @@ mod tests {
             quantum_ticks: 3,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3461,6 +3467,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
         let mut kernel = SimulatedKernel::new().with_scheduler_config(config);
 
@@ -3527,6 +3534,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: scheduler::RealTimePolicy::None,
+            scheduling_policy: scheduler::SchedulingPolicy::RoundRobin,
         };
 
         let mut kernel1 = SimulatedKernel::new().with_scheduler_config(config.clone());

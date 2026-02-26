@@ -36,6 +36,10 @@ pub enum TaskState {
     /// Task is blocked waiting for a specific tick count
     /// The task will be unblocked when current_ticks >= wake_tick
     Blocked { wake_tick: u64 },
+    /// Task is waiting for I/O or other external event
+    Waiting,
+    /// Task has been suspended and will not be scheduled
+    Suspended,
     /// Task has exited normally or abnormally
     Exited,
     /// Task was cancelled due to resource exhaustion
@@ -51,6 +55,8 @@ pub struct SchedulerConfig {
     pub max_steps_per_tick: Option<u64>,
     /// Real-time scheduling policy
     pub realtime_policy: RealTimePolicy,
+    /// Scheduling policy for non-realtime tasks
+    pub scheduling_policy: SchedulingPolicy,
 }
 
 impl Default for SchedulerConfig {
@@ -59,6 +65,7 @@ impl Default for SchedulerConfig {
             quantum_ticks: 10, // Small quantum for testing
             max_steps_per_tick: Some(1000),
             realtime_policy: RealTimePolicy::None,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         }
     }
 }
@@ -68,6 +75,38 @@ impl Default for SchedulerConfig {
 pub enum RealTimePolicy {
     None,
     EarliestDeadlineFirst,
+}
+
+/// Scheduling policy for non-realtime tasks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingPolicy {
+    /// Simple round-robin scheduling
+    RoundRobin,
+    /// Priority-based scheduling with preemption
+    Priority,
+}
+
+/// Task priority level (lower number = higher priority)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Priority(pub u8);
+
+impl Priority {
+    /// Highest priority (0)
+    pub const HIGHEST: Priority = Priority(0);
+    /// High priority (64)
+    pub const HIGH: Priority = Priority(64);
+    /// Normal/default priority (128)
+    pub const NORMAL: Priority = Priority(128);
+    /// Low priority (192)
+    pub const LOW: Priority = Priority(192);
+    /// Lowest priority (255)
+    pub const LOWEST: Priority = Priority(255);
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        Priority::NORMAL
+    }
 }
 
 /// Real-time task parameters
@@ -167,6 +206,8 @@ struct TaskInfo {
     state: TaskState,
     /// Ticks consumed since last scheduling
     ticks_in_quantum: u64,
+    /// Priority level (used in Priority scheduling policy)
+    priority: Priority,
     realtime: Option<RealTimeTask>,
 }
 
@@ -217,6 +258,28 @@ impl RunQueue {
         self.dequeue()
     }
 
+    fn dequeue_highest_priority<F>(&mut self, mut priority_of: F) -> Option<TaskId>
+    where
+        F: FnMut(TaskId) -> Priority,
+    {
+        if self.queue.is_empty() {
+            return None;
+        }
+
+        let mut best_index: usize = 0;
+        let mut best_priority: Priority = priority_of(*self.queue.get(0)?);
+
+        for (index, task_id) in self.queue.iter().copied().enumerate().skip(1) {
+            let priority = priority_of(task_id);
+            if priority < best_priority {
+                best_priority = priority;
+                best_index = index;
+            }
+        }
+
+        self.queue.remove(best_index)
+    }
+
     fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -228,6 +291,31 @@ impl RunQueue {
     fn remove(&mut self, task_id: TaskId) {
         self.queue.retain(|&id| id != task_id);
     }
+}
+
+/// Scheduler statistics for observability
+#[derive(Debug, Clone, Default)]
+pub struct SchedulerStatistics {
+    /// Total number of tasks tracked by scheduler
+    pub total_tasks: usize,
+    /// Number of runnable tasks
+    pub runnable_tasks: usize,
+    /// Number of blocked tasks
+    pub blocked_tasks: usize,
+    /// Number of waiting tasks
+    pub waiting_tasks: usize,
+    /// Number of suspended tasks
+    pub suspended_tasks: usize,
+    /// Number of exited tasks
+    pub exited_tasks: usize,
+    /// Number of cancelled tasks
+    pub cancelled_tasks: usize,
+    /// Current scheduler tick
+    pub current_tick: u64,
+    /// Total context switches
+    pub context_switches: usize,
+    /// Total preemptions
+    pub preemptions: usize,
 }
 
 /// Preemptive scheduler
@@ -265,9 +353,17 @@ impl Scheduler {
     ///
     /// The task is added to the run queue and marked as Runnable.
     pub fn enqueue(&mut self, task_id: TaskId) {
+        self.enqueue_with_priority(task_id, Priority::default());
+    }
+
+    /// Enqueues a task with a specific priority
+    ///
+    /// The task is added to the run queue and marked as Runnable.
+    pub fn enqueue_with_priority(&mut self, task_id: TaskId, priority: Priority) {
         let task_info = TaskInfo {
             state: TaskState::Runnable,
             ticks_in_quantum: 0,
+            priority,
             realtime: None,
         };
         self.tasks.insert(task_id, task_info);
@@ -277,9 +373,34 @@ impl Scheduler {
     /// Dequeues the next task to run
     ///
     /// Returns None if no tasks are runnable.
+    ///
+    /// # Performance Note
+    ///
+    /// Priority-based scheduling performs an O(n) linear scan of the run queue.
+    /// For systems with many runnable tasks, consider using a priority queue
+    /// data structure (e.g., BinaryHeap) for O(log n) operations.
     pub fn dequeue_next(&mut self) -> Option<TaskId> {
         let next = match self.config.realtime_policy {
-            RealTimePolicy::None => self.run_queue.dequeue(),
+            RealTimePolicy::None => match self.config.scheduling_policy {
+                SchedulingPolicy::RoundRobin => self.run_queue.dequeue(),
+                SchedulingPolicy::Priority => {
+                    // Build a map of priorities to avoid borrowing self in the closure
+                    let priorities: std::collections::HashMap<TaskId, Priority> = self
+                        .run_queue
+                        .queue
+                        .iter()
+                        .copied()
+                        .filter_map(|task_id| {
+                            self.tasks
+                                .get(&task_id)
+                                .map(|info| (task_id, info.priority))
+                        })
+                        .collect();
+                    self.run_queue.dequeue_highest_priority(|task_id| {
+                        priorities.get(&task_id).copied().unwrap_or(Priority::NORMAL)
+                    })
+                }
+            },
             RealTimePolicy::EarliestDeadlineFirst => {
                 // Build a map of deadlines to avoid borrowing self in the closure
                 let deadlines: std::collections::HashMap<TaskId, u64> = self
@@ -585,6 +706,84 @@ impl Scheduler {
         self.audit_log.clear();
     }
 
+    /// Sets the priority for a task
+    ///
+    /// Returns an error if the task doesn't exist.
+    pub fn set_priority(&mut self, task_id: TaskId, priority: Priority) -> Result<(), SchedulerError> {
+        let task_info = self
+            .tasks
+            .get_mut(&task_id)
+            .ok_or(SchedulerError::TaskNotFound(task_id))?;
+        task_info.priority = priority;
+        Ok(())
+    }
+
+    /// Gets the priority for a task
+    pub fn get_priority(&self, task_id: TaskId) -> Option<Priority> {
+        self.tasks.get(&task_id).map(|info| info.priority)
+    }
+
+    /// Suspends a task (will not be scheduled until resumed)
+    ///
+    /// Only suspends tasks that are currently in the Runnable state.
+    /// Tasks in other states (Blocked, Waiting, Exited, etc.) are not affected.
+    /// This is intentional to avoid interfering with task synchronization and lifecycle.
+    pub fn suspend_task(&mut self, task_id: TaskId) {
+        if let Some(task_info) = self.tasks.get_mut(&task_id) {
+            if task_info.state == TaskState::Runnable {
+                task_info.state = TaskState::Suspended;
+                // Remove from run queue
+                self.run_queue.remove(task_id);
+                // Clear current task if it's being suspended
+                if self.current_task == Some(task_id) {
+                    self.current_task = None;
+                }
+            }
+        }
+    }
+
+    /// Resumes a suspended task
+    ///
+    /// Only resumes tasks that are currently in the Suspended state.
+    /// Has no effect on tasks in other states.
+    pub fn resume_task(&mut self, task_id: TaskId) {
+        if let Some(task_info) = self.tasks.get_mut(&task_id) {
+            if task_info.state == TaskState::Suspended {
+                task_info.state = TaskState::Runnable;
+                self.enqueue_runnable(task_id);
+            }
+        }
+    }
+
+    /// Returns scheduler statistics
+    ///
+    /// # Performance Note
+    ///
+    /// This method performs an O(n) scan of all tasks and O(m) scan of the audit log
+    /// where n is the number of tasks and m is the audit log size. For production use,
+    /// consider maintaining running counters instead of scanning on each call.
+    pub fn statistics(&self) -> SchedulerStatistics {
+        let mut stats = SchedulerStatistics::default();
+        
+        for info in self.tasks.values() {
+            match info.state {
+                TaskState::Runnable => stats.runnable_tasks += 1,
+                TaskState::Blocked { .. } => stats.blocked_tasks += 1,
+                TaskState::Waiting => stats.waiting_tasks += 1,
+                TaskState::Suspended => stats.suspended_tasks += 1,
+                TaskState::Exited => stats.exited_tasks += 1,
+                TaskState::Cancelled => stats.cancelled_tasks += 1,
+            }
+        }
+        
+        stats.total_tasks = self.tasks.len();
+        stats.current_tick = self.current_ticks;
+        stats.context_switches = self.audit_log.iter().filter(|e| matches!(e, ScheduleEvent::TaskSelected { .. })).count();
+        stats.preemptions = self.audit_log.iter().filter(|e| matches!(e, ScheduleEvent::TaskPreempted { .. })).count();
+        
+        stats
+    }
+
     fn task_deadline(&self, task_id: TaskId) -> Option<u64> {
         self.tasks
             .get(&task_id)
@@ -728,6 +927,7 @@ mod tests {
             quantum_ticks: 10,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task = TaskId::new();
@@ -757,6 +957,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task1 = TaskId::new();
@@ -865,6 +1066,7 @@ mod tests {
             quantum_ticks: 10,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task = TaskId::new();
@@ -971,6 +1173,7 @@ mod tests {
             quantum_ticks: 5,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task1 = TaskId::new();
@@ -1115,6 +1318,7 @@ mod tests {
             quantum_ticks: 10,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task1 = TaskId::new();
@@ -1154,6 +1358,7 @@ mod tests {
             quantum_ticks: 10,
             max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
+            scheduling_policy: SchedulingPolicy::RoundRobin,
         };
         let mut scheduler = Scheduler::with_config(config);
         let task = TaskId::new();
@@ -1181,5 +1386,143 @@ mod tests {
 
         scheduler.on_tick_advanced(15);
         assert_eq!(scheduler.task_state(task), Some(TaskState::Runnable));
+    }
+
+    #[test]
+    fn test_priority_scheduling() {
+        let mut config = SchedulerConfig::default();
+        config.scheduling_policy = SchedulingPolicy::Priority;
+        let mut scheduler = Scheduler::with_config(config);
+
+        let task_low = TaskId::new();
+        let task_normal = TaskId::new();
+        let task_high = TaskId::new();
+
+        // Enqueue tasks with different priorities (enqueue in reverse priority order)
+        scheduler.enqueue_with_priority(task_low, Priority::LOW);
+        scheduler.enqueue_with_priority(task_normal, Priority::NORMAL);
+        scheduler.enqueue_with_priority(task_high, Priority::HIGH);
+
+        // High priority task should run first
+        assert_eq!(scheduler.dequeue_next(), Some(task_high));
+        scheduler.on_tick_advanced(1);
+
+        // Normal priority task should run next
+        assert_eq!(scheduler.dequeue_next(), Some(task_normal));
+        scheduler.on_tick_advanced(1);
+
+        // Low priority task should run last
+        assert_eq!(scheduler.dequeue_next(), Some(task_low));
+    }
+
+    #[test]
+    fn test_suspend_resume() {
+        let mut scheduler = Scheduler::new();
+        let task_id = TaskId::new();
+        scheduler.enqueue(task_id);
+
+        // Task should be runnable
+        assert_eq!(scheduler.task_state(task_id), Some(TaskState::Runnable));
+        assert_eq!(scheduler.runnable_count(), 1);
+
+        // Suspend the task
+        scheduler.suspend_task(task_id);
+        assert_eq!(scheduler.task_state(task_id), Some(TaskState::Suspended));
+        assert_eq!(scheduler.runnable_count(), 0);
+
+        // Resume the task
+        scheduler.resume_task(task_id);
+        assert_eq!(scheduler.task_state(task_id), Some(TaskState::Runnable));
+        assert_eq!(scheduler.runnable_count(), 1);
+    }
+
+    #[test]
+    fn test_set_get_priority() {
+        let mut scheduler = Scheduler::new();
+        let task_id = TaskId::new();
+        scheduler.enqueue_with_priority(task_id, Priority::LOW);
+
+        // Check initial priority
+        assert_eq!(scheduler.get_priority(task_id), Some(Priority::LOW));
+
+        // Change priority
+        scheduler.set_priority(task_id, Priority::HIGH).unwrap();
+        assert_eq!(scheduler.get_priority(task_id), Some(Priority::HIGH));
+
+        // Invalid task should error
+        let invalid_id = TaskId::new();
+        assert!(scheduler.set_priority(invalid_id, Priority::NORMAL).is_err());
+    }
+
+    #[test]
+    fn test_scheduler_statistics() {
+        let mut scheduler = Scheduler::new();
+        
+        let task1 = TaskId::new();
+        let task2 = TaskId::new();
+        let task3 = TaskId::new();
+        
+        scheduler.enqueue(task1);
+        scheduler.enqueue(task2);
+        scheduler.enqueue(task3);
+        
+        // Block one task
+        scheduler.block_task(task2, 100);
+        
+        // Exit one task
+        scheduler.exit_task(task3);
+        
+        let stats = scheduler.statistics();
+        assert_eq!(stats.total_tasks, 3);
+        assert_eq!(stats.runnable_tasks, 1);
+        assert_eq!(stats.blocked_tasks, 1);
+        assert_eq!(stats.exited_tasks, 1);
+    }
+
+    #[test]
+    fn test_priority_preemption() {
+        let mut config = SchedulerConfig::default();
+        config.scheduling_policy = SchedulingPolicy::Priority;
+        config.quantum_ticks = 5;
+        let mut scheduler = Scheduler::with_config(config);
+
+        let task_low = TaskId::new();
+        let task_high = TaskId::new();
+
+        // Start with low priority task
+        scheduler.enqueue_with_priority(task_low, Priority::LOW);
+        let current = scheduler.dequeue_next();
+        assert_eq!(current, Some(task_low));
+
+        // Advance some ticks
+        scheduler.on_tick_advanced(2);
+
+        // Add high priority task (should preempt if we check)
+        scheduler.enqueue_with_priority(task_high, Priority::HIGH);
+        
+        // Preempt current task
+        scheduler.preempt_current();
+        
+        // High priority task should be selected next
+        assert_eq!(scheduler.dequeue_next(), Some(task_high));
+    }
+
+    #[test]
+    fn test_waiting_state() {
+        let mut scheduler = Scheduler::new();
+        let task_id = TaskId::new();
+        
+        scheduler.enqueue(task_id);
+        assert_eq!(scheduler.task_state(task_id), Some(TaskState::Runnable));
+        
+        // Manually set to waiting state (would be done by kernel for I/O)
+        if let Some(info) = scheduler.tasks.get_mut(&task_id) {
+            info.state = TaskState::Waiting;
+        }
+        
+        assert_eq!(scheduler.task_state(task_id), Some(TaskState::Waiting));
+        
+        let stats = scheduler.statistics();
+        assert_eq!(stats.waiting_tasks, 1);
     }
 }
