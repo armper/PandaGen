@@ -42,6 +42,42 @@ pub struct RgbaBuffer {
     pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BitmapFont {
+    glyph_width: usize,
+    glyph_height: usize,
+    advance_x: usize,
+}
+
+impl BitmapFont {
+    pub const fn new(glyph_width: usize, glyph_height: usize, advance_x: usize) -> Self {
+        Self {
+            glyph_width,
+            glyph_height,
+            advance_x,
+        }
+    }
+
+    pub const fn glyph_width(&self) -> usize {
+        self.glyph_width
+    }
+
+    pub const fn glyph_height(&self) -> usize {
+        self.glyph_height
+    }
+
+    pub const fn advance_x(&self) -> usize {
+        self.advance_x
+    }
+
+    pub fn measure_text(&self, text: &str) -> (usize, usize) {
+        (text.chars().count() * self.advance_x, self.glyph_height)
+    }
+}
+
+pub const COMPACT_FONT: BitmapFont = BitmapFont::new(5, 7, 6);
+pub const DESKTOP_FONT: BitmapFont = BitmapFont::new(8, 8, 9);
+
 pub trait RenderTarget {
     fn width(&self) -> usize;
     fn height(&self) -> usize;
@@ -105,10 +141,21 @@ pub trait RenderTarget {
     }
 
     fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
+        self.draw_text_with_font(x, y, text, &DESKTOP_FONT, color);
+    }
+
+    fn draw_text_with_font(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        font: &BitmapFont,
+        color: RgbaColor,
+    ) {
         let mut cursor_x = x;
         for ch in text.chars() {
-            draw_glyph(self, cursor_x, y, glyph_for(ch), color);
-            cursor_x = cursor_x.saturating_add(GLYPH_WIDTH + 1);
+            draw_glyph(self, cursor_x, y, font, ch, color);
+            cursor_x = cursor_x.saturating_add(font.advance_x());
             if cursor_x >= self.width() {
                 break;
             }
@@ -235,6 +282,17 @@ impl RgbaBuffer {
         <Self as RenderTarget>::draw_text(self, x, y, text, color)
     }
 
+    pub fn draw_text_with_font(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        font: &BitmapFont,
+        color: RgbaColor,
+    ) {
+        <Self as RenderTarget>::draw_text_with_font(self, x, y, text, font, color)
+    }
+
     fn offset(&self, x: usize, y: usize) -> Option<usize> {
         if x >= self.width || y >= self.height {
             return None;
@@ -303,24 +361,27 @@ impl RenderTarget for LinearFramebufferTarget<'_> {
     }
 }
 
-const GLYPH_WIDTH: usize = 5;
-const GLYPH_HEIGHT: usize = 7;
+const SOURCE_GLYPH_WIDTH: usize = 5;
+const SOURCE_GLYPH_HEIGHT: usize = 7;
+const MAX_GLYPH_HEIGHT: usize = 16;
 
 fn draw_glyph(
     target: &mut (impl RenderTarget + ?Sized),
     x: usize,
     y: usize,
-    glyph: [u8; GLYPH_HEIGHT],
+    font: &BitmapFont,
+    ch: char,
     color: RgbaColor,
 ) {
-    for (row, pattern) in glyph.iter().enumerate() {
+    let glyph = rasterize_glyph(font, ch);
+    for (row, pattern) in glyph.iter().take(font.glyph_height()).enumerate() {
         let y = y + row;
         if y >= target.height() {
             break;
         }
 
-        for column in 0..GLYPH_WIDTH {
-            let mask = 1 << (GLYPH_WIDTH - 1 - column);
+        for column in 0..font.glyph_width() {
+            let mask = 1 << (font.glyph_width() - 1 - column);
             if pattern & mask != 0 {
                 target.write_pixel(x + column, y, color);
             }
@@ -328,7 +389,30 @@ fn draw_glyph(
     }
 }
 
-fn glyph_for(ch: char) -> [u8; GLYPH_HEIGHT] {
+fn rasterize_glyph(font: &BitmapFont, ch: char) -> [u16; MAX_GLYPH_HEIGHT] {
+    let source = compact_glyph_for(ch);
+    let mut rows = [0u16; MAX_GLYPH_HEIGHT];
+
+    for target_y in 0..font.glyph_height() {
+        let source_y = target_y * SOURCE_GLYPH_HEIGHT / font.glyph_height();
+        let source_row = source[source_y];
+        let mut row = 0u16;
+
+        for target_x in 0..font.glyph_width() {
+            let source_x = target_x * SOURCE_GLYPH_WIDTH / font.glyph_width();
+            let bit = (source_row >> (SOURCE_GLYPH_WIDTH - 1 - source_x)) & 1;
+            if bit != 0 {
+                row |= 1 << (font.glyph_width() - 1 - target_x);
+            }
+        }
+
+        rows[target_y] = row;
+    }
+
+    rows
+}
+
+fn compact_glyph_for(ch: char) -> [u8; SOURCE_GLYPH_HEIGHT] {
     match ch {
         'A' | 'a' => [
             0b00100, 0b01010, 0b11111, 0b10001, 0b10001, 0b10001, 0b00000,
@@ -525,7 +609,7 @@ mod tests {
     fn test_draw_text_renders_supported_glyph_pixels() {
         let mut buffer = RgbaBuffer::new(24, 12, CLEAR);
 
-        buffer.draw_text(2, 2, "Ab?", ACCENT);
+        buffer.draw_text_with_font(2, 2, "Ab?", &COMPACT_FONT, ACCENT);
 
         assert_eq!(buffer.pixel(4, 2), Some(ACCENT));
         assert_eq!(buffer.pixel(2, 4), Some(ACCENT));
@@ -587,5 +671,20 @@ mod tests {
         );
         assert_eq!(framebuffer.pixel(1, 0), Some(ACCENT));
         assert_eq!(framebuffer.pixel(2, 1), Some(CLEAR));
+    }
+
+    #[test]
+    fn test_desktop_font_reports_readable_metrics() {
+        assert_eq!(DESKTOP_FONT.measure_text("Ab"), (18, 8));
+    }
+
+    #[test]
+    fn test_draw_text_with_desktop_font_preserves_glyph_gap() {
+        let mut buffer = RgbaBuffer::new(32, 12, CLEAR);
+
+        buffer.draw_text_with_font(1, 1, "II", &DESKTOP_FONT, ACCENT);
+
+        assert_eq!(buffer.pixel(9, 1), Some(CLEAR));
+        assert_eq!(buffer.pixel(10, 1), Some(ACCENT));
     }
 }

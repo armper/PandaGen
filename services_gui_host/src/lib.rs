@@ -1,14 +1,14 @@
 //! GUI host and compositor on view surfaces.
 
-use graphics_rasterizer::{RasterRect, RenderTarget, RgbaBuffer, RgbaColor};
+use graphics_rasterizer::{RasterRect, RenderTarget, RgbaBuffer, RgbaColor, DESKTOP_FONT};
 use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
-const RASTER_CELL_WIDTH: usize = 8;
-const RASTER_CELL_HEIGHT: usize = 10;
+const RASTER_CELL_WIDTH: usize = DESKTOP_FONT.advance_x();
+const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
 const RASTER_BORDER_THICKNESS: usize = 1;
 
 const DESKTOP_BACKGROUND_COLOR: RgbaColor = RgbaColor::new(12, 18, 28, 255);
@@ -573,7 +573,13 @@ fn raster_window(target: &mut impl RenderTarget, window: &DesktopWindow) {
     );
 
     let chrome_label = window_chrome_label(window);
-    target.draw_text(rect.x + 2, rect.y + 2, &chrome_label, TEXT_COLOR);
+    target.draw_text_with_font(
+        rect.x + 2,
+        rect.y + 2,
+        &chrome_label,
+        &DESKTOP_FONT,
+        TEXT_COLOR,
+    );
 
     let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
     for (line_index, line) in render_content_lines(&window.frame.content)
@@ -585,7 +591,7 @@ fn raster_window(target: &mut impl RenderTarget, window: &DesktopWindow) {
         if y >= target.height() {
             break;
         }
-        target.draw_text(rect.x + 2, y, &line, TEXT_COLOR);
+        target.draw_text_with_font(rect.x + 2, y, &line, &DESKTOP_FONT, TEXT_COLOR);
     }
 
     if let Some(cursor) = window.frame.cursor {
@@ -886,15 +892,15 @@ mod tests {
                 .focused()],
         );
 
-        assert_eq!(surface.width, 64);
+        assert_eq!(surface.width, 72);
         assert_eq!(surface.height, 50);
         assert_eq!(surface.frame_count, 1);
         assert_eq!(surface.timestamp_ns, 33);
         assert_eq!(surface.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
-        assert_eq!(surface.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(surface.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
         assert_eq!(surface.pixel(16, 20), Some(WINDOW_FILL_COLOR));
-        assert_eq!(surface.pixel(12, 22), Some(TEXT_COLOR));
-        assert_eq!(surface.pixel(18, 21), Some(CURSOR_COLOR));
+        assert_eq!(surface.pixel(15, 22), Some(TEXT_COLOR));
+        assert_eq!(surface.pixel(20, 21), Some(CURSOR_COLOR));
     }
 
     #[test]
@@ -1378,8 +1384,8 @@ mod tests {
             ],
         );
 
-        assert_eq!(surface.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
-        assert_eq!(surface.pixel(16, 20), Some(UNFOCUSED_BORDER_COLOR));
+        assert_eq!(surface.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(surface.pixel(18, 20), Some(UNFOCUSED_BORDER_COLOR));
     }
 
     #[test]
@@ -1395,9 +1401,9 @@ mod tests {
         .with_title("Main")
         .with_cursor(CursorPosition::new(0, 0));
 
-        let mut bytes = vec![0; 64 * 50 * 4];
+        let mut bytes = vec![0; 72 * 50 * 4];
         let mut target =
-            LinearFramebufferTarget::new(64, 50, 64, LinearPixelFormat::Rgb32, &mut bytes);
+            LinearFramebufferTarget::new(72, 50, 72, LinearPixelFormat::Rgb32, &mut bytes);
 
         let stats = compositor.render_desktop_to_target(
             &mut target,
@@ -1407,9 +1413,30 @@ mod tests {
         assert_eq!(stats.frame_count, 1);
         assert_eq!(stats.timestamp_ns, 44);
         assert_eq!(target.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
-        assert_eq!(target.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
-        assert_eq!(target.pixel(12, 22), Some(TEXT_COLOR));
-        assert_eq!(target.pixel(18, 21), Some(CURSOR_COLOR));
+        assert_eq!(target.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(target.pixel(15, 22), Some(TEXT_COLOR));
+        assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
+    }
+
+    #[test]
+    fn test_compose_desktop_rgba_uses_desktop_font_spacing_for_title() {
+        let compositor = Compositor::new();
+        let title = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            2,
+            ViewContent::text_buffer(vec!["body".to_string()]),
+            22,
+        )
+        .with_title("II");
+
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(8, 5),
+            vec![DesktopWindow::new(title, SurfaceRect::new(1, 1, 4, 3)).focused()],
+        );
+
+        assert_eq!(surface.pixel(19, 12), Some(WINDOW_FILL_COLOR));
+        assert_eq!(surface.pixel(20, 12), Some(TEXT_COLOR));
     }
 
     #[test]

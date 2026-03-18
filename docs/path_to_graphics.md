@@ -81,7 +81,7 @@ User-space services should provide policy:
 
 - [x] `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
 - [x] `GFX-012` Define a render target abstraction that can target both off-screen test buffers and the real framebuffer backend.
-- [ ] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
+- [x] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
 - [ ] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
 - [ ] `GFX-015` Add golden surface tests for raster output so pixel logic can be validated without booting QEMU.
 
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
+- `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
 
-`GFX-012` is now in place: the rasterizer exposes a reusable render-target contract, and the GUI host can paint the desktop into either an owned off-screen RGBA buffer or a linear framebuffer-style sink. The next step is to improve text quality and flexibility by replacing the tiny built-in bitmap set with a better font path or atlas.
+`GFX-013` is now in place: the rasterizer has an explicit bitmap-font abstraction with readable desktop metrics, and the GUI host now spaces desktop text from font measurements instead of hidden constants. The next step is to make redraws spatially aware with clipping and damage support so graphics work scales past the current full-window paint model.
