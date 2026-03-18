@@ -828,7 +828,114 @@ fn partition_extent(total: usize, count: usize) -> Vec<(usize, usize)> {
 mod tests {
     use super::*;
     use graphics_rasterizer::{LinearFramebufferTarget, LinearPixelFormat};
+    use services_workspace_manager::{
+        ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+    };
     use view_types::{CursorPosition, ViewId, ViewKind};
+
+    fn raster_surface_to_golden(surface: &RasterSurfaceFrame) -> String {
+        let mut rows = Vec::with_capacity(surface.height);
+        for y in 0..surface.height {
+            let mut row = String::with_capacity(surface.width);
+            for x in 0..surface.width {
+                let ch = match surface.pixel(x, y) {
+                    Some(color) if color == DESKTOP_BACKGROUND_COLOR => '.',
+                    Some(color) if color == WINDOW_FILL_COLOR => 'f',
+                    Some(color) if color == FOCUSED_BORDER_COLOR => '#',
+                    Some(color) if color == UNFOCUSED_BORDER_COLOR => '+',
+                    Some(color) if color == TEXT_COLOR => 't',
+                    Some(color) if color == CURSOR_COLOR => '@',
+                    Some(_) => '?',
+                    None => '!',
+                };
+                row.push(ch);
+            }
+            rows.push(row);
+        }
+
+        rows.join("\n")
+    }
+
+    fn assert_raster_golden(surface: &RasterSurfaceFrame, expected: &str) {
+        let actual = raster_surface_to_golden(surface);
+        let expected = expected.trim_end();
+        assert!(
+            actual == expected,
+            "golden raster mismatch\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
+        );
+    }
+
+    fn sample_workspace_snapshot_for_golden() -> WorkspaceRenderSnapshot {
+        let left_component = ComponentId::new();
+        let right_component = ComponentId::new();
+        let left = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            2,
+            ViewContent::text_buffer(vec!["left".to_string(), "cursor".to_string()]),
+            20,
+        )
+        .with_title("Editor")
+        .with_cursor(CursorPosition::new(1, 2));
+        let right = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            5,
+            ViewContent::panel("notify"),
+            50,
+        )
+        .with_title("Panel");
+
+        WorkspaceRenderSnapshot {
+            focused_component: Some(left_component),
+            main_view: Some(left.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: Some(SplitAxis::Vertical),
+                focused_tile: 0,
+                tiles: vec![
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 0,
+                        is_focused: true,
+                        active_component: Some(left_component),
+                        tabs: vec![left_component, right_component],
+                    },
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 1,
+                        is_focused: false,
+                        active_component: Some(right_component),
+                        tabs: vec![right_component],
+                    },
+                ],
+            },
+            tiles: vec![
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(left_component),
+                    tabs: vec![left_component, right_component],
+                    main_view: Some(left),
+                    status_view: None,
+                },
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 1,
+                    is_focused: false,
+                    active_component: Some(right_component),
+                    tabs: vec![right_component],
+                    main_view: Some(right),
+                    status_view: None,
+                },
+            ],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Graphics".to_string(),
+            breadcrumbs: "PANDA/desktop".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        }
+    }
 
     #[test]
     fn test_compositor_renders_frames() {
@@ -983,10 +1090,6 @@ mod tests {
 
     #[test]
     fn test_workspace_snapshot_maps_vertical_tiles_to_desktop_windows() {
-        use services_workspace_manager::{
-            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
-        };
-
         let compositor = Compositor::new();
         let left_component = ComponentId::new();
         let right_component = ComponentId::new();
@@ -1545,6 +1648,56 @@ mod tests {
         assert_eq!(stats.damage_rect, Some(damage_rect));
         assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
         assert_eq!(target.pixel(56, 21), preserved_pixel);
+    }
+
+    #[test]
+    fn test_compose_desktop_rgba_matches_golden_fixture() {
+        let compositor = Compositor::new();
+        let editor = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["AB".to_string(), "CD".to_string()]),
+            44,
+        )
+        .with_title("Main")
+        .with_cursor(CursorPosition::new(1, 1));
+        let modal = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            2,
+            ViewContent::panel("ok"),
+            60,
+        )
+        .with_title("Modal");
+
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(8, 5),
+            vec![
+                DesktopWindow::new(editor, SurfaceRect::new(1, 1, 4, 3)).focused(),
+                DesktopWindow::new(modal, SurfaceRect::new(3, 1, 3, 3))
+                    .with_role(DesktopWindowRole::Modal),
+            ],
+        );
+
+        assert_raster_golden(
+            &surface,
+            include_str!("../tests/golden/desktop_rgba_surface.golden"),
+        );
+    }
+
+    #[test]
+    fn test_compose_workspace_snapshot_rgba_matches_golden_fixture() {
+        let compositor = Compositor::new();
+        let snapshot = sample_workspace_snapshot_for_golden();
+
+        let surface =
+            compositor.compose_workspace_snapshot_rgba(SurfaceSize::new(12, 5), &snapshot);
+
+        assert_raster_golden(
+            &surface,
+            include_str!("../tests/golden/workspace_snapshot_rgba_surface.golden"),
+        );
     }
 
     #[test]
