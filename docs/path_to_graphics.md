@@ -87,7 +87,7 @@ User-space services should provide policy:
 
 ### Epic 4: Framebuffer Presentation
 
-- [ ] `GFX-016` Add a framebuffer presentation path that accepts a desktop pixel buffer from the GUI host path.
+- [x] `GFX-016` Add a framebuffer presentation path that accepts a desktop pixel buffer from the GUI host path.
 - [ ] `GFX-017` Route the current framebuffer backbuffer/blit machinery through that new presentation path.
 - [ ] `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
 - [ ] `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-016` Add a framebuffer presentation path that accepts a desktop pixel buffer from the GUI host path.
+- `GFX-017` Route the current framebuffer backbuffer/blit machinery through that new presentation path.
 
-`GFX-015` is now in place: the GUI host has checked-in golden raster fixtures for direct desktop composition and workspace-driven desktop composition, so future graphics work can detect pixel-level regressions without booting QEMU. The next step is to wire that render output into a real framebuffer presentation path.
+`GFX-016` is now in place: `kernel_bootstrap` has an explicit desktop-surface presenter that accepts GUI-host-style RGBA frames, validates them against the framebuffer contract, and converts them into hardware-native bytes. The next step is to route the live framebuffer backbuffer/blit path through that presenter instead of leaving it as an isolated presentation helper.

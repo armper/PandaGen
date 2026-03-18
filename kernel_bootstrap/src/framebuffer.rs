@@ -62,6 +62,59 @@ impl FramebufferInfo {
     }
 }
 
+/// Source pixel format for desktop presentation.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DesktopSurfaceFormat {
+    /// 32-bit RGBA pixels emitted by the GUI host raster path.
+    Rgba8888,
+}
+
+/// Full-frame desktop pixel buffer presented into the framebuffer.
+#[derive(Debug, Copy, Clone)]
+pub struct DesktopSurface<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: &'a [u8],
+    pub format: DesktopSurfaceFormat,
+}
+
+impl<'a> DesktopSurface<'a> {
+    pub const fn rgba8888(width: usize, height: usize, pixels: &'a [u8]) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+            format: DesktopSurfaceFormat::Rgba8888,
+        }
+    }
+
+    pub const fn required_bytes(&self) -> usize {
+        self.width * self.height * 4
+    }
+}
+
+/// Presentation result for a desktop frame.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DesktopPresentStats {
+    pub copied_pixels: usize,
+    pub source_bytes: usize,
+}
+
+/// Presentation error for desktop frames.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DesktopPresentError {
+    DimensionMismatch {
+        expected_width: usize,
+        expected_height: usize,
+        actual_width: usize,
+        actual_height: usize,
+    },
+    BufferLengthMismatch {
+        expected: usize,
+        actual: usize,
+    },
+}
+
 /// Glyph entry in the cache
 #[derive(Clone)]
 struct GlyphEntry {
@@ -266,6 +319,44 @@ impl BareMetalFramebuffer {
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.buffer.as_mut_ptr(), len);
         }
+    }
+
+    /// Present a desktop pixel buffer into the framebuffer.
+    ///
+    /// This is the explicit bridge from GUI-host raster output into the
+    /// hardware-facing framebuffer path. The contract is intentionally strict:
+    /// callers must provide a full-frame surface with dimensions that match the
+    /// framebuffer target exactly.
+    pub fn present_desktop_surface(
+        &mut self,
+        surface: DesktopSurface<'_>,
+    ) -> Result<DesktopPresentStats, DesktopPresentError> {
+        let info = self.info();
+        if surface.width != info.width || surface.height != info.height {
+            return Err(DesktopPresentError::DimensionMismatch {
+                expected_width: info.width,
+                expected_height: info.height,
+                actual_width: surface.width,
+                actual_height: surface.height,
+            });
+        }
+
+        let expected = surface.required_bytes();
+        if surface.pixels.len() != expected {
+            return Err(DesktopPresentError::BufferLengthMismatch {
+                expected,
+                actual: surface.pixels.len(),
+            });
+        }
+
+        match surface.format {
+            DesktopSurfaceFormat::Rgba8888 => self.present_rgba8888(surface.pixels),
+        }
+
+        Ok(DesktopPresentStats {
+            copied_pixels: surface.width * surface.height,
+            source_bytes: surface.pixels.len(),
+        })
     }
 
     /// Clear the screen with a color (optimized with memset-style fill)
@@ -628,6 +719,25 @@ impl BareMetalFramebuffer {
         self.glyph_cache.as_mut().expect("glyph cache initialized")
     }
 
+    fn present_rgba8888(&mut self, pixels: &[u8]) {
+        let info = self.info();
+        let bpp = info.format.bytes_per_pixel();
+        for y in 0..info.height {
+            let src_row = y * info.width * 4;
+            let dst_row = y * info.stride_pixels * bpp;
+            for x in 0..info.width {
+                let src_offset = src_row + x * 4;
+                let dst_offset = dst_row + x * bpp;
+                let pixel = info.format.to_bytes(
+                    pixels[src_offset],
+                    pixels[src_offset + 1],
+                    pixels[src_offset + 2],
+                );
+                write_pixel(self.buffer, dst_offset, pixel);
+            }
+        }
+    }
+
     /// Scroll the framebuffer up by the given number of text rows.
     ///
     /// This moves pixel rows up by `lines * FONT_HEIGHT` and clears the bottom
@@ -746,5 +856,141 @@ fn vga_color(idx: u8) -> (u8, u8, u8) {
         14 => (0xFF, 0xFF, 0x55), // Yellow
         15 => (0xFF, 0xFF, 0xFF), // White
         _ => (0xAA, 0xAA, 0xAA),  // Default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use services_gui_host::{Compositor, DesktopWindow, SurfaceRect, SurfaceSize};
+    use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
+
+    fn test_framebuffer(info: FramebufferInfo, fill: u8) -> BareMetalFramebuffer {
+        let buffer = vec![fill; info.buffer_size()].into_boxed_slice();
+        let leaked = Box::leak(buffer);
+        unsafe { BareMetalFramebuffer::from_info_and_buffer(info, leaked) }
+    }
+
+    #[test]
+    fn test_present_desktop_surface_converts_rgba8888_to_framebuffer_layout() {
+        let info = FramebufferInfo {
+            width: 2,
+            height: 2,
+            stride_pixels: 3,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0xAA);
+        let pixels = [
+            10, 20, 30, 255, 40, 50, 60, 200, 70, 80, 90, 128, 100, 110, 120, 0,
+        ];
+
+        let stats = framebuffer
+            .present_desktop_surface(DesktopSurface::rgba8888(2, 2, &pixels))
+            .expect("desktop surface should present");
+
+        assert_eq!(
+            stats,
+            DesktopPresentStats {
+                copied_pixels: 4,
+                source_bytes: 16,
+            }
+        );
+        let bytes = framebuffer.buffer_mut();
+        assert_eq!(&bytes[0..8], &[30, 20, 10, 0, 60, 50, 40, 0]);
+        assert_eq!(&bytes[8..12], &[0xAA, 0xAA, 0xAA, 0xAA]);
+        assert_eq!(&bytes[12..20], &[90, 80, 70, 0, 120, 110, 100, 0]);
+        assert_eq!(&bytes[20..24], &[0xAA, 0xAA, 0xAA, 0xAA]);
+    }
+
+    #[test]
+    fn test_present_desktop_surface_rejects_dimension_mismatch() {
+        let info = FramebufferInfo {
+            width: 4,
+            height: 4,
+            stride_pixels: 4,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0);
+        let pixels = [0u8; 4 * 4 * 4];
+
+        let err = framebuffer
+            .present_desktop_surface(DesktopSurface::rgba8888(2, 4, &pixels))
+            .expect_err("mismatched dimensions should fail");
+
+        assert_eq!(
+            err,
+            DesktopPresentError::DimensionMismatch {
+                expected_width: 4,
+                expected_height: 4,
+                actual_width: 2,
+                actual_height: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn test_present_desktop_surface_rejects_invalid_buffer_length() {
+        let info = FramebufferInfo {
+            width: 2,
+            height: 2,
+            stride_pixels: 2,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0);
+        let pixels = [0u8; 12];
+
+        let err = framebuffer
+            .present_desktop_surface(DesktopSurface::rgba8888(2, 2, &pixels))
+            .expect_err("short pixel buffer should fail");
+
+        assert_eq!(
+            err,
+            DesktopPresentError::BufferLengthMismatch {
+                expected: 16,
+                actual: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn test_present_desktop_surface_accepts_gui_host_raster_frame() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["A".to_string()]),
+            10,
+        )
+        .with_title("Main");
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(6, 4),
+            vec![DesktopWindow::new(frame, SurfaceRect::new(1, 1, 3, 2)).focused()],
+        );
+
+        let info = FramebufferInfo {
+            width: surface.width,
+            height: surface.height,
+            stride_pixels: surface.width,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0);
+
+        let stats = framebuffer
+            .present_desktop_surface(DesktopSurface::rgba8888(
+                surface.width,
+                surface.height,
+                &surface.pixels,
+            ))
+            .expect("GUI host surface should present");
+
+        assert_eq!(stats.copied_pixels, surface.width * surface.height);
+        assert_eq!(stats.source_bytes, surface.pixels.len());
+        assert_eq!(
+            &framebuffer.buffer_mut()[0..4],
+            &[0x1C, 0x12, 0x0C, 0x00],
+            "background pixel should convert into framebuffer layout"
+        );
     }
 }

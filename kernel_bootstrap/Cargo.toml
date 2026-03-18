@@ -24,6 +24,7 @@ services_notification = { path = "../services_notification", default-features = 
 
 [dev-dependencies]
 services_workspace_manager = { path = "../services_workspace_manager" }
+services_gui_host = { path = "../services_gui_host" }
 
 [features]
 default = ["console_vga", "limine"]
