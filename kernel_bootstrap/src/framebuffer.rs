@@ -67,6 +67,14 @@ impl FramebufferInfo {
 pub enum DesktopSurfaceFormat {
     /// 32-bit RGBA pixels emitted by the GUI host raster path.
     Rgba8888,
+    /// Framebuffer-native 32-bit pixels already encoded for the target.
+    NativeRgb32,
+}
+
+impl DesktopSurfaceFormat {
+    const fn bytes_per_pixel(self) -> usize {
+        4
+    }
 }
 
 /// Full-frame desktop pixel buffer presented into the framebuffer.
@@ -74,6 +82,7 @@ pub enum DesktopSurfaceFormat {
 pub struct DesktopSurface<'a> {
     pub width: usize,
     pub height: usize,
+    pub stride_pixels: usize,
     pub pixels: &'a [u8],
     pub format: DesktopSurfaceFormat,
 }
@@ -83,13 +92,29 @@ impl<'a> DesktopSurface<'a> {
         Self {
             width,
             height,
+            stride_pixels: width,
             pixels,
             format: DesktopSurfaceFormat::Rgba8888,
         }
     }
 
+    pub const fn native_rgb32(
+        width: usize,
+        height: usize,
+        stride_pixels: usize,
+        pixels: &'a [u8],
+    ) -> Self {
+        Self {
+            width,
+            height,
+            stride_pixels,
+            pixels,
+            format: DesktopSurfaceFormat::NativeRgb32,
+        }
+    }
+
     pub const fn required_bytes(&self) -> usize {
-        self.width * self.height * 4
+        self.height * self.stride_pixels * self.format.bytes_per_pixel()
     }
 }
 
@@ -112,6 +137,10 @@ pub enum DesktopPresentError {
     BufferLengthMismatch {
         expected: usize,
         actual: usize,
+    },
+    StrideMismatch {
+        expected_stride_pixels: usize,
+        actual_stride_pixels: usize,
     },
 }
 
@@ -350,7 +379,18 @@ impl BareMetalFramebuffer {
         }
 
         match surface.format {
-            DesktopSurfaceFormat::Rgba8888 => self.present_rgba8888(surface.pixels),
+            DesktopSurfaceFormat::Rgba8888 => {
+                self.present_rgba8888(surface.pixels, surface.stride_pixels)
+            }
+            DesktopSurfaceFormat::NativeRgb32 => {
+                if surface.stride_pixels != info.stride_pixels {
+                    return Err(DesktopPresentError::StrideMismatch {
+                        expected_stride_pixels: info.stride_pixels,
+                        actual_stride_pixels: surface.stride_pixels,
+                    });
+                }
+                self.present_native_rgb32(surface.pixels);
+            }
         }
 
         Ok(DesktopPresentStats {
@@ -719,11 +759,11 @@ impl BareMetalFramebuffer {
         self.glyph_cache.as_mut().expect("glyph cache initialized")
     }
 
-    fn present_rgba8888(&mut self, pixels: &[u8]) {
+    fn present_rgba8888(&mut self, pixels: &[u8], stride_pixels: usize) {
         let info = self.info();
         let bpp = info.format.bytes_per_pixel();
         for y in 0..info.height {
-            let src_row = y * info.width * 4;
+            let src_row = y * stride_pixels * 4;
             let dst_row = y * info.stride_pixels * bpp;
             for x in 0..info.width {
                 let src_offset = src_row + x * 4;
@@ -736,6 +776,10 @@ impl BareMetalFramebuffer {
                 write_pixel(self.buffer, dst_offset, pixel);
             }
         }
+    }
+
+    fn present_native_rgb32(&mut self, pixels: &[u8]) {
+        self.blit_from(pixels);
     }
 
     /// Scroll the framebuffer up by the given number of text rows.
@@ -991,6 +1035,53 @@ mod tests {
             &framebuffer.buffer_mut()[0..4],
             &[0x1C, 0x12, 0x0C, 0x00],
             "background pixel should convert into framebuffer layout"
+        );
+    }
+
+    #[test]
+    fn test_present_desktop_surface_accepts_native_backbuffer_surface() {
+        let info = FramebufferInfo {
+            width: 2,
+            height: 2,
+            stride_pixels: 3,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0);
+        let native_pixels = [
+            1, 2, 3, 0, 4, 5, 6, 0, 0xAA, 0xAA, 0xAA, 0xAA, 7, 8, 9, 0, 10, 11, 12, 0, 0xBB,
+            0xBB, 0xBB, 0xBB,
+        ];
+
+        let stats = framebuffer
+            .present_desktop_surface(DesktopSurface::native_rgb32(2, 2, 3, &native_pixels))
+            .expect("native backbuffer surface should present");
+
+        assert_eq!(stats.copied_pixels, 4);
+        assert_eq!(stats.source_bytes, native_pixels.len());
+        assert_eq!(framebuffer.buffer_mut(), &native_pixels);
+    }
+
+    #[test]
+    fn test_present_desktop_surface_rejects_native_stride_mismatch() {
+        let info = FramebufferInfo {
+            width: 2,
+            height: 2,
+            stride_pixels: 3,
+            format: PixelFormat::Rgb32,
+        };
+        let mut framebuffer = test_framebuffer(info, 0);
+        let native_pixels = [0u8; 16];
+
+        let err = framebuffer
+            .present_desktop_surface(DesktopSurface::native_rgb32(2, 2, 2, &native_pixels))
+            .expect_err("native stride mismatch should fail");
+
+        assert_eq!(
+            err,
+            DesktopPresentError::StrideMismatch {
+                expected_stride_pixels: 3,
+                actual_stride_pixels: 2,
+            }
         );
     }
 }

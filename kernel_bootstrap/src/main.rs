@@ -1447,7 +1447,7 @@ fn workspace_loop(
                         );
                         input_dirty = false;
                         if let Some(backbuffer) = fb_shadow.as_mut() {
-                            fb.blit_from(backbuffer.buffer_mut());
+                            present_framebuffer_shadow(fb, backbuffer);
                         }
                         continue; // Skip normal workspace rendering when palette open
                     }
@@ -1662,7 +1662,7 @@ fn workspace_loop(
                     }
 
                     if let Some(backbuffer) = fb_shadow.as_mut() {
-                        fb.blit_from(backbuffer.buffer_mut());
+                        present_framebuffer_shadow(fb, backbuffer);
                     }
                 }
             } // End !rendered_editor
@@ -2014,6 +2014,20 @@ fn render_palette_overlay_fb(
     *last_palette_result_count = result_count;
     *last_palette_selection = selected_idx;
     true
+}
+
+fn present_framebuffer_shadow(
+    fb: &mut framebuffer::BareMetalFramebuffer,
+    backbuffer: &mut framebuffer::BareMetalFramebuffer,
+) {
+    let info = backbuffer.info();
+    let surface = framebuffer::DesktopSurface::native_rgb32(
+        info.width,
+        info.height,
+        info.stride_pixels,
+        backbuffer.buffer_mut(),
+    );
+    let _ = fb.present_desktop_surface(surface);
 }
 
 fn prompt_view(cmd: &[u8], cols: usize, prefix_len: usize) -> (usize, &[u8], usize) {
