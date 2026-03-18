@@ -1,6 +1,8 @@
 //! GUI host and compositor on view surfaces.
 
-use graphics_rasterizer::{RasterRect, RenderTarget, RgbaBuffer, RgbaColor, DESKTOP_FONT};
+use graphics_rasterizer::{
+    RasterRect, RenderTarget, RgbaBuffer, RgbaColor, ScissorTarget, DESKTOP_FONT,
+};
 use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
@@ -249,6 +251,10 @@ impl RasterSurfaceFrame {
 pub struct RasterRenderStats {
     pub frame_count: usize,
     pub timestamp_ns: u64,
+    #[serde(default)]
+    pub painted_windows: usize,
+    #[serde(default)]
+    pub damage_rect: Option<RasterRect>,
 }
 
 /// Simple compositor that merges view frames into a surface.
@@ -351,9 +357,27 @@ impl Compositor {
     pub fn render_desktop_to_target(
         &self,
         target: &mut impl RenderTarget,
-        mut windows: Vec<DesktopWindow>,
+        windows: Vec<DesktopWindow>,
     ) -> RasterRenderStats {
-        target.clear(DESKTOP_BACKGROUND_COLOR);
+        self.render_desktop_to_target_with_damage(target, windows, None)
+    }
+
+    /// Render only the damaged region of a desktop into a pixel target.
+    pub fn render_desktop_to_target_with_damage(
+        &self,
+        target: &mut impl RenderTarget,
+        mut windows: Vec<DesktopWindow>,
+        damage_rect: Option<RasterRect>,
+    ) -> RasterRenderStats {
+        let target_bounds = RasterRect::new(0, 0, target.width(), target.height());
+        let damage_rect = damage_rect.and_then(|rect| rect.intersect(target_bounds));
+
+        if let Some(rect) = damage_rect {
+            target.fill_rect(rect, DESKTOP_BACKGROUND_COLOR);
+        } else {
+            target.clear(DESKTOP_BACKGROUND_COLOR);
+        }
+
         windows.sort_by_key(|window| {
             (
                 window.layer.sort_key(),
@@ -362,8 +386,11 @@ impl Compositor {
             )
         });
 
+        let mut painted_windows = 0;
         for window in &windows {
-            raster_window(target, window);
+            if raster_window(target, window, damage_rect) {
+                painted_windows += 1;
+            }
         }
 
         RasterRenderStats {
@@ -373,6 +400,8 @@ impl Compositor {
                 .map(|window| window.frame.timestamp_ns)
                 .max()
                 .unwrap_or(0),
+            painted_windows,
+            damage_rect,
         }
     }
 
@@ -555,53 +584,78 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
     }
 }
 
-fn raster_window(target: &mut impl RenderTarget, window: &DesktopWindow) {
+fn raster_window(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    damage_rect: Option<RasterRect>,
+) -> bool {
     let rect = pixel_rect(window.rect);
     if rect.width == 0 || rect.height == 0 {
-        return;
+        return false;
     }
 
-    target.fill_rect(rect, WINDOW_FILL_COLOR);
-    target.draw_border(
-        rect,
-        RASTER_BORDER_THICKNESS,
-        if window.focused {
-            FOCUSED_BORDER_COLOR
-        } else {
-            UNFOCUSED_BORDER_COLOR
-        },
-    );
+    let clipped_rect = damage_rect
+        .map(|damage| rect.intersect(damage))
+        .unwrap_or(Some(rect));
+    let Some(clipped_rect) = clipped_rect else {
+        return false;
+    };
 
-    let chrome_label = window_chrome_label(window);
-    target.draw_text_with_font(
-        rect.x + 2,
-        rect.y + 2,
-        &chrome_label,
-        &DESKTOP_FONT,
-        TEXT_COLOR,
-    );
-
-    let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
-    for (line_index, line) in render_content_lines(&window.frame.content)
-        .into_iter()
-        .take(window.rect.height.saturating_sub(2))
-        .enumerate()
     {
-        let y = line_origin_y + line_index * RASTER_CELL_HEIGHT;
-        if y >= target.height() {
-            break;
-        }
-        target.draw_text_with_font(rect.x + 2, y, &line, &DESKTOP_FONT, TEXT_COLOR);
-    }
-
-    if let Some(cursor) = window.frame.cursor {
-        let cursor_x = rect.x + RASTER_CELL_WIDTH + 2 + cursor.column * RASTER_CELL_WIDTH;
-        let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
-        target.fill_rect(
-            RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
-            CURSOR_COLOR,
+        let mut window_target = ScissorTarget::new(target, clipped_rect);
+        window_target.fill_rect(rect, WINDOW_FILL_COLOR);
+        window_target.draw_border(
+            rect,
+            RASTER_BORDER_THICKNESS,
+            if window.focused {
+                FOCUSED_BORDER_COLOR
+            } else {
+                UNFOCUSED_BORDER_COLOR
+            },
         );
     }
+
+    let chrome_label = window_chrome_label(window);
+    if let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) {
+        let mut chrome_target = ScissorTarget::new(target, chrome_rect);
+        chrome_target.draw_text_with_font(
+            rect.x + 2,
+            rect.y + 2,
+            &chrome_label,
+            &DESKTOP_FONT,
+            TEXT_COLOR,
+        );
+    }
+
+    if let Some(content_rect) = window_content_rect(rect) {
+        if let Some(content_clip) = content_rect.intersect(clipped_rect) {
+            let target_height = target.height();
+            let mut content_target = ScissorTarget::new(target, content_clip);
+            let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
+            for (line_index, line) in render_content_lines(&window.frame.content)
+                .into_iter()
+                .take(window.rect.height.saturating_sub(2))
+                .enumerate()
+            {
+                let y = line_origin_y + line_index * RASTER_CELL_HEIGHT;
+                if y >= target_height {
+                    break;
+                }
+                content_target.draw_text_with_font(rect.x + 2, y, &line, &DESKTOP_FONT, TEXT_COLOR);
+            }
+
+            if let Some(cursor) = window.frame.cursor {
+                let cursor_x = rect.x + RASTER_CELL_WIDTH + 2 + cursor.column * RASTER_CELL_WIDTH;
+                let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
+                content_target.fill_rect(
+                    RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
+                    CURSOR_COLOR,
+                );
+            }
+        }
+    }
+
+    true
 }
 
 fn pixel_rect(rect: SurfaceRect) -> RasterRect {
@@ -611,6 +665,30 @@ fn pixel_rect(rect: SurfaceRect) -> RasterRect {
         rect.width.saturating_mul(RASTER_CELL_WIDTH),
         rect.height.saturating_mul(RASTER_CELL_HEIGHT),
     )
+}
+
+fn window_chrome_rect(rect: RasterRect) -> RasterRect {
+    RasterRect::new(
+        rect.x + RASTER_BORDER_THICKNESS,
+        rect.y + RASTER_BORDER_THICKNESS,
+        rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
+        RASTER_CELL_HEIGHT.saturating_sub(RASTER_BORDER_THICKNESS),
+    )
+}
+
+fn window_content_rect(rect: RasterRect) -> Option<RasterRect> {
+    let y = rect.y + RASTER_CELL_HEIGHT + RASTER_BORDER_THICKNESS;
+    let bottom = rect.y + rect.height;
+    if y >= bottom {
+        return None;
+    }
+
+    Some(RasterRect::new(
+        rect.x + RASTER_BORDER_THICKNESS,
+        y,
+        rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
+        bottom - y - RASTER_BORDER_THICKNESS,
+    ))
 }
 
 fn put_char(canvas: &mut [Vec<char>], x: usize, y: usize, ch: char) {
@@ -1416,6 +1494,85 @@ mod tests {
         assert_eq!(target.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
         assert_eq!(target.pixel(15, 22), Some(TEXT_COLOR));
         assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
+    }
+
+    #[test]
+    fn test_render_desktop_to_target_with_damage_only_repaints_intersecting_windows() {
+        let compositor = Compositor::new();
+        let left = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["A".to_string()]),
+            44,
+        )
+        .with_title("Left");
+        let right = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            2,
+            ViewContent::panel("side"),
+            40,
+        )
+        .with_title("Right");
+
+        let mut target = RgbaBuffer::new(108, 50, RgbaColor::new(0, 0, 0, 0));
+        compositor.render_desktop_to_target(
+            &mut target,
+            vec![
+                DesktopWindow::new(left.clone(), SurfaceRect::new(1, 1, 4, 3)).focused(),
+                DesktopWindow::new(right.clone(), SurfaceRect::new(6, 1, 4, 3)),
+            ],
+        );
+        let preserved_pixel = target.pixel(56, 21);
+
+        let damage_rect = RasterRect::new(18, 20, 8, 8);
+        let stats = compositor.render_desktop_to_target_with_damage(
+            &mut target,
+            vec![
+                DesktopWindow::new(
+                    left.with_cursor(CursorPosition::new(0, 0)),
+                    SurfaceRect::new(1, 1, 4, 3),
+                )
+                .focused(),
+                DesktopWindow::new(right, SurfaceRect::new(6, 1, 4, 3)),
+            ],
+            Some(damage_rect),
+        );
+
+        assert_eq!(stats.frame_count, 2);
+        assert_eq!(stats.painted_windows, 1);
+        assert_eq!(stats.damage_rect, Some(damage_rect));
+        assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
+        assert_eq!(target.pixel(56, 21), preserved_pixel);
+    }
+
+    #[test]
+    fn test_compose_desktop_rgba_clips_long_content_to_window_bounds() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["WWWWWWWW".to_string()]),
+            44,
+        )
+        .with_title("Wide");
+
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(8, 5),
+            vec![DesktopWindow::new(frame, SurfaceRect::new(1, 1, 3, 3)).focused()],
+        );
+
+        for y in 22..(22 + DESKTOP_FONT.glyph_height()) {
+            for x in 37..46 {
+                assert_eq!(
+                    surface.pixel(x, y),
+                    Some(DESKTOP_BACKGROUND_COLOR),
+                    "content overflow at ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]

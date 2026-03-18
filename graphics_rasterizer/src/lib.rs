@@ -33,6 +33,33 @@ impl RasterRect {
             height,
         }
     }
+
+    pub const fn right(&self) -> usize {
+        self.x + self.width
+    }
+
+    pub const fn bottom(&self) -> usize {
+        self.y + self.height
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    pub const fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
+    pub fn intersect(&self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        if right <= x || bottom <= y {
+            return None;
+        }
+        Some(Self::new(x, y, right - x, bottom - y))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +224,17 @@ pub struct LinearFramebufferTarget<'a> {
     buffer: &'a mut [u8],
 }
 
+pub struct ScissorTarget<'a, T: RenderTarget + ?Sized> {
+    target: &'a mut T,
+    scissor: RasterRect,
+}
+
+impl<'a, T: RenderTarget + ?Sized> ScissorTarget<'a, T> {
+    pub fn new(target: &'a mut T, scissor: RasterRect) -> Self {
+        Self { target, scissor }
+    }
+}
+
 impl<'a> LinearFramebufferTarget<'a> {
     pub fn new(
         width: usize,
@@ -358,6 +396,30 @@ impl RenderTarget for LinearFramebufferTarget<'_> {
             self.buffer[offset + 3],
         ];
         Some(self.format.decode(bytes))
+    }
+}
+
+impl<T: RenderTarget + ?Sized> RenderTarget for ScissorTarget<'_, T> {
+    fn width(&self) -> usize {
+        self.target.width()
+    }
+
+    fn height(&self) -> usize {
+        self.target.height()
+    }
+
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        if self.scissor.contains(x, y) {
+            self.target.write_pixel(x, y, color);
+        }
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        if self.scissor.contains(x, y) {
+            self.target.pixel(x, y)
+        } else {
+            None
+        }
     }
 }
 
@@ -686,5 +748,21 @@ mod tests {
 
         assert_eq!(buffer.pixel(9, 1), Some(CLEAR));
         assert_eq!(buffer.pixel(10, 1), Some(ACCENT));
+    }
+
+    #[test]
+    fn test_scissor_target_clips_fill_and_text() {
+        let mut buffer = RgbaBuffer::new(12, 8, CLEAR);
+        {
+            let mut clipped = ScissorTarget::new(&mut buffer, RasterRect::new(2, 1, 4, 3));
+            clipped.fill_rect(RasterRect::new(0, 0, 12, 8), ACCENT);
+            clipped.draw_text_with_font(0, 1, "AB", &COMPACT_FONT, DETAIL);
+        }
+
+        assert_eq!(buffer.pixel(1, 1), Some(CLEAR));
+        assert_eq!(buffer.pixel(5, 1), Some(ACCENT));
+        assert_eq!(buffer.pixel(2, 1), Some(DETAIL));
+        assert_eq!(buffer.pixel(6, 2), Some(CLEAR));
+        assert_eq!(buffer.pixel(3, 4), Some(CLEAR));
     }
 }

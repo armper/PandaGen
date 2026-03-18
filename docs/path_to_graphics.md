@@ -82,7 +82,7 @@ User-space services should provide policy:
 - [x] `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
 - [x] `GFX-012` Define a render target abstraction that can target both off-screen test buffers and the real framebuffer backend.
 - [x] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
-- [ ] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
+- [x] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
 - [ ] `GFX-015` Add golden surface tests for raster output so pixel logic can be validated without booting QEMU.
 
 ### Epic 4: Framebuffer Presentation
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
+- `GFX-015` Add golden surface tests for raster output so pixel logic can be validated without booting QEMU.
 
-`GFX-013` is now in place: the rasterizer has an explicit bitmap-font abstraction with readable desktop metrics, and the GUI host now spaces desktop text from font measurements instead of hidden constants. The next step is to make redraws spatially aware with clipping and damage support so graphics work scales past the current full-window paint model.
+`GFX-014` is now in place: the rasterizer has an explicit scissor target, and the GUI host can repaint only damaged regions while clipping chrome and content to window bounds. The next step is to lock that output down with golden raster surface tests so future graphics work can move quickly without visual regressions.
