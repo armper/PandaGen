@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_editor_io_save_as() {
-        let mut fs = BareMetalFilesystem::new().unwrap();
+        let fs = BareMetalFilesystem::new().unwrap();
         let mut io = BareMetalEditorIo::new(fs);
 
         let (msg, handle) = io.save_as("new_file.txt", "new content").unwrap();
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_file_not_found() {
-        let fs = BareMetalFilesystem::new().unwrap();
+        let mut fs = BareMetalFilesystem::new().unwrap();
         let result = fs.read_file_by_name("nonexistent.txt");
         assert!(result.is_err());
     }

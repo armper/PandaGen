@@ -3,8 +3,9 @@
 //! Tiered help system for workspace commands
 
 use crate::command_surface::{
-    help_usage_pattern, parse_help_topic, COMPONENT_ID_COMMAND_SPECS, HELPER_COMMAND_SPECS,
-    HELP_TOPIC_SPECS, LAUNCH_COMMAND_SPECS, NON_LAUNCH_PALETTE_SPECS,
+    component_id_usage_pattern, help_usage_pattern, non_launch_prompt_suggestion_by_id,
+    parse_help_topic, COMPONENT_ID_COMMAND_SPECS, HELPER_COMMAND_SPECS, HELP_TOPIC_SPECS,
+    LAUNCH_COMMAND_SPECS, NON_LAUNCH_PALETTE_SPECS,
 };
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -95,17 +96,14 @@ impl HelpCategory {
         for spec in NON_LAUNCH_PALETTE_SPECS.iter().filter(|spec| {
             spec.category == "Workspace" && matches!(spec.id, "list" | "focus_next" | "focus_prev")
         }) {
-            let pattern = match spec.id {
-                "focus_next" => "next",
-                "focus_prev" => "prev",
-                _ => spec.id,
-            };
-            lines.push(format_help_line(pattern, spec.description));
+            if let Some(suggestion) = non_launch_prompt_suggestion_by_id(spec.id) {
+                lines.push(format_help_line(&suggestion.pattern, spec.description));
+            }
         }
 
         // Component-id command grammar is sourced from shared command rules.
         for spec in COMPONENT_ID_COMMAND_SPECS {
-            let pattern = spec.usage.strip_prefix("Usage: ").unwrap_or(spec.usage);
+            let pattern = component_id_usage_pattern(spec.token).unwrap_or(spec.usage);
             let description = NON_LAUNCH_PALETTE_SPECS
                 .iter()
                 .find(|entry| entry.id == spec.token)

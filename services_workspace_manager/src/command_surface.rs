@@ -366,6 +366,12 @@ pub(crate) struct SuggestionSpec {
     pub description: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptSuggestionSpec {
+    pub pattern: String,
+    pub description: &'static str,
+}
+
 pub(crate) const DEFAULT_SUGGESTIONS: &[SuggestionSpec] = &[
     SuggestionSpec {
         pattern: "open editor <path>",
@@ -374,10 +380,6 @@ pub(crate) const DEFAULT_SUGGESTIONS: &[SuggestionSpec] = &[
     SuggestionSpec {
         pattern: "open file",
         description: "Open file picker",
-    },
-    SuggestionSpec {
-        pattern: "list",
-        description: "List all components",
     },
     SuggestionSpec {
         pattern: "help",
@@ -474,6 +476,61 @@ pub(crate) fn component_id_command_by_token(
     COMPONENT_ID_COMMAND_SPECS
         .iter()
         .find(|spec| spec.token == token)
+}
+
+pub(crate) fn component_id_usage_pattern(token: &str) -> Option<&'static str> {
+    component_id_command_by_token(token).map(|spec| {
+        spec.usage
+            .strip_prefix("Usage: ")
+            .unwrap_or(spec.usage)
+    })
+}
+
+fn non_launch_prompt_pattern(spec: &PaletteDescriptorSpec) -> Option<String> {
+    match spec.id {
+        "focus_next" => Some("next".to_string()),
+        "focus_prev" => Some("prev".to_string()),
+        "close" => component_id_usage_pattern(spec.id).map(|pattern| pattern.to_string()),
+        _ => {
+            if let Some(pattern) = spec.prompt_pattern {
+                Some(pattern.trim_end().to_string())
+            } else if !spec.requires_args {
+                match spec.id {
+                    "list" | "help" | "save" | "quit" => Some(spec.id.to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub(crate) fn non_launch_prompt_suggestion_by_id(id: &str) -> Option<PromptSuggestionSpec> {
+    NON_LAUNCH_PALETTE_SPECS
+        .iter()
+        .find(|spec| spec.id == id)
+        .and_then(|spec| {
+            non_launch_prompt_pattern(spec).map(|pattern| PromptSuggestionSpec {
+                pattern,
+                description: spec.description,
+            })
+        })
+}
+
+pub(crate) fn non_launch_prefix_suggestions(prefix: &str) -> Vec<PromptSuggestionSpec> {
+    NON_LAUNCH_PALETTE_SPECS
+        .iter()
+        .filter(|spec| !spec.id.starts_with("help"))
+        .filter_map(|spec| {
+            let suggestion = non_launch_prompt_suggestion_by_id(spec.id)?;
+            if suggestion.pattern.starts_with(prefix) {
+                Some(suggestion)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn validate_component_id_invocation(parts: &[&str]) -> CommandInvocationValidation {
@@ -636,5 +693,24 @@ mod tests {
             CommandInvocationValidation::Invalid
         );
         assert_eq!(help_usage_pattern(), "help [workspace|editor|keys|system]");
+    }
+
+    #[test]
+    fn test_workspace_non_launch_suggestion_patterns_are_shared() {
+        let list = non_launch_prompt_suggestion_by_id("list").expect("list suggestion");
+        assert_eq!(list.pattern, "list");
+        assert_eq!(list.description, "List all active components");
+
+        let next = non_launch_prompt_suggestion_by_id("focus_next").expect("next suggestion");
+        assert_eq!(next.pattern, "next");
+        assert_eq!(next.description, "Focus the next component");
+
+        let prev = non_launch_prompt_suggestion_by_id("focus_prev").expect("prev suggestion");
+        assert_eq!(prev.pattern, "prev");
+        assert_eq!(prev.description, "Focus the previous component");
+
+        let close = non_launch_prompt_suggestion_by_id("close").expect("close suggestion");
+        assert_eq!(close.pattern, "close <component_id>");
+        assert_eq!(close.description, "Close a component by ID");
     }
 }

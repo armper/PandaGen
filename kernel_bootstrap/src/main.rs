@@ -28,7 +28,7 @@ mod render_stats;
 mod vga;
 mod workspace;
 
-#[cfg(all(debug_assertions, not(test), target_os = "none"))]
+#[cfg(all(debug_assertions, not(test)))]
 use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;

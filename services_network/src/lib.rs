@@ -253,6 +253,12 @@ pub struct ProtocolRegistry {
     handlers: HashMap<AdvancedProtocol, Box<dyn ProtocolHandler>>,
 }
 
+impl Default for ProtocolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProtocolRegistry {
     pub fn new() -> Self {
         Self {

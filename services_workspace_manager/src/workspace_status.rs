@@ -9,8 +9,10 @@
 use crate::command_surface::{
     helper_command_by_alias, is_known_command_prefix, validate_component_id_invocation,
     validate_help_invocation, validate_open_invocation, CommandInvocationValidation,
-    HelperCommandKind, OpenInvocationValidation, SuggestionSpec, DEFAULT_SUGGESTIONS,
-    HELP_PREFIX_SUGGESTIONS, OPEN_PREFIX_SUGGESTIONS, RECENT_PREFIX_SUGGESTIONS,
+    HelperCommandKind, OpenInvocationValidation, PromptSuggestionSpec, SuggestionSpec,
+    DEFAULT_SUGGESTIONS, HELP_PREFIX_SUGGESTIONS, OPEN_PREFIX_SUGGESTIONS,
+    RECENT_PREFIX_SUGGESTIONS, non_launch_prefix_suggestions,
+    non_launch_prompt_suggestion_by_id,
 };
 use serde::{Deserialize, Serialize};
 
@@ -245,10 +247,14 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
 
     // Empty input - show common commands
     if input_lower.is_empty() {
-        return DEFAULT_SUGGESTIONS
+        let mut suggestions: Vec<CommandSuggestion> = DEFAULT_SUGGESTIONS
             .iter()
             .map(|spec| CommandSuggestion::new(spec.pattern, spec.description))
             .collect();
+        if let Some(spec) = non_launch_prompt_suggestion_by_id("list") {
+            push_prompt_suggestion(&mut suggestions, spec);
+        }
+        return suggestions;
     }
 
     // Match command prefixes
@@ -264,31 +270,17 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
         push_suggestions(&mut suggestions, HELP_PREFIX_SUGGESTIONS);
     }
 
-    // "list" commands
-    if "list".starts_with(&input_lower) || input_lower.starts_with("li") {
-        suggestions.push(CommandSuggestion::new("list", "List all components"));
-    }
-
     // "recent" commands
     if "recent".starts_with(&input_lower) || input_lower.starts_with("rec") {
         push_suggestions(&mut suggestions, RECENT_PREFIX_SUGGESTIONS);
     }
 
-    // "close" commands
-    if "close".starts_with(&input_lower) || input_lower.starts_with("cl") {
-        suggestions.push(CommandSuggestion::new("close <id>", "Close a component"));
-    }
-
-    // "next" / "prev" navigation
-    if "next".starts_with(&input_lower) || input_lower.starts_with("ne") {
-        suggestions.push(CommandSuggestion::new("next", "Focus next component"));
-    }
-    if "prev".starts_with(&input_lower)
-        || "previous".starts_with(&input_lower)
-        || input_lower.starts_with("pr")
-    {
-        suggestions.push(CommandSuggestion::new("prev", "Focus previous component"));
-    }
+    push_prompt_suggestions(
+        &mut suggestions,
+        non_launch_prefix_suggestions(&input_lower)
+            .into_iter()
+            .filter(|spec| !matches!(spec.pattern.as_str(), "help" | "help workspace" | "help editor" | "help keys" | "help system")),
+    );
 
     suggestions
 }
@@ -299,6 +291,22 @@ fn push_suggestions(into: &mut Vec<CommandSuggestion>, specs: &[SuggestionSpec])
             .iter()
             .map(|spec| CommandSuggestion::new(spec.pattern, spec.description)),
     );
+}
+
+fn push_prompt_suggestion(into: &mut Vec<CommandSuggestion>, spec: PromptSuggestionSpec) {
+    if into.iter().any(|existing| existing.pattern == spec.pattern) {
+        return;
+    }
+    into.push(CommandSuggestion::new(spec.pattern, spec.description));
+}
+
+fn push_prompt_suggestions<I>(into: &mut Vec<CommandSuggestion>, specs: I)
+where
+    I: IntoIterator<Item = PromptSuggestionSpec>,
+{
+    for spec in specs {
+        push_prompt_suggestion(into, spec);
+    }
 }
 
 /// Prompt validation state
@@ -654,6 +662,27 @@ mod tests {
     fn test_generate_suggestions_list_prefix() {
         let suggestions = generate_suggestions("li");
         assert!(suggestions.iter().any(|s| s.pattern == "list"));
+    }
+
+    #[test]
+    fn test_generate_suggestions_navigation_prefixes_use_shared_patterns() {
+        let next = generate_suggestions("ne");
+        assert!(next.iter().any(|s| {
+            s.pattern == "next" && s.description == "Focus the next component"
+        }));
+
+        let prev = generate_suggestions("pr");
+        assert!(prev.iter().any(|s| {
+            s.pattern == "prev" && s.description == "Focus the previous component"
+        }));
+    }
+
+    #[test]
+    fn test_generate_suggestions_close_prefix_uses_component_id_grammar() {
+        let suggestions = generate_suggestions("cl");
+        assert!(suggestions.iter().any(|s| {
+            s.pattern == "close <component_id>" && s.description == "Close a component by ID"
+        }));
     }
 
     #[test]

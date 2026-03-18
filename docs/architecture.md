@@ -547,6 +547,8 @@ All safety properties maintained:
 - `VersionId`: Every change is versioned
 - `ObjectKind`: Blob, Log, or Map
 - `Transaction`: Atomic operations
+- Recovery replays committed journal entries in commit order, so the latest
+  recovered version matches the last successful commit rather than UUID sort order
 
 **Not a Filesystem**: No hierarchy, no paths, no inodes.
 

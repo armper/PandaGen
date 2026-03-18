@@ -158,7 +158,10 @@ impl SnapshotSink for InMemorySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
+    use services_workspace_manager::DebugInfo;
     use std::sync::{Arc, Mutex};
+    use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
     #[derive(Default)]
     struct MockKernel {
@@ -224,29 +227,67 @@ mod tests {
         }
     }
 
+    fn sample_view(kind: ViewKind, revision: u64, text: &str) -> ViewFrame {
+        let content = match kind {
+            ViewKind::TextBuffer => ViewContent::text_buffer(vec![text.to_string()]),
+            ViewKind::StatusLine => ViewContent::status_line(text),
+            ViewKind::Panel => ViewContent::panel(text),
+        };
+
+        ViewFrame::new(ViewId::new(), kind, revision, content, 1000 + revision)
+    }
+
+    fn sample_snapshot() -> WorkspaceRenderSnapshot {
+        let main_view = sample_view(ViewKind::TextBuffer, 1, "tile 0");
+        let status_view = sample_view(ViewKind::StatusLine, 2, "focused tile");
+        let composed_main_view = sample_view(ViewKind::TextBuffer, 3, "composed tiles");
+        let composed_status_view = sample_view(ViewKind::StatusLine, 4, "layout: split");
+
+        WorkspaceRenderSnapshot {
+            focused_component: None,
+            main_view: Some(main_view.clone()),
+            status_view: Some(status_view.clone()),
+            composed_main_view: Some(composed_main_view.clone()),
+            composed_status_view: Some(composed_status_view.clone()),
+            layout: services_workspace_manager::WorkspaceLayoutSnapshot::default(),
+            tiles: vec![services_workspace_manager::WorkspaceTileRenderSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: None,
+                tabs: Vec::new(),
+                main_view: Some(main_view),
+                status_view: Some(status_view),
+            }],
+            component_count: 1,
+            running_count: 1,
+            status_strip: "Workspace - 1 tile - Idle".to_string(),
+            breadcrumbs: "PANDA > ROOT".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: Some(DebugInfo {
+                focused_component_name: Some("editor".to_string()),
+                focused_component_type: None,
+                last_key_event: Some("ctrl+w".to_string()),
+                last_routed_to: None,
+                consumed_by_global: false,
+            }),
+        }
+    }
+
     #[test]
     fn test_remote_ui_host_revision_increments() {
         let mut host = RemoteUiHost::new();
         let sink = InMemorySink::default();
         host.add_sink(Box::new(sink));
 
-        let snapshot = WorkspaceRenderSnapshot {
-            focused_component: None,
-            main_view: None,
-            status_view: None,
-            component_count: 0,
-            running_count: 0,
-            status_strip: "Workspace — No editors — Idle".to_string(),
-            breadcrumbs: "PANDA > ROOT".to_string(),
-            #[cfg(debug_assertions)]
-            debug_info: None,
-        };
+        let snapshot = sample_snapshot();
 
         let frame1 = host.push_snapshot(snapshot.clone(), 10).unwrap();
         let frame2 = host.push_snapshot(snapshot, 11).unwrap();
 
         assert_eq!(frame1.revision, 1);
         assert_eq!(frame2.revision, 2);
+        assert!(frame2.snapshot.composed_main_view.is_some());
+        assert_eq!(frame2.snapshot.tiles.len(), 1);
     }
 
     #[test]
@@ -261,17 +302,7 @@ mod tests {
         let frame = RemoteSnapshotFrame {
             revision: 1,
             timestamp_ns: 5,
-            snapshot: WorkspaceRenderSnapshot {
-                focused_component: None,
-                main_view: None,
-                status_view: None,
-                component_count: 0,
-                running_count: 0,
-                status_strip: "Workspace — No editors — Idle".to_string(),
-                breadcrumbs: "PANDA > ROOT".to_string(),
-                #[cfg(debug_assertions)]
-                debug_info: None,
-            },
+            snapshot: sample_snapshot(),
         };
 
         sink.send(frame).unwrap();
@@ -280,5 +311,28 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, channel);
         assert_eq!(sent[0].1.action, REMOTE_UI_ACTION.to_string());
+    }
+
+    #[test]
+    fn test_json_line_sink_round_trips_layout_snapshot_fields() {
+        let mut output = Vec::new();
+        let mut sink = JsonLineSink::new(&mut output);
+        let frame = RemoteSnapshotFrame {
+            revision: 7,
+            timestamp_ns: 99,
+            snapshot: sample_snapshot(),
+        };
+
+        sink.send(frame.clone()).unwrap();
+
+        let encoded = String::from_utf8(output).expect("utf8 json line");
+        let decoded: RemoteSnapshotFrame =
+            serde_json::from_str(encoded.trim_end()).expect("decode frame");
+
+        assert_eq!(decoded.revision, frame.revision);
+        assert!(decoded.snapshot.composed_status_view.is_some());
+        assert_eq!(decoded.snapshot.layout.focused_tile, 0);
+        assert_eq!(decoded.snapshot.tiles.len(), 1);
+        assert_eq!(decoded.snapshot.status_strip, frame.snapshot.status_strip);
     }
 }

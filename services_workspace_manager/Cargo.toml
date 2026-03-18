@@ -36,6 +36,7 @@ sim_kernel = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "allocator-api2"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
 uuid = { version = "1.0", default-features = false, features = ["serde"] }
@@ -44,8 +45,5 @@ uuid = { version = "1.0", default-features = false, features = ["serde"] }
 uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 
 # For no_std HashMap support
-[target.'cfg(not(feature = "std"))'.dependencies]
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "allocator-api2"] }
-
 [dev-dependencies]
 sim_kernel = { workspace = true }
