@@ -7,12 +7,11 @@
 //! - Validation indicators
 
 use crate::command_surface::{
-    helper_command_by_alias, is_known_command_prefix, validate_component_id_invocation,
-    validate_help_invocation, validate_open_invocation, CommandInvocationValidation,
-    HelperCommandKind, OpenInvocationValidation, PromptSuggestionSpec, SuggestionSpec,
-    DEFAULT_SUGGESTIONS, HELP_PREFIX_SUGGESTIONS, OPEN_PREFIX_SUGGESTIONS,
-    RECENT_PREFIX_SUGGESTIONS, non_launch_prefix_suggestions,
-    non_launch_prompt_suggestion_by_id,
+    helper_command_by_alias, is_known_command_prefix, non_launch_prefix_suggestions,
+    non_launch_prompt_suggestion_by_id, validate_component_id_invocation, validate_help_invocation,
+    validate_open_invocation, CommandInvocationValidation, HelperCommandKind,
+    OpenInvocationValidation, PromptSuggestionSpec, SuggestionSpec, DEFAULT_SUGGESTIONS,
+    HELP_PREFIX_SUGGESTIONS, OPEN_PREFIX_SUGGESTIONS, RECENT_PREFIX_SUGGESTIONS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -279,7 +278,12 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
         &mut suggestions,
         non_launch_prefix_suggestions(&input_lower)
             .into_iter()
-            .filter(|spec| !matches!(spec.pattern.as_str(), "help" | "help workspace" | "help editor" | "help keys" | "help system")),
+            .filter(|spec| {
+                !matches!(
+                    spec.pattern.as_str(),
+                    "help" | "help workspace" | "help editor" | "help keys" | "help system"
+                )
+            }),
     );
 
     suggestions
@@ -667,14 +671,14 @@ mod tests {
     #[test]
     fn test_generate_suggestions_navigation_prefixes_use_shared_patterns() {
         let next = generate_suggestions("ne");
-        assert!(next.iter().any(|s| {
-            s.pattern == "next" && s.description == "Focus the next component"
-        }));
+        assert!(next
+            .iter()
+            .any(|s| { s.pattern == "next" && s.description == "Focus the next component" }));
 
         let prev = generate_suggestions("pr");
-        assert!(prev.iter().any(|s| {
-            s.pattern == "prev" && s.description == "Focus the previous component"
-        }));
+        assert!(prev
+            .iter()
+            .any(|s| { s.pattern == "prev" && s.description == "Focus the previous component" }));
     }
 
     #[test]

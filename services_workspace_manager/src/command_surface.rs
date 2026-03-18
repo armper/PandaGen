@@ -479,11 +479,8 @@ pub(crate) fn component_id_command_by_token(
 }
 
 pub(crate) fn component_id_usage_pattern(token: &str) -> Option<&'static str> {
-    component_id_command_by_token(token).map(|spec| {
-        spec.usage
-            .strip_prefix("Usage: ")
-            .unwrap_or(spec.usage)
-    })
+    component_id_command_by_token(token)
+        .map(|spec| spec.usage.strip_prefix("Usage: ").unwrap_or(spec.usage))
 }
 
 fn non_launch_prompt_pattern(spec: &PaletteDescriptorSpec) -> Option<String> {

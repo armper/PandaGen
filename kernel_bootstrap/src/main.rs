@@ -28,20 +28,20 @@ mod render_stats;
 mod vga;
 mod workspace;
 
-use core::fmt::Write;
-use core::marker::PhantomData;
-use core::mem::MaybeUninit;
-use core::str;
-#[cfg(not(test))]
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(not(test))]
 use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;
 #[cfg(all(not(test), target_os = "none"))]
 use core::arch::global_asm;
+use core::fmt::Write;
+use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 #[cfg(all(not(test), target_os = "none"))]
 use core::panic::PanicInfo;
+use core::str;
+#[cfg(not(test))]
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 #[cfg(all(not(test), target_os = "none"))]
 use limine::memory_map::EntryType;
 #[cfg(all(not(test), target_os = "none"))]

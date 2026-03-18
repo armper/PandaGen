@@ -1,7 +1,8 @@
 //! GUI host and compositor on view surfaces.
 
 use serde::{Deserialize, Serialize};
-use view_types::{ViewContent, ViewFrame, ViewKind};
+use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
+use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
@@ -40,10 +41,30 @@ impl SurfaceRect {
 }
 
 /// Window descriptor for desktop composition.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum DesktopWindowRole {
+    /// Primary application or workspace content.
+    #[default]
+    Main,
+    /// Status strip or compact informational surface.
+    Status,
+    /// Non-modal overlay attached to the current workspace.
+    Overlay,
+    /// Command or launcher palette that floats above workspace content.
+    Palette,
+    /// Transient system notification surface.
+    Notification,
+    /// Blocking modal surface that captures interaction priority.
+    Modal,
+}
+
+/// Window descriptor for desktop composition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesktopWindow {
     pub frame: ViewFrame,
     pub rect: SurfaceRect,
+    #[serde(default)]
+    pub role: DesktopWindowRole,
     pub z_index: usize,
     pub focused: bool,
 }
@@ -53,9 +74,15 @@ impl DesktopWindow {
         Self {
             frame,
             rect,
+            role: DesktopWindowRole::Main,
             z_index: 0,
             focused: false,
         }
+    }
+
+    pub fn with_role(mut self, role: DesktopWindowRole) -> Self {
+        self.role = role;
+        self
     }
 
     pub fn with_z_index(mut self, z_index: usize) -> Self {
@@ -171,6 +198,44 @@ impl Compositor {
 
         SurfaceFrame::from_rows(rows, windows.len(), timestamp_ns)
     }
+
+    /// Map a workspace snapshot into tiled desktop windows.
+    ///
+    /// This is the first bridge from workspace-managed split/tab state into
+    /// the desktop compositor. It intentionally maps only visible tile content
+    /// for now; shell overlays such as breadcrumbs and notifications can be
+    /// layered on later without changing the tile/window contract.
+    pub fn desktop_windows_from_workspace_snapshot(
+        &self,
+        size: SurfaceSize,
+        snapshot: &WorkspaceRenderSnapshot,
+    ) -> Vec<DesktopWindow> {
+        if !snapshot.tiles.is_empty() {
+            return workspace_tile_windows(size, snapshot);
+        }
+
+        snapshot
+            .main_view
+            .as_ref()
+            .cloned()
+            .map(|frame| {
+                DesktopWindow::new(frame, SurfaceRect::new(0, 0, size.width, size.height)).focused()
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Compose a workspace snapshot directly into a desktop surface.
+    pub fn compose_workspace_snapshot(
+        &self,
+        size: SurfaceSize,
+        snapshot: &WorkspaceRenderSnapshot,
+    ) -> SurfaceFrame {
+        self.compose_desktop(
+            size,
+            self.desktop_windows_from_workspace_snapshot(size, snapshot),
+        )
+    }
 }
 
 fn render_content(content: &ViewContent) -> String {
@@ -196,17 +261,18 @@ fn render_content_lines(content: &ViewContent) -> Vec<String> {
 }
 
 fn window_title(frame: &ViewFrame) -> String {
-    frame.title
-        .clone()
-        .unwrap_or_else(|| match frame.kind {
-            ViewKind::TextBuffer => "TextBuffer".to_string(),
-            ViewKind::StatusLine => "StatusLine".to_string(),
-            ViewKind::Panel => "Panel".to_string(),
-        })
+    frame.title.clone().unwrap_or_else(|| match frame.kind {
+        ViewKind::TextBuffer => "TextBuffer".to_string(),
+        ViewKind::StatusLine => "StatusLine".to_string(),
+        ViewKind::Panel => "Panel".to_string(),
+    })
 }
 
 fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
-    if window.rect.width == 0 || window.rect.height == 0 || canvas.is_empty() || canvas[0].is_empty()
+    if window.rect.width == 0
+        || window.rect.height == 0
+        || canvas.is_empty()
+        || canvas[0].is_empty()
     {
         return;
     }
@@ -285,6 +351,105 @@ fn put_char(canvas: &mut [Vec<char>], x: usize, y: usize, ch: char) {
             *cell = ch;
         }
     }
+}
+
+fn workspace_tile_windows(
+    size: SurfaceSize,
+    snapshot: &WorkspaceRenderSnapshot,
+) -> Vec<DesktopWindow> {
+    let mut tiles = snapshot.tiles.iter().collect::<Vec<_>>();
+    tiles.sort_by_key(|tile| tile.tile_index);
+
+    let tile_count = tiles.len();
+    if tile_count == 0 {
+        return Vec::new();
+    }
+
+    let rects = match snapshot.layout.split_axis {
+        Some(SplitAxis::Vertical) => partition_rects_vertical(size, tile_count),
+        _ => partition_rects_horizontal(size, tile_count),
+    };
+
+    tiles
+        .into_iter()
+        .zip(rects)
+        .map(|(tile, rect)| {
+            let (frame, role) = tile_window_frame(tile, tile.tile_index);
+            let mut window = DesktopWindow::new(frame, rect)
+                .with_role(role)
+                .with_z_index(tile.tile_index);
+            if tile.is_focused {
+                window = window.focused();
+            }
+            window
+        })
+        .collect()
+}
+
+fn tile_window_frame(
+    tile: &WorkspaceTileRenderSnapshot,
+    tile_index: usize,
+) -> (ViewFrame, DesktopWindowRole) {
+    let (mut frame, role) = if let Some(frame) = tile.main_view.clone() {
+        (frame, DesktopWindowRole::Main)
+    } else if let Some(frame) = tile.status_view.clone() {
+        (frame, DesktopWindowRole::Status)
+    } else {
+        (
+            ViewFrame::new(
+                ViewId::new(),
+                ViewKind::Panel,
+                1,
+                ViewContent::panel("[empty tile]"),
+                0,
+            ),
+            DesktopWindowRole::Main,
+        )
+    };
+
+    if frame.title.is_none() {
+        let title = if tile.tabs.len() > 1 {
+            format!("Tile {} [{} tabs]", tile_index + 1, tile.tabs.len())
+        } else {
+            format!("Tile {}", tile_index + 1)
+        };
+        frame = frame.with_title(title);
+    }
+
+    (frame, role)
+}
+
+fn partition_rects_vertical(size: SurfaceSize, count: usize) -> Vec<SurfaceRect> {
+    let slices = partition_extent(size.width, count);
+    slices
+        .into_iter()
+        .map(|(x, width)| SurfaceRect::new(x, 0, width, size.height))
+        .collect()
+}
+
+fn partition_rects_horizontal(size: SurfaceSize, count: usize) -> Vec<SurfaceRect> {
+    let slices = partition_extent(size.height, count);
+    slices
+        .into_iter()
+        .map(|(y, height)| SurfaceRect::new(0, y, size.width, height))
+        .collect()
+}
+
+fn partition_extent(total: usize, count: usize) -> Vec<(usize, usize)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let base = total / count;
+    let remainder = total % count;
+    let mut offset = 0;
+    let mut slices = Vec::with_capacity(count);
+    for index in 0..count {
+        let len = base + usize::from(index < remainder);
+        slices.push((offset, len));
+        offset += len;
+    }
+    slices
 }
 
 #[cfg(test)]
@@ -410,5 +575,287 @@ mod tests {
         assert_eq!(surface.rows[4], "........+sta");
         assert_eq!(surface.rows[5], "........+   ");
         assert!(surface.rows.iter().all(|row| row.len() == 12));
+    }
+
+    #[test]
+    fn test_workspace_snapshot_maps_vertical_tiles_to_desktop_windows() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let left_component = ComponentId::new();
+        let right_component = ComponentId::new();
+        let left = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            2,
+            ViewContent::text_buffer(vec!["left".to_string()]),
+            20,
+        )
+        .with_title("Editor");
+        let right = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            5,
+            ViewContent::text_buffer(vec!["right".to_string()]),
+            50,
+        )
+        .with_title("CLI");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(right_component),
+            main_view: Some(right.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: Some(SplitAxis::Vertical),
+                focused_tile: 1,
+                tiles: vec![
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 0,
+                        is_focused: false,
+                        active_component: Some(left_component),
+                        tabs: vec![left_component],
+                    },
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 1,
+                        is_focused: true,
+                        active_component: Some(right_component),
+                        tabs: vec![right_component],
+                    },
+                ],
+            },
+            tiles: vec![
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 0,
+                    is_focused: false,
+                    active_component: Some(left_component),
+                    tabs: vec![left_component],
+                    main_view: Some(left),
+                    status_view: None,
+                },
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 1,
+                    is_focused: true,
+                    active_component: Some(right_component),
+                    tabs: vec![right_component],
+                    main_view: Some(right),
+                    status_view: None,
+                },
+            ],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(20, 8), &snapshot);
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].rect, SurfaceRect::new(0, 0, 10, 8));
+        assert_eq!(windows[1].rect, SurfaceRect::new(10, 0, 10, 8));
+        assert!(!windows[0].focused);
+        assert!(windows[1].focused);
+        assert_eq!(windows[0].frame.title.as_deref(), Some("Editor"));
+        assert_eq!(windows[1].frame.title.as_deref(), Some("CLI"));
+    }
+
+    #[test]
+    fn test_workspace_snapshot_maps_single_tile_to_full_surface_window() {
+        let compositor = Compositor::new();
+        let focused = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            7,
+            ViewContent::text_buffer(vec!["solo".to_string()]),
+            70,
+        )
+        .with_title("Solo");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: None,
+            main_view: Some(focused),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: Default::default(),
+            tiles: Vec::new(),
+            component_count: 1,
+            running_count: 1,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(18, 6), &snapshot);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].rect, SurfaceRect::new(0, 0, 18, 6));
+        assert!(windows[0].focused);
+        assert_eq!(windows[0].frame.title.as_deref(), Some("Solo"));
+    }
+
+    #[test]
+    fn test_workspace_snapshot_orders_tiles_by_tile_index() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let first_component = ComponentId::new();
+        let second_component = ComponentId::new();
+        let first = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["first".to_string()]),
+            10,
+        )
+        .with_title("First");
+        let second = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            2,
+            ViewContent::text_buffer(vec!["second".to_string()]),
+            20,
+        )
+        .with_title("Second");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(first_component),
+            main_view: Some(first.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: Some(SplitAxis::Vertical),
+                focused_tile: 0,
+                tiles: vec![
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 0,
+                        is_focused: true,
+                        active_component: Some(first_component),
+                        tabs: vec![first_component],
+                    },
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 1,
+                        is_focused: false,
+                        active_component: Some(second_component),
+                        tabs: vec![second_component],
+                    },
+                ],
+            },
+            tiles: vec![
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 1,
+                    is_focused: false,
+                    active_component: Some(second_component),
+                    tabs: vec![second_component],
+                    main_view: Some(second),
+                    status_view: None,
+                },
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(first_component),
+                    tabs: vec![first_component],
+                    main_view: Some(first),
+                    status_view: None,
+                },
+            ],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(20, 8), &snapshot);
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].frame.title.as_deref(), Some("First"));
+        assert_eq!(windows[0].rect, SurfaceRect::new(0, 0, 10, 8));
+        assert_eq!(windows[1].frame.title.as_deref(), Some("Second"));
+        assert_eq!(windows[1].rect, SurfaceRect::new(10, 0, 10, 8));
+    }
+
+    #[test]
+    fn test_desktop_window_defaults_to_main_role() {
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("default"),
+            10,
+        );
+
+        let window = DesktopWindow::new(frame, SurfaceRect::new(0, 0, 4, 3));
+
+        assert_eq!(window.role, DesktopWindowRole::Main);
+    }
+
+    #[test]
+    fn test_workspace_snapshot_uses_status_role_when_tile_has_only_status_view() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let component = ComponentId::new();
+        let status = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::StatusLine,
+            3,
+            ViewContent::status_line("status"),
+            30,
+        );
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(component),
+            main_view: None,
+            status_view: Some(status.clone()),
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: Some(SplitAxis::Vertical),
+                focused_tile: 0,
+                tiles: vec![WorkspaceTileLayoutSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(component),
+                    tabs: vec![component],
+                }],
+            },
+            tiles: vec![WorkspaceTileRenderSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: Some(component),
+                tabs: vec![component],
+                main_view: None,
+                status_view: Some(status),
+            }],
+            component_count: 1,
+            running_count: 1,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(20, 4), &snapshot);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].role, DesktopWindowRole::Status);
+        assert!(windows[0].focused);
     }
 }
