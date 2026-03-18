@@ -1,11 +1,22 @@
 //! GUI host and compositor on view surfaces.
 
+use graphics_rasterizer::{RasterRect, RgbaBuffer, RgbaColor};
 use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
+const RASTER_CELL_WIDTH: usize = 8;
+const RASTER_CELL_HEIGHT: usize = 10;
+const RASTER_BORDER_THICKNESS: usize = 1;
+
+const DESKTOP_BACKGROUND_COLOR: RgbaColor = RgbaColor::new(12, 18, 28, 255);
+const WINDOW_FILL_COLOR: RgbaColor = RgbaColor::new(28, 34, 48, 255);
+const FOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(52, 211, 153, 255);
+const UNFOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(107, 114, 128, 255);
+const TEXT_COLOR: RgbaColor = RgbaColor::new(226, 232, 240, 255);
+const CURSOR_COLOR: RgbaColor = RgbaColor::new(251, 146, 60, 255);
 
 /// Dimensions of a composited surface.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +209,42 @@ impl SurfaceFrame {
     }
 }
 
+/// Rasterized desktop frame in RGBA pixel space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RasterSurfaceFrame {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+    pub frame_count: usize,
+    pub timestamp_ns: u64,
+}
+
+impl RasterSurfaceFrame {
+    fn new(buffer: RgbaBuffer, frame_count: usize, timestamp_ns: u64) -> Self {
+        Self {
+            width: buffer.width(),
+            height: buffer.height(),
+            pixels: buffer.as_bytes().to_vec(),
+            frame_count,
+            timestamp_ns,
+        }
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let offset = (y * self.width + x) * 4;
+        Some(RgbaColor::new(
+            self.pixels[offset],
+            self.pixels[offset + 1],
+            self.pixels[offset + 2],
+            self.pixels[offset + 3],
+        ))
+    }
+}
+
 /// Simple compositor that merges view frames into a surface.
 pub struct Compositor;
 
@@ -279,6 +326,38 @@ impl Compositor {
         SurfaceFrame::from_rows(rows, windows.len(), timestamp_ns)
     }
 
+    /// Compose a desktop into an RGBA pixel buffer using the software rasterizer.
+    pub fn compose_desktop_rgba(
+        &self,
+        size: SurfaceSize,
+        mut windows: Vec<DesktopWindow>,
+    ) -> RasterSurfaceFrame {
+        let mut buffer = RgbaBuffer::new(
+            size.width.saturating_mul(RASTER_CELL_WIDTH),
+            size.height.saturating_mul(RASTER_CELL_HEIGHT),
+            DESKTOP_BACKGROUND_COLOR,
+        );
+        windows.sort_by_key(|window| {
+            (
+                window.layer.sort_key(),
+                window.z_index,
+                window.frame.view_id.as_uuid(),
+            )
+        });
+
+        for window in &windows {
+            raster_window(&mut buffer, window);
+        }
+
+        let timestamp_ns = windows
+            .iter()
+            .map(|window| window.frame.timestamp_ns)
+            .max()
+            .unwrap_or(0);
+
+        RasterSurfaceFrame::new(buffer, windows.len(), timestamp_ns)
+    }
+
     /// Map a workspace snapshot into tiled desktop windows.
     ///
     /// This is the first bridge from workspace-managed split/tab state into
@@ -312,6 +391,18 @@ impl Compositor {
         snapshot: &WorkspaceRenderSnapshot,
     ) -> SurfaceFrame {
         self.compose_desktop(
+            size,
+            self.desktop_windows_from_workspace_snapshot(size, snapshot),
+        )
+    }
+
+    /// Compose a workspace snapshot directly into an RGBA pixel surface.
+    pub fn compose_workspace_snapshot_rgba(
+        &self,
+        size: SurfaceSize,
+        snapshot: &WorkspaceRenderSnapshot,
+    ) -> RasterSurfaceFrame {
+        self.compose_desktop_rgba(
             size,
             self.desktop_windows_from_workspace_snapshot(size, snapshot),
         )
@@ -444,6 +535,58 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
             );
         }
     }
+}
+
+fn raster_window(buffer: &mut RgbaBuffer, window: &DesktopWindow) {
+    let rect = pixel_rect(window.rect);
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+
+    buffer.fill_rect(rect, WINDOW_FILL_COLOR);
+    buffer.draw_border(
+        rect,
+        RASTER_BORDER_THICKNESS,
+        if window.focused {
+            FOCUSED_BORDER_COLOR
+        } else {
+            UNFOCUSED_BORDER_COLOR
+        },
+    );
+
+    let chrome_label = window_chrome_label(window);
+    buffer.draw_text(rect.x + 2, rect.y + 2, &chrome_label, TEXT_COLOR);
+
+    let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
+    for (line_index, line) in render_content_lines(&window.frame.content)
+        .into_iter()
+        .take(window.rect.height.saturating_sub(2))
+        .enumerate()
+    {
+        let y = line_origin_y + line_index * RASTER_CELL_HEIGHT;
+        if y >= buffer.height() {
+            break;
+        }
+        buffer.draw_text(rect.x + 2, y, &line, TEXT_COLOR);
+    }
+
+    if let Some(cursor) = window.frame.cursor {
+        let cursor_x = rect.x + RASTER_CELL_WIDTH + 2 + cursor.column * RASTER_CELL_WIDTH;
+        let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
+        buffer.fill_rect(
+            RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
+            CURSOR_COLOR,
+        );
+    }
+}
+
+fn pixel_rect(rect: SurfaceRect) -> RasterRect {
+    RasterRect::new(
+        rect.x.saturating_mul(RASTER_CELL_WIDTH),
+        rect.y.saturating_mul(RASTER_CELL_HEIGHT),
+        rect.width.saturating_mul(RASTER_CELL_WIDTH),
+        rect.height.saturating_mul(RASTER_CELL_HEIGHT),
+    )
 }
 
 fn put_char(canvas: &mut [Vec<char>], x: usize, y: usize, ch: char) {
@@ -702,6 +845,37 @@ mod tests {
         assert_eq!(surface.rows[4], "........+sta");
         assert_eq!(surface.rows[5], "........+   ");
         assert!(surface.rows.iter().all(|row| row.len() == 12));
+    }
+
+    #[test]
+    fn test_compose_desktop_rgba_renders_border_background_and_cursor() {
+        let compositor = Compositor::new();
+        let editor = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            3,
+            ViewContent::text_buffer(vec!["A".to_string()]),
+            33,
+        )
+        .with_title("Editor")
+        .with_cursor(CursorPosition::new(0, 0));
+
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(8, 5),
+            vec![DesktopWindow::new(editor, SurfaceRect::new(1, 1, 4, 3))
+                .with_z_index(1)
+                .focused()],
+        );
+
+        assert_eq!(surface.width, 64);
+        assert_eq!(surface.height, 50);
+        assert_eq!(surface.frame_count, 1);
+        assert_eq!(surface.timestamp_ns, 33);
+        assert_eq!(surface.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
+        assert_eq!(surface.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(surface.pixel(16, 20), Some(WINDOW_FILL_COLOR));
+        assert_eq!(surface.pixel(12, 22), Some(TEXT_COLOR));
+        assert_eq!(surface.pixel(18, 21), Some(CURSOR_COLOR));
     }
 
     #[test]
@@ -1154,6 +1328,42 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_desktop_rgba_layer_policy_beats_raw_z_index() {
+        let compositor = Compositor::new();
+        let workspace = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["A".to_string()]),
+            10,
+        )
+        .with_title("Main");
+        let modal = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("M"),
+            20,
+        )
+        .with_title("Modal");
+
+        let surface = compositor.compose_desktop_rgba(
+            SurfaceSize::new(12, 6),
+            vec![
+                DesktopWindow::new(workspace, SurfaceRect::new(1, 1, 6, 4))
+                    .with_z_index(99)
+                    .focused(),
+                DesktopWindow::new(modal, SurfaceRect::new(2, 2, 4, 3))
+                    .with_role(DesktopWindowRole::Modal)
+                    .with_z_index(0),
+            ],
+        );
+
+        assert_eq!(surface.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(surface.pixel(16, 20), Some(UNFOCUSED_BORDER_COLOR));
+    }
+
+    #[test]
     fn test_workspace_snapshot_maps_horizontal_tiles_to_desktop_windows() {
         use services_workspace_manager::{
             ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
@@ -1302,8 +1512,7 @@ mod tests {
         let surface = compositor.compose_desktop(
             SurfaceSize::new(20, 8),
             vec![
-                DesktopWindow::new(workspace, SurfaceRect::new(0, 1, 14, 5))
-                    .with_z_index(50),
+                DesktopWindow::new(workspace, SurfaceRect::new(0, 1, 14, 5)).with_z_index(50),
                 DesktopWindow::new(overlay, SurfaceRect::new(3, 2, 12, 4))
                     .with_role(DesktopWindowRole::Overlay)
                     .with_z_index(99),

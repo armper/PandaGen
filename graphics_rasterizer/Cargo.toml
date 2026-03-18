@@ -1,12 +1,9 @@
 [package]
-name = "services_gui_host"
+name = "graphics_rasterizer"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-view_types = { workspace = true }
 serde = { workspace = true }
-services_workspace_manager = { workspace = true }
-graphics_rasterizer = { workspace = true }

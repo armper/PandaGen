@@ -79,7 +79,7 @@ User-space services should provide policy:
 
 ### Epic 3: Software Rasterizer
 
-- [ ] `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
+- [x] `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
 - [ ] `GFX-012` Define a render target abstraction that can target both off-screen test buffers and the real framebuffer backend.
 - [ ] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
 - [ ] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
+- `GFX-012` Define a render target abstraction that can target both off-screen test buffers and the real framebuffer backend.
 
-`GFX-010` is now in place, which means the compositor contract has stronger deterministic coverage for horizontal and vertical tile mapping, focused versus unfocused chrome, and multi-layer ordering. The next step is to leave the text-surface prototype behind and add a real software raster path.
+`GFX-011` is now in place: PandaGen has a dedicated `graphics_rasterizer` crate with deterministic RGBA fill, border, and glyph primitives, and `services_gui_host` can now rasterize desktop windows into a pixel buffer without pretending the desktop is fundamentally a terminal. The next step is to stop hard-coding the off-screen buffer target and define a render target contract that can point at both tests and the real framebuffer path.

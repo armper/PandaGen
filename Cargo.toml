@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "graphics_rasterizer",
     "kernel_bootstrap",
     "core_types",
     "ipc",
@@ -72,6 +73,7 @@ panic = "abort"
 
 [workspace.dependencies]
 # Core crates
+graphics_rasterizer = { path = "graphics_rasterizer" }
 core_types = { path = "core_types" }
 ipc = { path = "ipc" }
 kernel_api = { path = "kernel_api" }
