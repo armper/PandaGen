@@ -6,6 +6,14 @@
 //! - Command suggestions for guided prompts
 //! - Validation indicators
 
+use crate::command_surface::{
+    helper_command_by_alias, is_known_command_prefix, validate_component_id_invocation,
+    validate_help_invocation, validate_open_invocation, CommandInvocationValidation,
+    HelperCommandKind, OpenInvocationValidation, PromptSuggestionSpec, SuggestionSpec,
+    DEFAULT_SUGGESTIONS, HELP_PREFIX_SUGGESTIONS, OPEN_PREFIX_SUGGESTIONS,
+    RECENT_PREFIX_SUGGESTIONS, non_launch_prefix_suggestions,
+    non_launch_prompt_suggestion_by_id,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "std"))]
@@ -239,12 +247,14 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
 
     // Empty input - show common commands
     if input_lower.is_empty() {
-        return vec![
-            CommandSuggestion::new("open editor <path>", "Open file in editor"),
-            CommandSuggestion::new("list", "List all components"),
-            CommandSuggestion::new("help", "Show help overview"),
-            CommandSuggestion::new("recent", "Show recent files"),
-        ];
+        let mut suggestions: Vec<CommandSuggestion> = DEFAULT_SUGGESTIONS
+            .iter()
+            .map(|spec| CommandSuggestion::new(spec.pattern, spec.description))
+            .collect();
+        if let Some(spec) = non_launch_prompt_suggestion_by_id("list") {
+            push_prompt_suggestion(&mut suggestions, spec);
+        }
+        return suggestions;
     }
 
     // Match command prefixes
@@ -252,52 +262,51 @@ pub fn generate_suggestions(input: &str) -> Vec<CommandSuggestion> {
 
     // "open" commands
     if "open".starts_with(&input_lower) || input_lower.starts_with("op") {
-        suggestions.push(CommandSuggestion::new(
-            "open editor <path>",
-            "Open file in editor",
-        ));
-        suggestions.push(CommandSuggestion::new("open recent", "Show recent files"));
+        push_suggestions(&mut suggestions, OPEN_PREFIX_SUGGESTIONS);
     }
 
     // "help" commands
     if "help".starts_with(&input_lower) || input_lower.starts_with("he") || input_lower == "?" {
-        suggestions.push(CommandSuggestion::new("help", "Overview"));
-        suggestions.push(CommandSuggestion::new("help editor", "Editor commands"));
-        suggestions.push(CommandSuggestion::new("help keys", "Keyboard shortcuts"));
-        suggestions.push(CommandSuggestion::new(
-            "help workspace",
-            "Workspace commands",
-        ));
-        suggestions.push(CommandSuggestion::new("help system", "System commands"));
-    }
-
-    // "list" commands
-    if "list".starts_with(&input_lower) || input_lower.starts_with("li") {
-        suggestions.push(CommandSuggestion::new("list", "List all components"));
+        push_suggestions(&mut suggestions, HELP_PREFIX_SUGGESTIONS);
     }
 
     // "recent" commands
     if "recent".starts_with(&input_lower) || input_lower.starts_with("rec") {
-        suggestions.push(CommandSuggestion::new("recent", "Show recent files"));
+        push_suggestions(&mut suggestions, RECENT_PREFIX_SUGGESTIONS);
     }
 
-    // "close" commands
-    if "close".starts_with(&input_lower) || input_lower.starts_with("cl") {
-        suggestions.push(CommandSuggestion::new("close <id>", "Close a component"));
-    }
-
-    // "next" / "prev" navigation
-    if "next".starts_with(&input_lower) || input_lower.starts_with("ne") {
-        suggestions.push(CommandSuggestion::new("next", "Focus next component"));
-    }
-    if "prev".starts_with(&input_lower)
-        || "previous".starts_with(&input_lower)
-        || input_lower.starts_with("pr")
-    {
-        suggestions.push(CommandSuggestion::new("prev", "Focus previous component"));
-    }
+    push_prompt_suggestions(
+        &mut suggestions,
+        non_launch_prefix_suggestions(&input_lower)
+            .into_iter()
+            .filter(|spec| !matches!(spec.pattern.as_str(), "help" | "help workspace" | "help editor" | "help keys" | "help system")),
+    );
 
     suggestions
+}
+
+fn push_suggestions(into: &mut Vec<CommandSuggestion>, specs: &[SuggestionSpec]) {
+    into.extend(
+        specs
+            .iter()
+            .map(|spec| CommandSuggestion::new(spec.pattern, spec.description)),
+    );
+}
+
+fn push_prompt_suggestion(into: &mut Vec<CommandSuggestion>, spec: PromptSuggestionSpec) {
+    if into.iter().any(|existing| existing.pattern == spec.pattern) {
+        return;
+    }
+    into.push(CommandSuggestion::new(spec.pattern, spec.description));
+}
+
+fn push_prompt_suggestions<I>(into: &mut Vec<CommandSuggestion>, specs: I)
+where
+    I: IntoIterator<Item = PromptSuggestionSpec>,
+{
+    for spec in specs {
+        push_prompt_suggestion(into, spec);
+    }
 }
 
 /// Prompt validation state
@@ -428,25 +437,11 @@ pub fn validate_command(input: &str) -> PromptValidation {
 
     // Check valid commands
     match cmd {
-        "open" => {
-            // Needs at least component type
-            if parts.len() == 1 {
-                PromptValidation::ValidPrefix
-            } else if parts.len() == 2 {
-                // Has component type but no args - check if it's valid
-                match parts[1] {
-                    "editor" => PromptValidation::ValidPrefix, // Editor needs filename
-                    "cli" | "pipeline" => PromptValidation::ValidComplete,
-                    _ => PromptValidation::Invalid,
-                }
-            } else {
-                // Has component type and args
-                match parts[1] {
-                    "editor" | "cli" | "pipeline" => PromptValidation::ValidComplete,
-                    _ => PromptValidation::Invalid,
-                }
-            }
-        }
+        "open" => match validate_open_invocation(&parts) {
+            OpenInvocationValidation::ValidPrefix => PromptValidation::ValidPrefix,
+            OpenInvocationValidation::ValidComplete => PromptValidation::ValidComplete,
+            OpenInvocationValidation::Invalid => PromptValidation::Invalid,
+        },
         "list" | "next" | "prev" | "previous" => {
             if parts.len() == 1 {
                 PromptValidation::ValidComplete
@@ -454,64 +449,31 @@ pub fn validate_command(input: &str) -> PromptValidation {
                 PromptValidation::Invalid
             }
         }
-        "close" | "focus" | "status" => {
-            // These need a component ID
-            if parts.len() == 1 {
-                PromptValidation::ValidPrefix
-            } else if parts.len() == 2 {
-                // Check if it looks like a component ID
-                if parts[1].starts_with("comp:") {
-                    PromptValidation::ValidComplete
-                } else {
-                    PromptValidation::Invalid
-                }
-            } else {
-                PromptValidation::Invalid
-            }
-        }
-        "help" => {
-            if parts.len() == 1 {
-                PromptValidation::ValidComplete
-            } else if parts.len() == 2 {
-                // Check if it's a valid help category
-                match parts[1] {
-                    "workspace" | "editor" | "keys" | "system" => PromptValidation::ValidComplete,
-                    _ => PromptValidation::Invalid,
-                }
-            } else {
-                PromptValidation::Invalid
-            }
-        }
+        "close" | "focus" | "status" => match validate_component_id_invocation(&parts) {
+            CommandInvocationValidation::ValidPrefix => PromptValidation::ValidPrefix,
+            CommandInvocationValidation::ValidComplete => PromptValidation::ValidComplete,
+            CommandInvocationValidation::Invalid => PromptValidation::Invalid,
+        },
+        "help" => match validate_help_invocation(&parts) {
+            CommandInvocationValidation::ValidPrefix => PromptValidation::ValidPrefix,
+            CommandInvocationValidation::ValidComplete => PromptValidation::ValidComplete,
+            CommandInvocationValidation::Invalid => PromptValidation::Invalid,
+        },
         "recent" => {
-            if parts.len() == 1 {
-                PromptValidation::ValidComplete
-            } else {
-                PromptValidation::Invalid
+            if let Some(helper) = helper_command_by_alias(&parts) {
+                if helper.kind == HelperCommandKind::RecentFiles {
+                    return PromptValidation::ValidComplete;
+                }
             }
+            PromptValidation::Invalid
         }
         // Check if input is a valid prefix of any command
         _ => {
-            // Valid command prefixes
-            let valid_prefixes = [
-                ("open", &["op", "ope"] as &[&str]),
-                ("list", &["li", "lis"]),
-                ("next", &["ne", "nex"]),
-                ("prev", &["pr", "pre"]), // Note: also matches "previous"
-                ("close", &["cl", "clo", "clos"]),
-                ("focus", &["fo", "foc", "focu"]),
-                ("status", &["st", "sta", "stat", "statu"]),
-                ("help", &["he", "hel"]),
-                ("recent", &["re", "rec", "rece", "recen"]),
-            ];
-
-            // Check if input matches any valid prefix
-            for (_, prefixes) in &valid_prefixes {
-                if prefixes.contains(&cmd) {
-                    return PromptValidation::ValidPrefix;
-                }
+            if is_known_command_prefix(cmd) {
+                PromptValidation::ValidPrefix
+            } else {
+                PromptValidation::Invalid
             }
-
-            PromptValidation::Invalid
         }
     }
 }
@@ -684,6 +646,7 @@ mod tests {
         assert!(suggestions
             .iter()
             .any(|s| s.pattern.contains("open editor")));
+        assert!(suggestions.iter().any(|s| s.pattern == "open file"));
     }
 
     #[test]
@@ -699,6 +662,27 @@ mod tests {
     fn test_generate_suggestions_list_prefix() {
         let suggestions = generate_suggestions("li");
         assert!(suggestions.iter().any(|s| s.pattern == "list"));
+    }
+
+    #[test]
+    fn test_generate_suggestions_navigation_prefixes_use_shared_patterns() {
+        let next = generate_suggestions("ne");
+        assert!(next.iter().any(|s| {
+            s.pattern == "next" && s.description == "Focus the next component"
+        }));
+
+        let prev = generate_suggestions("pr");
+        assert!(prev.iter().any(|s| {
+            s.pattern == "prev" && s.description == "Focus the previous component"
+        }));
+    }
+
+    #[test]
+    fn test_generate_suggestions_close_prefix_uses_component_id_grammar() {
+        let suggestions = generate_suggestions("cl");
+        assert!(suggestions.iter().any(|s| {
+            s.pattern == "close <component_id>" && s.description == "Close a component by ID"
+        }));
     }
 
     #[test]
@@ -781,6 +765,10 @@ mod tests {
         assert_eq!(validate_command("open"), PromptValidation::ValidPrefix);
         assert_eq!(
             validate_command("open editor"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open custom"),
             PromptValidation::ValidPrefix
         );
     }
@@ -793,6 +781,26 @@ mod tests {
         );
         assert_eq!(
             validate_command("open cli"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open custom dashboard"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open file"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open file-picker"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open recent"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(
+            validate_command("open recent files"),
             PromptValidation::ValidComplete
         );
     }
@@ -809,7 +817,21 @@ mod tests {
             validate_command("help workspace"),
             PromptValidation::ValidComplete
         );
+        assert_eq!(
+            validate_command("help keyboard"),
+            PromptValidation::ValidComplete
+        );
         assert_eq!(validate_command("help invalid"), PromptValidation::Invalid);
+    }
+
+    #[test]
+    fn test_validate_command_recent() {
+        assert_eq!(validate_command("recent"), PromptValidation::ValidComplete);
+        assert_eq!(
+            validate_command("recent files"),
+            PromptValidation::ValidComplete
+        );
+        assert_eq!(validate_command("recent now"), PromptValidation::Invalid);
     }
 
     #[test]

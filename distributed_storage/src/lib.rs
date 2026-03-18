@@ -3,8 +3,8 @@
 pub mod consensus;
 
 pub use consensus::{
-    AppendEntriesRequest, AppendEntriesResponse, ConsensusCluster, ConsensusError,
-    ConsensusNode, ConsensusNodeId, LogEntry, NodeState, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, ConsensusCluster, ConsensusError, ConsensusNode,
+    ConsensusNodeId, LogEntry, NodeState, VoteRequest, VoteResponse,
 };
 
 use serde::{Deserialize, Serialize};

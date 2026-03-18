@@ -4,11 +4,15 @@
 //! Boot straight into vi, start in workspace mode, or run as a kiosk.
 
 use serde::{Deserialize, Serialize};
+use services_storage::{JournaledStorage, ObjectId, TransactionError, TransactionalStorage};
+use uuid::Uuid;
 
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
+
+const BOOT_PROFILE_OBJECT_UUID: u128 = 0x6b2a_f5a8_0dc3_4da0_82f8_f3d3_b20f_4ec3;
 
 /// Boot profile types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -169,29 +173,63 @@ impl BootProfileManager {
     }
 
     /// Loads configuration (from storage in real impl)
-    ///
-    /// For now, this is a placeholder that would integrate with services_storage
-    pub fn load(&mut self, _storage_handle: Option<()>) -> Result<(), String> {
-        // In real implementation:
-        // 1. Read config from persistent storage
-        // 2. Deserialize JSON
-        // 3. Update self.config
-        // 4. Set self.loaded = true
+    pub fn load(&mut self, storage_handle: Option<&mut JournaledStorage>) -> Result<(), String> {
+        let Some(storage) = storage_handle else {
+            self.config = BootConfig::default();
+            self.loaded = true;
+            return Ok(());
+        };
 
-        // For now, use default
-        self.config = BootConfig::default();
+        let object_id = Self::boot_profile_object_id();
+        let mut tx = storage
+            .begin_transaction()
+            .map_err(|e| format!("Failed to begin boot profile load transaction: {}", e))?;
+
+        let bytes = match storage.read_data(&tx, object_id) {
+            Ok(bytes) => bytes,
+            Err(TransactionError::ObjectNotFound(_)) => {
+                let _ = storage.rollback(&mut tx);
+                self.config = BootConfig::default();
+                self.loaded = true;
+                return Ok(());
+            }
+            Err(err) => {
+                let _ = storage.rollback(&mut tx);
+                return Err(format!("Failed to read boot profile from storage: {}", err));
+            }
+        };
+        let _ = storage.rollback(&mut tx);
+
+        self.config = String::from_utf8(bytes)
+            .ok()
+            .and_then(|json| BootConfig::from_json(&json).ok())
+            .unwrap_or_default();
         self.loaded = true;
         Ok(())
     }
 
     /// Saves configuration (to storage in real impl)
-    pub fn save(&self, _storage_handle: Option<()>) -> Result<(), String> {
-        // In real implementation:
-        // 1. Serialize config to JSON
-        // 2. Write to persistent storage
-        // 3. Sync to disk
+    pub fn save(&self, storage_handle: Option<&mut JournaledStorage>) -> Result<(), String> {
+        let Some(storage) = storage_handle else {
+            return Ok(());
+        };
 
-        // For now, no-op
+        let object_id = Self::boot_profile_object_id();
+        let json = self
+            .config
+            .to_json()
+            .map_err(|e| format!("Failed to serialize boot profile: {}", e))?;
+
+        let mut tx = storage
+            .begin_transaction()
+            .map_err(|e| format!("Failed to begin boot profile save transaction: {}", e))?;
+        storage
+            .write(&mut tx, object_id, json.as_bytes())
+            .map_err(|e| format!("Failed to write boot profile to storage: {}", e))?;
+        storage
+            .commit(&mut tx)
+            .map_err(|e| format!("Failed to commit boot profile save transaction: {}", e))?;
+
         Ok(())
     }
 
@@ -219,6 +257,10 @@ impl BootProfileManager {
     pub fn profile(&self) -> BootProfile {
         self.config.profile
     }
+
+    fn boot_profile_object_id() -> ObjectId {
+        ObjectId::from_uuid(Uuid::from_u128(BOOT_PROFILE_OBJECT_UUID))
+    }
 }
 
 impl Default for BootProfileManager {
@@ -230,6 +272,7 @@ impl Default for BootProfileManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use services_storage::{JournaledStorage, TransactionalStorage};
 
     #[test]
     fn test_boot_profile_name() {
@@ -348,6 +391,55 @@ mod tests {
         let mut manager = BootProfileManager::new();
         assert!(manager.load(None).is_ok());
         assert!(manager.is_loaded());
+    }
+
+    #[test]
+    fn test_boot_profile_manager_save_and_load_roundtrip() {
+        let mut storage = JournaledStorage::new();
+        let config = BootConfig::new(BootProfile::Kiosk)
+            .with_kiosk_app("browser".to_string())
+            .with_auto_start(vec!["network".to_string(), "input".to_string()])
+            .with_extra("theme".to_string(), "amber".to_string());
+
+        let mut manager = BootProfileManager::new();
+        manager.set_config(config);
+        manager.save(Some(&mut storage)).unwrap();
+
+        let mut loaded = BootProfileManager::new();
+        loaded.load(Some(&mut storage)).unwrap();
+
+        assert!(loaded.is_loaded());
+        assert_eq!(loaded.profile(), BootProfile::Kiosk);
+        assert_eq!(loaded.config().kiosk_app.as_deref(), Some("browser"));
+        assert_eq!(
+            loaded.config().auto_start,
+            vec!["network".to_string(), "input".to_string()]
+        );
+        assert_eq!(
+            loaded.config().extra.get("theme"),
+            Some(&"amber".to_string())
+        );
+    }
+
+    #[test]
+    fn test_boot_profile_manager_load_corrupt_data_falls_back_to_default() {
+        let mut storage = JournaledStorage::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(
+                &mut tx,
+                BootProfileManager::boot_profile_object_id(),
+                b"{ this is not valid json ",
+            )
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let mut manager = BootProfileManager::new();
+        manager.set_profile(BootProfile::Kiosk);
+        manager.load(Some(&mut storage)).unwrap();
+
+        assert!(manager.is_loaded());
+        assert_eq!(manager.profile(), BootProfile::Workspace);
     }
 
     #[test]

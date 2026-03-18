@@ -199,6 +199,14 @@ impl Editor {
         }
     }
 
+    /// Save the currently open document.
+    ///
+    /// This is used by workspace-level save actions (for example `Ctrl+S`)
+    /// that should trigger a real document save without command-mode key simulation.
+    pub fn save_current_document(&mut self) -> EditorResult<VersionId> {
+        self.save_document()
+    }
+
     /// Handle normal mode key event
     fn handle_normal_mode(&mut self, event: &KeyEvent) -> EditorResult<EditorAction> {
         match event.code {

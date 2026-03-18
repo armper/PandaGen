@@ -4,7 +4,6 @@ use crate::{
     ObjectId, Transaction, TransactionError, TransactionId, TransactionalStorage, VersionId,
 };
 use alloc::collections::BTreeMap;
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -108,7 +107,9 @@ impl JournaledStorage {
 
     /// Recovers committed transactions from the journal.
     pub fn recover(&mut self) {
-        let mut committed = BTreeSet::new();
+        self.objects.clear();
+        self.pending.clear();
+
         let mut writes: BTreeMap<TransactionId, Vec<PendingWrite>> = BTreeMap::new();
 
         for entry in &self.journal {
@@ -126,21 +127,17 @@ impl JournaledStorage {
                     });
                 }
                 JournalEntry::Commit { tx_id } => {
-                    committed.insert(*tx_id);
-                }
-            }
-        }
-
-        for tx_id in committed {
-            if let Some(pending) = writes.remove(&tx_id) {
-                for write in pending {
-                    self.objects
-                        .entry(write.object_id)
-                        .or_default()
-                        .push(VersionEntry {
-                            version_id: write.version_id,
-                            data: write.data,
-                        });
+                    if let Some(pending) = writes.remove(tx_id) {
+                        for write in pending {
+                            self.objects
+                                .entry(write.object_id)
+                                .or_default()
+                                .push(VersionEntry {
+                                    version_id: write.version_id,
+                                    data: write.data,
+                                });
+                        }
+                    }
                 }
             }
         }
@@ -420,6 +417,44 @@ mod tests {
         let recovered_data = recovered.read_data(&read_tx, object).unwrap();
         assert_eq!(recovered_data, b"data".to_vec());
         assert!(recovered.read(&read_tx, object2).is_err());
+    }
+
+    #[test]
+    fn test_journal_recovery_preserves_commit_order_for_versions() {
+        let mut storage = JournaledStorage::new();
+        let object = ObjectId::new();
+
+        let mut first_tx = storage.begin_transaction().unwrap();
+        let first_version = storage.write(&mut first_tx, object, b"hello").unwrap();
+        storage.commit(&mut first_tx).unwrap();
+
+        let mut second_tx = storage.begin_transaction().unwrap();
+        let second_version = storage.write(&mut second_tx, object, b"xhello").unwrap();
+        storage.commit(&mut second_tx).unwrap();
+
+        let recovered = JournaledStorage::from_journal(storage.journal_clone());
+        let read_tx = Transaction::new();
+
+        assert_eq!(recovered.read(&read_tx, object).unwrap(), second_version);
+        assert_ne!(second_version, first_version);
+        assert_eq!(recovered.read_data(&read_tx, object).unwrap(), b"xhello");
+    }
+
+    #[test]
+    fn test_recover_is_idempotent() {
+        let mut storage = JournaledStorage::new();
+        let object = ObjectId::new();
+
+        let mut tx = storage.begin_transaction().unwrap();
+        let version = storage.write(&mut tx, object, b"data").unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        storage.recover();
+        storage.recover();
+
+        let read_tx = Transaction::new();
+        assert_eq!(storage.read(&read_tx, object).unwrap(), version);
+        assert_eq!(storage.read_data(&read_tx, object).unwrap(), b"data");
     }
 
     #[test]

@@ -281,17 +281,16 @@ impl Scheduler {
         let next = match self.config.realtime_policy {
             RealTimePolicy::None => self.run_queue.dequeue(),
             RealTimePolicy::EarliestDeadlineFirst => {
-                // Build a map of deadlines to avoid borrowing self in the closure
                 let deadlines: std::collections::HashMap<TaskId, u64> = self
-                    .run_queue
-                    .queue
+                    .tasks
                     .iter()
-                    .copied()
-                    .filter_map(|task_id| {
-                        self.task_deadline(task_id)
-                            .map(|deadline| (task_id, deadline))
+                    .filter_map(|(task_id, info)| {
+                        info.realtime
+                            .as_ref()
+                            .map(|realtime| (*task_id, realtime.next_deadline))
                     })
                     .collect();
+
                 self.run_queue
                     .dequeue_earliest_deadline(|task_id| deadlines.get(&task_id).copied())
             }
@@ -640,8 +639,8 @@ impl Scheduler {
         for (id, info) in self.tasks.iter() {
             if *id == task_id {
                 if params.period_ticks > 0 {
-                    total += (params.budget_ticks as u128 * 1_000_000u128)
-                        / params.period_ticks as u128;
+                    total +=
+                        (params.budget_ticks as u128 * 1_000_000u128) / params.period_ticks as u128;
                 }
                 continue;
             }

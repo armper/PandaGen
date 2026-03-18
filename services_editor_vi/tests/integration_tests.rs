@@ -234,6 +234,7 @@ fn test_editor_open_and_save_with_storage_io() {
         .process_input(press_key_shift(KeyCode::Semicolon))
         .unwrap();
     editor.state_mut().append_to_command('w');
+    assert_eq!(editor.get_content(), "xhello");
     let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
     assert!(matches!(result, EditorAction::Saved(_)));
     assert_ne!(editor.document().unwrap().version_id, initial_version);

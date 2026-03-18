@@ -180,7 +180,10 @@ impl ConsensusNode {
         }
     }
 
-    pub fn handle_append_entries(&mut self, request: AppendEntriesRequest) -> AppendEntriesResponse {
+    pub fn handle_append_entries(
+        &mut self,
+        request: AppendEntriesRequest,
+    ) -> AppendEntriesResponse {
         if request.term < self.current_term {
             return AppendEntriesResponse {
                 term: self.current_term,
@@ -197,10 +200,7 @@ impl ConsensusNode {
         self.state = NodeState::Follower;
 
         if request.prev_log_index > 0 {
-            let prev = self
-                .log
-                .get((request.prev_log_index - 1) as usize)
-                .cloned();
+            let prev = self.log.get((request.prev_log_index - 1) as usize).cloned();
             if prev.is_none() || prev.unwrap().term != request.prev_log_term {
                 return AppendEntriesResponse {
                     term: self.current_term,
@@ -222,9 +222,7 @@ impl ConsensusNode {
         }
 
         if request.leader_commit > self.commit_index {
-            self.commit_index = self
-                .last_log_index()
-                .min(request.leader_commit);
+            self.commit_index = self.last_log_index().min(request.leader_commit);
         }
 
         AppendEntriesResponse {

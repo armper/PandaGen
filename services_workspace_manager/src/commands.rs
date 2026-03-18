@@ -3,7 +3,14 @@
 //! This module provides a minimal command surface for workspace operations.
 //! It is NOT a shell - just component orchestration commands.
 
-use crate::{ComponentId, ComponentType, LaunchConfig, WorkspaceError, WorkspaceManager};
+use crate::boot_profile::BootProfile;
+use crate::command_surface::{
+    component_id_command_by_token, help_usage_pattern, helper_command_by_alias,
+    helper_command_by_open_token, launch_command_by_token, parse_help_topic, HelperCommandKind,
+};
+use crate::{
+    ComponentId, ComponentType, HelpCategory, LaunchConfig, WorkspaceError, WorkspaceManager,
+};
 use identity::{ExitReason, IdentityKind, TrustDomain};
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +48,14 @@ pub enum WorkspaceCommand {
     OpenFilePicker,
     /// Open recent files
     RecentFiles,
+    /// Show help content for a category
+    Help { category: HelpCategory },
+    /// Boot profile: show current configuration
+    BootProfileShow,
+    /// Boot profile: set active profile (workspace/editor/kiosk)
+    BootProfileSet { profile: BootProfile },
+    /// Boot profile: persist current configuration
+    BootProfileSave,
 }
 
 /// Result of executing a workspace command
@@ -137,10 +152,26 @@ impl WorkspaceManager {
             WorkspaceCommand::SettingsSave => self.cmd_settings_save(),
             WorkspaceCommand::OpenFilePicker => self.cmd_open_file_picker(),
             WorkspaceCommand::RecentFiles => self.cmd_recent_files(),
+            WorkspaceCommand::Help { category } => self.cmd_help(category),
+            WorkspaceCommand::BootProfileShow => self.cmd_boot_profile_show(),
+            WorkspaceCommand::BootProfileSet { profile } => self.cmd_boot_profile_set(profile),
+            WorkspaceCommand::BootProfileSave => self.cmd_boot_profile_save(),
         }
     }
 
     fn cmd_open(&mut self, component_type: ComponentType, args: Vec<String>) -> CommandResult {
+        if component_type == ComponentType::Custom
+            && args
+                .first()
+                .map(|arg| arg.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return CommandResult::Error {
+                message: "Custom component requires an entry: usage `open custom <entry>`"
+                    .to_string(),
+            };
+        }
+
         // Determine name from args
         let name = if let Some(first_arg) = args.first() {
             format!("{}-{}", component_type, first_arg)
@@ -159,6 +190,13 @@ impl WorkspaceManager {
         // Add args as metadata
         for (i, arg) in args.iter().enumerate() {
             config = config.with_metadata(format!("arg{}", i), arg);
+        }
+        if component_type == ComponentType::Custom {
+            if let Some(entry) = args.first() {
+                config = config
+                    .with_metadata("package.entry", entry.clone())
+                    .with_metadata("custom.entry", entry.clone());
+            }
         }
 
         // Launch component
@@ -412,7 +450,7 @@ impl WorkspaceManager {
                 name: "File Picker".to_string(),
             },
             Err(err) => CommandResult::Error {
-                message: format!("Failed to open file picker: {}", err),
+                message: format!("Failed to open file picker: {}", err.format_with_actions()),
             },
         }
     }
@@ -431,6 +469,49 @@ impl WorkspaceManager {
             }
         }
     }
+
+    fn cmd_help(&self, category: HelpCategory) -> CommandResult {
+        CommandResult::Success {
+            message: category.content(),
+        }
+    }
+
+    fn cmd_boot_profile_show(&self) -> CommandResult {
+        let config = self.boot_profile_config();
+        let profile = config.profile;
+        let editor_file = config.editor_file.as_deref().unwrap_or("<none>");
+        let kiosk_app = config.kiosk_app.as_deref().unwrap_or("<none>");
+        let message = format!(
+            "Boot profile: {}\nDescription: {}\nEditor file: {}\nKiosk app: {}\nAuto-start services: {}",
+            profile.name(),
+            profile.description(),
+            editor_file,
+            kiosk_app,
+            config.auto_start.join(", ")
+        );
+        CommandResult::Success { message }
+    }
+
+    fn cmd_boot_profile_set(&mut self, profile: BootProfile) -> CommandResult {
+        self.set_boot_profile(profile);
+        CommandResult::Success {
+            message: format!(
+                "Boot profile set to {} (run `boot profile save` to persist)",
+                profile.name()
+            ),
+        }
+    }
+
+    fn cmd_boot_profile_save(&mut self) -> CommandResult {
+        match self.save_boot_profile() {
+            Ok(()) => CommandResult::Success {
+                message: "Boot profile saved successfully".to_string(),
+            },
+            Err(err) => CommandResult::Error {
+                message: format!("Failed to save boot profile: {}", err),
+            },
+        }
+    }
 }
 
 /// Parses a command string into a WorkspaceCommand
@@ -447,6 +528,13 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
         return Err(WorkspaceError::InvalidCommand("Empty command".to_string()));
     }
 
+    if let Some(helper) = helper_command_by_alias(&parts) {
+        return Ok(match helper.kind {
+            HelperCommandKind::RecentFiles => WorkspaceCommand::RecentFiles,
+            HelperCommandKind::OpenFilePicker => WorkspaceCommand::OpenFilePicker,
+        });
+    }
+
     match parts[0] {
         "open" => {
             if parts.len() < 2 {
@@ -455,37 +543,48 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
                 ));
             }
 
-            let component_type = match parts[1] {
-                "editor" => ComponentType::Editor,
-                "cli" => ComponentType::Cli,
-                "pipeline" => ComponentType::PipelineExecutor,
-                other => {
-                    return Err(WorkspaceError::InvalidCommand(format!(
-                        "Unknown component type: {}",
-                        other
-                    )))
+            let Some(open_spec) = launch_command_by_token(parts[1]) else {
+                if let Some(helper_spec) = helper_command_by_open_token(parts[1]) {
+                    return Err(WorkspaceError::InvalidCommand(
+                        helper_spec.usage.to_string(),
+                    ));
                 }
+                return Err(WorkspaceError::InvalidCommand(format!(
+                    "Unknown component type: {}",
+                    parts[1]
+                )));
             };
+            if let Some(usage) = open_spec.required_usage {
+                if parts.len() < 3 {
+                    return Err(WorkspaceError::InvalidCommand(usage.to_string()));
+                }
+            }
 
             let args = parts[2..].iter().map(|s| s.to_string()).collect();
 
             Ok(WorkspaceCommand::Open {
-                component_type,
+                component_type: open_spec.component_type,
                 args,
             })
         }
         "list" => Ok(WorkspaceCommand::List),
-        "focus" => parse_component_id_command(&parts, "focus", |id| WorkspaceCommand::Focus {
-            component_id: id,
-        }),
         "next" => Ok(WorkspaceCommand::FocusNext),
         "prev" | "previous" => Ok(WorkspaceCommand::FocusPrev),
-        "close" => parse_component_id_command(&parts, "close", |id| WorkspaceCommand::Close {
-            component_id: id,
-        }),
-        "status" => parse_component_id_command(&parts, "status", |id| WorkspaceCommand::Status {
-            component_id: id,
-        }),
+        "focus" | "close" | "status" => parse_component_id_surface_command(&parts),
+        "help" => {
+            let category = match parts.len() {
+                1 => parse_help_topic(None),
+                2 => parse_help_topic(Some(parts[1])),
+                _ => None,
+            };
+            match category {
+                Some(category) => Ok(WorkspaceCommand::Help { category }),
+                None => Err(WorkspaceError::InvalidCommand(format!(
+                    "Usage: {}",
+                    help_usage_pattern()
+                ))),
+            }
+        }
         "settings" => {
             if parts.len() < 2 {
                 return Err(WorkspaceError::InvalidCommand(
@@ -524,6 +623,50 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
                 ))),
             }
         }
+        "boot" => {
+            if parts.len() < 2 {
+                return Err(WorkspaceError::InvalidCommand(
+                    "Usage: boot profile <show|set|save>".to_string(),
+                ));
+            }
+
+            match parts[1] {
+                "profile" => {
+                    if parts.len() < 3 {
+                        return Err(WorkspaceError::InvalidCommand(
+                            "Usage: boot profile <show|set|save>".to_string(),
+                        ));
+                    }
+
+                    match parts[2] {
+                        "show" => Ok(WorkspaceCommand::BootProfileShow),
+                        "set" => {
+                            if parts.len() < 4 {
+                                return Err(WorkspaceError::InvalidCommand(
+                                    "Usage: boot profile set <workspace|editor|kiosk>".to_string(),
+                                ));
+                            }
+                            let profile = BootProfile::parse(parts[3]).ok_or_else(|| {
+                                WorkspaceError::InvalidCommand(format!(
+                                    "Unknown boot profile: {}",
+                                    parts[3]
+                                ))
+                            })?;
+                            Ok(WorkspaceCommand::BootProfileSet { profile })
+                        }
+                        "save" => Ok(WorkspaceCommand::BootProfileSave),
+                        other => Err(WorkspaceError::InvalidCommand(format!(
+                            "Unknown boot profile command: {}",
+                            other
+                        ))),
+                    }
+                }
+                other => Err(WorkspaceError::InvalidCommand(format!(
+                    "Unknown boot command: {}",
+                    other
+                ))),
+            }
+        }
         unknown => Err(WorkspaceError::InvalidCommand(format!(
             "Unknown command: {}",
             unknown
@@ -531,20 +674,17 @@ pub fn parse_command(input: &str) -> Result<WorkspaceCommand, WorkspaceError> {
     }
 }
 
-/// Helper function to parse commands that take a component ID
-fn parse_component_id_command<F>(
-    parts: &[&str],
-    command_name: &str,
-    constructor: F,
-) -> Result<WorkspaceCommand, WorkspaceError>
-where
-    F: FnOnce(ComponentId) -> WorkspaceCommand,
-{
+/// Helper function to parse non-launch commands that target a component ID.
+fn parse_component_id_surface_command(parts: &[&str]) -> Result<WorkspaceCommand, WorkspaceError> {
+    let spec = component_id_command_by_token(parts[0]).ok_or_else(|| {
+        WorkspaceError::InvalidCommand(format!("Unknown component target command: {}", parts[0]))
+    })?;
+
     if parts.len() < 2 {
-        return Err(WorkspaceError::InvalidCommand(format!(
-            "Usage: {} <component_id>",
-            command_name
-        )));
+        return Err(WorkspaceError::InvalidCommand(spec.usage.to_string()));
+    }
+    if parts.len() > 2 {
+        return Err(WorkspaceError::InvalidCommand(spec.usage.to_string()));
     }
 
     let id_str = parts[1];
@@ -557,8 +697,14 @@ where
     let uuid_str = &id_str[5..];
     let uuid = uuid::Uuid::parse_str(uuid_str)
         .map_err(|_| WorkspaceError::InvalidCommand(format!("Invalid UUID: {}", uuid_str)))?;
+    let component_id = ComponentId::from_uuid(uuid);
 
-    Ok(constructor(ComponentId::from_uuid(uuid)))
+    Ok(match spec.token {
+        "focus" => WorkspaceCommand::Focus { component_id },
+        "close" => WorkspaceCommand::Close { component_id },
+        "status" => WorkspaceCommand::Status { component_id },
+        _ => unreachable!("component_id_command_by_token returned unsupported token"),
+    })
 }
 
 /// Formats a WorkspaceCommand as a string for display
@@ -586,14 +732,30 @@ fn format_command(command: &WorkspaceCommand) -> String {
         WorkspaceCommand::SettingsReset { key } => format!("settings reset {}", key),
         WorkspaceCommand::SettingsSave => "settings save".to_string(),
         WorkspaceCommand::OpenFilePicker => "open file".to_string(),
-        WorkspaceCommand::RecentFiles => "recent files".to_string(),
+        WorkspaceCommand::RecentFiles => "recent".to_string(),
+        WorkspaceCommand::Help { category } => {
+            if *category == HelpCategory::Overview {
+                "help".to_string()
+            } else {
+                format!("help {}", category)
+            }
+        }
+        WorkspaceCommand::BootProfileShow => "boot profile show".to_string(),
+        WorkspaceCommand::BootProfileSet { profile } => {
+            format!("boot profile set {}", profile.name().to_lowercase())
+        }
+        WorkspaceCommand::BootProfileSave => "boot profile save".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IdentityMetadata;
+    use crate::boot_profile::BootProfile;
+    use crate::{EditorIoContext, IdentityMetadata};
+    use fs_view::DirectoryView;
+    use services_fs_view::FileSystemViewService;
+    use services_storage::JournaledStorage;
 
     fn create_test_workspace() -> WorkspaceManager {
         let workspace_identity = IdentityMetadata::new(
@@ -621,9 +783,108 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_open_custom_command() {
+        let cmd = parse_command("open custom dashboard").unwrap();
+        match cmd {
+            WorkspaceCommand::Open {
+                component_type,
+                args,
+            } => {
+                assert_eq!(component_type, ComponentType::Custom);
+                assert_eq!(args, vec!["dashboard"]);
+            }
+            _ => panic!("Expected Open command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_open_custom_requires_entry() {
+        let result = parse_command("open custom");
+        assert!(matches!(result, Err(WorkspaceError::InvalidCommand(_))));
+        if let Err(WorkspaceError::InvalidCommand(message)) = result {
+            assert!(message.contains("open custom <entry>"));
+        }
+    }
+
+    #[test]
     fn test_parse_list_command() {
         let cmd = parse_command("list").unwrap();
         assert_eq!(cmd, WorkspaceCommand::List);
+    }
+
+    #[test]
+    fn test_parse_help_command_variants() {
+        assert_eq!(
+            parse_command("help").unwrap(),
+            WorkspaceCommand::Help {
+                category: HelpCategory::Overview
+            }
+        );
+        assert_eq!(
+            parse_command("help workspace").unwrap(),
+            WorkspaceCommand::Help {
+                category: HelpCategory::Workspace
+            }
+        );
+        assert_eq!(
+            parse_command("help keyboard").unwrap(),
+            WorkspaceCommand::Help {
+                category: HelpCategory::Keys
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_help_invalid_topic() {
+        let result = parse_command("help nope");
+        assert!(matches!(result, Err(WorkspaceError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_parse_focus_requires_component_id_only() {
+        let result = parse_command("focus");
+        assert!(matches!(result, Err(WorkspaceError::InvalidCommand(_))));
+
+        let result = parse_command("focus comp:123 extra");
+        assert!(matches!(result, Err(WorkspaceError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_parse_recent_command_variants() {
+        assert_eq!(
+            parse_command("recent").unwrap(),
+            WorkspaceCommand::RecentFiles
+        );
+        assert_eq!(
+            parse_command("recent files").unwrap(),
+            WorkspaceCommand::RecentFiles
+        );
+        assert_eq!(
+            parse_command("open recent").unwrap(),
+            WorkspaceCommand::RecentFiles
+        );
+        assert_eq!(
+            parse_command("open recent files").unwrap(),
+            WorkspaceCommand::RecentFiles
+        );
+    }
+
+    #[test]
+    fn test_parse_open_file_picker_command_variants() {
+        assert_eq!(
+            parse_command("open file").unwrap(),
+            WorkspaceCommand::OpenFilePicker
+        );
+        assert_eq!(
+            parse_command("open file-picker").unwrap(),
+            WorkspaceCommand::OpenFilePicker
+        );
+    }
+
+    #[test]
+    fn test_parse_open_file_picker_rejects_extra_args() {
+        let result = parse_command("open file now");
+        assert!(matches!(result, Err(WorkspaceError::InvalidCommand(_))));
     }
 
     #[test]
@@ -671,6 +932,69 @@ mod tests {
                 assert!(workspace.get_component(component_id).is_some());
             }
             _ => panic!("Expected Opened result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_open_custom_sets_entry_metadata() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::Open {
+            component_type: ComponentType::Custom,
+            args: vec!["dashboard".to_string()],
+        });
+
+        match result {
+            CommandResult::Opened { component_id, .. } => {
+                let component = workspace.get_component(component_id).unwrap();
+                assert_eq!(component.component_type, ComponentType::Custom);
+                assert_eq!(
+                    component.metadata.get("package.entry"),
+                    Some(&"dashboard".to_string())
+                );
+                assert_eq!(
+                    component.metadata.get("custom.entry"),
+                    Some(&"dashboard".to_string())
+                );
+            }
+            other => panic!("Expected Opened result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_execute_open_file_picker_without_storage_context() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::OpenFilePicker);
+
+        match result {
+            CommandResult::Error { message } => {
+                assert!(message.contains("Failed to open file picker"));
+                assert!(message.contains("storage context unavailable"));
+                assert!(message.contains("Try:"));
+            }
+            other => panic!("Expected Error result, got {:?}", other),
+        }
+
+        assert!(workspace.list_components().is_empty());
+    }
+
+    #[test]
+    fn test_execute_open_file_picker_with_storage_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            FileSystemViewService::new(),
+            DirectoryView::new(services_storage::ObjectId::new()),
+        ));
+
+        let result = workspace.execute_command(WorkspaceCommand::OpenFilePicker);
+
+        match result {
+            CommandResult::Opened { component_id, name } => {
+                assert_eq!(name, "File Picker");
+                let component = workspace.get_component(component_id).unwrap();
+                assert_eq!(component.component_type, ComponentType::FilePicker);
+            }
+            other => panic!("Expected Opened result, got {:?}", other),
         }
     }
 
@@ -771,6 +1095,22 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_help_workspace() {
+        let mut workspace = create_test_workspace();
+        let result = workspace.execute_command(WorkspaceCommand::Help {
+            category: HelpCategory::Workspace,
+        });
+
+        match result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Workspace Commands"));
+                assert!(message.contains("open editor"));
+            }
+            other => panic!("Expected Success result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_settings_list_command() {
         let cmd = parse_command("settings list").unwrap();
         assert_eq!(cmd, WorkspaceCommand::SettingsList);
@@ -803,6 +1143,29 @@ mod tests {
     fn test_parse_settings_save_command() {
         let cmd = parse_command("settings save").unwrap();
         assert_eq!(cmd, WorkspaceCommand::SettingsSave);
+    }
+
+    #[test]
+    fn test_parse_boot_profile_show_command() {
+        let cmd = parse_command("boot profile show").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::BootProfileShow);
+    }
+
+    #[test]
+    fn test_parse_boot_profile_set_command() {
+        let cmd = parse_command("boot profile set editor").unwrap();
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::BootProfileSet {
+                profile: BootProfile::Editor
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_boot_profile_save_command() {
+        let cmd = parse_command("boot profile save").unwrap();
+        assert_eq!(cmd, WorkspaceCommand::BootProfileSave);
     }
 
     #[test]
@@ -911,6 +1274,52 @@ mod tests {
             }
             _ => panic!("Expected Success result"),
         }
+    }
+
+    #[test]
+    fn test_execute_boot_profile_set_and_show() {
+        let mut workspace = create_test_workspace();
+
+        let set_result = workspace.execute_command(WorkspaceCommand::BootProfileSet {
+            profile: BootProfile::Kiosk,
+        });
+        match set_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile set to Kiosk"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        let show_result = workspace.execute_command(WorkspaceCommand::BootProfileShow);
+        match show_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile: Kiosk"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[test]
+    fn test_execute_boot_profile_save_persists_to_storage() {
+        use services_storage::JournaledStorage;
+
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(crate::EditorIoContext::new(JournaledStorage::new()));
+
+        workspace.execute_command(WorkspaceCommand::BootProfileSet {
+            profile: BootProfile::Editor,
+        });
+        let save_result = workspace.execute_command(WorkspaceCommand::BootProfileSave);
+        match save_result {
+            CommandResult::Success { message } => {
+                assert!(message.contains("Boot profile saved"));
+            }
+            _ => panic!("Expected Success result"),
+        }
+
+        workspace.set_boot_profile(BootProfile::Workspace);
+        workspace.load_boot_profile().unwrap();
+        assert_eq!(workspace.boot_profile_config().profile, BootProfile::Editor);
     }
 
     #[test]

@@ -23,6 +23,7 @@
 
 pub mod boot_profile;
 pub mod command_registry;
+pub(crate) mod command_surface;
 pub mod commands;
 pub mod help;
 pub mod keybindings;
@@ -40,35 +41,47 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 #[cfg(feature = "std")]
 use std::boxed::Box;
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
 use core_types::uuid_tools::new_uuid;
-use core_types::TaskId;
-use fs_view::DirectoryView;
+use core_types::{ServiceId, TaskId};
+use fs_view::{DirectoryResolver, DirectoryView};
 use identity::{ExecutionId, ExitReason, IdentityKind, IdentityMetadata, TrustDomain};
-use input_types::InputEvent;
+use input_types::{InputEvent, KeyCode, KeyEvent};
+#[cfg(feature = "std")]
+use ipc::{MessageEnvelope, MessagePayload};
+#[cfg(feature = "std")]
+use kernel_api::{Duration, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use keybindings::KeyBindingManager;
 use lifecycle::{CancellationReason, CancellationSource, CancellationToken};
 use packages::{ComponentLoader, PackageComponentType, PackageManifest};
+#[cfg(feature = "std")]
+use pipeline::{PayloadSchemaId, PayloadSchemaVersion, PipelineSpec, StageSpec, TypedPayload};
 use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
 use resources::ResourceBudget;
 use serde::{Deserialize, Serialize};
 use services_editor_vi::{Editor, OpenOptions, StorageEditorIo};
 use services_focus_manager::{FocusError, FocusManager};
-use services_fs_view::FileSystemViewService;
+use services_fs_view::{FileSystemOperations, FileSystemViewService};
 use services_input::InputSubscriptionCap;
+#[cfg(feature = "std")]
+use services_pipeline_executor::PipelineExecutor;
 use services_settings::{self, SettingKey, SettingValue, SettingsRegistry};
-use services_storage::JournaledStorage;
+use services_storage::{
+    JournaledStorage, ObjectId, ObjectKind, TransactionError, TransactionalStorage,
+};
 use services_view_host::{ViewHandleCap, ViewHost, ViewSubscriptionCap};
+#[cfg(feature = "std")]
+use sim_kernel::SimulatedKernel;
 #[cfg(feature = "std")]
 use thiserror::Error;
 use uuid::Uuid;
@@ -76,6 +89,7 @@ use view_types::{ViewFrame, ViewId, ViewKind};
 use workspace_status::{ContextBreadcrumbs, RecentHistory, WorkspaceStatus};
 
 // Re-export public types from modules
+use crate::boot_profile::{BootConfig, BootProfile, BootProfileManager};
 pub use commands::WorkspaceCommand;
 pub use help::HelpCategory;
 pub use platform::{
@@ -85,6 +99,12 @@ pub use workspace_status::{
     generate_suggestions, validate_command, ActionableError, CommandSuggestion, FsStatus,
     PromptValidation,
 };
+
+const SETTINGS_DIR_PATH: &str = "settings";
+const SETTINGS_OVERRIDES_PATH: &str = "settings/user_overrides.json";
+const SETTINGS_OBJECT_UUID: u128 = 0x9f2f_51d4_3f87_42f8_92d4_e6f2_56af_ea20;
+const COMPOSED_MAIN_VIEW_UUID: u128 = 0xb1e8_54c5_2be7_4f1f_9f6f_78be_bf5d_8d51;
+const COMPOSED_STATUS_VIEW_UUID: u128 = 0xa8bd_4d66_7a5f_4cb2_bf3d_8e20_1024_a9c2;
 
 /// Unique identifier for a component in the workspace
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -297,6 +317,254 @@ impl ComponentInfo {
     }
 }
 
+/// Axis for a split workspace layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitAxis {
+    /// Tiles are stacked top/bottom.
+    Horizontal,
+    /// Tiles are arranged side-by-side.
+    Vertical,
+}
+
+impl SplitAxis {
+    fn as_label(self) -> &'static str {
+        match self {
+            SplitAxis::Horizontal => "horizontal",
+            SplitAxis::Vertical => "vertical",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowTileState {
+    tabs: Vec<ComponentId>,
+    active_tab: usize,
+}
+
+impl WindowTileState {
+    fn new() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active_tab: 0,
+        }
+    }
+
+    fn with_tabs(tabs: Vec<ComponentId>) -> Self {
+        let active_tab = if tabs.is_empty() { 0 } else { tabs.len() - 1 };
+        Self { tabs, active_tab }
+    }
+
+    fn active_component(&self) -> Option<ComponentId> {
+        self.tabs.get(self.active_tab).copied()
+    }
+
+    fn add_tab(&mut self, component_id: ComponentId) {
+        if let Some(position) = self.tabs.iter().position(|id| *id == component_id) {
+            self.active_tab = position;
+            return;
+        }
+        self.tabs.push(component_id);
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    fn set_active_component(&mut self, component_id: ComponentId) -> bool {
+        if let Some(position) = self.tabs.iter().position(|id| *id == component_id) {
+            self.active_tab = position;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_component(&mut self, component_id: ComponentId) -> bool {
+        let Some(position) = self.tabs.iter().position(|id| *id == component_id) else {
+            return false;
+        };
+        self.tabs.remove(position);
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if position <= self.active_tab && self.active_tab > 0 {
+            self.active_tab -= 1;
+        }
+        true
+    }
+
+    fn focus_next_tab(&mut self) -> Option<ComponentId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.active_component()
+    }
+
+    fn focus_previous_tab(&mut self) -> Option<ComponentId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
+        self.active_tab = if self.active_tab == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab - 1
+        };
+        self.active_component()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowLayoutState {
+    split_axis: Option<SplitAxis>,
+    focused_tile: usize,
+    tiles: Vec<WindowTileState>,
+}
+
+impl WindowLayoutState {
+    fn new() -> Self {
+        Self {
+            split_axis: None,
+            focused_tile: 0,
+            tiles: vec![WindowTileState::new()],
+        }
+    }
+
+    fn normalize(&mut self) {
+        if self.tiles.is_empty() {
+            self.tiles.push(WindowTileState::new());
+        }
+        if self.focused_tile >= self.tiles.len() {
+            self.focused_tile = self.tiles.len().saturating_sub(1);
+        }
+        if self.tiles.len() <= 1 {
+            self.split_axis = None;
+        }
+    }
+
+    fn add_component_tab(&mut self, component_id: ComponentId) {
+        if self.set_focused_component(component_id) {
+            return;
+        }
+        self.normalize();
+        if let Some(tile) = self.tiles.get_mut(self.focused_tile) {
+            tile.add_tab(component_id);
+        }
+    }
+
+    fn set_focused_component(&mut self, component_id: ComponentId) -> bool {
+        for (tile_index, tile) in self.tiles.iter_mut().enumerate() {
+            if tile.set_active_component(component_id) {
+                self.focused_tile = tile_index;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn remove_component(&mut self, component_id: ComponentId) {
+        for tile in &mut self.tiles {
+            tile.remove_component(component_id);
+        }
+
+        if self.tiles.len() > 1 {
+            self.tiles.retain(|tile| !tile.tabs.is_empty());
+        }
+        self.normalize();
+    }
+
+    fn split_focused_tile(&mut self, axis: SplitAxis) {
+        self.normalize();
+        let source_index = self.focused_tile;
+        let moved_tabs = if let Some(tile) = self.tiles.get_mut(source_index) {
+            if tile.tabs.len() > 1 {
+                let active_index = tile.active_tab.min(tile.tabs.len() - 1);
+                let moved = tile.tabs.remove(active_index);
+                if tile.active_tab >= tile.tabs.len() {
+                    tile.active_tab = tile.tabs.len().saturating_sub(1);
+                }
+                vec![moved]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let target_index = source_index + 1;
+        self.tiles
+            .insert(target_index, WindowTileState::with_tabs(moved_tabs));
+        self.focused_tile = target_index;
+        self.split_axis = Some(axis);
+        self.normalize();
+    }
+
+    fn focus_next_tab(&mut self) -> Option<ComponentId> {
+        self.normalize();
+        self.tiles
+            .get_mut(self.focused_tile)
+            .and_then(WindowTileState::focus_next_tab)
+    }
+
+    fn focus_previous_tab(&mut self) -> Option<ComponentId> {
+        self.normalize();
+        self.tiles
+            .get_mut(self.focused_tile)
+            .and_then(WindowTileState::focus_previous_tab)
+    }
+
+    fn focused_active_component(&self) -> Option<ComponentId> {
+        self.tiles
+            .get(self.focused_tile)
+            .and_then(WindowTileState::active_component)
+    }
+
+    fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+}
+
+/// Snapshot of a window tile layout state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceTileLayoutSnapshot {
+    pub tile_index: usize,
+    pub is_focused: bool,
+    pub active_component: Option<ComponentId>,
+    pub tabs: Vec<ComponentId>,
+}
+
+/// Snapshot of workspace layout topology (splits + tabs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceLayoutSnapshot {
+    pub split_axis: Option<SplitAxis>,
+    pub focused_tile: usize,
+    pub tiles: Vec<WorkspaceTileLayoutSnapshot>,
+}
+
+impl Default for WorkspaceLayoutSnapshot {
+    fn default() -> Self {
+        Self {
+            split_axis: None,
+            focused_tile: 0,
+            tiles: vec![WorkspaceTileLayoutSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: None,
+                tabs: Vec::new(),
+            }],
+        }
+    }
+}
+
+/// Render payload for a single visible tile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTileRenderSnapshot {
+    pub tile_index: usize,
+    pub is_focused: bool,
+    pub active_component: Option<ComponentId>,
+    pub tabs: Vec<ComponentId>,
+    pub main_view: Option<ViewFrame>,
+    pub status_view: Option<ViewFrame>,
+}
+
 /// Workspace lifecycle event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceEvent {
@@ -334,7 +602,7 @@ pub enum WorkspaceEvent {
 
 /// Workspace manager errors
 #[cfg_attr(feature = "std", derive(Error))]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceError {
     #[cfg_attr(feature = "std", error("Component not found: {0}"))]
     ComponentNotFound(ComponentId),
@@ -362,6 +630,15 @@ pub enum WorkspaceError {
 
     #[cfg_attr(feature = "std", error("Focus error: {0}"))]
     FocusError(String),
+
+    #[cfg_attr(
+        feature = "std",
+        error("Missing launch context for {component_type}: {reason}")
+    )]
+    MissingLaunchContext {
+        component_type: ComponentType,
+        reason: String,
+    },
 }
 
 impl From<FocusError> for WorkspaceError {
@@ -411,6 +688,22 @@ impl WorkspaceError {
                 format!("Focus error: {}", msg),
                 vec!["list".to_string(), "next".to_string()],
             ),
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                let actions = match component_type {
+                    ComponentType::FilePicker => vec![
+                        "open editor <path>".to_string(),
+                        "help workspace".to_string(),
+                    ],
+                    _ => vec!["help workspace".to_string()],
+                };
+                (
+                    format!("Cannot launch {}: {}", component_type, reason),
+                    actions,
+                )
+            }
         }
     }
 
@@ -423,6 +716,28 @@ impl WorkspaceError {
         } else {
             format!("{} — Try: {}", message, actions.join(" | "))
         }
+    }
+}
+
+/// Structured failure for a single component within a package launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageLaunchFailure {
+    pub component_name: String,
+    pub component_type: ComponentType,
+    pub entry: String,
+    pub error: WorkspaceError,
+}
+
+/// Result report for launching a package.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackageLaunchReport {
+    pub created_component_ids: Vec<ComponentId>,
+    pub failures: Vec<PackageLaunchFailure>,
+}
+
+impl PackageLaunchReport {
+    pub fn is_success(&self) -> bool {
+        self.failures.is_empty()
     }
 }
 
@@ -482,15 +797,566 @@ impl LaunchConfig {
     }
 }
 
+/// Lightweight line-oriented console used by interactive component instances.
+struct InlineConsole {
+    prompt: String,
+    input_buffer: String,
+    cursor_pos: usize,
+    history: Vec<String>,
+    history_pos: Option<usize>,
+    output_lines: Vec<String>,
+    max_output_lines: usize,
+    next_main_revision: u64,
+    next_status_revision: u64,
+}
+
+impl InlineConsole {
+    fn new(prompt: impl Into<String>, welcome_lines: Vec<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            input_buffer: String::new(),
+            cursor_pos: 0,
+            history: Vec::new(),
+            history_pos: None,
+            output_lines: welcome_lines,
+            max_output_lines: 256,
+            next_main_revision: 1,
+            next_status_revision: 1,
+        }
+    }
+
+    fn process_input(&mut self, event: InputEvent) -> Option<String> {
+        let key = event.as_key()?;
+        if !key.is_pressed() {
+            return None;
+        }
+
+        if key.modifiers.is_ctrl() {
+            match key.code {
+                KeyCode::C => {
+                    self.input_buffer.clear();
+                    self.cursor_pos = 0;
+                    self.history_pos = None;
+                    return None;
+                }
+                KeyCode::L => {
+                    self.output_lines.clear();
+                    self.trim_output();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                let command = self.input_buffer.clone();
+                if !command.trim().is_empty() {
+                    self.history.push(command.clone());
+                }
+                self.input_buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                return Some(command);
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 && self.cursor_pos <= self.input_buffer.len() {
+                    self.input_buffer.remove(self.cursor_pos - 1);
+                    self.cursor_pos -= 1;
+                }
+                return None;
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.input_buffer.remove(self.cursor_pos);
+                }
+                return None;
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+                return None;
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.cursor_pos += 1;
+                }
+                return None;
+            }
+            KeyCode::Home => {
+                self.cursor_pos = 0;
+                return None;
+            }
+            KeyCode::End => {
+                self.cursor_pos = self.input_buffer.len();
+                return None;
+            }
+            KeyCode::Escape => {
+                self.input_buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                return None;
+            }
+            KeyCode::Up => {
+                if !self.history.is_empty() {
+                    let pos = match self.history_pos {
+                        None => self.history.len() - 1,
+                        Some(p) if p > 0 => p - 1,
+                        Some(p) => p,
+                    };
+                    self.history_pos = Some(pos);
+                    self.input_buffer = self.history[pos].clone();
+                    self.cursor_pos = self.input_buffer.len();
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if let Some(pos) = self.history_pos {
+                    if pos + 1 < self.history.len() {
+                        self.history_pos = Some(pos + 1);
+                        self.input_buffer = self.history[pos + 1].clone();
+                        self.cursor_pos = self.input_buffer.len();
+                    } else {
+                        self.history_pos = None;
+                        self.input_buffer.clear();
+                        self.cursor_pos = 0;
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        if let Some(ch) = key_event_to_char(key) {
+            self.input_buffer.insert(self.cursor_pos, ch);
+            self.cursor_pos += 1;
+            self.history_pos = None;
+        }
+
+        None
+    }
+
+    fn push_output_lines(&mut self, lines: Vec<String>) {
+        for line in lines {
+            self.output_lines.push(line);
+        }
+        self.trim_output();
+    }
+
+    fn publish_views(
+        &mut self,
+        view_host: &mut ViewHost,
+        main_view: &ViewHandleCap,
+        status_view: &ViewHandleCap,
+        timestamp_ns: u64,
+        component_id: ComponentId,
+        status_label: &str,
+    ) {
+        let mut lines = self.output_lines.clone();
+        lines.push(format!("{}{}", self.prompt, self.input_buffer));
+
+        let main_frame = ViewFrame::new(
+            main_view.view_id,
+            ViewKind::TextBuffer,
+            self.next_main_revision,
+            view_types::ViewContent::text_buffer(lines),
+            timestamp_ns,
+        )
+        .with_cursor(view_types::CursorPosition::new(
+            self.output_lines.len(),
+            self.prompt.len() + self.cursor_pos,
+        ))
+        .with_component_id(component_id.to_string());
+        self.next_main_revision += 1;
+        let _ = view_host.publish_frame(main_view, main_frame);
+
+        let status_text = format!(
+            "{} | lines:{} | history:{}",
+            status_label,
+            self.output_lines.len(),
+            self.history.len()
+        );
+        let status_frame = ViewFrame::new(
+            status_view.view_id,
+            ViewKind::StatusLine,
+            self.next_status_revision,
+            view_types::ViewContent::status_line(status_text),
+            timestamp_ns,
+        )
+        .with_component_id(component_id.to_string());
+        self.next_status_revision += 1;
+        let _ = view_host.publish_frame(status_view, status_frame);
+    }
+
+    fn trim_output(&mut self) {
+        if self.output_lines.len() > self.max_output_lines {
+            let keep = self.max_output_lines;
+            let start = self.output_lines.len() - keep;
+            self.output_lines = self.output_lines[start..].to_vec();
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy)]
+enum PipelineStageHandler {
+    Echo,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Deserialize)]
+struct StageInvokeRequestWire {
+    input: TypedPayload,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Serialize)]
+struct StageInvokeResponseWire {
+    result: pipeline::StageResult,
+}
+
+#[cfg(feature = "std")]
+struct PipelineHarnessKernel {
+    inner: SimulatedKernel,
+    handlers_by_channel: HashMap<ipc::ChannelId, PipelineStageHandler>,
+    service_to_channel: HashMap<ServiceId, ipc::ChannelId>,
+}
+
+#[cfg(feature = "std")]
+impl PipelineHarnessKernel {
+    fn new() -> Self {
+        Self {
+            inner: SimulatedKernel::new(),
+            handlers_by_channel: HashMap::new(),
+            service_to_channel: HashMap::new(),
+        }
+    }
+
+    fn ensure_echo_handler(&mut self, service_id: ServiceId) -> Result<(), KernelError> {
+        if self.service_to_channel.contains_key(&service_id) {
+            return Ok(());
+        }
+        let channel = self.inner.create_channel()?;
+        self.inner.register_service(service_id, channel)?;
+        self.handlers_by_channel
+            .insert(channel, PipelineStageHandler::Echo);
+        self.service_to_channel.insert(service_id, channel);
+        Ok(())
+    }
+
+    fn maybe_handle_stage_invoke(
+        &mut self,
+        channel: ipc::ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<Option<MessageEnvelope>, KernelError> {
+        let Some(handler) = self.handlers_by_channel.get(&channel).copied() else {
+            return Ok(None);
+        };
+
+        let result = match handler {
+            PipelineStageHandler::Echo => {
+                let request: StageInvokeRequestWire =
+                    message.payload.deserialize().map_err(|e| {
+                        KernelError::SendFailed(format!("Invalid stage request: {}", e))
+                    })?;
+                let output = TypedPayload::new(
+                    PayloadSchemaId::new("pipeline/output"),
+                    request.input.schema_version,
+                    request.input.data,
+                );
+                pipeline::StageResult::Success {
+                    output,
+                    capabilities: vec![0x1D],
+                }
+            }
+        };
+
+        let response = StageInvokeResponseWire { result };
+        let payload = MessagePayload::new(&response)
+            .map_err(|e| KernelError::SendFailed(format!("Failed to serialize response: {}", e)))?;
+        Ok(Some(
+            MessageEnvelope::new(
+                message.destination,
+                message.action,
+                message.schema_version,
+                payload,
+            )
+            .with_correlation(message.id),
+        ))
+    }
+
+    fn handler_count(&self) -> usize {
+        self.handlers_by_channel.len()
+    }
+}
+
+#[cfg(feature = "std")]
+impl KernelApi for PipelineHarnessKernel {
+    fn spawn_task(&mut self, descriptor: TaskDescriptor) -> Result<TaskHandle, KernelError> {
+        self.inner.spawn_task(descriptor)
+    }
+
+    fn create_channel(&mut self) -> Result<ipc::ChannelId, KernelError> {
+        self.inner.create_channel()
+    }
+
+    fn send_message(
+        &mut self,
+        channel: ipc::ChannelId,
+        message: MessageEnvelope,
+    ) -> Result<(), KernelError> {
+        if let Some(response) = self.maybe_handle_stage_invoke(channel, message.clone())? {
+            self.inner.send_message(channel, response)
+        } else {
+            self.inner.send_message(channel, message)
+        }
+    }
+
+    fn receive_message(
+        &mut self,
+        channel: ipc::ChannelId,
+        timeout: Option<Duration>,
+    ) -> Result<MessageEnvelope, KernelError> {
+        self.inner.receive_message(channel, timeout)
+    }
+
+    fn now(&self) -> kernel_api::Instant {
+        self.inner.now()
+    }
+
+    fn sleep(&mut self, duration: Duration) -> Result<(), KernelError> {
+        self.inner.sleep(duration)
+    }
+
+    fn grant_capability(
+        &mut self,
+        task: TaskId,
+        capability: core_types::Cap<()>,
+    ) -> Result<(), KernelError> {
+        self.inner.grant_capability(task, capability)
+    }
+
+    fn register_service(
+        &mut self,
+        service_id: ServiceId,
+        channel: ipc::ChannelId,
+    ) -> Result<(), KernelError> {
+        self.inner.register_service(service_id, channel)
+    }
+
+    fn lookup_service(&self, service_id: ServiceId) -> Result<ipc::ChannelId, KernelError> {
+        self.inner.lookup_service(service_id)
+    }
+}
+
+#[cfg(feature = "std")]
+struct PipelineRuntime {
+    console: InlineConsole,
+    executor: PipelineExecutor,
+    kernel: PipelineHarnessKernel,
+    default_handler_service: ServiceId,
+}
+
+#[cfg(feature = "std")]
+impl PipelineRuntime {
+    fn new() -> Self {
+        const DEFAULT_PIPELINE_HANDLER_SERVICE_ID: u128 = 0x1;
+        let default_handler_service = ServiceId::from_u128(DEFAULT_PIPELINE_HANDLER_SERVICE_ID);
+        let mut kernel = PipelineHarnessKernel::new();
+        let _ = kernel.ensure_echo_handler(default_handler_service);
+        Self {
+            console: InlineConsole::new(
+                "pipeline> ",
+                vec![
+                    "Pipeline executor ready".to_string(),
+                    "Type `run` to execute a pipeline stage".to_string(),
+                ],
+            ),
+            executor: PipelineExecutor::new(),
+            kernel,
+            default_handler_service,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomHostKind {
+    Generic,
+    Kiosk,
+    PackageEntry,
+}
+
+impl CustomHostKind {
+    fn label(self) -> &'static str {
+        match self {
+            CustomHostKind::Generic => "generic",
+            CustomHostKind::Kiosk => "kiosk",
+            CustomHostKind::PackageEntry => "package-entry",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CustomComponentDescriptor {
+    entry: String,
+    host_kind: CustomHostKind,
+}
+
+struct CustomComponentRuntime {
+    console: InlineConsole,
+    descriptor: CustomComponentDescriptor,
+    metadata_snapshot: Vec<(String, String)>,
+}
+
+impl CustomComponentRuntime {
+    fn new(
+        descriptor: CustomComponentDescriptor,
+        component_name: &str,
+        metadata: &HashMap<String, String>,
+    ) -> Self {
+        let mut metadata_snapshot: Vec<(String, String)> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        metadata_snapshot.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        Self {
+            console: InlineConsole::new(
+                "custom> ",
+                vec![
+                    format!("Custom component host ready: {}", component_name),
+                    format!(
+                        "entry={} handler={}",
+                        descriptor.entry,
+                        descriptor.host_kind.label()
+                    ),
+                    "Type `help` for custom host commands".to_string(),
+                ],
+            ),
+            descriptor,
+            metadata_snapshot,
+        }
+    }
+}
+
+struct CustomComponentRegistry {
+    handlers: HashMap<String, CustomHostKind>,
+}
+
+impl CustomComponentRegistry {
+    fn with_defaults() -> Self {
+        let mut handlers = HashMap::new();
+        handlers.insert("kiosk".to_string(), CustomHostKind::Kiosk);
+        handlers.insert("dashboard".to_string(), CustomHostKind::Kiosk);
+        handlers.insert("shell".to_string(), CustomHostKind::PackageEntry);
+        Self { handlers }
+    }
+
+    fn resolve(&self, metadata: &HashMap<String, String>) -> CustomComponentDescriptor {
+        if let Some(entry) = metadata.get("package.entry") {
+            let host_kind = self
+                .handlers
+                .get(entry)
+                .copied()
+                .unwrap_or(CustomHostKind::PackageEntry);
+            return CustomComponentDescriptor {
+                entry: entry.clone(),
+                host_kind,
+            };
+        }
+
+        if let Some(app) = metadata.get("kiosk.app") {
+            let host_kind = self
+                .handlers
+                .get(app)
+                .copied()
+                .unwrap_or(CustomHostKind::Kiosk);
+            return CustomComponentDescriptor {
+                entry: app.clone(),
+                host_kind,
+            };
+        }
+
+        CustomComponentDescriptor {
+            entry: "custom.generic".to_string(),
+            host_kind: CustomHostKind::Generic,
+        }
+    }
+}
+
+fn key_event_to_char(event: &KeyEvent) -> Option<char> {
+    let shifted = event.modifiers.is_shift();
+    match event.code {
+        KeyCode::A => Some(if shifted { 'A' } else { 'a' }),
+        KeyCode::B => Some(if shifted { 'B' } else { 'b' }),
+        KeyCode::C => Some(if shifted { 'C' } else { 'c' }),
+        KeyCode::D => Some(if shifted { 'D' } else { 'd' }),
+        KeyCode::E => Some(if shifted { 'E' } else { 'e' }),
+        KeyCode::F => Some(if shifted { 'F' } else { 'f' }),
+        KeyCode::G => Some(if shifted { 'G' } else { 'g' }),
+        KeyCode::H => Some(if shifted { 'H' } else { 'h' }),
+        KeyCode::I => Some(if shifted { 'I' } else { 'i' }),
+        KeyCode::J => Some(if shifted { 'J' } else { 'j' }),
+        KeyCode::K => Some(if shifted { 'K' } else { 'k' }),
+        KeyCode::L => Some(if shifted { 'L' } else { 'l' }),
+        KeyCode::M => Some(if shifted { 'M' } else { 'm' }),
+        KeyCode::N => Some(if shifted { 'N' } else { 'n' }),
+        KeyCode::O => Some(if shifted { 'O' } else { 'o' }),
+        KeyCode::P => Some(if shifted { 'P' } else { 'p' }),
+        KeyCode::Q => Some(if shifted { 'Q' } else { 'q' }),
+        KeyCode::R => Some(if shifted { 'R' } else { 'r' }),
+        KeyCode::S => Some(if shifted { 'S' } else { 's' }),
+        KeyCode::T => Some(if shifted { 'T' } else { 't' }),
+        KeyCode::U => Some(if shifted { 'U' } else { 'u' }),
+        KeyCode::V => Some(if shifted { 'V' } else { 'v' }),
+        KeyCode::W => Some(if shifted { 'W' } else { 'w' }),
+        KeyCode::X => Some(if shifted { 'X' } else { 'x' }),
+        KeyCode::Y => Some(if shifted { 'Y' } else { 'y' }),
+        KeyCode::Z => Some(if shifted { 'Z' } else { 'z' }),
+        KeyCode::Num0 => Some(if shifted { ')' } else { '0' }),
+        KeyCode::Num1 => Some(if shifted { '!' } else { '1' }),
+        KeyCode::Num2 => Some(if shifted { '@' } else { '2' }),
+        KeyCode::Num3 => Some(if shifted { '#' } else { '3' }),
+        KeyCode::Num4 => Some(if shifted { '$' } else { '4' }),
+        KeyCode::Num5 => Some(if shifted { '%' } else { '5' }),
+        KeyCode::Num6 => Some(if shifted { '^' } else { '6' }),
+        KeyCode::Num7 => Some(if shifted { '&' } else { '7' }),
+        KeyCode::Num8 => Some(if shifted { '*' } else { '8' }),
+        KeyCode::Num9 => Some(if shifted { '(' } else { '9' }),
+        KeyCode::Space => Some(' '),
+        KeyCode::Minus => Some(if shifted { '_' } else { '-' }),
+        KeyCode::Equal => Some(if shifted { '+' } else { '=' }),
+        KeyCode::LeftBracket => Some(if shifted { '{' } else { '[' }),
+        KeyCode::RightBracket => Some(if shifted { '}' } else { ']' }),
+        KeyCode::Backslash => Some(if shifted { '|' } else { '\\' }),
+        KeyCode::Semicolon => Some(if shifted { ':' } else { ';' }),
+        KeyCode::Quote => Some(if shifted { '"' } else { '\'' }),
+        KeyCode::Comma => Some(if shifted { '<' } else { ',' }),
+        KeyCode::Period => Some(if shifted { '>' } else { '.' }),
+        KeyCode::Slash => Some(if shifted { '?' } else { '/' }),
+        KeyCode::Grave => Some(if shifted { '~' } else { '`' }),
+        _ => None,
+    }
+}
+
 /// Component instance holder
 ///
 /// Stores the actual running component instance
 enum ComponentInstance {
     /// Editor component
     Editor(Box<Editor>),
+    /// CLI component
+    Cli(Box<InlineConsole>),
     /// File picker component
     FilePicker(Box<services_file_picker::FilePicker>),
+    /// Pipeline executor component
+    #[cfg(feature = "std")]
+    Pipeline(Box<PipelineRuntime>),
+    /// Custom component host
+    Custom(Box<CustomComponentRuntime>),
     /// No instance (placeholder for components not yet implemented)
+    #[cfg(not(feature = "std"))]
     None,
 }
 
@@ -553,12 +1419,18 @@ pub struct WorkspaceManager {
     recent_history: RecentHistory,
     /// Context breadcrumbs
     breadcrumbs: ContextBreadcrumbs,
+    /// Workspace window layout state (tabs and splits)
+    window_layout: WindowLayoutState,
     /// Command palette for command discovery
     command_palette: services_command_palette::CommandPalette,
+    /// Registry for custom component host resolution
+    custom_component_registry: CustomComponentRegistry,
     /// Settings registry for user preferences
     settings_registry: SettingsRegistry,
     /// Current user ID for settings (default "default")
     current_user: String,
+    /// Boot profile manager for startup mode configuration
+    boot_profile_manager: BootProfileManager,
 }
 
 impl WorkspaceManager {
@@ -581,14 +1453,18 @@ impl WorkspaceManager {
             workspace_status: WorkspaceStatus::new(),
             recent_history: RecentHistory::new(),
             breadcrumbs: ContextBreadcrumbs::new(),
+            window_layout: WindowLayoutState::new(),
             command_palette: command_registry::build_command_registry(),
+            custom_component_registry: CustomComponentRegistry::with_defaults(),
             settings_registry: services_settings::create_default_registry(),
             current_user: "default".to_string(),
+            boot_profile_manager: BootProfileManager::new(),
         }
     }
 
     /// Sets the editor I/O context used to configure new editor components.
-    pub fn set_editor_io_context(&mut self, context: EditorIoContext) {
+    pub fn set_editor_io_context(&mut self, mut context: EditorIoContext) {
+        let _ = self.boot_profile_manager.load(Some(&mut context.storage));
         self.editor_io_context = Some(context);
     }
 
@@ -606,6 +1482,8 @@ impl WorkspaceManager {
         &mut self,
         config: LaunchConfig,
     ) -> Result<ComponentId, WorkspaceError> {
+        self.validate_launch_config(&config)?;
+
         let timestamp = self.next_timestamp();
 
         // Create identity for the component
@@ -748,22 +1626,79 @@ impl WorkspaceManager {
                 }
                 ComponentInstance::Editor(Box::new(editor))
             }
+            ComponentType::Cli => {
+                let mut cli = InlineConsole::new(
+                    "pg> ",
+                    vec![
+                        "PandaGen CLI ready".to_string(),
+                        "Type `help` for built-in hints".to_string(),
+                    ],
+                );
+                if let (Some(main_view), Some(status_view)) =
+                    (&component.main_view, &component.status_view)
+                {
+                    cli.publish_views(
+                        &mut self.view_host,
+                        main_view,
+                        status_view,
+                        timestamp,
+                        component_id,
+                        "CLI",
+                    );
+                }
+                ComponentInstance::Cli(Box::new(cli))
+            }
             ComponentType::FilePicker => {
-                // Create file picker with root directory from editor I/O context
-                if let Some(context) = &self.editor_io_context {
-                    if let Some(root) = &context.root {
-                        let picker = services_file_picker::FilePicker::new(root.clone());
-                        ComponentInstance::FilePicker(Box::new(picker))
-                    } else {
-                        // No root directory available
-                        ComponentInstance::None
+                // Preconditions are validated in validate_launch_config.
+                let root = self
+                    .editor_io_context
+                    .as_ref()
+                    .and_then(|context| context.root.as_ref())
+                    .expect("file picker launch requires root directory context");
+                let picker = services_file_picker::FilePicker::new(root.clone());
+                ComponentInstance::FilePicker(Box::new(picker))
+            }
+            ComponentType::PipelineExecutor => {
+                #[cfg(feature = "std")]
+                {
+                    let mut pipeline_runtime = PipelineRuntime::new();
+                    if let (Some(main_view), Some(status_view)) =
+                        (&component.main_view, &component.status_view)
+                    {
+                        pipeline_runtime.console.publish_views(
+                            &mut self.view_host,
+                            main_view,
+                            status_view,
+                            timestamp,
+                            component_id,
+                            "PIPELINE",
+                        );
                     }
-                } else {
-                    // No editor I/O context available
+                    ComponentInstance::Pipeline(Box::new(pipeline_runtime))
+                }
+                #[cfg(not(feature = "std"))]
+                {
                     ComponentInstance::None
                 }
             }
-            _ => ComponentInstance::None,
+            ComponentType::Custom => {
+                let descriptor = self.custom_component_registry.resolve(&component.metadata);
+                let mut runtime =
+                    CustomComponentRuntime::new(descriptor, &component.name, &component.metadata);
+                if let (Some(main_view), Some(status_view)) =
+                    (&component.main_view, &component.status_view)
+                {
+                    runtime.console.publish_views(
+                        &mut self.view_host,
+                        main_view,
+                        status_view,
+                        timestamp,
+                        component_id,
+                        "CUSTOM",
+                    );
+                }
+                ComponentInstance::Custom(Box::new(runtime))
+            }
         };
 
         // Record event
@@ -779,6 +1714,7 @@ impl WorkspaceManager {
 
         // Store component instance
         self.component_instances.insert(component_id, instance);
+        self.window_layout.add_component_tab(component_id);
 
         // Grant focus if focusable and no other component has focus
         if config.focusable {
@@ -788,18 +1724,43 @@ impl WorkspaceManager {
         Ok(component_id)
     }
 
+    fn validate_launch_config(&self, config: &LaunchConfig) -> Result<(), WorkspaceError> {
+        match config.component_type {
+            ComponentType::FilePicker => {
+                let Some(context) = self.editor_io_context.as_ref() else {
+                    return Err(WorkspaceError::MissingLaunchContext {
+                        component_type: ComponentType::FilePicker,
+                        reason: "storage context unavailable".to_string(),
+                    });
+                };
+                if context.root.is_none() {
+                    return Err(WorkspaceError::MissingLaunchContext {
+                        component_type: ComponentType::FilePicker,
+                        reason: "root directory context unavailable".to_string(),
+                    });
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Launches all components described in a package manifest.
     ///
-    /// Returns the list of created component IDs in manifest order.
+    /// Returns created component IDs and per-component launch failures.
     pub fn launch_package(
         &mut self,
         manifest: &PackageManifest,
-    ) -> Result<Vec<ComponentId>, WorkspaceError> {
+    ) -> Result<PackageLaunchReport, WorkspaceError> {
         let launch_plan = ComponentLoader::build_launch_plan(manifest).map_err(|err| {
             WorkspaceError::InvalidCommand(format!("Package manifest error: {}", err))
         })?;
 
-        let mut created = Vec::with_capacity(launch_plan.len());
+        let mut report = PackageLaunchReport {
+            created_component_ids: Vec::with_capacity(launch_plan.len()),
+            failures: Vec::new(),
+        };
+
         for spec in launch_plan {
             let component_type = match spec.component_type {
                 PackageComponentType::Editor => ComponentType::Editor,
@@ -807,6 +1768,8 @@ impl WorkspaceManager {
                 PackageComponentType::PipelineExecutor => ComponentType::PipelineExecutor,
                 PackageComponentType::Custom => ComponentType::Custom,
             };
+            let component_name = spec.name.clone();
+            let component_entry = spec.entry.clone();
 
             let mut config = LaunchConfig::new(
                 component_type,
@@ -817,7 +1780,7 @@ impl WorkspaceManager {
             .with_focusable(spec.focusable)
             .with_metadata("package.name", manifest.name.clone())
             .with_metadata("package.version", manifest.version.clone())
-            .with_metadata("package.entry", spec.entry);
+            .with_metadata("package.entry", component_entry.clone());
 
             if let Some(budget) = spec.budget {
                 config = config.with_budget(budget);
@@ -827,10 +1790,18 @@ impl WorkspaceManager {
                 config = config.with_metadata(key, value);
             }
 
-            created.push(self.launch_component(config)?);
+            match self.launch_component(config) {
+                Ok(component_id) => report.created_component_ids.push(component_id),
+                Err(error) => report.failures.push(PackageLaunchFailure {
+                    component_name,
+                    component_type,
+                    entry: component_entry,
+                    error,
+                }),
+            }
         }
 
-        Ok(created)
+        Ok(report)
     }
 
     /// Grants focus to a component
@@ -865,6 +1836,7 @@ impl WorkspaceManager {
 
         // Request focus
         self.focus_manager.request_focus(*subscription)?;
+        self.window_layout.set_focused_component(component_id);
 
         // Record event
         let timestamp = self.next_timestamp();
@@ -876,71 +1848,170 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Switches focus to the next component
-    pub fn focus_next(&mut self) -> Result<(), WorkspaceError> {
-        let running_focusable: Vec<ComponentId> = self
-            .components
-            .values()
-            .filter(|c| c.is_running() && c.focusable)
-            .map(|c| c.id)
-            .collect();
-
-        if running_focusable.is_empty() {
-            return Err(WorkspaceError::NoComponents);
-        }
-
-        // Find currently focused component
-        let current_focus = self.get_focused_component();
-
-        let next_id = if let Some(current_id) = current_focus {
-            // Find next component after current
-            let current_pos = running_focusable
-                .iter()
-                .position(|&id| id == current_id)
-                .unwrap_or(0);
-            running_focusable[(current_pos + 1) % running_focusable.len()]
-        } else {
-            // No focus, take first
-            running_focusable[0]
-        };
-
-        self.focus_component(next_id)
+    fn is_focusable_running_component(&self, component_id: ComponentId) -> bool {
+        self.components
+            .get(&component_id)
+            .map(|component| component.is_running() && component.focusable)
+            .unwrap_or(false)
     }
 
-    /// Switches focus to the previous component
-    pub fn focus_previous(&mut self) -> Result<(), WorkspaceError> {
-        let running_focusable: Vec<ComponentId> = self
+    fn ordered_focusable_components(&self) -> Vec<ComponentId> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+
+        for tile in &self.window_layout.tiles {
+            for component_id in &tile.tabs {
+                if seen.contains(component_id) {
+                    continue;
+                }
+                if self.is_focusable_running_component(*component_id) {
+                    seen.insert(*component_id);
+                    ordered.push(*component_id);
+                }
+            }
+        }
+
+        let mut remaining: Vec<ComponentId> = self
             .components
             .values()
-            .filter(|c| c.is_running() && c.focusable)
-            .map(|c| c.id)
+            .filter(|component| component.is_running() && component.focusable)
+            .map(|component| component.id)
+            .filter(|component_id| !seen.contains(component_id))
             .collect();
+        remaining.sort_by_key(|component_id| component_id.to_string());
+        ordered.extend(remaining);
 
-        if running_focusable.is_empty() {
+        ordered
+    }
+
+    fn ordered_visible_focusable_components(&self) -> Vec<ComponentId> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+
+        for tile in &self.window_layout.tiles {
+            if let Some(component_id) = tile.active_component() {
+                if !seen.contains(&component_id)
+                    && self.is_focusable_running_component(component_id)
+                {
+                    seen.insert(component_id);
+                    ordered.push(component_id);
+                }
+            }
+        }
+
+        if ordered.is_empty() {
+            self.ordered_focusable_components()
+        } else {
+            ordered
+        }
+    }
+
+    fn cycle_focus_in_order(
+        &mut self,
+        ordered: Vec<ComponentId>,
+        forward: bool,
+    ) -> Result<(), WorkspaceError> {
+        if ordered.is_empty() {
             return Err(WorkspaceError::NoComponents);
         }
 
-        // Find currently focused component
         let current_focus = self.get_focused_component();
-
-        let prev_id = if let Some(current_id) = current_focus {
-            // Find previous component before current
-            let current_pos = running_focusable
-                .iter()
-                .position(|&id| id == current_id)
-                .unwrap_or(0);
-            let prev_pos = if current_pos == 0 {
-                running_focusable.len() - 1
+        let target = if let Some(current_id) = current_focus {
+            let current_pos = ordered.iter().position(|id| *id == current_id).unwrap_or(0);
+            if forward {
+                ordered[(current_pos + 1) % ordered.len()]
+            } else if current_pos == 0 {
+                ordered[ordered.len() - 1]
             } else {
-                current_pos - 1
-            };
-            running_focusable[prev_pos]
+                ordered[current_pos - 1]
+            }
+        } else if forward {
+            ordered[0]
         } else {
-            // No focus, take last
-            running_focusable[running_focusable.len() - 1]
+            ordered[ordered.len() - 1]
         };
 
-        self.focus_component(prev_id)
+        self.focus_component(target)
+    }
+
+    /// Switches focus to the next component in layout order.
+    pub fn focus_next(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_focusable_components(), true)
+    }
+
+    /// Switches focus to the previous component in layout order.
+    pub fn focus_previous(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_focusable_components(), false)
+    }
+
+    /// Focuses the next visible tile (active tab per tile).
+    pub fn focus_next_tile(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_visible_focusable_components(), true)
+    }
+
+    /// Focuses the previous visible tile (active tab per tile).
+    pub fn focus_previous_tile(&mut self) -> Result<(), WorkspaceError> {
+        self.cycle_focus_in_order(self.ordered_visible_focusable_components(), false)
+    }
+
+    /// Focuses the next tab in the current tile.
+    pub fn focus_next_tab(&mut self) -> Result<(), WorkspaceError> {
+        let candidate = self.window_layout.focus_next_tab();
+        if let Some(component_id) = candidate {
+            if self.is_focusable_running_component(component_id) {
+                return self.focus_component(component_id);
+            }
+        }
+        self.focus_next()
+    }
+
+    /// Focuses the previous tab in the current tile.
+    pub fn focus_previous_tab(&mut self) -> Result<(), WorkspaceError> {
+        let candidate = self.window_layout.focus_previous_tab();
+        if let Some(component_id) = candidate {
+            if self.is_focusable_running_component(component_id) {
+                return self.focus_component(component_id);
+            }
+        }
+        self.focus_previous()
+    }
+
+    /// Splits the currently focused tile and creates a new pane.
+    ///
+    /// If the source tile has multiple tabs, the active tab is moved into the
+    /// newly created tile so both panes render useful content immediately.
+    pub fn split_focused_tile(&mut self, axis: SplitAxis) -> Result<(), WorkspaceError> {
+        self.window_layout.split_focused_tile(axis);
+        if let Some(component_id) = self.window_layout.focused_active_component() {
+            if self.is_focusable_running_component(component_id) {
+                let _ = self.focus_component(component_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the current window layout (tabs/splits).
+    pub fn window_layout_snapshot(&self) -> WorkspaceLayoutSnapshot {
+        let focused_tile = self
+            .window_layout
+            .focused_tile
+            .min(self.window_layout.tiles.len().saturating_sub(1));
+
+        let mut tiles = Vec::new();
+        for (tile_index, tile) in self.window_layout.tiles.iter().enumerate() {
+            tiles.push(WorkspaceTileLayoutSnapshot {
+                tile_index,
+                is_focused: tile_index == focused_tile,
+                active_component: tile.active_component(),
+                tabs: tile.tabs.clone(),
+            });
+        }
+
+        WorkspaceLayoutSnapshot {
+            split_axis: self.window_layout.split_axis,
+            focused_tile,
+            tiles,
+        }
     }
 
     /// Terminates a component
@@ -988,6 +2059,7 @@ impl WorkspaceManager {
 
         // Clean up component instance
         self.component_instances.remove(&component_id);
+        self.window_layout.remove_component(component_id);
 
         // Record event
         let timestamp = self.next_timestamp();
@@ -1034,23 +2106,20 @@ impl WorkspaceManager {
 
         match action {
             Action::SwitchTile => {
-                // Cycle to next focusable component
-                if let Err(e) = self.focus_next() {
+                let result = if self.window_layout.tile_count() > 1 {
+                    self.focus_next_tile()
+                } else {
+                    self.focus_next()
+                };
+                if let Err(e) = result {
                     eprintln!("Failed to switch tile: {}", e);
                     return false;
                 }
                 true
             }
             Action::FocusTop => {
-                // Focus first focusable component
-                let running_focusable: Vec<ComponentId> = self
-                    .components
-                    .values()
-                    .filter(|c| c.is_running() && c.focusable)
-                    .map(|c| c.id)
-                    .collect();
-
-                if let Some(&first_id) = running_focusable.first() {
+                let ordered = self.ordered_visible_focusable_components();
+                if let Some(&first_id) = ordered.first() {
                     if let Err(e) = self.focus_component(first_id) {
                         eprintln!("Failed to focus top: {}", e);
                         return false;
@@ -1061,15 +2130,8 @@ impl WorkspaceManager {
                 }
             }
             Action::FocusBottom => {
-                // Focus last focusable component
-                let running_focusable: Vec<ComponentId> = self
-                    .components
-                    .values()
-                    .filter(|c| c.is_running() && c.focusable)
-                    .map(|c| c.id)
-                    .collect();
-
-                if let Some(&last_id) = running_focusable.last() {
+                let ordered = self.ordered_visible_focusable_components();
+                if let Some(&last_id) = ordered.last() {
                     if let Err(e) = self.focus_component(last_id) {
                         eprintln!("Failed to focus bottom: {}", e);
                         return false;
@@ -1080,29 +2142,60 @@ impl WorkspaceManager {
                 }
             }
             Action::Save => {
-                // Save current document (if focused component is an editor)
-                if let Some(focused_id) = self.get_focused_component() {
-                    if let Some(component) = self.components.get(&focused_id) {
-                        if component.component_type == ComponentType::Editor {
-                            // Editor save logic would go here
-                            // For now, we save settings as a placeholder
-                            if let Err(e) = self.save_settings() {
-                                eprintln!("Failed to save: {}", e);
-                                return false;
-                            }
-                            self.workspace_status.set_last_action("Saved".to_string());
-                            return true;
-                        }
+                // Save the currently focused editor document.
+                let focused_id = match self.get_focused_component() {
+                    Some(id) => id,
+                    None => {
+                        self.workspace_status
+                            .set_last_action("Save failed: no focused component".to_string());
+                        return false;
                     }
-                }
-                // No editor focused, just save settings
-                if let Err(e) = self.save_settings() {
-                    eprintln!("Failed to save settings: {}", e);
+                };
+
+                let is_focused_editor = self
+                    .components
+                    .get(&focused_id)
+                    .map(|component| component.component_type == ComponentType::Editor)
+                    .unwrap_or(false);
+                if !is_focused_editor {
+                    self.workspace_status.set_last_action(
+                        "Save failed: focused component is not an editor".to_string(),
+                    );
                     return false;
                 }
-                self.workspace_status
-                    .set_last_action("Settings saved".to_string());
-                true
+
+                let timestamp = self.next_timestamp();
+                let (instances, view_host) = (&mut self.component_instances, &mut self.view_host);
+                let instance = match instances.get_mut(&focused_id) {
+                    Some(instance) => instance,
+                    None => {
+                        self.workspace_status
+                            .set_last_action("Save failed: editor instance missing".to_string());
+                        return false;
+                    }
+                };
+
+                match instance {
+                    ComponentInstance::Editor(editor) => match editor.save_current_document() {
+                        Ok(version_id) => {
+                            let _ = editor.publish_views(view_host, timestamp);
+                            self.workspace_status
+                                .set_last_action(format!("Saved version {}", version_id));
+                            true
+                        }
+                        Err(err) => {
+                            self.workspace_status
+                                .set_last_action(format!("Save failed: {}", err));
+                            false
+                        }
+                    },
+                    _ => {
+                        self.workspace_status.set_last_action(
+                            "Save failed: focused component is not an editor".to_string(),
+                        );
+                        false
+                    }
+                }
             }
             Action::Quit => {
                 // Quit application by terminating all components
@@ -1119,19 +2212,109 @@ impl WorkspaceManager {
                     .set_last_action("Quitting...".to_string());
                 true
             }
-            Action::CommandMode => {
-                // Enter command mode - this would typically show the command palette
-                // For now, we just set a status message
-                self.workspace_status
-                    .set_last_action("Command mode (not yet implemented)".to_string());
-                true
-            }
+            Action::CommandMode => self.enter_command_mode(),
             Action::Custom(name) => {
                 // Custom actions not yet supported
                 eprintln!("Custom action '{}' not implemented", name);
                 false
             }
         }
+    }
+
+    fn enter_command_mode(&mut self) -> bool {
+        const PALETTE_PREVIEW_LIMIT: usize = 8;
+        let (preview_lines, shown, total) = self.command_palette_preview("", PALETTE_PREVIEW_LIMIT);
+        if total == 0 {
+            self.workspace_status
+                .set_last_action("Command palette has no registered commands".to_string());
+            return false;
+        }
+
+        let cli_id = self
+            .find_running_component_of_type(ComponentType::Cli)
+            .or_else(|| {
+                self.launch_component(LaunchConfig::new(
+                    ComponentType::Cli,
+                    "command-palette",
+                    IdentityKind::Component,
+                    TrustDomain::user(),
+                ))
+                .ok()
+            });
+
+        let Some(cli_id) = cli_id else {
+            self.workspace_status
+                .set_last_action("Command mode failed: unable to open CLI".to_string());
+            return false;
+        };
+
+        let _ = self.focus_component(cli_id);
+        self.append_cli_output(cli_id, preview_lines);
+        self.workspace_status.set_last_action(format!(
+            "Command palette ready: showing {}/{} commands",
+            shown, total
+        ));
+        true
+    }
+
+    fn find_running_component_of_type(&self, component_type: ComponentType) -> Option<ComponentId> {
+        let mut ids: Vec<ComponentId> = self
+            .components
+            .iter()
+            .filter_map(|(id, component)| {
+                if component.state == ComponentState::Running
+                    && component.component_type == component_type
+                {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ids.sort_by_key(|id| id.to_string());
+        ids.into_iter().next()
+    }
+
+    fn command_palette_preview(&self, query: &str, limit: usize) -> (Vec<String>, usize, usize) {
+        let mut commands = if query.trim().is_empty() {
+            self.command_palette.list_commands()
+        } else {
+            self.command_palette.filter_commands(query)
+        };
+        commands.retain(|command| command.enabled);
+
+        if query.trim().is_empty() {
+            commands.sort_by(|a, b| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            });
+        }
+
+        let total = commands.len();
+        let shown = core::cmp::min(total, limit);
+        let mut lines = vec![format!("Command Palette ({})", total)];
+
+        for command in commands.into_iter().take(limit) {
+            let invocation = command
+                .prompt_pattern
+                .as_deref()
+                .unwrap_or(command.id.as_str());
+            lines.push(format!(
+                "  {} -> `{}`",
+                command.format_for_palette(),
+                invocation
+            ));
+        }
+
+        if shown < total {
+            lines.push(format!(
+                "  ... {} more commands (type `help` for full command docs)",
+                total - shown
+            ));
+        }
+
+        (lines, shown, total)
     }
 
     /// Routes an input event to the focused component and processes it
@@ -1235,6 +2418,10 @@ impl WorkspaceManager {
 
         // Get timestamp before borrowing instances mutably
         let timestamp = self.next_timestamp();
+        let mut pending_cli_command: Option<String> = None;
+        let mut pending_custom_command: Option<String> = None;
+        #[cfg(feature = "std")]
+        let mut pending_pipeline_command: Option<String> = None;
 
         // Process input in the component instance
         if let Some(instance) = self.component_instances.get_mut(&component_id) {
@@ -1251,12 +2438,33 @@ impl WorkspaceManager {
                         }
                     }
                 }
+                ComponentInstance::Cli(cli) => {
+                    pending_cli_command = cli.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            cli.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "CLI",
+                            );
+                        }
+                    }
+                }
                 ComponentInstance::FilePicker(picker) => {
-                    // Process input with directory resolver from editor I/O context
-                    let resolver = self
-                        .editor_io_context
-                        .as_ref()
-                        .and_then(|ctx| ctx.fs_view.as_ref());
+                    let picker_context = self.editor_io_context.as_ref().and_then(|ctx| {
+                        match (&ctx.fs_view, &ctx.root) {
+                            (Some(fs_view), Some(root)) => Some((fs_view.clone(), root.clone())),
+                            _ => None,
+                        }
+                    });
+
+                    // Process input with directory resolver from editor I/O context.
+                    let resolver = picker_context.as_ref().map(|(fs_view, _)| fs_view);
                     let result = picker.process_input(event.clone(), resolver);
 
                     // Publish updated views
@@ -1264,9 +2472,8 @@ impl WorkspaceManager {
                         if let (Some(main_view), Some(status_view)) =
                             (&component.main_view, &component.status_view)
                         {
-                            // TODO: Track actual directory path for breadcrumb
-                            // For now, use placeholder to indicate root browsing
-                            let breadcrumb = "<root>";
+                            let breadcrumb =
+                                Self::build_file_picker_breadcrumb(picker, picker_context.as_ref());
 
                             // Render and publish main view
                             let main_frame =
@@ -1278,7 +2485,7 @@ impl WorkspaceManager {
                                 status_view.view_id,
                                 0,
                                 timestamp,
-                                breadcrumb,
+                                &breadcrumb,
                             );
                             let _ = self.view_host.publish_frame(status_view, status_frame);
                         }
@@ -1287,17 +2494,21 @@ impl WorkspaceManager {
                     // Handle file selection or cancellation
                     match result {
                         services_file_picker::FilePickerResult::FileSelected {
-                            object_id: _,
+                            object_id,
                             name,
                         } => {
                             // File selected - close picker and open in editor
                             let _ = self.terminate_component(component_id, ExitReason::Normal);
 
-                            // Launch editor with the selected file
-                            // TODO: Map ObjectId to path for editor
+                            // Launch editor with resolved path when available.
+                            let resolved_path = Self::resolve_relative_path_from_context(
+                                picker_context.as_ref(),
+                                object_id,
+                            )
+                            .unwrap_or(name);
                             let _ = self.execute_command(WorkspaceCommand::Open {
                                 component_type: ComponentType::Editor,
-                                args: vec![name],
+                                args: vec![resolved_path],
                             });
                         }
                         services_file_picker::FilePickerResult::Cancelled => {
@@ -1309,13 +2520,419 @@ impl WorkspaceManager {
                         }
                     }
                 }
+                ComponentInstance::Custom(runtime) => {
+                    pending_custom_command = runtime.console.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            runtime.console.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "CUSTOM",
+                            );
+                        }
+                    }
+                }
+                #[cfg(feature = "std")]
+                ComponentInstance::Pipeline(runtime) => {
+                    pending_pipeline_command = runtime.console.process_input(event.clone());
+                    if let Some(component) = self.components.get(&component_id) {
+                        if let (Some(main_view), Some(status_view)) =
+                            (&component.main_view, &component.status_view)
+                        {
+                            runtime.console.publish_views(
+                                &mut self.view_host,
+                                main_view,
+                                status_view,
+                                timestamp,
+                                component_id,
+                                "PIPELINE",
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(feature = "std"))]
                 ComponentInstance::None => {
                     // No instance to process
                 }
             }
         }
 
+        if let Some(command) = pending_cli_command {
+            self.execute_cli_component_command(component_id, command);
+        }
+        if let Some(command) = pending_custom_command {
+            self.execute_custom_component_command(component_id, command);
+        }
+        #[cfg(feature = "std")]
+        if let Some(command) = pending_pipeline_command {
+            self.execute_pipeline_component_command(component_id, command);
+        }
+
         Some(component_id)
+    }
+
+    fn execute_cli_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let mut lines = vec![format!("pg> {}", trimmed)];
+
+        match crate::commands::parse_command(trimmed) {
+            Ok(parsed) => {
+                let result = self.execute_command(parsed);
+                lines.extend(Self::format_command_result_lines(&result));
+            }
+            Err(err) => {
+                lines.push(err.format_with_actions());
+            }
+        }
+
+        self.append_cli_output(component_id, lines);
+    }
+
+    fn append_cli_output(&mut self, component_id: ComponentId, lines: Vec<String>) {
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Cli(cli)) = self.component_instances.get_mut(&component_id) {
+            cli.push_output_lines(lines);
+            if let Some((main_view, status_view)) = handles {
+                cli.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "CLI",
+                );
+            }
+        }
+    }
+
+    fn execute_custom_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Custom(runtime)) =
+            self.component_instances.get_mut(&component_id)
+        {
+            let mut lines = vec![format!("custom> {}", trimmed)];
+            lines.extend(Self::run_custom_host_command(runtime, trimmed));
+            runtime.console.push_output_lines(lines);
+
+            if let Some((main_view, status_view)) = handles {
+                runtime.console.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "CUSTOM",
+                );
+            }
+        }
+    }
+
+    fn run_custom_host_command(runtime: &CustomComponentRuntime, command: &str) -> Vec<String> {
+        let mut parts = command.split_whitespace();
+        let Some(op) = parts.next() else {
+            return Vec::new();
+        };
+
+        match op {
+            "help" => vec![
+                "Custom host commands:".to_string(),
+                "  status".to_string(),
+                "  meta".to_string(),
+                "  ping [payload]".to_string(),
+            ],
+            "status" => vec![format!(
+                "Custom host online: handler={} entry={} metadata={}",
+                runtime.descriptor.host_kind.label(),
+                runtime.descriptor.entry,
+                runtime.metadata_snapshot.len()
+            )],
+            "meta" => {
+                if runtime.metadata_snapshot.is_empty() {
+                    vec!["No metadata entries".to_string()]
+                } else {
+                    let mut lines = vec![format!(
+                        "Metadata entries ({})",
+                        runtime.metadata_snapshot.len()
+                    )];
+                    for (key, value) in &runtime.metadata_snapshot {
+                        lines.push(format!("  {}={}", key, value));
+                    }
+                    lines
+                }
+            }
+            "ping" => {
+                let payload = parts.collect::<Vec<&str>>().join(" ");
+                if payload.is_empty() {
+                    vec!["pong".to_string()]
+                } else {
+                    vec![format!(
+                        "pong [{}] via {}",
+                        payload,
+                        runtime.descriptor.host_kind.label()
+                    )]
+                }
+            }
+            other => vec![format!("Unknown custom command: {}", other)],
+        }
+    }
+
+    fn format_command_result_lines(result: &crate::commands::CommandResult) -> Vec<String> {
+        match result {
+            crate::commands::CommandResult::Opened { component_id, name } => {
+                vec![format!("Opened {} ({})", name, component_id)]
+            }
+            crate::commands::CommandResult::List { components } => {
+                let mut lines = vec![format!("Components ({})", components.len())];
+                for component in components {
+                    lines.push(format!(
+                        "- {} {} [{}]{}",
+                        component.id,
+                        component.name,
+                        component.component_type,
+                        if component.has_focus { " <focus>" } else { "" }
+                    ));
+                }
+                lines
+            }
+            crate::commands::CommandResult::FocusChanged { component_id } => {
+                vec![format!("Focus -> {}", component_id)]
+            }
+            crate::commands::CommandResult::Closed { component_id } => {
+                vec![format!("Closed {}", component_id)]
+            }
+            crate::commands::CommandResult::Status { summary } => {
+                vec![format!(
+                    "{} {} [{}] state={:?}",
+                    summary.id, summary.name, summary.component_type, summary.state
+                )]
+            }
+            crate::commands::CommandResult::FocusInfo { component_id } => match component_id {
+                Some(id) => vec![format!("Focused: {}", id)],
+                None => vec!["Focused: none".to_string()],
+            },
+            crate::commands::CommandResult::Success { message } => {
+                message.lines().map(|line| line.to_string()).collect()
+            }
+            crate::commands::CommandResult::Error { message } => {
+                vec![format!("Error: {}", message)]
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn execute_pipeline_component_command(&mut self, component_id: ComponentId, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let handles = self
+            .components
+            .get(&component_id)
+            .and_then(|component| component.main_view.zip(component.status_view));
+        let timestamp = self.next_timestamp();
+
+        if let Some(ComponentInstance::Pipeline(runtime)) =
+            self.component_instances.get_mut(&component_id)
+        {
+            let mut lines = vec![format!("pipeline> {}", trimmed)];
+            lines.extend(Self::run_pipeline_command(runtime, trimmed));
+            runtime.console.push_output_lines(lines);
+
+            if let Some((main_view, status_view)) = handles {
+                runtime.console.publish_views(
+                    &mut self.view_host,
+                    &main_view,
+                    &status_view,
+                    timestamp,
+                    component_id,
+                    "PIPELINE",
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn run_pipeline_command(runtime: &mut PipelineRuntime, command: &str) -> Vec<String> {
+        let mut parts = command.split_whitespace();
+        let Some(op) = parts.next() else {
+            return Vec::new();
+        };
+
+        match op {
+            "help" => vec![
+                "Pipeline commands:".to_string(),
+                "  run [service_id_u128|0xhex] [payload]".to_string(),
+                "    (auto-registers echo handler for requested service)".to_string(),
+                "  status".to_string(),
+            ],
+            "status" => vec![format!(
+                "Pipeline runtime online (registered handlers: {})",
+                runtime.kernel.handler_count()
+            )],
+            "run" => {
+                let mut rest = parts.collect::<Vec<&str>>();
+                let mut service_id = runtime.default_handler_service;
+                if let Some(first) = rest.first().copied() {
+                    if let Some(parsed) = Self::parse_service_id_token(first) {
+                        service_id = parsed;
+                        rest.remove(0);
+                    }
+                }
+                if let Err(err) = runtime.kernel.ensure_echo_handler(service_id) {
+                    return vec![format!(
+                        "Pipeline failed: unable to register handler {} ({})",
+                        service_id, err
+                    )];
+                }
+
+                let payload_text = rest.join(" ");
+                let payload_bytes = if payload_text.is_empty() {
+                    b"{}".to_vec()
+                } else {
+                    payload_text.into_bytes()
+                };
+
+                let input_schema = PayloadSchemaId::new("pipeline/input");
+                let output_schema = PayloadSchemaId::new("pipeline/output");
+                let stage = StageSpec::new(
+                    "stage1".to_string(),
+                    service_id,
+                    "invoke".to_string(),
+                    input_schema.clone(),
+                    output_schema.clone(),
+                );
+                let spec = PipelineSpec::new(
+                    "interactive-pipeline".to_string(),
+                    input_schema.clone(),
+                    output_schema,
+                )
+                .add_stage(stage);
+                let input =
+                    TypedPayload::new(input_schema, PayloadSchemaVersion::new(1, 0), payload_bytes);
+
+                match runtime.executor.execute(
+                    &mut runtime.kernel,
+                    &spec,
+                    input,
+                    CancellationToken::none(),
+                ) {
+                    Ok((output, trace)) => vec![format!(
+                        "Pipeline succeeded: schema={} bytes={} stages={}",
+                        output.schema_id.as_str(),
+                        output.data.len(),
+                        trace.entries.len()
+                    )],
+                    Err(err) => vec![format!("Pipeline failed: {}", err)],
+                }
+            }
+            other => vec![format!("Unknown pipeline command: {}", other)],
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn parse_service_id_token(token: &str) -> Option<ServiceId> {
+        let value = if let Some(hex) = token.strip_prefix("0x") {
+            u128::from_str_radix(hex, 16).ok()?
+        } else {
+            token.parse::<u128>().ok()?
+        };
+        Some(ServiceId::from_u128(value))
+    }
+
+    fn build_file_picker_breadcrumb(
+        picker: &services_file_picker::FilePicker,
+        context: Option<&(FileSystemViewService, DirectoryView)>,
+    ) -> String {
+        let Some((_, root)) = context else {
+            return "ROOT".to_string();
+        };
+
+        if picker.current_directory().id == root.id {
+            return "ROOT".to_string();
+        }
+
+        match Self::resolve_relative_path_from_context(context, picker.current_directory().id) {
+            Some(path) if !path.is_empty() => format!("ROOT/{}", path),
+            _ => "ROOT".to_string(),
+        }
+    }
+
+    fn resolve_relative_path_from_context(
+        context: Option<&(FileSystemViewService, DirectoryView)>,
+        target: ObjectId,
+    ) -> Option<String> {
+        let (resolver, root) = context?;
+
+        if target == root.id {
+            return Some(String::new());
+        }
+
+        let mut visited = HashSet::new();
+        Self::resolve_relative_path_recursive(resolver, root, target, "", &mut visited)
+    }
+
+    fn resolve_relative_path_recursive<R: DirectoryResolver>(
+        resolver: &R,
+        directory: &DirectoryView,
+        target: ObjectId,
+        prefix: &str,
+        visited: &mut HashSet<ObjectId>,
+    ) -> Option<String> {
+        if !visited.insert(directory.id) {
+            return None;
+        }
+
+        let mut entries = directory.list_entries();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for entry in entries {
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", prefix, entry.name)
+            };
+
+            if entry.object_id == target {
+                return Some(path);
+            }
+
+            if entry.kind == ObjectKind::Map {
+                if let Some(subdir) = resolver.resolve_directory(&entry.object_id) {
+                    if let Some(found) = Self::resolve_relative_path_recursive(
+                        resolver, &subdir, target, &path, visited,
+                    ) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Returns the audit trail
@@ -1498,27 +3115,211 @@ impl WorkspaceManager {
         let bytes = services_settings::persistence::serialize_overrides(&data)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        // TODO(Phase 113): Integrate with StorageService
-        // - Add settings path constant (e.g., "/settings/user_overrides.json")
-        // - Use editor_io_context.storage.write() with proper capabilities
-        // - Wrap in transaction for atomicity
-        // For now, just validate serialization works
-        self.workspace_status
-            .set_last_action(format!("Settings saved ({} bytes)", bytes.len()));
+        let result = {
+            let context = match self.editor_io_context.as_mut() {
+                Some(context) => context,
+                None => {
+                    self.workspace_status
+                        .set_last_action("Settings saved (in-memory only)".to_string());
+                    return Ok(());
+                }
+            };
+
+            let object_id = Self::resolve_settings_object_for_write(context)?;
+            let mut tx = context
+                .storage
+                .begin_transaction()
+                .map_err(|e| format!("Failed to start settings transaction: {}", e))?;
+
+            context
+                .storage
+                .write(&mut tx, object_id, &bytes)
+                .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+            context
+                .storage
+                .commit(&mut tx)
+                .map_err(|e| format!("Failed to commit settings: {}", e))
+        };
+
+        if let Err(error) = result {
+            self.workspace_status
+                .set_last_action(format!("Settings save failed: {}", error));
+            return Err(error);
+        }
+
+        self.workspace_status.set_last_action(format!(
+            "Settings saved ({} bytes) to {}",
+            bytes.len(),
+            SETTINGS_OVERRIDES_PATH
+        ));
 
         Ok(())
     }
 
     /// Loads settings from storage (if storage context is available)
     pub fn load_settings(&mut self) -> Result<(), String> {
-        // TODO(Phase 113): Integrate with StorageService
-        // - Read from settings path
-        // - Use load_overrides_safe() for corruption handling
-        // - Call import_overrides() to apply
-        // - Emit notification on success/failure
-        self.workspace_status
-            .set_last_action("Settings loaded".to_string());
+        let (overrides, recovered_from_corruption, bytes_len) = {
+            let context = match self.editor_io_context.as_mut() {
+                Some(context) => context,
+                None => {
+                    self.workspace_status
+                        .set_last_action("Settings loaded (no storage context)".to_string());
+                    return Ok(());
+                }
+            };
+
+            let object_id = match Self::resolve_settings_object_for_read(context)? {
+                Some(id) => id,
+                None => {
+                    self.workspace_status.set_last_action(
+                        "Settings loaded (defaults; no persisted overrides)".to_string(),
+                    );
+                    return Ok(());
+                }
+            };
+
+            let mut tx = context
+                .storage
+                .begin_transaction()
+                .map_err(|e| format!("Failed to start settings read transaction: {}", e))?;
+
+            let bytes = match context.storage.read_data(&tx, object_id) {
+                Ok(bytes) => bytes,
+                Err(TransactionError::ObjectNotFound(_)) => {
+                    let _ = context.storage.rollback(&mut tx);
+                    self.workspace_status.set_last_action(
+                        "Settings loaded (defaults; no persisted overrides)".to_string(),
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    let _ = context.storage.rollback(&mut tx);
+                    return Err(format!("Failed to read settings data: {}", err));
+                }
+            };
+            let _ = context.storage.rollback(&mut tx);
+
+            let recovered_from_corruption =
+                services_settings::persistence::deserialize_overrides(&bytes).is_err();
+            let loaded = services_settings::persistence::load_overrides_safe(&bytes);
+            (
+                loaded.to_overrides(),
+                recovered_from_corruption,
+                bytes.len(),
+            )
+        };
+
+        self.settings_registry.import_overrides(overrides);
+
+        let active_keys = self
+            .settings_registry
+            .list_user_overrides(&self.current_user);
+        for key in active_keys {
+            self.apply_setting(key.as_str());
+        }
+
+        if recovered_from_corruption {
+            self.workspace_status.set_last_action(
+                "Settings loaded with recovery (invalid data reset to defaults)".to_string(),
+            );
+        } else {
+            self.workspace_status.set_last_action(format!(
+                "Settings loaded ({} bytes) from {}",
+                bytes_len, SETTINGS_OVERRIDES_PATH
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Gets the current boot profile configuration.
+    pub fn boot_profile_config(&self) -> &BootConfig {
+        self.boot_profile_manager.config()
+    }
+
+    /// Sets the active boot profile in memory.
+    pub fn set_boot_profile(&mut self, profile: BootProfile) {
+        self.boot_profile_manager.set_profile(profile);
+    }
+
+    /// Loads boot profile from storage if available.
+    pub fn load_boot_profile(&mut self) -> Result<(), String> {
+        match self.editor_io_context.as_mut() {
+            Some(context) => self.boot_profile_manager.load(Some(&mut context.storage)),
+            None => self.boot_profile_manager.load(None),
+        }
+    }
+
+    /// Saves boot profile to storage if available.
+    pub fn save_boot_profile(&mut self) -> Result<(), String> {
+        match self.editor_io_context.as_mut() {
+            Some(context) => self.boot_profile_manager.save(Some(&mut context.storage)),
+            None => self.boot_profile_manager.save(None),
+        }
+    }
+
+    fn settings_object_id() -> ObjectId {
+        ObjectId::from_uuid(Uuid::from_u128(SETTINGS_OBJECT_UUID))
+    }
+
+    fn resolve_settings_object_for_read(
+        context: &EditorIoContext,
+    ) -> Result<Option<ObjectId>, String> {
+        match (&context.fs_view, &context.root) {
+            (Some(fs_view), Some(root)) => match fs_view.open(root, SETTINGS_OVERRIDES_PATH) {
+                Ok(object_id) => Ok(Some(object_id)),
+                Err(services_fs_view::OperationError::NotFound(_)) => Ok(None),
+                Err(err) => Err(format!(
+                    "Failed to resolve settings path {}: {}",
+                    SETTINGS_OVERRIDES_PATH, err
+                )),
+            },
+            _ => Ok(Some(Self::settings_object_id())),
+        }
+    }
+
+    fn resolve_settings_object_for_write(
+        context: &mut EditorIoContext,
+    ) -> Result<ObjectId, String> {
+        match (&mut context.fs_view, &mut context.root) {
+            (Some(fs_view), Some(root)) => match fs_view.open(root, SETTINGS_OVERRIDES_PATH) {
+                Ok(object_id) => Ok(object_id),
+                Err(services_fs_view::OperationError::NotFound(_)) => {
+                    match fs_view.mkdir(root, SETTINGS_DIR_PATH) {
+                        Ok(_) | Err(services_fs_view::OperationError::AlreadyExists(_)) => {}
+                        Err(err) => {
+                            return Err(format!(
+                                "Failed to create settings directory {}: {}",
+                                SETTINGS_DIR_PATH, err
+                            ));
+                        }
+                    }
+
+                    let object_id = Self::settings_object_id();
+                    match fs_view.link(root, SETTINGS_OVERRIDES_PATH, object_id, ObjectKind::Blob) {
+                        Ok(()) => Ok(object_id),
+                        Err(services_fs_view::OperationError::AlreadyExists(_)) => {
+                            fs_view.open(root, SETTINGS_OVERRIDES_PATH).map_err(|err| {
+                                format!(
+                                    "Failed to resolve settings path {} after link race: {}",
+                                    SETTINGS_OVERRIDES_PATH, err
+                                )
+                            })
+                        }
+                        Err(err) => Err(format!(
+                            "Failed to link settings path {}: {}",
+                            SETTINGS_OVERRIDES_PATH, err
+                        )),
+                    }
+                }
+                Err(err) => Err(format!(
+                    "Failed to resolve settings path {}: {}",
+                    SETTINGS_OVERRIDES_PATH, err
+                )),
+            },
+            _ => Ok(Self::settings_object_id()),
+        }
     }
 
     /// Updates workspace status based on current state (deterministic)
@@ -1607,28 +3408,251 @@ impl WorkspaceManager {
         }
     }
 
+    fn component_frames(
+        &self,
+        component_id: ComponentId,
+    ) -> (Option<ViewFrame>, Option<ViewFrame>) {
+        let Some(component) = self.components.get(&component_id) else {
+            return (None, None);
+        };
+
+        let main_view = component
+            .main_view
+            .as_ref()
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+        let status_view = component
+            .status_view
+            .as_ref()
+            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
+            .flatten();
+        (main_view, status_view)
+    }
+
+    fn build_tile_render_snapshots(&self) -> Vec<WorkspaceTileRenderSnapshot> {
+        let fallback_tile = WindowTileState::new();
+        let tiles: Vec<&WindowTileState> = if self.window_layout.tiles.is_empty() {
+            vec![&fallback_tile]
+        } else {
+            self.window_layout.tiles.iter().collect()
+        };
+
+        let focused_tile = self
+            .window_layout
+            .focused_tile
+            .min(tiles.len().saturating_sub(1));
+
+        let mut snapshots = Vec::with_capacity(tiles.len());
+        for (tile_index, tile) in tiles.into_iter().enumerate() {
+            let tabs: Vec<ComponentId> = tile
+                .tabs
+                .iter()
+                .copied()
+                .filter(|component_id| {
+                    self.components
+                        .get(component_id)
+                        .map(|component| component.is_running())
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let active_component = tile
+                .active_component()
+                .filter(|component_id| tabs.contains(component_id))
+                .or_else(|| tabs.first().copied());
+
+            let (main_view, status_view) = if let Some(component_id) = active_component {
+                self.component_frames(component_id)
+            } else {
+                (None, None)
+            };
+
+            snapshots.push(WorkspaceTileRenderSnapshot {
+                tile_index,
+                is_focused: tile_index == focused_tile,
+                active_component,
+                tabs,
+                main_view,
+                status_view,
+            });
+        }
+
+        snapshots
+    }
+
+    fn frame_to_lines(frame: &ViewFrame) -> Vec<String> {
+        match &frame.content {
+            view_types::ViewContent::TextBuffer { lines } => {
+                if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines.clone()
+                }
+            }
+            view_types::ViewContent::StatusLine { text } => vec![text.clone()],
+            view_types::ViewContent::Panel { metadata } => vec![metadata.clone()],
+        }
+    }
+
+    fn compose_vertical_tiles(tile_sections: &[(String, Vec<String>)]) -> Vec<String> {
+        if tile_sections.len() != 2 {
+            return Self::compose_horizontal_tiles(tile_sections);
+        }
+
+        let left_lines = &tile_sections[0].1;
+        let right_lines = &tile_sections[1].1;
+        let left_width = left_lines.iter().map(|line| line.len()).max().unwrap_or(0);
+        let total_lines = core::cmp::max(left_lines.len(), right_lines.len());
+
+        let mut lines = Vec::with_capacity(total_lines);
+        for index in 0..total_lines {
+            let left = left_lines.get(index).map(|s| s.as_str()).unwrap_or("");
+            let right = right_lines.get(index).map(|s| s.as_str()).unwrap_or("");
+            lines.push(format!("{:<width$} || {}", left, right, width = left_width));
+        }
+        lines
+    }
+
+    fn compose_horizontal_tiles(tile_sections: &[(String, Vec<String>)]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (index, (_, tile_lines)) in tile_sections.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+                lines.push("----------------".to_string());
+            }
+            lines.extend(tile_lines.iter().cloned());
+        }
+        lines
+    }
+
+    fn compose_main_view(
+        &self,
+        split_axis: Option<SplitAxis>,
+        tile_snapshots: &[WorkspaceTileRenderSnapshot],
+    ) -> Option<ViewFrame> {
+        if tile_snapshots.len() <= 1 {
+            return None;
+        }
+
+        let mut tile_sections: Vec<(String, Vec<String>)> = Vec::new();
+        let mut max_revision = 1;
+        for tile in tile_snapshots {
+            let title = format!(
+                "Tile {}{}",
+                tile.tile_index + 1,
+                if tile.is_focused { " [focused]" } else { "" }
+            );
+            let mut lines = vec![format!(
+                "{} tabs={}",
+                title,
+                tile.tabs
+                    .iter()
+                    .map(|component_id| {
+                        let marker = if tile.active_component == Some(*component_id) {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        format!("{}{}", marker, component_id)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            )];
+
+            if let Some(main_view) = &tile.main_view {
+                max_revision = core::cmp::max(max_revision, main_view.revision);
+                lines.extend(Self::frame_to_lines(main_view));
+            } else {
+                lines.push("[empty tile]".to_string());
+            }
+            tile_sections.push((title, lines));
+        }
+
+        let mut composed_lines = vec![format!(
+            "Workspace layout: {} split",
+            split_axis.unwrap_or(SplitAxis::Horizontal).as_label()
+        )];
+        let section_lines = match split_axis {
+            Some(SplitAxis::Vertical) => Self::compose_vertical_tiles(&tile_sections),
+            _ => Self::compose_horizontal_tiles(&tile_sections),
+        };
+        composed_lines.extend(section_lines);
+
+        Some(
+            ViewFrame::new(
+                ViewId::from_uuid(Uuid::from_u128(COMPOSED_MAIN_VIEW_UUID)),
+                ViewKind::TextBuffer,
+                max_revision,
+                view_types::ViewContent::text_buffer(composed_lines),
+                self.next_timestamp,
+            )
+            .with_title("Workspace Composite"),
+        )
+    }
+
+    fn compose_status_view(
+        &self,
+        split_axis: Option<SplitAxis>,
+        tile_snapshots: &[WorkspaceTileRenderSnapshot],
+    ) -> Option<ViewFrame> {
+        if tile_snapshots.len() <= 1 {
+            return None;
+        }
+
+        let mut status_segments = Vec::new();
+        let mut max_revision = 1;
+        for tile in tile_snapshots {
+            let tile_label = format!("T{}", tile.tile_index + 1);
+            let suffix = if tile.is_focused { "*" } else { "" };
+            let status = tile
+                .status_view
+                .as_ref()
+                .and_then(|frame| {
+                    max_revision = core::cmp::max(max_revision, frame.revision);
+                    frame.content.get_line(0).map(|line| line.to_string())
+                })
+                .unwrap_or_else(|| "idle".to_string());
+            status_segments.push(format!("{}{}: {}", tile_label, suffix, status));
+        }
+
+        let summary = format!(
+            "[{} split] {}",
+            split_axis.unwrap_or(SplitAxis::Horizontal).as_label(),
+            status_segments.join(" | ")
+        );
+
+        Some(ViewFrame::new(
+            ViewId::from_uuid(Uuid::from_u128(COMPOSED_STATUS_VIEW_UUID)),
+            ViewKind::StatusLine,
+            max_revision,
+            view_types::ViewContent::status_line(summary),
+            self.next_timestamp,
+        ))
+    }
+
     /// Renders the current workspace state
     ///
-    /// Returns a snapshot of the focused component's views and status.
+    /// Returns focused views and composed multi-tile views when splits are active.
     pub fn render_snapshot(&self) -> WorkspaceRenderSnapshot {
         let focused_component_id = self.get_focused_component();
-
         let focused_component = focused_component_id.and_then(|id| self.get_component(id));
+        let (main_view_frame, status_view_frame) = focused_component_id
+            .map(|component_id| self.component_frames(component_id))
+            .unwrap_or((None, None));
 
-        let main_view_frame = focused_component
-            .and_then(|c| c.main_view.as_ref())
-            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
-            .flatten();
-
-        let status_view_frame = focused_component
-            .and_then(|c| c.status_view.as_ref())
-            .and_then(|handle| self.view_host.get_latest(handle.view_id).ok())
-            .flatten();
+        let tile_snapshots = self.build_tile_render_snapshots();
+        let layout = self.window_layout_snapshot();
+        let composed_main_view = self.compose_main_view(layout.split_axis, &tile_snapshots);
+        let composed_status_view = self.compose_status_view(layout.split_axis, &tile_snapshots);
 
         WorkspaceRenderSnapshot {
             focused_component: focused_component_id,
             main_view: main_view_frame,
             status_view: status_view_frame,
+            composed_main_view,
+            composed_status_view,
+            layout,
+            tiles: tile_snapshots,
             component_count: self.components.len(),
             running_count: self.components.values().filter(|c| c.is_running()).count(),
             status_strip: self.workspace_status.format_status_strip_with_action(),
@@ -1703,6 +3727,7 @@ impl WorkspaceManager {
         self.view_host = ViewHost::new();
         self.view_subscriptions.clear();
         self.audit_trail.clear();
+        self.window_layout = WindowLayoutState::new();
         self.next_timestamp = snapshot.next_timestamp;
 
         for component_snapshot in snapshot.components {
@@ -1817,6 +3842,7 @@ impl WorkspaceManager {
             }
 
             self.components.insert(component.id, component);
+            self.window_layout.add_component_tab(component_id);
         }
 
         if let Some(focused) = snapshot.focused_component {
@@ -1869,6 +3895,18 @@ pub struct WorkspaceRenderSnapshot {
     pub main_view: Option<ViewFrame>,
     /// Status view frame of focused component
     pub status_view: Option<ViewFrame>,
+    /// Composed main view containing all visible tiles when splits are active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_main_view: Option<ViewFrame>,
+    /// Composed status line containing all visible tiles when splits are active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_status_view: Option<ViewFrame>,
+    /// Workspace split/tab layout metadata.
+    #[serde(default)]
+    pub layout: WorkspaceLayoutSnapshot,
+    /// Per-tile render details.
+    #[serde(default)]
+    pub tiles: Vec<WorkspaceTileRenderSnapshot>,
     /// Total number of components
     pub component_count: usize,
     /// Number of running components
@@ -1950,6 +3988,7 @@ fn remap_frame(mut frame: ViewFrame, new_view_id: ViewId, component_id: Componen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
     use packages::{ComponentSpec, PackageComponentType, PackageFormatVersion, PackageManifest};
 
     fn create_test_workspace() -> WorkspaceManager {
@@ -1960,6 +3999,52 @@ mod tests {
             0,
         );
         WorkspaceManager::new(workspace_identity)
+    }
+
+    fn key_event_for_char(ch: char) -> Option<KeyEvent> {
+        let (code, modifiers) = match ch {
+            'a' => (KeyCode::A, Modifiers::none()),
+            'b' => (KeyCode::B, Modifiers::none()),
+            'c' => (KeyCode::C, Modifiers::none()),
+            'd' => (KeyCode::D, Modifiers::none()),
+            'e' => (KeyCode::E, Modifiers::none()),
+            'f' => (KeyCode::F, Modifiers::none()),
+            'g' => (KeyCode::G, Modifiers::none()),
+            'h' => (KeyCode::H, Modifiers::none()),
+            'i' => (KeyCode::I, Modifiers::none()),
+            'j' => (KeyCode::J, Modifiers::none()),
+            'k' => (KeyCode::K, Modifiers::none()),
+            'l' => (KeyCode::L, Modifiers::none()),
+            'm' => (KeyCode::M, Modifiers::none()),
+            'n' => (KeyCode::N, Modifiers::none()),
+            'o' => (KeyCode::O, Modifiers::none()),
+            'p' => (KeyCode::P, Modifiers::none()),
+            'q' => (KeyCode::Q, Modifiers::none()),
+            'r' => (KeyCode::R, Modifiers::none()),
+            's' => (KeyCode::S, Modifiers::none()),
+            't' => (KeyCode::T, Modifiers::none()),
+            'u' => (KeyCode::U, Modifiers::none()),
+            'v' => (KeyCode::V, Modifiers::none()),
+            'w' => (KeyCode::W, Modifiers::none()),
+            'x' => (KeyCode::X, Modifiers::none()),
+            'y' => (KeyCode::Y, Modifiers::none()),
+            'z' => (KeyCode::Z, Modifiers::none()),
+            ' ' => (KeyCode::Space, Modifiers::none()),
+            _ => return None,
+        };
+        Some(KeyEvent::pressed(code, modifiers))
+    }
+
+    fn type_command(workspace: &mut WorkspaceManager, command: &str) {
+        for ch in command.chars() {
+            if let Some(event) = key_event_for_char(ch) {
+                workspace.route_input(&InputEvent::key(event));
+            }
+        }
+        workspace.route_input(&InputEvent::key(KeyEvent::pressed(
+            KeyCode::Enter,
+            Modifiers::none(),
+        )));
     }
 
     #[test]
@@ -1992,6 +4077,167 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_component_executes_workspace_commands() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
+
+        type_command(&mut workspace, "list");
+
+        let component = workspace.get_component(cli_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let lines = frame.content.line_count();
+        assert!(lines > 0);
+        assert!(frame
+            .content
+            .get_line(0)
+            .unwrap_or_default()
+            .contains("PandaGen CLI ready"));
+        let mut found_components_line = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Components (") {
+                    found_components_line = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_components_line);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_pipeline_component_runs_executor_path() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::PipelineExecutor,
+            "pipeline",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let pipeline_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(pipeline_id));
+
+        type_command(&mut workspace, "run");
+
+        let component = workspace.get_component(pipeline_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let mut found_success = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Pipeline succeeded:") {
+                    found_success = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_success);
+    }
+
+    #[test]
+    fn test_custom_component_launches_runtime_host() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Custom,
+            "custom-widget",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_metadata("package.entry", "widgets/clock");
+        let custom_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(custom_id));
+
+        let component = workspace.get_component(custom_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+
+        let mut found_ready = false;
+        let mut found_entry = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Custom component host ready") {
+                    found_ready = true;
+                }
+                if line.contains("entry=widgets/clock handler=package-entry") {
+                    found_entry = true;
+                }
+            }
+        }
+        assert!(found_ready);
+        assert!(found_entry);
+    }
+
+    #[test]
+    fn test_custom_component_host_handles_commands() {
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Custom,
+            "kiosk-dashboard",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_metadata("kiosk.app", "dashboard");
+        let custom_id = workspace.launch_component(config).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(custom_id));
+
+        type_command(&mut workspace, "status");
+        type_command(&mut workspace, "meta");
+        type_command(&mut workspace, "ping hello");
+
+        let component = workspace.get_component(custom_id).unwrap();
+        let main_view_id = component.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+
+        let mut found_status = false;
+        let mut found_meta = false;
+        let mut found_ping = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Custom host online: handler=kiosk") {
+                    found_status = true;
+                }
+                if line.contains("kiosk.app=dashboard") {
+                    found_meta = true;
+                }
+                if line.contains("pong [hello] via kiosk") {
+                    found_ping = true;
+                }
+            }
+        }
+        assert!(found_status);
+        assert!(found_meta);
+        assert!(found_ping);
+    }
+
+    #[test]
     fn test_launch_package_components() {
         let mut workspace = create_test_workspace();
 
@@ -2021,10 +4267,14 @@ mod tests {
             ],
         };
 
-        let ids = workspace.launch_package(&manifest).unwrap();
-        assert_eq!(ids.len(), 2);
+        let report = workspace.launch_package(&manifest).unwrap();
+        assert!(report.is_success());
+        assert_eq!(report.created_component_ids.len(), 2);
+        assert!(report.failures.is_empty());
 
-        let first = workspace.get_component(ids[0]).unwrap();
+        let first = workspace
+            .get_component(report.created_component_ids[0])
+            .unwrap();
         assert_eq!(
             first.metadata.get("package.name"),
             Some(&"demo".to_string())
@@ -2033,6 +4283,77 @@ mod tests {
             first.metadata.get("package.entry"),
             Some(&"services_editor_vi".to_string())
         );
+    }
+
+    #[test]
+    fn test_launch_package_reports_partial_failures() {
+        use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+
+        struct DenyCliLaunchPolicy;
+        impl PolicyEngine for DenyCliLaunchPolicy {
+            fn evaluate(&self, event: PolicyEvent, context: &PolicyContext) -> PolicyDecision {
+                if event == PolicyEvent::OnSpawn
+                    && context
+                        .target_identity
+                        .as_ref()
+                        .map(|target| target.name == "CLI")
+                        .unwrap_or(false)
+                {
+                    PolicyDecision::deny("CLI disabled by policy")
+                } else {
+                    PolicyDecision::allow()
+                }
+            }
+
+            fn name(&self) -> &str {
+                "DenyCliLaunchPolicy"
+            }
+        }
+
+        let workspace_identity = IdentityMetadata::new(
+            IdentityKind::Service,
+            TrustDomain::core(),
+            "test-workspace",
+            0,
+        );
+        let mut workspace =
+            WorkspaceManager::new(workspace_identity).with_policy(Box::new(DenyCliLaunchPolicy));
+
+        let manifest = PackageManifest {
+            format_version: PackageFormatVersion::new(1, 0),
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            components: vec![
+                ComponentSpec {
+                    id: "editor".to_string(),
+                    name: "Editor".to_string(),
+                    component_type: PackageComponentType::Editor,
+                    entry: "services_editor_vi".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+                ComponentSpec {
+                    id: "cli".to_string(),
+                    name: "CLI".to_string(),
+                    component_type: PackageComponentType::Cli,
+                    entry: "cli_console".to_string(),
+                    focusable: true,
+                    metadata: HashMap::new(),
+                    budget: None,
+                },
+            ],
+        };
+
+        let report = workspace.launch_package(&manifest).unwrap();
+        assert_eq!(report.created_component_ids.len(), 1);
+        assert_eq!(report.failures.len(), 1);
+
+        let failure = &report.failures[0];
+        assert_eq!(failure.component_name, "CLI");
+        assert_eq!(failure.component_type, ComponentType::Cli);
+        assert_eq!(failure.entry, "cli_console");
+        assert!(matches!(failure.error, WorkspaceError::LaunchDenied { .. }));
     }
 
     #[test]
@@ -2417,6 +4738,20 @@ mod tests {
     }
 
     #[test]
+    fn test_actionable_error_missing_launch_context_for_file_picker() {
+        let err = WorkspaceError::MissingLaunchContext {
+            component_type: ComponentType::FilePicker,
+            reason: "storage context unavailable".to_string(),
+        };
+        let (message, actions) = err.actionable_message();
+        let formatted = err.format_with_actions();
+
+        assert!(message.contains("Cannot launch FilePicker"));
+        assert!(actions.iter().any(|a| a.contains("open editor")));
+        assert!(formatted.contains("Try:"));
+    }
+
+    #[test]
     fn test_actionable_error_format() {
         let err = WorkspaceError::NoComponents;
         let formatted = err.format_with_actions();
@@ -2564,6 +4899,77 @@ mod tests {
     }
 
     #[test]
+    fn test_action_save_clears_dirty_editor_state() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let config = LaunchConfig::new(
+            ComponentType::Editor,
+            "editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let editor_id = workspace.launch_component(config).unwrap();
+
+        if let Some(ComponentInstance::Editor(editor)) =
+            workspace.component_instances.get_mut(&editor_id)
+        {
+            editor.state_mut().mark_dirty();
+            assert!(editor.state().is_dirty());
+        } else {
+            panic!("Expected editor instance");
+        }
+
+        let result = workspace.execute_action(&Action::Save);
+        assert!(result);
+
+        if let Some(ComponentInstance::Editor(editor)) =
+            workspace.component_instances.get(&editor_id)
+        {
+            assert!(!editor.state().is_dirty());
+        } else {
+            panic!("Expected editor instance");
+        }
+    }
+
+    #[test]
+    fn test_action_save_fails_when_focused_component_is_not_editor() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let editor_config = LaunchConfig::new(
+            ComponentType::Editor,
+            "editor",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let _editor_id = workspace.launch_component(editor_config).unwrap();
+        let cli_id = workspace.launch_component(cli_config).unwrap();
+
+        // Last launched focusable component is focused.
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
+
+        let result = workspace.execute_action(&Action::Save);
+        assert!(!result);
+
+        let status = &workspace.workspace_status.last_action;
+        assert!(status.is_some());
+        assert!(status
+            .as_ref()
+            .unwrap()
+            .contains("focused component is not an editor"));
+    }
+
+    #[test]
     fn test_action_quit() {
         use crate::keybindings::Action;
 
@@ -2601,11 +5007,56 @@ mod tests {
         let result = workspace.execute_action(&Action::CommandMode);
         assert!(result);
 
-        // Check that status was updated (placeholder implementation)
+        let focused_id = workspace.get_focused_component().unwrap();
+        let focused = workspace.get_component(focused_id).unwrap();
+        assert_eq!(focused.component_type, ComponentType::Cli);
+
+        let main_view_id = focused.main_view.unwrap().view_id;
+        let frame = workspace
+            .view_host()
+            .get_latest(main_view_id)
+            .unwrap()
+            .unwrap();
+        let mut found_palette_line = false;
+        let mut found_command_entry = false;
+        for idx in 0..frame.content.line_count() {
+            if let Some(line) = frame.content.get_line(idx) {
+                if line.contains("Command Palette (") {
+                    found_palette_line = true;
+                }
+                if line.contains(" -> `") {
+                    found_command_entry = true;
+                }
+            }
+        }
+        assert!(found_palette_line);
+        assert!(found_command_entry);
+
         let status = &workspace.workspace_status.last_action;
         assert!(status.is_some());
         let status_text = status.as_ref().unwrap();
-        assert!(status_text.contains("Command mode"));
+        assert!(status_text.contains("Command palette ready:"));
+    }
+
+    #[test]
+    fn test_action_command_mode_reuses_existing_cli() {
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+
+        let cli_config = LaunchConfig::new(
+            ComponentType::Cli,
+            "cli",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let cli_id = workspace.launch_component(cli_config).unwrap();
+
+        let before = workspace.list_components().len();
+        let result = workspace.execute_action(&Action::CommandMode);
+        assert!(result);
+        assert_eq!(workspace.list_components().len(), before);
+        assert_eq!(workspace.get_focused_component(), Some(cli_id));
     }
 
     #[test]
@@ -2653,15 +5104,46 @@ mod tests {
             TrustDomain::user(),
         );
 
-        let component_id = workspace.launch_component(config).unwrap();
+        let err = workspace.launch_component(config).unwrap_err();
+        match err {
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                assert_eq!(component_type, ComponentType::FilePicker);
+                assert!(reason.contains("storage context"));
+            }
+            other => panic!("expected MissingLaunchContext, got {:?}", other),
+        }
+        assert_eq!(workspace.components.len(), 0);
+        assert_eq!(workspace.component_instances.len(), 0);
+    }
 
-        // Component should be created but instance will be None
-        assert_eq!(workspace.components.len(), 1);
-        assert!(workspace.get_component(component_id).is_some());
+    #[test]
+    fn test_launch_file_picker_without_root_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(JournaledStorage::new()));
 
-        let component = workspace.get_component(component_id).unwrap();
-        assert_eq!(component.component_type, ComponentType::FilePicker);
-        assert_eq!(component.state, ComponentState::Running);
+        let config = LaunchConfig::new(
+            ComponentType::FilePicker,
+            "file-picker",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+
+        let err = workspace.launch_component(config).unwrap_err();
+        match err {
+            WorkspaceError::MissingLaunchContext {
+                component_type,
+                reason,
+            } => {
+                assert_eq!(component_type, ComponentType::FilePicker);
+                assert!(reason.contains("root directory"));
+            }
+            other => panic!("expected MissingLaunchContext, got {:?}", other),
+        }
+        assert_eq!(workspace.components.len(), 0);
+        assert_eq!(workspace.component_instances.len(), 0);
     }
 
     #[test]
@@ -2697,6 +5179,363 @@ mod tests {
         assert_eq!(component.component_type, ComponentType::FilePicker);
         assert_eq!(component.state, ComponentState::Running);
         assert!(component.focusable);
+    }
+
+    #[test]
+    fn test_settings_save_load_roundtrip_with_storage_context() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(JournaledStorage::new()));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        workspace.set_setting(
+            "ui.theme".to_string(),
+            SettingValue::String("dark".to_string()),
+        );
+
+        workspace.save_settings().unwrap();
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(8));
+        workspace.set_setting(
+            "ui.theme".to_string(),
+            SettingValue::String("light".to_string()),
+        );
+
+        workspace.load_settings().unwrap();
+
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(2)
+        );
+        assert_eq!(
+            workspace.get_setting("ui.theme").unwrap().as_string(),
+            Some("dark")
+        );
+    }
+
+    #[test]
+    fn test_settings_load_recovers_from_corrupt_data() {
+        let mut storage = JournaledStorage::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(
+                &mut tx,
+                WorkspaceManager::settings_object_id(),
+                b"{ not valid json ",
+            )
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(storage));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(2)
+        );
+
+        workspace.load_settings().unwrap();
+
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn test_settings_save_links_path_when_fs_view_available() {
+        use services_fs_view::FileSystemOperations;
+
+        let mut workspace = create_test_workspace();
+        let storage = JournaledStorage::new();
+        let fs_view = FileSystemViewService::new();
+        let root = DirectoryView::new(services_storage::ObjectId::new());
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(storage, fs_view, root));
+
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        workspace.save_settings().unwrap();
+
+        let context = workspace.editor_io_context.as_ref().unwrap();
+        let fs_view = context.fs_view.as_ref().unwrap();
+        let root = context.root.as_ref().unwrap();
+        let object_id = fs_view.open(root, SETTINGS_OVERRIDES_PATH).unwrap();
+        assert_eq!(object_id, WorkspaceManager::settings_object_id());
+    }
+
+    #[test]
+    fn test_file_picker_status_breadcrumb_tracks_directory_path() {
+        use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        let root_id = services_storage::ObjectId::new();
+        let docs_id = services_storage::ObjectId::new();
+
+        let mut root = DirectoryView::new(root_id);
+        root.add_entry(fs_view::DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            services_storage::ObjectKind::Map,
+        ));
+
+        let mut docs = DirectoryView::new(docs_id);
+        docs.add_entry(fs_view::DirectoryEntry::new(
+            "readme.md".to_string(),
+            services_storage::ObjectId::new(),
+            services_storage::ObjectKind::Blob,
+        ));
+
+        let mut fs_view = FileSystemViewService::new();
+        fs_view.register_directory(docs);
+
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            fs_view,
+            root,
+        ));
+
+        let picker_id = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::FilePicker,
+                "file-picker",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let enter = InputEvent::key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
+        workspace.route_input(&enter);
+
+        let context =
+            workspace
+                .editor_io_context
+                .as_ref()
+                .and_then(|ctx| match (&ctx.fs_view, &ctx.root) {
+                    (Some(fs_view), Some(root)) => Some((fs_view.clone(), root.clone())),
+                    _ => None,
+                });
+        let breadcrumb = if let Some(ComponentInstance::FilePicker(picker)) =
+            workspace.component_instances.get(&picker_id)
+        {
+            WorkspaceManager::build_file_picker_breadcrumb(picker, context.as_ref())
+        } else {
+            panic!("Expected file picker instance");
+        };
+
+        assert_eq!(breadcrumb, "ROOT/docs");
+        assert!(!breadcrumb.contains("<root>"));
+    }
+
+    #[test]
+    fn test_file_picker_selection_opens_editor_with_resolved_path() {
+        use input_types::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut workspace = create_test_workspace();
+
+        let root_id = services_storage::ObjectId::new();
+        let docs_id = services_storage::ObjectId::new();
+        let readme_id = services_storage::ObjectId::new();
+
+        let mut root = DirectoryView::new(root_id);
+        root.add_entry(fs_view::DirectoryEntry::new(
+            "docs".to_string(),
+            docs_id,
+            services_storage::ObjectKind::Map,
+        ));
+
+        let mut docs = DirectoryView::new(docs_id);
+        docs.add_entry(fs_view::DirectoryEntry::new(
+            "readme.md".to_string(),
+            readme_id,
+            services_storage::ObjectKind::Blob,
+        ));
+
+        let mut fs_view = FileSystemViewService::new();
+        fs_view.register_directory(docs);
+
+        workspace.set_editor_io_context(EditorIoContext::with_fs_view(
+            JournaledStorage::new(),
+            fs_view,
+            root,
+        ));
+
+        workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::FilePicker,
+                "file-picker",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let enter = InputEvent::key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
+        workspace.route_input(&enter); // enter docs/
+        workspace.route_input(&enter); // select readme.md
+
+        let focused_id = workspace.get_focused_component().unwrap();
+        let focused = workspace.get_component(focused_id).unwrap();
+        assert_eq!(focused.component_type, ComponentType::Editor);
+        assert_eq!(
+            focused.metadata.get("arg0"),
+            Some(&"docs/readme.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_window_layout_launches_into_tabs() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        let layout = workspace.window_layout_snapshot();
+        assert_eq!(layout.tiles.len(), 1);
+        assert_eq!(layout.tiles[0].tabs, vec![id1, id2]);
+        assert_eq!(layout.tiles[0].active_component, Some(id2));
+    }
+
+    #[test]
+    fn test_split_focused_tile_produces_composed_views() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        workspace.split_focused_tile(SplitAxis::Vertical).unwrap();
+
+        let snapshot = workspace.render_snapshot();
+        assert_eq!(snapshot.layout.split_axis, Some(SplitAxis::Vertical));
+        assert_eq!(snapshot.layout.tiles.len(), 2);
+        assert_eq!(snapshot.tiles.len(), 2);
+        assert!(snapshot.composed_main_view.is_some());
+        assert!(snapshot.composed_status_view.is_some());
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+        assert!(snapshot
+            .layout
+            .tiles
+            .iter()
+            .any(|tile| tile.active_component == Some(id1)));
+        assert!(snapshot
+            .layout
+            .tiles
+            .iter()
+            .any(|tile| tile.active_component == Some(id2)));
+
+        let first_line = snapshot
+            .composed_main_view
+            .as_ref()
+            .and_then(|frame| frame.content.get_line(0))
+            .unwrap_or("");
+        assert!(first_line.contains("vertical split"));
+    }
+
+    #[test]
+    fn test_focus_next_tile_cycles_across_split_tiles() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Cli,
+                "cli1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        workspace.split_focused_tile(SplitAxis::Vertical).unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+
+        workspace.focus_next_tile().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
+
+        workspace.focus_next_tile().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+    }
+
+    #[test]
+    fn test_focus_next_tab_cycles_within_tile() {
+        let mut workspace = create_test_workspace();
+
+        let id1 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor1",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id2 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor2",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+        let id3 = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor3",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        assert_eq!(workspace.get_focused_component(), Some(id3));
+
+        workspace.focus_next_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
+
+        workspace.focus_next_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id2));
+
+        workspace.focus_previous_tab().unwrap();
+        assert_eq!(workspace.get_focused_component(), Some(id1));
     }
 }
 
@@ -2744,6 +5583,8 @@ pub struct WorkspaceRuntime<P: WorkspacePlatform> {
     workspace: WorkspaceManager,
     /// Current tick number
     tick_count: u64,
+    /// Loaded boot configuration used to initialize startup behavior
+    boot_config: BootConfig,
 }
 
 impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
@@ -2757,20 +5598,40 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     pub fn new(
         platform: P,
         workspace_identity: IdentityMetadata,
-        initial_caps: WorkspaceCaps,
+        mut initial_caps: WorkspaceCaps,
     ) -> Self {
         let mut workspace = WorkspaceManager::new(workspace_identity);
+        let mut boot_profile_manager = BootProfileManager::new();
+        let boot_profile_load = match initial_caps.storage.as_mut() {
+            Some(storage_context) => boot_profile_manager.load(Some(&mut storage_context.storage)),
+            None => boot_profile_manager.load(None),
+        };
+        let boot_config = boot_profile_manager.config().clone();
 
         // Set editor I/O context if storage capability is provided
         if let Some(storage_context) = initial_caps.storage {
             workspace.set_editor_io_context(storage_context);
         }
 
-        Self {
+        let mut runtime = Self {
             platform,
             workspace,
             tick_count: 0,
+            boot_config,
+        };
+
+        if let Err(err) = boot_profile_load {
+            runtime
+                .workspace
+                .workspace_status_mut()
+                .set_last_action(format!(
+                    "Boot profile load failed: {}; defaults applied",
+                    err
+                ));
         }
+
+        runtime.apply_boot_profile();
+        runtime
     }
 
     /// Creates a new workspace runtime with policy
@@ -2811,13 +5672,20 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
         // Clear display before rendering new content
         display.clear();
 
-        // Render main view if available
-        if let Some(ref main_view) = snapshot.main_view {
+        // Render composed multi-window view when present; otherwise focused view.
+        if let Some(main_view) = snapshot
+            .composed_main_view
+            .as_ref()
+            .or(snapshot.main_view.as_ref())
+        {
             display.render_main_view(main_view);
         }
 
-        // Render status view if available
-        if let Some(ref status_view) = snapshot.status_view {
+        if let Some(status_view) = snapshot
+            .composed_status_view
+            .as_ref()
+            .or(snapshot.status_view.as_ref())
+        {
             display.render_status_view(status_view);
         }
 
@@ -2847,5 +5715,70 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
     /// Get the current tick count
     pub fn tick_count(&self) -> u64 {
         self.tick_count
+    }
+
+    /// Returns the loaded boot configuration.
+    pub fn boot_config(&self) -> &BootConfig {
+        &self.boot_config
+    }
+
+    /// Applies startup behavior from the loaded boot profile.
+    fn apply_boot_profile(&mut self) {
+        match self.boot_config.profile {
+            BootProfile::Workspace => {
+                self.workspace
+                    .workspace_status_mut()
+                    .set_last_action("Boot profile: workspace".to_string());
+            }
+            BootProfile::Editor => {
+                let mut args = Vec::new();
+                if let Some(path) = self
+                    .boot_config
+                    .editor_file
+                    .as_ref()
+                    .filter(|path| !path.is_empty())
+                {
+                    args.push(path.clone());
+                }
+
+                let result = self.workspace.execute_command(WorkspaceCommand::Open {
+                    component_type: ComponentType::Editor,
+                    args,
+                });
+                if let commands::CommandResult::Error { message } = result {
+                    self.workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile (editor) failed: {}", message));
+                }
+            }
+            BootProfile::Kiosk => {
+                let app_name = self
+                    .boot_config
+                    .kiosk_app
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "kiosk".to_string());
+
+                let config = LaunchConfig::new(
+                    ComponentType::Custom,
+                    format!("kiosk-{}", app_name),
+                    IdentityKind::Component,
+                    TrustDomain::user(),
+                )
+                .with_metadata("boot.profile", "kiosk")
+                .with_metadata("kiosk.app", app_name.clone());
+
+                match self.workspace.launch_component(config) {
+                    Ok(_) => self
+                        .workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile: kiosk ({})", app_name)),
+                    Err(err) => self
+                        .workspace
+                        .workspace_status_mut()
+                        .set_last_action(format!("Boot profile (kiosk) failed: {}", err)),
+                }
+            }
+        }
     }
 }

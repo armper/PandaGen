@@ -109,16 +109,22 @@ The editor will open in the QEMU window.
 **Command Mode:**
 - `:q` - Quit (fails if buffer is dirty)
 - `:q!` - Force quit (discard changes)
-- `:w` - Write (shows "Filesystem unavailable" in bare-metal mode)
+- `:w` - Write to active boot storage backend (`ramdisk` fallback or `virtio-blk-mmio` when available)
 - `:wq` - Write and quit
 - `Esc` - Cancel command
 
 ### Limitations in Bare-Metal Mode
 
-- **No Filesystem**: Bare-metal editor operates in-memory only. `:w` command shows a message that filesystem is unavailable.
-- **In-Memory Editing Only**: All edits are lost when you quit the editor or reboot.
+- **Backend-Dependent Persistence**: Boot storage now probes for `virtio-blk-mmio` and falls back to `ramdisk`.
+- **Current Default QEMU Path**: `cargo xtask qemu` attaches `virtio-blk-pci`; without PCI probing in the kernel, storage typically falls back to RAM and is not reboot-persistent.
 - **VGA Text Mode**: 80x25 character display, no syntax highlighting.
 - **PS/2 Keyboard Only**: USB keyboards may not work depending on BIOS/UEFI compatibility layer.
+
+Check `dist/serial.log` for the boot line:
+
+```
+Filesystem ready (backend: ...)
+```
 
 ### Editor Implementation
 

@@ -5,7 +5,10 @@
 use fs_view::DirectoryView;
 use hal::BlockDevice;
 use services_fs_view::{FileSystemOperations, FileSystemViewService};
-use services_storage::{ObjectId, ObjectKind, PersistentFilesystem, TransactionError};
+use services_storage::{
+    JournaledStorage, ObjectId, ObjectKind, PersistentFilesystem, TransactionError,
+    TransactionalStorage,
+};
 
 /// CLI Command handler with persistent storage backend
 pub struct PersistentCommandHandler<D: BlockDevice> {
@@ -156,6 +159,8 @@ pub struct CommandHandler {
     pub fs_service: FileSystemViewService,
     /// Current root directory
     pub root: DirectoryView,
+    /// Storage backend for object content reads/writes
+    storage: JournaledStorage,
 }
 
 impl CommandHandler {
@@ -168,7 +173,11 @@ impl CommandHandler {
         // Register the root directory with the service
         fs_service.register_directory(root.clone());
 
-        Self { fs_service, root }
+        Self {
+            fs_service,
+            root,
+            storage: JournaledStorage::new(),
+        }
     }
 
     /// Lists directory contents
@@ -184,17 +193,26 @@ impl CommandHandler {
         Ok(names)
     }
 
-    /// Reads file contents (stub - returns object ID)
+    /// Reads file contents
     ///
     /// Example: `pg cat docs/notes.txt`
-    pub fn cat(&self, path: &str) -> Result<String, String> {
+    pub fn cat(&mut self, path: &str) -> Result<String, String> {
         let obj_id = self
             .fs_service
             .open(&self.root, path)
             .map_err(|e| format!("cat failed: {}", e))?;
 
-        // In a real implementation, this would read the object contents
-        Ok(format!("Object ID: {}", obj_id))
+        let mut tx = self
+            .storage
+            .begin_transaction()
+            .map_err(|e| format!("cat failed: {}", e))?;
+        let bytes = self
+            .storage
+            .read_data(&tx, obj_id)
+            .map_err(|e| format!("cat failed: {}", e))?;
+        let _ = self.storage.rollback(&mut tx);
+
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Creates a directory
@@ -327,13 +345,19 @@ mod tests {
     fn test_link_and_cat_command() {
         let mut handler = CommandHandler::new();
         let obj_id = ObjectId::new();
+        let content = b"hello from storage";
+
+        // Seed storage with actual object content for the linked object.
+        let mut tx = handler.storage.begin_transaction().unwrap();
+        handler.storage.write(&mut tx, obj_id, content).unwrap();
+        handler.storage.commit(&mut tx).unwrap();
 
         let link_result = handler.link("file.txt", obj_id, ObjectKind::Blob);
         assert!(link_result.is_ok());
 
         let cat_result = handler.cat("file.txt");
         assert!(cat_result.is_ok());
-        assert!(cat_result.unwrap().contains(&obj_id.to_string()));
+        assert_eq!(cat_result.unwrap(), "hello from storage");
     }
 
     #[test]
@@ -381,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_cat_nonexistent_file() {
-        let handler = CommandHandler::new();
+        let mut handler = CommandHandler::new();
         let result = handler.cat("nonexistent.txt");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cat failed"));

@@ -3,6 +3,7 @@
 use identity::{IdentityKind, IdentityMetadata, TrustDomain};
 use input_types::{KeyCode, KeyEvent, Modifiers};
 use services_workspace_manager::{
+    boot_profile::{BootConfig, BootProfile, BootProfileManager},
     ComponentType, FakePlatform, LaunchConfig, WorkspaceCaps, WorkspaceRuntime,
 };
 
@@ -140,6 +141,83 @@ fn test_runtime_with_storage_capability() {
     // Workspace should have the storage context set
     // (We can't directly verify this, but it's used internally when launching editors)
     assert_eq!(runtime.tick_count(), 0);
+}
+
+#[test]
+fn test_runtime_boot_profile_editor_launches_editor_on_startup() {
+    use services_storage::JournaledStorage;
+    use services_workspace_manager::EditorIoContext;
+
+    let mut storage = JournaledStorage::new();
+    let mut manager = BootProfileManager::new();
+    manager.set_config(BootConfig::new(BootProfile::Editor).with_editor_file("boot.txt".into()));
+    manager.save(Some(&mut storage)).unwrap();
+
+    let platform = FakePlatform::new();
+    let identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let caps = WorkspaceCaps::with_storage(EditorIoContext::new(storage));
+    let runtime = WorkspaceRuntime::new(platform, identity, caps);
+
+    let components = runtime.workspace().list_components();
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].component_type, ComponentType::Editor);
+    assert_eq!(
+        components[0].metadata.get("arg0"),
+        Some(&"boot.txt".to_string())
+    );
+}
+
+#[test]
+fn test_runtime_boot_profile_kiosk_launches_custom_component_on_startup() {
+    use services_storage::JournaledStorage;
+    use services_workspace_manager::EditorIoContext;
+
+    let mut storage = JournaledStorage::new();
+    let mut manager = BootProfileManager::new();
+    manager.set_config(BootConfig::new(BootProfile::Kiosk).with_kiosk_app("dashboard".into()));
+    manager.save(Some(&mut storage)).unwrap();
+
+    let platform = FakePlatform::new();
+    let identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let caps = WorkspaceCaps::with_storage(EditorIoContext::new(storage));
+    let runtime = WorkspaceRuntime::new(platform, identity, caps);
+
+    let components = runtime.workspace().list_components();
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].component_type, ComponentType::Custom);
+    assert_eq!(
+        components[0].metadata.get("boot.profile"),
+        Some(&"kiosk".to_string())
+    );
+    assert_eq!(
+        components[0].metadata.get("kiosk.app"),
+        Some(&"dashboard".to_string())
+    );
+}
+
+#[test]
+fn test_runtime_boot_profile_workspace_default_launches_no_components() {
+    let platform = FakePlatform::new();
+    let identity = IdentityMetadata::new(
+        IdentityKind::Service,
+        TrustDomain::core(),
+        "test-workspace",
+        0,
+    );
+    let runtime = WorkspaceRuntime::new(platform, identity, WorkspaceCaps::empty());
+
+    assert_eq!(runtime.boot_config().profile, BootProfile::Workspace);
+    assert_eq!(runtime.workspace().list_components().len(), 0);
 }
 
 #[test]

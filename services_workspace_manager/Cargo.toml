@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["std"]
-std = []
+std = ["dep:services_pipeline_executor", "dep:pipeline", "dep:sim_kernel"]
 
 [dependencies]
 core_types = { workspace = true }
@@ -23,6 +23,7 @@ services_editor_vi = { workspace = true }
 services_file_picker = { workspace = true }
 services_command_palette = { workspace = true }
 services_settings = { workspace = true }
+services_pipeline_executor = { workspace = true, optional = true }
 input_types = { workspace = true }
 services_input = { workspace = true }
 view_types = { workspace = true }
@@ -30,9 +31,12 @@ services_view_host = { workspace = true }
 services_fs_view = { workspace = true }
 services_storage = { workspace = true }
 fs_view = { workspace = true }
+pipeline = { workspace = true, optional = true }
+sim_kernel = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "allocator-api2"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
 uuid = { version = "1.0", default-features = false, features = ["serde"] }
@@ -41,8 +45,5 @@ uuid = { version = "1.0", default-features = false, features = ["serde"] }
 uuid = { version = "1.0", default-features = false, features = ["v4", "serde"] }
 
 # For no_std HashMap support
-[target.'cfg(not(feature = "std"))'.dependencies]
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "allocator-api2"] }
-
 [dev-dependencies]
 sim_kernel = { workspace = true }

@@ -2,10 +2,16 @@
 //!
 //! Tiered help system for workspace commands
 
+use crate::command_surface::{
+    component_id_usage_pattern, help_usage_pattern, non_launch_prompt_suggestion_by_id,
+    parse_help_topic, COMPONENT_ID_COMMAND_SPECS, HELPER_COMMAND_SPECS, HELP_TOPIC_SPECS,
+    LAUNCH_COMMAND_SPECS, NON_LAUNCH_PALETTE_SPECS,
+};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Help category
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HelpCategory {
     /// Overview help
     Overview,
@@ -22,13 +28,11 @@ pub enum HelpCategory {
 impl HelpCategory {
     /// Parse help category from string
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "overview" | "" => Some(HelpCategory::Overview),
-            "workspace" => Some(HelpCategory::Workspace),
-            "editor" => Some(HelpCategory::Editor),
-            "keys" | "keyboard" | "shortcuts" => Some(HelpCategory::Keys),
-            "system" => Some(HelpCategory::System),
-            _ => None,
+        let token = s.trim();
+        if token.is_empty() {
+            parse_help_topic(None)
+        } else {
+            parse_help_topic(Some(token))
         }
     }
 
@@ -44,29 +48,82 @@ impl HelpCategory {
     }
 
     fn overview_help(&self) -> String {
-        "PandaGen OS Workspace\n\
-             \n\
-             Available help topics:\n\
-             - help workspace  — Workspace management commands\n\
-             - help editor     — Editor commands and operations\n\
-             - help keys       — Keyboard shortcuts reference\n\
-             - help system     — System control commands\n\
-             \n\
-             Tip: Press Ctrl+P to find commands faster"
-            .to_string()
+        let mut content = String::from("PandaGen OS Workspace\n\nAvailable help topics:\n");
+        for topic in HELP_TOPIC_SPECS {
+            if let Some(primary_alias) = topic.aliases.first() {
+                content.push_str(&format!(
+                    "- {}  — {}\n",
+                    format!("help {}", primary_alias),
+                    topic_description(topic.topic)
+                ));
+            }
+        }
+        content.push_str(&format!(
+            "- {}  — Show help by topic\n",
+            help_usage_pattern()
+        ));
+        content.push_str("\nTip: Press Ctrl+P to find commands faster");
+        content
     }
 
     fn workspace_help(&self) -> String {
-        "Workspace Commands\n\
-             \n\
-             open editor <path>   — Open file in editor\n\
-             list                 — List all components\n\
-             next / prev          — Switch focus between components\n\
-             close <id>           — Close a component\n\
-             recent               — Show recent files\n\
-             \n\
-             Tip: Press Ctrl+P to find commands faster"
-            .to_string()
+        let mut lines = Vec::new();
+
+        // Launch commands are sourced from shared launch grammar/metadata.
+        for spec in LAUNCH_COMMAND_SPECS {
+            let pattern = if let Some(usage) = spec.required_usage {
+                usage.strip_prefix("Usage: ").unwrap_or(usage).to_string()
+            } else if spec.token == "editor" {
+                "open editor <path>".to_string()
+            } else {
+                format!("open {}", spec.token)
+            };
+            lines.push(format_help_line(&pattern, spec.palette.description));
+        }
+
+        // Helper command aliases are sourced from shared helper grammar.
+        for helper in HELPER_COMMAND_SPECS {
+            let aliases = helper
+                .aliases
+                .iter()
+                .map(|parts| parts.join(" "))
+                .collect::<Vec<String>>()
+                .join(" | ");
+            lines.push(format_help_line(&aliases, helper.palette.description));
+        }
+
+        // Workspace command descriptors are sourced from shared palette specs.
+        for spec in NON_LAUNCH_PALETTE_SPECS.iter().filter(|spec| {
+            spec.category == "Workspace" && matches!(spec.id, "list" | "focus_next" | "focus_prev")
+        }) {
+            if let Some(suggestion) = non_launch_prompt_suggestion_by_id(spec.id) {
+                lines.push(format_help_line(&suggestion.pattern, spec.description));
+            }
+        }
+
+        // Component-id command grammar is sourced from shared command rules.
+        for spec in COMPONENT_ID_COMMAND_SPECS {
+            let pattern = component_id_usage_pattern(spec.token).unwrap_or(spec.usage);
+            let description = NON_LAUNCH_PALETTE_SPECS
+                .iter()
+                .find(|entry| entry.id == spec.token)
+                .map(|entry| entry.description)
+                .unwrap_or("Target a component");
+            lines.push(format_help_line(pattern, description));
+        }
+
+        lines.push(format_help_line(
+            &help_usage_pattern(),
+            "Show help by topic",
+        ));
+
+        let mut content = String::from("Workspace Commands\n\n");
+        for line in lines {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        content.push_str("\nTip: Press Ctrl+P to find commands faster");
+        content
     }
 
     fn editor_help(&self) -> String {
@@ -101,16 +158,43 @@ impl HelpCategory {
     }
 
     fn system_help(&self) -> String {
-        "System Commands\n\
-             \n\
-             System control:\n\
-             - halt         — Shut down system\n\
-             - reboot       — Restart system\n\
-             - mem          — Show memory usage\n\
-             - ticks        — Show scheduler ticks\n\
-             \n\
-             Tip: Press Ctrl+P to find commands faster"
-            .to_string()
+        let mut lines = Vec::new();
+        for spec in NON_LAUNCH_PALETTE_SPECS
+            .iter()
+            .filter(|spec| spec.category == "System" && !matches!(spec.id, "help_system"))
+        {
+            let pattern = spec
+                .prompt_pattern
+                .map(|pattern| pattern.trim_end())
+                .unwrap_or(spec.id);
+            lines.push(format_help_line(pattern, spec.description));
+        }
+        lines.push(format_help_line(
+            &help_usage_pattern(),
+            "Show help by topic",
+        ));
+
+        let mut content = String::from("System Commands\n\n");
+        for line in lines {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        content.push_str("\nTip: Press Ctrl+P to find commands faster");
+        content
+    }
+}
+
+fn format_help_line(pattern: &str, description: &str) -> String {
+    format!("{:<34} — {}", pattern, description)
+}
+
+fn topic_description(topic: HelpCategory) -> &'static str {
+    match topic {
+        HelpCategory::Overview => "Workspace overview",
+        HelpCategory::Workspace => "Workspace management commands",
+        HelpCategory::Editor => "Editor commands and operations",
+        HelpCategory::Keys => "Keyboard shortcuts reference",
+        HelpCategory::System => "System control commands",
     }
 }
 
@@ -151,6 +235,8 @@ mod tests {
     #[test]
     fn test_help_overview_has_tip() {
         let content = HelpCategory::Overview.content();
+        assert!(content.contains("help workspace"));
+        assert!(content.contains("help [workspace|editor|keys|system]"));
         assert!(content.contains("Tip: Press Ctrl+P"));
     }
 
@@ -159,6 +245,9 @@ mod tests {
         let content = HelpCategory::Workspace.content();
         assert!(content.contains("open editor"));
         assert!(content.contains("list"));
+        assert!(content.contains("open custom <entry>"));
+        assert!(content.contains("recent | recent files | open recent"));
+        assert!(content.contains("help [workspace|editor|keys|system]"));
         assert!(content.contains("Tip: Press Ctrl+P"));
     }
 
@@ -181,8 +270,11 @@ mod tests {
     #[test]
     fn test_help_system_has_commands() {
         let content = HelpCategory::System.content();
-        assert!(content.contains("halt"));
-        assert!(content.contains("reboot"));
+        assert!(content.contains("boot profile show"));
+        assert!(content.contains("boot profile set"));
+        assert!(content.contains("boot profile save"));
+        assert!(!content.contains("halt"));
+        assert!(!content.contains("reboot"));
         assert!(content.contains("Tip: Press Ctrl+P"));
     }
 

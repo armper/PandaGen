@@ -1,6 +1,7 @@
 # Repository Guidelines
 
 ## Project Philosophy (Apply to Every Task)
+- **Clean-slate, next-gen OS**: design for the system we would choose today, not for historical operating-system baggage; prefer new primitives and interaction models when they improve clarity, safety, or capability.
 - **No legacy compatibility by design**: avoid POSIX assumptions (`fork`, `exec`, file descriptors, path-centric APIs).
 - **Testability first**: logic should run under `cargo test`; keep kernel-facing work minimal and deterministic.
 - **Modular and explicit**: use capabilities, explicit construction, and typed messages—no ambient authority.
