@@ -1,6 +1,6 @@
 //! GUI host and compositor on view surfaces.
 
-use graphics_rasterizer::{RasterRect, RgbaBuffer, RgbaColor};
+use graphics_rasterizer::{RasterRect, RenderTarget, RgbaBuffer, RgbaColor};
 use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
@@ -245,6 +245,12 @@ impl RasterSurfaceFrame {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RasterRenderStats {
+    pub frame_count: usize,
+    pub timestamp_ns: u64,
+}
+
 /// Simple compositor that merges view frames into a surface.
 pub struct Compositor;
 
@@ -330,13 +336,24 @@ impl Compositor {
     pub fn compose_desktop_rgba(
         &self,
         size: SurfaceSize,
-        mut windows: Vec<DesktopWindow>,
+        windows: Vec<DesktopWindow>,
     ) -> RasterSurfaceFrame {
         let mut buffer = RgbaBuffer::new(
             size.width.saturating_mul(RASTER_CELL_WIDTH),
             size.height.saturating_mul(RASTER_CELL_HEIGHT),
             DESKTOP_BACKGROUND_COLOR,
         );
+        let stats = self.render_desktop_to_target(&mut buffer, windows);
+        RasterSurfaceFrame::new(buffer, stats.frame_count, stats.timestamp_ns)
+    }
+
+    /// Render a desktop into any pixel target that implements the raster contract.
+    pub fn render_desktop_to_target(
+        &self,
+        target: &mut impl RenderTarget,
+        mut windows: Vec<DesktopWindow>,
+    ) -> RasterRenderStats {
+        target.clear(DESKTOP_BACKGROUND_COLOR);
         windows.sort_by_key(|window| {
             (
                 window.layer.sort_key(),
@@ -346,16 +363,17 @@ impl Compositor {
         });
 
         for window in &windows {
-            raster_window(&mut buffer, window);
+            raster_window(target, window);
         }
 
-        let timestamp_ns = windows
-            .iter()
-            .map(|window| window.frame.timestamp_ns)
-            .max()
-            .unwrap_or(0);
-
-        RasterSurfaceFrame::new(buffer, windows.len(), timestamp_ns)
+        RasterRenderStats {
+            frame_count: windows.len(),
+            timestamp_ns: windows
+                .iter()
+                .map(|window| window.frame.timestamp_ns)
+                .max()
+                .unwrap_or(0),
+        }
     }
 
     /// Map a workspace snapshot into tiled desktop windows.
@@ -537,14 +555,14 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
     }
 }
 
-fn raster_window(buffer: &mut RgbaBuffer, window: &DesktopWindow) {
+fn raster_window(target: &mut impl RenderTarget, window: &DesktopWindow) {
     let rect = pixel_rect(window.rect);
     if rect.width == 0 || rect.height == 0 {
         return;
     }
 
-    buffer.fill_rect(rect, WINDOW_FILL_COLOR);
-    buffer.draw_border(
+    target.fill_rect(rect, WINDOW_FILL_COLOR);
+    target.draw_border(
         rect,
         RASTER_BORDER_THICKNESS,
         if window.focused {
@@ -555,7 +573,7 @@ fn raster_window(buffer: &mut RgbaBuffer, window: &DesktopWindow) {
     );
 
     let chrome_label = window_chrome_label(window);
-    buffer.draw_text(rect.x + 2, rect.y + 2, &chrome_label, TEXT_COLOR);
+    target.draw_text(rect.x + 2, rect.y + 2, &chrome_label, TEXT_COLOR);
 
     let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
     for (line_index, line) in render_content_lines(&window.frame.content)
@@ -564,16 +582,16 @@ fn raster_window(buffer: &mut RgbaBuffer, window: &DesktopWindow) {
         .enumerate()
     {
         let y = line_origin_y + line_index * RASTER_CELL_HEIGHT;
-        if y >= buffer.height() {
+        if y >= target.height() {
             break;
         }
-        buffer.draw_text(rect.x + 2, y, &line, TEXT_COLOR);
+        target.draw_text(rect.x + 2, y, &line, TEXT_COLOR);
     }
 
     if let Some(cursor) = window.frame.cursor {
         let cursor_x = rect.x + RASTER_CELL_WIDTH + 2 + cursor.column * RASTER_CELL_WIDTH;
         let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
-        buffer.fill_rect(
+        target.fill_rect(
             RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
             CURSOR_COLOR,
         );
@@ -725,6 +743,7 @@ fn partition_extent(total: usize, count: usize) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graphics_rasterizer::{LinearFramebufferTarget, LinearPixelFormat};
     use view_types::{CursorPosition, ViewId, ViewKind};
 
     #[test]
@@ -1361,6 +1380,36 @@ mod tests {
 
         assert_eq!(surface.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
         assert_eq!(surface.pixel(16, 20), Some(UNFOCUSED_BORDER_COLOR));
+    }
+
+    #[test]
+    fn test_render_desktop_to_linear_framebuffer_target() {
+        let compositor = Compositor::new();
+        let editor = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["A".to_string()]),
+            44,
+        )
+        .with_title("Main")
+        .with_cursor(CursorPosition::new(0, 0));
+
+        let mut bytes = vec![0; 64 * 50 * 4];
+        let mut target =
+            LinearFramebufferTarget::new(64, 50, 64, LinearPixelFormat::Rgb32, &mut bytes);
+
+        let stats = compositor.render_desktop_to_target(
+            &mut target,
+            vec![DesktopWindow::new(editor, SurfaceRect::new(1, 1, 4, 3)).focused()],
+        );
+
+        assert_eq!(stats.frame_count, 1);
+        assert_eq!(stats.timestamp_ns, 44);
+        assert_eq!(target.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
+        assert_eq!(target.pixel(8, 10), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(target.pixel(12, 22), Some(TEXT_COLOR));
+        assert_eq!(target.pixel(18, 21), Some(CURSOR_COLOR));
     }
 
     #[test]

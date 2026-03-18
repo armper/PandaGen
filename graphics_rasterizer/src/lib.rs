@@ -42,63 +42,35 @@ pub struct RgbaBuffer {
     pixels: Vec<u8>,
 }
 
-impl RgbaBuffer {
-    pub fn new(width: usize, height: usize, clear: RgbaColor) -> Self {
-        let mut pixels = vec![0; width.saturating_mul(height).saturating_mul(4)];
-        for chunk in pixels.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&[clear.r, clear.g, clear.b, clear.a]);
-        }
+pub trait RenderTarget {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor);
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor>;
 
-        Self {
-            width,
-            height,
-            pixels,
-        }
-    }
-
-    pub const fn width(&self) -> usize {
-        self.width
-    }
-
-    pub const fn height(&self) -> usize {
-        self.height
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.pixels
-    }
-
-    pub fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
-        let offset = self.offset(x, y)?;
-        Some(RgbaColor::new(
-            self.pixels[offset],
-            self.pixels[offset + 1],
-            self.pixels[offset + 2],
-            self.pixels[offset + 3],
-        ))
-    }
-
-    pub fn clear(&mut self, color: RgbaColor) {
-        for chunk in self.pixels.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
-    }
-
-    pub fn fill_rect(&mut self, rect: RasterRect, color: RgbaColor) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
-        }
-
-        let x_end = rect.x.saturating_add(rect.width).min(self.width);
-        let y_end = rect.y.saturating_add(rect.height).min(self.height);
-        for y in rect.y.min(self.height)..y_end {
-            for x in rect.x.min(self.width)..x_end {
-                self.set_pixel(x, y, color);
+    fn clear(&mut self, color: RgbaColor) {
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                self.write_pixel(x, y, color);
             }
         }
     }
 
-    pub fn draw_border(&mut self, rect: RasterRect, thickness: usize, color: RgbaColor) {
+    fn fill_rect(&mut self, rect: RasterRect, color: RgbaColor) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+
+        let x_end = rect.x.saturating_add(rect.width).min(self.width());
+        let y_end = rect.y.saturating_add(rect.height).min(self.height());
+        for y in rect.y.min(self.height())..y_end {
+            for x in rect.x.min(self.width())..x_end {
+                self.write_pixel(x, y, color);
+            }
+        }
+    }
+
+    fn draw_border(&mut self, rect: RasterRect, thickness: usize, color: RgbaColor) {
         if thickness == 0 || rect.width == 0 || rect.height == 0 {
             return;
         }
@@ -132,31 +104,135 @@ impl RgbaBuffer {
         );
     }
 
-    pub fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
+    fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
         let mut cursor_x = x;
         for ch in text.chars() {
-            self.draw_glyph(cursor_x, y, glyph_for(ch), color);
+            draw_glyph(self, cursor_x, y, glyph_for(ch), color);
             cursor_x = cursor_x.saturating_add(GLYPH_WIDTH + 1);
-            if cursor_x >= self.width {
+            if cursor_x >= self.width() {
                 break;
             }
         }
     }
+}
 
-    fn draw_glyph(&mut self, x: usize, y: usize, glyph: [u8; GLYPH_HEIGHT], color: RgbaColor) {
-        for (row, pattern) in glyph.iter().enumerate() {
-            let y = y + row;
-            if y >= self.height {
-                break;
-            }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearPixelFormat {
+    Rgb32,
+    Bgr32,
+}
 
-            for column in 0..GLYPH_WIDTH {
-                let mask = 1 << (GLYPH_WIDTH - 1 - column);
-                if pattern & mask != 0 {
-                    self.set_pixel(x + column, y, color);
-                }
-            }
+impl LinearPixelFormat {
+    const fn bytes_per_pixel(self) -> usize {
+        4
+    }
+
+    fn encode(self, color: RgbaColor) -> [u8; 4] {
+        match self {
+            Self::Rgb32 => [color.b, color.g, color.r, 0],
+            Self::Bgr32 => [color.r, color.g, color.b, 0],
         }
+    }
+
+    fn decode(self, bytes: [u8; 4]) -> RgbaColor {
+        match self {
+            Self::Rgb32 => RgbaColor::new(bytes[2], bytes[1], bytes[0], 255),
+            Self::Bgr32 => RgbaColor::new(bytes[0], bytes[1], bytes[2], 255),
+        }
+    }
+}
+
+pub struct LinearFramebufferTarget<'a> {
+    width: usize,
+    height: usize,
+    stride_pixels: usize,
+    format: LinearPixelFormat,
+    buffer: &'a mut [u8],
+}
+
+impl<'a> LinearFramebufferTarget<'a> {
+    pub fn new(
+        width: usize,
+        height: usize,
+        stride_pixels: usize,
+        format: LinearPixelFormat,
+        buffer: &'a mut [u8],
+    ) -> Self {
+        let required = height
+            .saturating_mul(stride_pixels)
+            .saturating_mul(format.bytes_per_pixel());
+        assert!(
+            buffer.len() >= required,
+            "framebuffer target requires at least {required} bytes, got {}",
+            buffer.len()
+        );
+
+        Self {
+            width,
+            height,
+            stride_pixels,
+            format,
+            buffer,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buffer
+    }
+
+    fn offset(&self, x: usize, y: usize) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        Some((y * self.stride_pixels + x) * self.format.bytes_per_pixel())
+    }
+}
+
+impl RgbaBuffer {
+    pub fn new(width: usize, height: usize, clear: RgbaColor) -> Self {
+        let mut pixels = vec![0; width.saturating_mul(height).saturating_mul(4)];
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&[clear.r, clear.g, clear.b, clear.a]);
+        }
+
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        <Self as RenderTarget>::pixel(self, x, y)
+    }
+
+    pub fn clear(&mut self, color: RgbaColor) {
+        <Self as RenderTarget>::clear(self, color)
+    }
+
+    pub fn fill_rect(&mut self, rect: RasterRect, color: RgbaColor) {
+        <Self as RenderTarget>::fill_rect(self, rect, color)
+    }
+
+    pub fn draw_border(&mut self, rect: RasterRect, thickness: usize, color: RgbaColor) {
+        <Self as RenderTarget>::draw_border(self, rect, thickness, color)
+    }
+
+    pub fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
+        <Self as RenderTarget>::draw_text(self, x, y, text, color)
     }
 
     fn offset(&self, x: usize, y: usize) -> Option<usize> {
@@ -175,8 +251,82 @@ impl RgbaBuffer {
     }
 }
 
+impl RenderTarget for RgbaBuffer {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        self.set_pixel(x, y, color);
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        let offset = self.offset(x, y)?;
+        Some(RgbaColor::new(
+            self.pixels[offset],
+            self.pixels[offset + 1],
+            self.pixels[offset + 2],
+            self.pixels[offset + 3],
+        ))
+    }
+}
+
+impl RenderTarget for LinearFramebufferTarget<'_> {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        let Some(offset) = self.offset(x, y) else {
+            return;
+        };
+        self.buffer[offset..offset + 4].copy_from_slice(&self.format.encode(color));
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        let offset = self.offset(x, y)?;
+        let bytes = [
+            self.buffer[offset],
+            self.buffer[offset + 1],
+            self.buffer[offset + 2],
+            self.buffer[offset + 3],
+        ];
+        Some(self.format.decode(bytes))
+    }
+}
+
 const GLYPH_WIDTH: usize = 5;
 const GLYPH_HEIGHT: usize = 7;
+
+fn draw_glyph(
+    target: &mut (impl RenderTarget + ?Sized),
+    x: usize,
+    y: usize,
+    glyph: [u8; GLYPH_HEIGHT],
+    color: RgbaColor,
+) {
+    for (row, pattern) in glyph.iter().enumerate() {
+        let y = y + row;
+        if y >= target.height() {
+            break;
+        }
+
+        for column in 0..GLYPH_WIDTH {
+            let mask = 1 << (GLYPH_WIDTH - 1 - column);
+            if pattern & mask != 0 {
+                target.write_pixel(x + column, y, color);
+            }
+        }
+    }
+}
 
 fn glyph_for(ch: char) -> [u8; GLYPH_HEIGHT] {
     match ch {
@@ -337,6 +487,14 @@ mod tests {
 
     const CLEAR: RgbaColor = RgbaColor::new(5, 10, 15, 255);
     const ACCENT: RgbaColor = RgbaColor::new(200, 100, 50, 255);
+    const DETAIL: RgbaColor = RgbaColor::new(20, 220, 180, 255);
+
+    fn paint_sample(target: &mut impl RenderTarget) {
+        target.clear(CLEAR);
+        target.fill_rect(RasterRect::new(1, 1, 6, 4), ACCENT);
+        target.draw_border(RasterRect::new(0, 0, 8, 6), 1, DETAIL);
+        target.draw_text(2, 2, "Ab", DETAIL);
+    }
 
     #[test]
     fn test_fill_rect_clips_to_buffer_bounds() {
@@ -385,5 +543,49 @@ mod tests {
 
         assert_eq!(buffer.pixel(0, 0), Some(CLEAR));
         assert_eq!(buffer.pixel(2, 1), Some(CLEAR));
+    }
+
+    #[test]
+    fn test_linear_framebuffer_target_matches_rgba_buffer_for_same_draw_ops() {
+        let mut rgba = RgbaBuffer::new(8, 6, RgbaColor::new(0, 0, 0, 0));
+        paint_sample(&mut rgba);
+
+        let mut bytes = vec![0; 8 * 6 * 4];
+        let mut framebuffer =
+            LinearFramebufferTarget::new(8, 6, 8, LinearPixelFormat::Rgb32, &mut bytes);
+        paint_sample(&mut framebuffer);
+
+        for y in 0..6 {
+            for x in 0..8 {
+                assert_eq!(
+                    framebuffer.pixel(x, y),
+                    rgba.pixel(x, y),
+                    "pixel mismatch at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_linear_framebuffer_target_respects_stride_and_rgb32_layout() {
+        let mut bytes = vec![0xAA; 4 * 3 * 4];
+        let mut framebuffer =
+            LinearFramebufferTarget::new(3, 2, 4, LinearPixelFormat::Rgb32, &mut bytes);
+
+        framebuffer.clear(CLEAR);
+        framebuffer.write_pixel(1, 0, ACCENT);
+
+        let offset = 4;
+        assert_eq!(
+            &framebuffer.as_bytes()[offset..offset + 4],
+            &[ACCENT.b, ACCENT.g, ACCENT.r, 0]
+        );
+        let padding_offset = 3 * 4;
+        assert_eq!(
+            &framebuffer.as_bytes()[padding_offset..padding_offset + 4],
+            &[0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        assert_eq!(framebuffer.pixel(1, 0), Some(ACCENT));
+        assert_eq!(framebuffer.pixel(2, 1), Some(CLEAR));
     }
 }
