@@ -58,6 +58,22 @@ pub enum DesktopWindowRole {
     Modal,
 }
 
+/// Visible tab metadata for a desktop window chrome strip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesktopTab {
+    pub label: String,
+    pub active: bool,
+}
+
+impl DesktopTab {
+    pub fn new(label: impl Into<String>, active: bool) -> Self {
+        Self {
+            label: label.into(),
+            active,
+        }
+    }
+}
+
 /// Window descriptor for desktop composition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesktopWindow {
@@ -65,6 +81,8 @@ pub struct DesktopWindow {
     pub rect: SurfaceRect,
     #[serde(default)]
     pub role: DesktopWindowRole,
+    #[serde(default)]
+    pub tabs: Vec<DesktopTab>,
     pub z_index: usize,
     pub focused: bool,
 }
@@ -75,6 +93,7 @@ impl DesktopWindow {
             frame,
             rect,
             role: DesktopWindowRole::Main,
+            tabs: Vec::new(),
             z_index: 0,
             focused: false,
         }
@@ -82,6 +101,11 @@ impl DesktopWindow {
 
     pub fn with_role(mut self, role: DesktopWindowRole) -> Self {
         self.role = role;
+        self
+    }
+
+    pub fn with_tabs(mut self, tabs: Vec<DesktopTab>) -> Self {
+        self.tabs = tabs;
         self
     }
 
@@ -268,6 +292,27 @@ fn window_title(frame: &ViewFrame) -> String {
     })
 }
 
+fn window_chrome_label(window: &DesktopWindow) -> String {
+    if !window.tabs.is_empty() {
+        format!(" {} ", render_tab_strip(&window.tabs))
+    } else {
+        format!(" {} ", window_title(&window.frame))
+    }
+}
+
+fn render_tab_strip(tabs: &[DesktopTab]) -> String {
+    tabs.iter()
+        .map(|tab| {
+            if tab.active {
+                format!("[{}]", tab.label)
+            } else {
+                format!("({})", tab.label)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
     if window.rect.width == 0
         || window.rect.height == 0
@@ -306,7 +351,7 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
     }
 
     if rect.width > 2 {
-        let label = format!(" {} ", window_title(&window.frame));
+        let label = window_chrome_label(window);
         for (offset, ch) in label.chars().take(rect.width - 2).enumerate() {
             put_char(canvas, rect.x + 1 + offset, rect.y, ch);
         }
@@ -374,9 +419,10 @@ fn workspace_tile_windows(
         .into_iter()
         .zip(rects)
         .map(|(tile, rect)| {
-            let (frame, role) = tile_window_frame(tile, tile.tile_index);
+            let (frame, role, tabs) = tile_window_frame(tile, tile.tile_index);
             let mut window = DesktopWindow::new(frame, rect)
                 .with_role(role)
+                .with_tabs(tabs)
                 .with_z_index(tile.tile_index);
             if tile.is_focused {
                 window = window.focused();
@@ -389,7 +435,7 @@ fn workspace_tile_windows(
 fn tile_window_frame(
     tile: &WorkspaceTileRenderSnapshot,
     tile_index: usize,
-) -> (ViewFrame, DesktopWindowRole) {
+) -> (ViewFrame, DesktopWindowRole, Vec<DesktopTab>) {
     let (mut frame, role) = if let Some(frame) = tile.main_view.clone() {
         (frame, DesktopWindowRole::Main)
     } else if let Some(frame) = tile.status_view.clone() {
@@ -416,7 +462,32 @@ fn tile_window_frame(
         frame = frame.with_title(title);
     }
 
-    (frame, role)
+    let tabs = tile_window_tabs(tile, &frame);
+
+    (frame, role, tabs)
+}
+
+fn tile_window_tabs(tile: &WorkspaceTileRenderSnapshot, frame: &ViewFrame) -> Vec<DesktopTab> {
+    if tile.tabs.is_empty() {
+        return Vec::new();
+    }
+
+    let active_component = tile.active_component;
+    let active_label = frame.title.clone().unwrap_or_else(|| "Active".to_string());
+
+    tile.tabs
+        .iter()
+        .enumerate()
+        .map(|(index, component_id)| {
+            let active = Some(*component_id) == active_component;
+            let label = if active {
+                active_label.clone()
+            } else {
+                format!("Tab {}", index + 1)
+            };
+            DesktopTab::new(label, active)
+        })
+        .collect()
 }
 
 fn partition_rects_vertical(size: SurfaceSize, count: usize) -> Vec<SurfaceRect> {
@@ -857,5 +928,122 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].role, DesktopWindowRole::Status);
         assert!(windows[0].focused);
+    }
+
+    #[test]
+    fn test_workspace_snapshot_maps_tile_tabs_into_window_metadata() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let active_component = ComponentId::new();
+        let inactive_component = ComponentId::new();
+        let editor = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["hello".to_string()]),
+            40,
+        )
+        .with_title("Editor");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(active_component),
+            main_view: Some(editor.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: None,
+                focused_tile: 0,
+                tiles: vec![WorkspaceTileLayoutSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(active_component),
+                    tabs: vec![active_component, inactive_component],
+                }],
+            },
+            tiles: vec![WorkspaceTileRenderSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: Some(active_component),
+                tabs: vec![active_component, inactive_component],
+                main_view: Some(editor),
+                status_view: None,
+            }],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(24, 6), &snapshot);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].tabs.len(), 2);
+        assert_eq!(windows[0].tabs[0].label, "Editor");
+        assert!(windows[0].tabs[0].active);
+        assert_eq!(windows[0].tabs[1].label, "Tab 2");
+        assert!(!windows[0].tabs[1].active);
+    }
+
+    #[test]
+    fn test_compose_workspace_snapshot_renders_tab_strip_for_multi_tab_tile() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let active_component = ComponentId::new();
+        let inactive_component = ComponentId::new();
+        let editor = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            4,
+            ViewContent::text_buffer(vec!["hello".to_string()]),
+            40,
+        )
+        .with_title("Editor");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(active_component),
+            main_view: Some(editor.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: None,
+                focused_tile: 0,
+                tiles: vec![WorkspaceTileLayoutSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(active_component),
+                    tabs: vec![active_component, inactive_component],
+                }],
+            },
+            tiles: vec![WorkspaceTileRenderSnapshot {
+                tile_index: 0,
+                is_focused: true,
+                active_component: Some(active_component),
+                tabs: vec![active_component, inactive_component],
+                main_view: Some(editor),
+                status_view: None,
+            }],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let surface = compositor.compose_workspace_snapshot(SurfaceSize::new(20, 5), &snapshot);
+
+        assert_eq!(surface.rows[0], "# [Editor] (Tab 2) #");
+        assert_eq!(surface.rows[1], "#hello             #");
     }
 }

@@ -73,7 +73,7 @@ User-space services should provide policy:
 
 - [x] `GFX-006` Add an adapter that turns `WorkspaceRenderSnapshot` tile/layout state into `DesktopWindow` values for `services_gui_host`.
 - [x] `GFX-007` Define window roles such as main, status, overlay, palette, notification, and modal.
-- [ ] `GFX-008` Render split/tab state as actual desktop chrome instead of text-only composed summaries.
+- [x] `GFX-008` Render split/tab state as actual desktop chrome instead of text-only composed summaries.
 - [ ] `GFX-009` Add explicit z-layer policy for workspace windows, overlays, notifications, and system surfaces.
 - [ ] `GFX-010` Add deterministic tests for tile-to-window mapping, focus visuals, and overlay ordering.
 
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-008` Render split/tab state as actual desktop chrome instead of text-only composed summaries.
+- `GFX-009` Add explicit z-layer policy for workspace windows, overlays, notifications, and system surfaces.
 
-`GFX-007` is now in place, which means desktop windows carry explicit semantic roles instead of forcing later stages to infer meaning from placement or view kind. The next step is to use those roles to render real split and tab chrome rather than flattening workspace structure into plain window content.
+`GFX-008` is now in place, which means split state is expressed by actual window placement and multi-tab tiles render visible tab chrome instead of hiding that structure in text summaries. The next step is to stop encoding layering through ad hoc `z_index` choices and define a first-class desktop layering policy.
