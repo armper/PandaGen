@@ -58,6 +58,47 @@ pub enum DesktopWindowRole {
     Modal,
 }
 
+/// Canonical desktop layer ordering policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum DesktopWindowLayer {
+    /// Regular workspace-managed windows and status surfaces.
+    #[default]
+    Workspace,
+    /// Non-modal overlays attached to the current workspace.
+    Overlay,
+    /// Command palettes and launchers that float above overlays.
+    Palette,
+    /// Transient toast or alert surfaces.
+    Notification,
+    /// Blocking modal surfaces with the highest interactive priority.
+    Modal,
+    /// Reserved top layer for future system-owned surfaces.
+    System,
+}
+
+impl DesktopWindowLayer {
+    fn for_role(role: DesktopWindowRole) -> Self {
+        match role {
+            DesktopWindowRole::Main | DesktopWindowRole::Status => Self::Workspace,
+            DesktopWindowRole::Overlay => Self::Overlay,
+            DesktopWindowRole::Palette => Self::Palette,
+            DesktopWindowRole::Notification => Self::Notification,
+            DesktopWindowRole::Modal => Self::Modal,
+        }
+    }
+
+    fn sort_key(self) -> usize {
+        match self {
+            Self::Workspace => 0,
+            Self::Overlay => 1,
+            Self::Palette => 2,
+            Self::Notification => 3,
+            Self::Modal => 4,
+            Self::System => 5,
+        }
+    }
+}
+
 /// Visible tab metadata for a desktop window chrome strip.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DesktopTab {
@@ -82,6 +123,8 @@ pub struct DesktopWindow {
     #[serde(default)]
     pub role: DesktopWindowRole,
     #[serde(default)]
+    pub layer: DesktopWindowLayer,
+    #[serde(default)]
     pub tabs: Vec<DesktopTab>,
     pub z_index: usize,
     pub focused: bool,
@@ -93,6 +136,7 @@ impl DesktopWindow {
             frame,
             rect,
             role: DesktopWindowRole::Main,
+            layer: DesktopWindowLayer::Workspace,
             tabs: Vec::new(),
             z_index: 0,
             focused: false,
@@ -101,6 +145,12 @@ impl DesktopWindow {
 
     pub fn with_role(mut self, role: DesktopWindowRole) -> Self {
         self.role = role;
+        self.layer = DesktopWindowLayer::for_role(role);
+        self
+    }
+
+    pub fn with_layer(mut self, layer: DesktopWindowLayer) -> Self {
+        self.layer = layer;
         self
     }
 
@@ -204,7 +254,13 @@ impl Compositor {
         mut windows: Vec<DesktopWindow>,
     ) -> SurfaceFrame {
         let mut canvas = vec![vec![DESKTOP_BACKGROUND; size.width]; size.height];
-        windows.sort_by_key(|window| (window.z_index, window.frame.view_id.as_uuid()));
+        windows.sort_by_key(|window| {
+            (
+                window.layer.sort_key(),
+                window.z_index,
+                window.frame.view_id.as_uuid(),
+            )
+        });
 
         for window in &windows {
             draw_window(&mut canvas, window);
@@ -1045,5 +1101,55 @@ mod tests {
 
         assert_eq!(surface.rows[0], "# [Editor] (Tab 2) #");
         assert_eq!(surface.rows[1], "#hello             #");
+    }
+
+    #[test]
+    fn test_notification_role_assigns_notification_layer() {
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("notice"),
+            10,
+        );
+
+        let window = DesktopWindow::new(frame, SurfaceRect::new(0, 0, 6, 4))
+            .with_role(DesktopWindowRole::Notification);
+
+        assert_eq!(window.layer, DesktopWindowLayer::Notification);
+    }
+
+    #[test]
+    fn test_compose_desktop_layer_policy_beats_raw_z_index() {
+        let compositor = Compositor::new();
+        let workspace = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["workspace".to_string()]),
+            10,
+        )
+        .with_title("Main");
+        let notification = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("toast"),
+            20,
+        )
+        .with_title("Notify");
+
+        let surface = compositor.compose_desktop(
+            SurfaceSize::new(18, 7),
+            vec![
+                DesktopWindow::new(workspace, SurfaceRect::new(0, 1, 12, 5)).with_z_index(99),
+                DesktopWindow::new(notification, SurfaceRect::new(4, 2, 10, 4))
+                    .with_role(DesktopWindowRole::Notification)
+                    .with_z_index(0),
+            ],
+        );
+
+        assert_eq!(surface.rows[2], "+wor+ Notify +....");
+        assert_eq!(surface.rows[3], "+   +panel: t+....");
     }
 }
