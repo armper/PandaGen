@@ -75,7 +75,7 @@ User-space services should provide policy:
 - [x] `GFX-007` Define window roles such as main, status, overlay, palette, notification, and modal.
 - [x] `GFX-008` Render split/tab state as actual desktop chrome instead of text-only composed summaries.
 - [x] `GFX-009` Add explicit z-layer policy for workspace windows, overlays, notifications, and system surfaces.
-- [ ] `GFX-010` Add deterministic tests for tile-to-window mapping, focus visuals, and overlay ordering.
+- [x] `GFX-010` Add deterministic tests for tile-to-window mapping, focus visuals, and overlay ordering.
 
 ### Epic 3: Software Rasterizer
 
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-010` Add deterministic tests for tile-to-window mapping, focus visuals, and overlay ordering.
+- `GFX-011` Add a pure Rust software rasterizer crate that can paint rectangles, borders, glyphs, and solid fills into an RGBA buffer.
 
-`GFX-009` is now in place, which means layering is no longer an accident of raw `z_index` values. The next step is to widen deterministic coverage around focus chrome, layer interactions, and tile mapping invariants so later graphics work can build on a stable compositor contract.
+`GFX-010` is now in place, which means the compositor contract has stronger deterministic coverage for horizontal and vertical tile mapping, focused versus unfocused chrome, and multi-layer ordering. The next step is to leave the text-surface prototype behind and add a real software raster path.

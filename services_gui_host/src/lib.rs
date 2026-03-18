@@ -1152,4 +1152,168 @@ mod tests {
         assert_eq!(surface.rows[2], "+wor+ Notify +....");
         assert_eq!(surface.rows[3], "+   +panel: t+....");
     }
+
+    #[test]
+    fn test_workspace_snapshot_maps_horizontal_tiles_to_desktop_windows() {
+        use services_workspace_manager::{
+            ComponentId, WorkspaceLayoutSnapshot, WorkspaceTileLayoutSnapshot,
+        };
+
+        let compositor = Compositor::new();
+        let top_component = ComponentId::new();
+        let bottom_component = ComponentId::new();
+        let top = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            2,
+            ViewContent::text_buffer(vec!["top".to_string()]),
+            20,
+        )
+        .with_title("Top");
+        let bottom = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            5,
+            ViewContent::text_buffer(vec!["bottom".to_string()]),
+            50,
+        )
+        .with_title("Bottom");
+
+        let snapshot = WorkspaceRenderSnapshot {
+            focused_component: Some(top_component),
+            main_view: Some(top.clone()),
+            status_view: None,
+            composed_main_view: None,
+            composed_status_view: None,
+            layout: WorkspaceLayoutSnapshot {
+                split_axis: Some(SplitAxis::Horizontal),
+                focused_tile: 0,
+                tiles: vec![
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 0,
+                        is_focused: true,
+                        active_component: Some(top_component),
+                        tabs: vec![top_component],
+                    },
+                    WorkspaceTileLayoutSnapshot {
+                        tile_index: 1,
+                        is_focused: false,
+                        active_component: Some(bottom_component),
+                        tabs: vec![bottom_component],
+                    },
+                ],
+            },
+            tiles: vec![
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 0,
+                    is_focused: true,
+                    active_component: Some(top_component),
+                    tabs: vec![top_component],
+                    main_view: Some(top),
+                    status_view: None,
+                },
+                WorkspaceTileRenderSnapshot {
+                    tile_index: 1,
+                    is_focused: false,
+                    active_component: Some(bottom_component),
+                    tabs: vec![bottom_component],
+                    main_view: Some(bottom),
+                    status_view: None,
+                },
+            ],
+            component_count: 2,
+            running_count: 2,
+            status_strip: "Workspace".to_string(),
+            breadcrumbs: "PANDA".to_string(),
+            #[cfg(debug_assertions)]
+            debug_info: None,
+        };
+
+        let windows =
+            compositor.desktop_windows_from_workspace_snapshot(SurfaceSize::new(18, 9), &snapshot);
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].rect, SurfaceRect::new(0, 0, 18, 5));
+        assert_eq!(windows[1].rect, SurfaceRect::new(0, 5, 18, 4));
+        assert!(windows[0].focused);
+        assert!(!windows[1].focused);
+    }
+
+    #[test]
+    fn test_compose_desktop_focus_visuals_distinguish_focused_from_unfocused() {
+        let compositor = Compositor::new();
+        let focused = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("focused"),
+            10,
+        )
+        .with_title("Focus");
+        let unfocused = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("idle"),
+            10,
+        )
+        .with_title("Idle");
+
+        let surface = compositor.compose_desktop(
+            SurfaceSize::new(20, 8),
+            vec![
+                DesktopWindow::new(focused, SurfaceRect::new(0, 0, 10, 4)).focused(),
+                DesktopWindow::new(unfocused, SurfaceRect::new(10, 0, 10, 4)),
+            ],
+        );
+
+        assert_eq!(surface.rows[0], "# Focus ##+ Idle +++");
+        assert_eq!(surface.rows[3], "##########++++++++++");
+    }
+
+    #[test]
+    fn test_compose_desktop_modal_layer_outranks_notification_and_overlay() {
+        let compositor = Compositor::new();
+        let workspace = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["workspace".to_string()]),
+            10,
+        )
+        .with_title("Main");
+        let overlay = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("overlay"),
+            20,
+        )
+        .with_title("Overlay");
+        let modal = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::panel("modal"),
+            30,
+        )
+        .with_title("Modal");
+
+        let surface = compositor.compose_desktop(
+            SurfaceSize::new(20, 8),
+            vec![
+                DesktopWindow::new(workspace, SurfaceRect::new(0, 1, 14, 5))
+                    .with_z_index(50),
+                DesktopWindow::new(overlay, SurfaceRect::new(3, 2, 12, 4))
+                    .with_role(DesktopWindowRole::Overlay)
+                    .with_z_index(99),
+                DesktopWindow::new(modal, SurfaceRect::new(5, 3, 10, 4))
+                    .with_role(DesktopWindowRole::Modal)
+                    .with_z_index(0),
+            ],
+        );
+
+        assert_eq!(surface.rows[3], "+  +p+ Modal ++.....");
+        assert!(surface.rows[4].contains("panel: m"));
+    }
 }
