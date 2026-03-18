@@ -1,0 +1,31 @@
+# Open editor through host-control mode, type text, then quit host runtime
+
+# Enter host control mode
+Ctrl+Space
+
+# open editor
+o
+p
+e
+n
+Space
+e
+d
+i
+t
+o
+r
+Enter
+
+# Type in editor
+i
+"Hello Panda"
+Escape
+
+# Enter host control and quit
+Ctrl+Space
+q
+u
+i
+t
+Enter
