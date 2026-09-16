@@ -113,10 +113,10 @@ User-space services should provide policy:
 ### Epic 7: Desktop Shell
 
 - [x] `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
-- [ ] `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
+- [x] `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
 - [ ] `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
 - [ ] `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
-- [ ] `GFX-035` Add shell-level theme tokens so the desktop has a coherent next-gen visual language.
+- [x] `GFX-035` Add shell-level theme tokens so the desktop has a coherent next-gen visual language.
 
 ### Epic 8: Graphical App Surfaces
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-031` is in place: the graphics desktop is now the PandaGen shell, with a status bar, a launcher strip driven by the command palette (clicks run commands), the workspace area, expiring notices, the palette overlay, and the pointer, all composed from a data model and verified in QEMU.
+`GFX-032` and `GFX-035` are in place: the compositor paints from a `Theme` (default dark slate and a light variant), windows have tinted title bars by focus and role, a separator that continues the focus ring, rounded tab boxes, and muted text when unfocused.
 
 The best next implementation step is:
 
-- `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
+- `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
 
-The shell frame exists; its windows still draw a plain one-pixel border and a text label. A proper title bar and focus ring make focus visible at a glance and give tabs a real strip to live in.
+The palette already renders as a shell window; what remains is making it a real graphical control: highlighted selection row, pointer hover and click selection, and scrolling through long result lists using the scene primitives.

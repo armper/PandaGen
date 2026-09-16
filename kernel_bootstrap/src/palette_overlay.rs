@@ -180,9 +180,9 @@ impl PaletteOverlayState {
     /// Gets the context header for display
     pub fn context_header(&self) -> &str {
         if self.in_cli_mode {
-            "Commands — CLI"
+            "Commands - CLI"
         } else {
-            "Commands — Workspace"
+            "Commands - Workspace"
         }
     }
 

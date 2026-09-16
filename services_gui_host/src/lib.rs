@@ -25,6 +25,7 @@ pub mod input_routing;
 pub mod layout;
 pub mod scene;
 pub mod shell;
+pub mod theme;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
 pub use layout::{Anchor, Axis, Insets, LayoutId, LayoutNode, Length};
@@ -33,6 +34,7 @@ pub use shell::{
     compose_shell, shell_layout, LauncherItem, NoticeLevel, ShellModel, ShellNotice, ShellRects,
     ShellViewIds,
 };
+pub use theme::Theme;
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
@@ -42,14 +44,16 @@ pub const RASTER_CELL_WIDTH: usize = DESKTOP_FONT.advance_x();
 pub const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
 const RASTER_BORDER_THICKNESS: usize = 1;
 
-const DESKTOP_BACKGROUND_COLOR: RgbaColor = RgbaColor::new(12, 18, 28, 255);
-const POINTER_FILL_COLOR: RgbaColor = RgbaColor::new(245, 245, 245, 255);
-const POINTER_OUTLINE_COLOR: RgbaColor = RgbaColor::new(10, 10, 10, 255);
-const WINDOW_FILL_COLOR: RgbaColor = RgbaColor::new(28, 34, 48, 255);
-const FOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(52, 211, 153, 255);
-const UNFOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(107, 114, 128, 255);
-const TEXT_COLOR: RgbaColor = RgbaColor::new(226, 232, 240, 255);
-const CURSOR_COLOR: RgbaColor = RgbaColor::new(251, 146, 60, 255);
+const DESKTOP_BACKGROUND_COLOR: RgbaColor = Theme::DEFAULT.background;
+const POINTER_FILL_COLOR: RgbaColor = Theme::DEFAULT.pointer_fill;
+const POINTER_OUTLINE_COLOR: RgbaColor = Theme::DEFAULT.pointer_outline;
+const WINDOW_FILL_COLOR: RgbaColor = Theme::DEFAULT.surface;
+const FOCUSED_BORDER_COLOR: RgbaColor = Theme::DEFAULT.border_focused;
+const UNFOCUSED_BORDER_COLOR: RgbaColor = Theme::DEFAULT.border_unfocused;
+const TEXT_COLOR: RgbaColor = Theme::DEFAULT.text;
+const CURSOR_COLOR: RgbaColor = Theme::DEFAULT.caret;
+/// Corner radius of tab boxes in the title strip.
+const TAB_RADIUS: usize = 3;
 
 /// Dimensions of a composited surface.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,7 +322,10 @@ pub struct RasterRenderStats {
 }
 
 /// Simple compositor that merges view frames into a surface.
-pub struct Compositor;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Compositor {
+    theme: Theme,
+}
 
 impl Default for Compositor {
     fn default() -> Self {
@@ -328,7 +335,18 @@ impl Default for Compositor {
 
 impl Compositor {
     pub fn new() -> Self {
-        Self
+        Self {
+            theme: Theme::DEFAULT,
+        }
+    }
+
+    /// Compositor painting with `theme` (GFX-035).
+    pub const fn with_theme(theme: Theme) -> Self {
+        Self { theme }
+    }
+
+    pub const fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     pub fn compose(&self, mut frames: Vec<ViewFrame>) -> SurfaceFrame {
@@ -407,7 +425,7 @@ impl Compositor {
         let mut buffer = RgbaBuffer::new(
             size.width.saturating_mul(RASTER_CELL_WIDTH),
             size.height.saturating_mul(RASTER_CELL_HEIGHT),
-            DESKTOP_BACKGROUND_COLOR,
+            self.theme.background,
         );
         let stats = self.render_desktop_to_target(&mut buffer, windows);
         RasterSurfaceFrame::new(buffer, stats.frame_count, stats.timestamp_ns)
@@ -448,22 +466,22 @@ impl Compositor {
         let damage_rect = damage_rect.and_then(|rect| rect.intersect(target_bounds));
 
         if let Some(rect) = damage_rect {
-            target.fill_rect(rect, DESKTOP_BACKGROUND_COLOR);
+            target.fill_rect(rect, self.theme.background);
         } else {
-            target.clear(DESKTOP_BACKGROUND_COLOR);
+            target.clear(self.theme.background);
         }
 
         windows.sort_by_key(composition_sort_key);
 
         let mut painted_windows = 0;
         for window in &windows {
-            if raster_window(target, window, damage_rect) {
+            if raster_window(target, window, damage_rect, &self.theme) {
                 painted_windows += 1;
             }
         }
 
         if let Some(cursor) = cursor {
-            raster_cursor(target, &cursor);
+            raster_cursor(target, &cursor, &self.theme);
         }
 
         RasterRenderStats {
@@ -557,7 +575,7 @@ fn cursor_sprite_size(shape: CursorShape) -> (usize, usize) {
 }
 
 /// Paint the cursor sprite; pixels outside the target are skipped by the target.
-fn raster_cursor(target: &mut impl RenderTarget, cursor: &DesktopCursor) {
+fn raster_cursor(target: &mut impl RenderTarget, cursor: &DesktopCursor, theme: &Theme) {
     if !cursor.visible {
         return;
     }
@@ -567,8 +585,8 @@ fn raster_cursor(target: &mut impl RenderTarget, cursor: &DesktopCursor) {
     for (dy, row) in rows.iter().enumerate() {
         for (dx, cell) in row.bytes().enumerate() {
             let color = match cell {
-                b'X' => POINTER_OUTLINE_COLOR,
-                b'o' => POINTER_FILL_COLOR,
+                b'X' => theme.pointer_outline,
+                b'o' => theme.pointer_fill,
                 _ => continue,
             };
             let x = cursor.x.saturating_add(dx);
@@ -852,6 +870,7 @@ fn raster_window(
     target: &mut impl RenderTarget,
     window: &DesktopWindow,
     damage_rect: Option<RasterRect>,
+    theme: &Theme,
 ) -> bool {
     let rect = pixel_rect(window.rect);
     if rect.width == 0 || rect.height == 0 {
@@ -865,32 +884,19 @@ fn raster_window(
         return false;
     };
 
+    let border_color = if window.focused {
+        theme.border_focused
+    } else {
+        theme.border_unfocused
+    };
     {
         let mut window_target = ScissorTarget::new(target, clipped_rect);
-        window_target.fill_rect(rect, WINDOW_FILL_COLOR);
-        window_target.draw_border(
-            rect,
-            RASTER_BORDER_THICKNESS,
-            if window.focused {
-                FOCUSED_BORDER_COLOR
-            } else {
-                UNFOCUSED_BORDER_COLOR
-            },
-        );
+        window_target.fill_rect(rect, theme.surface);
+        window_target.draw_border(rect, RASTER_BORDER_THICKNESS, border_color);
     }
 
     if window.chrome {
-        let chrome_label = window_chrome_label(window);
-        if let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) {
-            let mut chrome_target = ScissorTarget::new(target, chrome_rect);
-            chrome_target.draw_text_with_font(
-                rect.x + 2,
-                rect.y + 2,
-                &chrome_label,
-                &DESKTOP_FONT,
-                TEXT_COLOR,
-            );
-        }
+        raster_title_bar(target, window, rect, clipped_rect, border_color, theme);
     }
 
     // Content text starts one cell down when a chrome row is present.
@@ -913,7 +919,7 @@ fn raster_window(
                 if y >= target_height {
                     break;
                 }
-                content_target.draw_text_with_font(rect.x + 2, y, &line, &DESKTOP_FONT, TEXT_COLOR);
+                content_target.draw_text_with_font(rect.x + 2, y, &line, &DESKTOP_FONT, theme.text);
             }
 
             if let Some(cursor) = window.frame.cursor {
@@ -923,13 +929,92 @@ fn raster_window(
                 let cursor_y = content_top + 1 + cursor.line * RASTER_CELL_HEIGHT;
                 content_target.fill_rect(
                     RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
-                    CURSOR_COLOR,
+                    theme.caret,
                 );
             }
         }
     }
 
     true
+}
+
+/// Title bar fill for a window: role first, then focus.
+fn title_fill(window: &DesktopWindow, theme: &Theme) -> RgbaColor {
+    match window.role {
+        DesktopWindowRole::Notification => theme.title_notice,
+        DesktopWindowRole::Palette => theme.title_palette,
+        _ if window.focused => theme.title_focused,
+        _ => theme.title_unfocused,
+    }
+}
+
+/// Graphical title bar (GFX-032): a tinted strip under the top border, a
+/// separator line in the border colour (the focus ring continues through it),
+/// and either the title text or a strip of rounded tab boxes.
+fn raster_title_bar(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    rect: RasterRect,
+    clipped_rect: RasterRect,
+    border_color: RgbaColor,
+    theme: &Theme,
+) {
+    let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) else {
+        return;
+    };
+    let title_text = if window.focused {
+        theme.text
+    } else {
+        theme.text_muted
+    };
+    let mut chrome_target = ScissorTarget::new(target, chrome_rect);
+    chrome_target.fill_rect(window_chrome_rect(rect), title_fill(window, theme));
+
+    if window.tabs.is_empty() {
+        let title = window_chrome_label(window);
+        chrome_target.draw_text_with_font(
+            rect.x + 2,
+            rect.y + 2,
+            &title,
+            &DESKTOP_FONT,
+            title_text,
+        );
+    } else {
+        let tab_top = rect.y + RASTER_BORDER_THICKNESS + 1;
+        let tab_height = RASTER_CELL_HEIGHT.saturating_sub(RASTER_BORDER_THICKNESS + 1);
+        let mut x = rect.x + 2;
+        for tab in &window.tabs {
+            let width = (tab.label.chars().count() + 2) * RASTER_CELL_WIDTH;
+            let body = RasterRect::new(x, tab_top, width, tab_height);
+            let (fill, text) = if tab.active {
+                (theme.tab_active, theme.text)
+            } else {
+                (theme.tab_inactive, theme.text_muted)
+            };
+            chrome_target.fill_rounded_rect(body, TAB_RADIUS, fill);
+            chrome_target.draw_text_with_font(
+                x + RASTER_CELL_WIDTH,
+                rect.y + 2,
+                &tab.label,
+                &DESKTOP_FONT,
+                text,
+            );
+            x += width + 2;
+        }
+    }
+
+    // Separator between the title bar and the content; for the focused
+    // window this carries the accent so the ring reads as one shape.
+    let separator_y = rect.y + RASTER_CELL_HEIGHT;
+    if separator_y < rect.y + rect.height {
+        let mut line_target = ScissorTarget::new(target, clipped_rect);
+        line_target.draw_hline(
+            rect.x + RASTER_BORDER_THICKNESS,
+            separator_y,
+            rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
+            border_color,
+        );
+    }
 }
 
 fn pixel_rect(rect: SurfaceRect) -> RasterRect {
@@ -1142,6 +1227,12 @@ mod tests {
                     Some(color) if color == UNFOCUSED_BORDER_COLOR => '+',
                     Some(color) if color == TEXT_COLOR => 't',
                     Some(color) if color == CURSOR_COLOR => '@',
+                    Some(color) if color == Theme::DEFAULT.title_focused => 'T',
+                    Some(color) if color == Theme::DEFAULT.title_unfocused => 'u',
+                    Some(color) if color == Theme::DEFAULT.title_notice => 'n',
+                    Some(color) if color == Theme::DEFAULT.title_palette => 'p',
+                    Some(color) if color == Theme::DEFAULT.text_muted => 'm',
+                    Some(color) if color == Theme::DEFAULT.tab_inactive => 'i',
                     Some(_) => '?',
                     None => '!',
                 };
@@ -2084,6 +2175,145 @@ mod tests {
             target.pixel(cursor.x, cursor.y),
             Some(POINTER_OUTLINE_COLOR)
         );
+    }
+
+    #[test]
+    fn test_title_bar_tint_follows_focus_and_role() {
+        let compositor = Compositor::new();
+        let make = |title: &str| {
+            ViewFrame::new(
+                ViewId::new(),
+                ViewKind::TextBuffer,
+                1,
+                ViewContent::text_buffer(vec![]),
+                0,
+            )
+            .with_title(title)
+        };
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let windows = vec![
+            DesktopWindow::new(make("A"), SurfaceRect::new(0, 0, 8, 4)).focused(),
+            DesktopWindow::new(make("B"), SurfaceRect::new(8, 0, 8, 4)),
+            DesktopWindow::new(make("N"), SurfaceRect::new(0, 4, 8, 3))
+                .with_role(DesktopWindowRole::Notification),
+            DesktopWindow::new(make("P"), SurfaceRect::new(8, 4, 8, 3))
+                .with_role(DesktopWindowRole::Palette),
+        ];
+        let surface = compositor.compose_desktop_rgba(SurfaceSize::new(16, 7), windows);
+
+        // A pixel in the title strip past the label text.
+        let probe_x = 6 * w;
+        assert_eq!(
+            surface.pixel(probe_x, 4),
+            Some(Theme::DEFAULT.title_focused)
+        );
+        assert_eq!(
+            surface.pixel(8 * w + probe_x, 4),
+            Some(Theme::DEFAULT.title_unfocused)
+        );
+        assert_eq!(
+            surface.pixel(probe_x, 4 * h + 4),
+            Some(Theme::DEFAULT.title_notice)
+        );
+        assert_eq!(
+            surface.pixel(8 * w + probe_x, 4 * h + 4),
+            Some(Theme::DEFAULT.title_palette)
+        );
+
+        // Separator under the title bar carries the border colour.
+        assert_eq!(surface.pixel(probe_x, h), Some(FOCUSED_BORDER_COLOR));
+        assert_eq!(
+            surface.pixel(8 * w + probe_x, h),
+            Some(UNFOCUSED_BORDER_COLOR)
+        );
+        // Content below is plain surface.
+        assert_eq!(surface.pixel(probe_x, h + 5), Some(WINDOW_FILL_COLOR));
+
+        // Unfocused title text is muted.
+        let glyph = graphics_rasterizer::ascii_8x16_glyph('B');
+        let (dy, row) = glyph
+            .iter()
+            .enumerate()
+            .find(|(_, row)| **row != 0)
+            .unwrap();
+        let dx = (0..8).find(|dx| (row >> (7 - dx)) & 1 == 1).unwrap();
+        // Label is padded with one space, so the glyph starts one cell in.
+        assert_eq!(
+            surface.pixel(8 * w + 2 + w + dx, 2 + dy),
+            Some(Theme::DEFAULT.text_muted)
+        );
+    }
+
+    #[test]
+    fn test_tab_strip_draws_active_and_inactive_tab_boxes() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec![]),
+            0,
+        );
+        let window = DesktopWindow::new(frame, SurfaceRect::new(0, 0, 20, 4))
+            .with_tabs(vec![
+                DesktopTab::new("one", true),
+                DesktopTab::new("two", false),
+            ])
+            .focused();
+        let surface = compositor.compose_desktop_rgba(SurfaceSize::new(20, 4), vec![window]);
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+
+        // First tab box: x 2.. 2+5w, padding cell before the label is fill.
+        let first_pad = (2 + w / 2, 2 + h / 2);
+        assert_eq!(
+            surface.pixel(first_pad.0, first_pad.1),
+            Some(Theme::DEFAULT.tab_active)
+        );
+        // Second tab starts after the first box plus a 2px gap.
+        let second_x = 2 + 5 * w + 2;
+        assert_eq!(
+            surface.pixel(second_x + w / 2, 2 + h / 2),
+            Some(Theme::DEFAULT.tab_inactive)
+        );
+        // Rounded corner of the inactive tab shows the title fill behind it.
+        assert_eq!(
+            surface.pixel(second_x, 2),
+            Some(Theme::DEFAULT.title_focused)
+        );
+        // Past both tabs the strip is title fill.
+        assert_eq!(
+            surface.pixel(second_x + 5 * w + 4, 2 + h / 2),
+            Some(Theme::DEFAULT.title_focused)
+        );
+    }
+
+    #[test]
+    fn test_theme_override_changes_every_painted_token() {
+        let compositor = Compositor::with_theme(Theme::LIGHT);
+        assert_eq!(compositor.theme(), &Theme::LIGHT);
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["x".to_string()]),
+            0,
+        )
+        .with_cursor(CursorPosition::new(0, 0));
+        let window = DesktopWindow::new(frame, SurfaceRect::new(1, 1, 8, 4)).focused();
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let mut target = RgbaBuffer::new(10 * w, 6 * h, RgbaColor::new(0, 0, 0, 0));
+        compositor.render_desktop_to_target_with_cursor(
+            &mut target,
+            vec![window],
+            None,
+            Some(DesktopCursor::new(0, 5 * h)),
+        );
+        assert_eq!(target.pixel(0, 0), Some(Theme::LIGHT.background));
+        assert_eq!(target.pixel(w, h), Some(Theme::LIGHT.border_focused));
+        assert_eq!(target.pixel(6 * w, h + 4), Some(Theme::LIGHT.title_focused));
+        assert_eq!(target.pixel(w + 3, 2 * h + 6), Some(Theme::LIGHT.caret));
+        assert_eq!(target.pixel(8 * w, 3 * h), Some(Theme::LIGHT.surface));
+        assert_eq!(target.pixel(0, 5 * h), Some(Theme::LIGHT.pointer_outline));
     }
 
     #[test]
