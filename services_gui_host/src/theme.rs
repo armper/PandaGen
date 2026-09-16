@@ -33,6 +33,8 @@ pub struct Theme {
     pub text_muted: RgbaColor,
     /// Text caret.
     pub caret: RgbaColor,
+    /// Highlighted (selected) content row.
+    pub selection: RgbaColor,
     /// Active tab body; matches `surface` so the tab joins its content.
     pub tab_active: RgbaColor,
     /// Inactive tab body.
@@ -55,6 +57,7 @@ impl Theme {
         text: RgbaColor::new(226, 232, 240, 255),
         text_muted: RgbaColor::new(148, 163, 184, 255),
         caret: RgbaColor::new(251, 146, 60, 255),
+        selection: RgbaColor::new(44, 82, 96, 255),
         tab_active: RgbaColor::new(28, 34, 48, 255),
         tab_inactive: RgbaColor::new(52, 60, 78, 255),
         pointer_fill: RgbaColor::new(245, 245, 245, 255),
@@ -74,6 +77,7 @@ impl Theme {
         text: RgbaColor::new(24, 30, 40, 255),
         text_muted: RgbaColor::new(96, 106, 122, 255),
         caret: RgbaColor::new(210, 90, 20, 255),
+        selection: RgbaColor::new(200, 224, 240, 255),
         tab_active: RgbaColor::new(250, 250, 252, 255),
         tab_inactive: RgbaColor::new(214, 220, 228, 255),
         pointer_fill: RgbaColor::new(20, 20, 20, 255),

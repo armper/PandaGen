@@ -148,6 +148,16 @@ impl PaletteOverlayState {
     }
 
     /// Moves selection up
+    /// Select a displayed result directly (pointer hover/click). Out-of-range
+    /// indices are clamped to the last result.
+    pub fn set_selection(&mut self, index: usize) {
+        if self.results.is_empty() {
+            self.selection_index = 0;
+        } else {
+            self.selection_index = index.min(self.results.len() - 1);
+        }
+    }
+
     pub fn move_selection_up(&mut self) {
         if self.selection_index > 0 {
             self.selection_index -= 1;

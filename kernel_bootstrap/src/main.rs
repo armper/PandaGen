@@ -1198,43 +1198,101 @@ fn workspace_loop(
                                 let _ = writeln!(serial, "pointer route: {:?}", delivery);
                             }
                         }
-                        // A primary press on a launcher line runs that command.
+                        // Pointer interaction with shell surfaces (GFX-031/033).
                         let launcher_id = renderer.view_ids().launcher();
+                        let palette_id = renderer.view_ids().palette();
                         for delivery in &deliveries {
                             let services_gui_host::Delivery::Pointer {
                                 target,
                                 event: routed,
-                                hit: Some(hit),
+                                hit,
                             } = delivery
                             else {
                                 continue;
                             };
-                            if *target != launcher_id
-                                || !routed.is_press(input_types::PointerButton::Primary)
-                            {
+                            let content_line = hit.and_then(|h| match h.region {
+                                services_gui_host::HitRegion::Content { line, .. } => Some(line),
+                                _ => None,
+                            });
+                            let primary_press =
+                                routed.is_press(input_types::PointerButton::Primary);
+
+                            if *target == palette_id {
+                                let result =
+                                    content_line.and_then(desktop_frame::palette_result_at_line);
+                                match routed.kind {
+                                    input_types::PointerEventKind::Move { .. } => {
+                                        if let Some(index) = result {
+                                            if workspace.palette_hover_result(index) {
+                                                input_dirty = true;
+                                            }
+                                        }
+                                    }
+                                    input_types::PointerEventKind::Wheel { dy, .. } => {
+                                        if workspace.palette_scroll(dy) {
+                                            input_dirty = true;
+                                        }
+                                    }
+                                    _ if primary_press => {
+                                        if let Some(index) = result {
+                                            let Kernel {
+                                                boot,
+                                                allocator,
+                                                heap,
+                                                channels,
+                                                next_message_id,
+                                                ..
+                                            } = kernel;
+                                            let mut ctx = KernelContext {
+                                                boot,
+                                                allocator,
+                                                heap,
+                                                channels,
+                                                next_message_id,
+                                            };
+                                            if workspace
+                                                .palette_click_result(index, &mut ctx, serial)
+                                            {
+                                                input_dirty = true;
+                                                output_dirty = true;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
                                 continue;
                             }
-                            let services_gui_host::HitRegion::Content { line, .. } = hit.region
-                            else {
+
+                            if primary_press && workspace.is_palette_open() {
+                                // Clicking anywhere else dismisses the palette.
+                                if workspace.palette_dismiss() {
+                                    input_dirty = true;
+                                }
                                 continue;
-                            };
-                            let Kernel {
-                                boot,
-                                allocator,
-                                heap,
-                                channels,
-                                next_message_id,
-                                ..
-                            } = kernel;
-                            let mut ctx = KernelContext {
-                                boot,
-                                allocator,
-                                heap,
-                                channels,
-                                next_message_id,
-                            };
-                            if workspace.activate_launcher_line(line, &mut ctx, serial) {
-                                output_dirty = true;
+                            }
+
+                            if *target == launcher_id && primary_press {
+                                let Some(line) = content_line else {
+                                    continue;
+                                };
+                                let Kernel {
+                                    boot,
+                                    allocator,
+                                    heap,
+                                    channels,
+                                    next_message_id,
+                                    ..
+                                } = kernel;
+                                let mut ctx = KernelContext {
+                                    boot,
+                                    allocator,
+                                    heap,
+                                    channels,
+                                    next_message_id,
+                                };
+                                if workspace.activate_launcher_line(line, &mut ctx, serial) {
+                                    output_dirty = true;
+                                }
                             }
                         }
                         let role_of = |id: Option<view_types::ViewId>| {

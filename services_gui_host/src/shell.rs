@@ -82,6 +82,8 @@ pub struct ShellModel {
     /// Palette content, when open.
     pub palette: Option<ViewFrame>,
     pub palette_title: String,
+    /// Palette content line to highlight (the selected result).
+    pub palette_selection: Option<usize>,
 }
 
 /// Stable identities for shell windows across frames.
@@ -280,6 +282,7 @@ pub fn compose_shell(
             line
         })
         .collect();
+    let active_launcher = model.launcher.iter().position(|item| item.active);
     windows.push(
         DesktopWindow::new(
             ViewFrame::new(
@@ -292,7 +295,8 @@ pub fn compose_shell(
             .with_title("Launch"),
             rects.launcher,
         )
-        .with_role(DesktopWindowRole::Launcher),
+        .with_role(DesktopWindowRole::Launcher)
+        .with_highlight(active_launcher),
     );
 
     for (index, notice) in model.notices.iter().take(MAX_NOTICES).enumerate() {
@@ -322,6 +326,7 @@ pub fn compose_shell(
         windows.push(
             DesktopWindow::new(frame, rects.palette)
                 .with_role(DesktopWindowRole::Palette)
+                .with_highlight(model.palette_selection)
                 .focused(),
         );
     }
@@ -368,6 +373,7 @@ mod tests {
             workspace_title: "Workspace".to_string(),
             palette: None,
             palette_title: "Commands".to_string(),
+            palette_selection: None,
         }
     }
 
@@ -438,7 +444,14 @@ mod tests {
             ViewContent::text_buffer(vec!["Search: ".to_string()]),
             0,
         ));
+        with_palette.palette_selection = Some(2);
         let again = compose_shell(&with_palette, &rects, &ids);
+        assert_eq!(again.last().unwrap().highlight_line, Some(2));
+        assert_eq!(
+            windows[2].highlight_line,
+            Some(1),
+            "active launcher entry highlighted"
+        );
         assert_eq!(again[0].frame.view_id, windows[0].frame.view_id);
         assert!(!again[0].focused, "palette takes focus");
         assert_eq!(again.last().unwrap().frame.view_id, ids.palette);

@@ -1418,6 +1418,60 @@ impl WorkspaceSession {
         return true;
     }
 
+    /// Pointer hover over a palette result: move the selection there.
+    /// Returns true when the selection changed.
+    pub fn palette_hover_result(&mut self, index: usize) -> bool {
+        if !self.palette_overlay.is_open() {
+            return false;
+        }
+        let before = self.palette_overlay.selection_index();
+        self.palette_overlay.set_selection(index);
+        before != self.palette_overlay.selection_index()
+    }
+
+    /// Wheel over the palette: positive notches move the selection up.
+    pub fn palette_scroll(&mut self, notches: i32) -> bool {
+        if !self.palette_overlay.is_open() || notches == 0 {
+            return false;
+        }
+        for _ in 0..notches.unsigned_abs() {
+            if notches > 0 {
+                self.palette_overlay.move_selection_up();
+            } else {
+                self.palette_overlay.move_selection_down();
+            }
+        }
+        true
+    }
+
+    /// Click on a palette result: select it and run it.
+    pub fn palette_click_result(
+        &mut self,
+        index: usize,
+        ctx: &mut KernelContext,
+        serial: &mut SerialPort,
+    ) -> bool {
+        if !self.palette_overlay.is_open() {
+            return false;
+        }
+        self.palette_overlay.set_selection(index);
+        let Some(cmd_id) = self.palette_overlay.selected_command().cloned() else {
+            return false;
+        };
+        let _ = writeln!(serial, "palette click: index={} cmd={}", index, cmd_id);
+        self.run_palette_command(cmd_id, ctx, serial)
+    }
+
+    /// Click outside the palette dismisses it.
+    pub fn palette_dismiss(&mut self) -> bool {
+        if self.palette_overlay.is_open() {
+            self.palette_overlay.close();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Launcher entries: enabled commands that need no arguments, sorted by
     /// name so the strip is stable across frames. The flag marks the entry
     /// for the component currently open.

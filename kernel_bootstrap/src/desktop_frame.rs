@@ -82,6 +82,13 @@ pub struct DesktopLayout {
 
 /// Chrome row plus bottom border, per `services_gui_host` window rendering.
 const WINDOW_CHROME_ROWS: usize = 2;
+/// Palette content line of the first result (line 0 is the search row).
+pub const PALETTE_RESULTS_FIRST_LINE: usize = 1;
+
+/// Map a palette content line to a result index, if it is one.
+pub fn palette_result_at_line(line: usize) -> Option<usize> {
+    line.checked_sub(PALETTE_RESULTS_FIRST_LINE)
+}
 
 impl DesktopLayout {
     /// Compute the cell layout for a pixel surface.
@@ -250,6 +257,12 @@ pub fn build_desktop_windows(
             .as_ref()
             .map(|p| p.header.clone())
             .unwrap_or_default(),
+        // Line 0 is the search row; results start at line 1.
+        palette_selection: model
+            .palette
+            .as_ref()
+            .filter(|p| !p.results.is_empty())
+            .map(|p| PALETTE_RESULTS_FIRST_LINE + p.selection),
     };
     compose_shell(&shell, &layout.shell, &ids.shell)
 }
@@ -485,6 +498,13 @@ mod tests {
             panic!("palette must be a text buffer");
         };
         assert_eq!(lines, &vec!["Search: op", "  Open Editor", "> Open CLI"]);
+        assert_eq!(
+            palette.highlight_line,
+            Some(2),
+            "selection 1 is content line 2"
+        );
+        assert_eq!(palette_result_at_line(2), Some(1));
+        assert_eq!(palette_result_at_line(0), None);
         assert!(palette.layer.sort_key() > main.layer.sort_key());
         let notice = find(&windows, DesktopWindowRole::Notification);
         assert_eq!(notice.frame.title.as_deref(), Some("INFO"));

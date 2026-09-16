@@ -114,7 +114,7 @@ User-space services should provide policy:
 
 - [x] `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
 - [x] `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
-- [ ] `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
+- [x] `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
 - [ ] `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
 - [x] `GFX-035` Add shell-level theme tokens so the desktop has a coherent next-gen visual language.
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-032` and `GFX-035` are in place: the compositor paints from a `Theme` (default dark slate and a light variant), windows have tinted title bars by focus and role, a separator that continues the focus ring, rounded tab boxes, and muted text when unfocused.
+`GFX-033` is in place: the palette is a graphical control with a highlighted selection row that follows pointer hover, wheel-driven selection, click-to-run, and click-outside-to-dismiss, all backed by the existing command surface.
 
 The best next implementation step is:
 
-- `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
+- `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
 
-The palette already renders as a shell window; what remains is making it a real graphical control: highlighted selection row, pointer hover and click selection, and scrolling through long result lists using the scene primitives.
+Transient toasts exist (Phase 231). Persistent status cards, such as an unsaved-changes indicator while the editor buffer is dirty, complete the notification layer.

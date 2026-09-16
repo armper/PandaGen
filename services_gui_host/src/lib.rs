@@ -185,6 +185,10 @@ pub struct DesktopWindow {
     /// launcher) turn it off so content starts at the border.
     #[serde(default = "default_chrome")]
     pub chrome: bool,
+    /// Content line drawn with the selection fill (palette selection,
+    /// active launcher entry).
+    #[serde(default)]
+    pub highlight_line: Option<usize>,
 }
 
 fn default_chrome() -> bool {
@@ -202,6 +206,7 @@ impl DesktopWindow {
             z_index: 0,
             focused: false,
             chrome: true,
+            highlight_line: None,
         }
     }
 
@@ -228,6 +233,12 @@ impl DesktopWindow {
 
     pub fn focused(mut self) -> Self {
         self.focused = true;
+        self
+    }
+
+    /// Fill content line `line` with the selection colour.
+    pub fn with_highlight(mut self, line: Option<usize>) -> Self {
+        self.highlight_line = line;
         self
     }
 
@@ -910,6 +921,17 @@ fn raster_window(
             let target_height = target.height();
             let mut content_target = ScissorTarget::new(target, content_clip);
             let line_origin_y = content_top + 2;
+            if let Some(highlight) = window.highlight_line.filter(|l| *l < window.content_rows()) {
+                content_target.fill_rect(
+                    RasterRect::new(
+                        content_rect.x,
+                        content_top + 1 + highlight * RASTER_CELL_HEIGHT,
+                        content_rect.width,
+                        RASTER_CELL_HEIGHT,
+                    ),
+                    theme.selection,
+                );
+            }
             for (line_index, line) in render_content_lines(&window.frame.content)
                 .into_iter()
                 .take(window.content_rows())
@@ -1233,6 +1255,7 @@ mod tests {
                     Some(color) if color == Theme::DEFAULT.title_palette => 'p',
                     Some(color) if color == Theme::DEFAULT.text_muted => 'm',
                     Some(color) if color == Theme::DEFAULT.tab_inactive => 'i',
+                    Some(color) if color == Theme::DEFAULT.selection => 'h',
                     Some(_) => '?',
                     None => '!',
                 };
@@ -2175,6 +2198,50 @@ mod tests {
             target.pixel(cursor.x, cursor.y),
             Some(POINTER_OUTLINE_COLOR)
         );
+    }
+
+    #[test]
+    fn test_highlight_line_fills_one_content_row() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::text_buffer(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+            0,
+        );
+        let window =
+            DesktopWindow::new(frame, SurfaceRect::new(0, 0, 10, 6)).with_highlight(Some(1));
+        let surface = compositor.compose_desktop_rgba(SurfaceSize::new(10, 6), vec![window]);
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        // Row 1 band spans the content width; rows 0 and 2 are plain surface.
+        let band_y = h + 1 + h + h / 2;
+        assert_eq!(surface.pixel(6 * w, band_y), Some(Theme::DEFAULT.selection));
+        assert_eq!(surface.pixel(1, band_y), Some(Theme::DEFAULT.selection));
+        assert_eq!(surface.pixel(6 * w, band_y - h), Some(WINDOW_FILL_COLOR));
+        assert_eq!(surface.pixel(6 * w, band_y + h), Some(WINDOW_FILL_COLOR));
+        // Text still paints over the band.
+        let glyph = graphics_rasterizer::ascii_8x16_glyph('b');
+        let (dy, row) = glyph.iter().enumerate().find(|(_, r)| **r != 0).unwrap();
+        let dx = (0..8).find(|dx| (row >> (7 - dx)) & 1 == 1).unwrap();
+        assert_eq!(surface.pixel(2 + dx, h + 2 + h + dy), Some(TEXT_COLOR));
+
+        // Out-of-range highlight paints nothing.
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::text_buffer(vec![]),
+            0,
+        );
+        let window =
+            DesktopWindow::new(frame, SurfaceRect::new(0, 0, 10, 3)).with_highlight(Some(9));
+        let surface = compositor.compose_desktop_rgba(SurfaceSize::new(10, 3), vec![window]);
+        for y in 0..3 * h {
+            for x in 0..10 * w {
+                assert_ne!(surface.pixel(x, y), Some(Theme::DEFAULT.selection));
+            }
+        }
     }
 
     #[test]
