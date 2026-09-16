@@ -59,6 +59,8 @@ pub struct DesktopModel {
     pub palette: Option<PaletteModel>,
     /// Pointer position in surface pixels; `None` hides the cursor.
     pub pointer: Option<(usize, usize)>,
+    /// Whether the text caret is drawn this frame (blink phase).
+    pub caret_visible: bool,
 }
 
 /// Desktop layout in cell units derived from the pixel surface.
@@ -202,8 +204,11 @@ pub fn build_desktop_windows(
         }
     };
     let main_focused = model.palette.is_none();
-    let mut main = DesktopWindow::new(main_frame.with_title(main_title), layout.main)
-        .with_role(DesktopWindowRole::Main);
+    let mut main_frame = main_frame.with_title(main_title);
+    if !model.caret_visible {
+        main_frame.cursor = None;
+    }
+    let mut main = DesktopWindow::new(main_frame, layout.main).with_role(DesktopWindowRole::Main);
     if main_focused {
         main = main.focused();
     }
@@ -354,6 +359,7 @@ mod tests {
             editor: None,
             palette: None,
             pointer: None,
+            caret_visible: true,
         }
     }
 
@@ -471,6 +477,18 @@ mod tests {
             windows[1].frame.content,
             ViewContent::status_line("-- NORMAL --")
         );
+    }
+
+    #[test]
+    fn test_caret_visibility_controls_cursor_in_main_window() {
+        let layout = DesktopLayout::for_pixels(1280, 800);
+        let mut model = sample_model();
+        model.caret_visible = false;
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        assert_eq!(windows[0].frame.cursor, None);
+        model.caret_visible = true;
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        assert!(windows[0].frame.cursor.is_some());
     }
 
     #[test]

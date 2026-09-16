@@ -20,9 +20,11 @@ use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
+pub mod animation;
 pub mod input_routing;
 pub mod layout;
 pub mod scene;
+pub use animation::{AnimationClock, Blink, Easing, Transition};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
 pub use layout::{Anchor, Axis, Insets, LayoutId, LayoutNode, Length};
 pub use scene::ScrollRegion;

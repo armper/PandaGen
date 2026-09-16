@@ -108,7 +108,7 @@ User-space services should provide policy:
 - [x] `GFX-027` Add image or icon surface support for future app and shell visuals.
 - [x] `GFX-028` Add scrollable regions and clipping containers as scene primitives.
 - [x] `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
-- [ ] `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
+- [x] `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
 
 ### Epic 7: Desktop Shell
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-029` is in place: `LayoutNode` (stack/split with fixed and weighted lengths, overlay, anchored, padded) solves to rectangles in one deterministic integer pass, and the kernel desktop layout is now declared with it.
+Epic 6 (basic scene primitives) is complete: draw ops, images, containers and scroll regions, a layout vocabulary, and tick-based animation hooks, with the caret blink as the first animation driven through the frame pacer.
 
 The best next implementation step is:
 
-- `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
+- `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
 
-Tick-based timelines and blink phases let the desktop schedule redraws (a blinking caret, a fading notification) through the existing frame pacer instead of a per-frame render loop.
+Everything the shell needs to draw itself now exists. The shell turns the bare "one main window plus status" desktop into the actual PandaGen shell layout, which Epic 8's app surfaces then live inside.

@@ -144,6 +144,8 @@ static MOUSE_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
 const KBD_DEBUG_LOG: bool = false;
 const FB_SHADOW_ENABLED: bool = true;
+/// Caret blink period in PIT ticks (100 Hz): on for 0.5 s, off for 0.5 s.
+const CARET_BLINK_PERIOD_TICKS: u64 = 100;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -997,6 +999,10 @@ fn workspace_loop(
     let mut pointer_translator = hal::PointerTranslator::new(pointer_width, pointer_height);
     // GFX-024: explicit pointer focus / keyboard focus / capture policy.
     let mut input_router = services_gui_host::DesktopInputRouter::new();
+    // GFX-030: the caret blinks on a tick timeline; the clock tells the loop
+    // when the next redraw is due instead of rendering every tick.
+    let mut caret_blink = services_gui_host::Blink::new(CARET_BLINK_PERIOD_TICKS);
+    let mut animation_clock = services_gui_host::AnimationClock::new();
     workspace.set_pointer_available(mouse_config.is_some());
     workspace.set_pointer_state(
         pointer_translator.position().x,
@@ -1206,6 +1212,15 @@ fn workspace_loop(
             }
         }
 
+        // Animation wakes are redraw requests scheduled by the previous frame.
+        if display_mode.is_graphics() && animation_clock.poll(get_tick_count()) {
+            input_dirty = true;
+        }
+        // Typing restarts the blink so the caret is visible right after input.
+        if input_progressed {
+            caret_blink.restart_at(get_tick_count());
+        }
+
         let editor_active = workspace.is_editor_active();
         let mut clear_terminal = false;
         let palette_open = workspace.is_palette_open();
@@ -1274,7 +1289,10 @@ fn workspace_loop(
                 };
                 let renderer = desktop_renderer
                     .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
-                let model = build_desktop_model(&workspace);
+                let now = get_tick_count();
+                let mut model = build_desktop_model(&workspace);
+                model.caret_visible = caret_blink.is_on_at(now);
+                animation_clock.wake_after(caret_blink.next_flip_after(now));
                 let mut windows = renderer.windows(&model);
                 input_router.apply_focus(&mut windows);
                 renderer.render_windows(windows, model.pointer);
