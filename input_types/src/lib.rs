@@ -29,13 +29,14 @@ use serde::{Deserialize, Serialize};
 /// Input event
 ///
 /// Represents a single input event from any input device.
-/// Currently supports keyboard only; pointer/touch reserved for future.
+/// Keyboard and pointer are supported; touch is reserved for future.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputEvent {
     /// Keyboard event
     Key(KeyEvent),
+    /// Pointer (mouse, trackpad, tablet) event
+    Pointer(PointerEvent),
     // Reserved for future:
-    // Pointer(PointerEvent),
     // Touch(TouchEvent),
 }
 
@@ -45,18 +46,356 @@ impl InputEvent {
         Self::Key(event)
     }
 
+    /// Creates a pointer event
+    pub fn pointer(event: PointerEvent) -> Self {
+        Self::Pointer(event)
+    }
+
     /// Returns true if this is a key event
     pub fn is_key(&self) -> bool {
         matches!(self, Self::Key(_))
+    }
+
+    /// Returns true if this is a pointer event
+    pub fn is_pointer(&self) -> bool {
+        matches!(self, Self::Pointer(_))
     }
 
     /// Returns the key event if this is a key event
     pub fn as_key(&self) -> Option<&KeyEvent> {
         match self {
             Self::Key(event) => Some(event),
-            #[allow(unreachable_patterns)]
             _ => None,
         }
+    }
+
+    /// Returns the pointer event if this is a pointer event
+    pub fn as_pointer(&self) -> Option<&PointerEvent> {
+        match self {
+            Self::Pointer(event) => Some(event),
+            _ => None,
+        }
+    }
+}
+
+/// Pointer position in desktop surface pixels.
+///
+/// Signed so relative motion can be expressed with the same type and so a
+/// pointer can be reported just outside a surface during capture without
+/// wrapping. The origin is the top-left corner of the desktop surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct PointerPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl PointerPosition {
+    pub const ORIGIN: Self = Self { x: 0, y: 0 };
+
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+
+    /// Position moved by `delta`, saturating at the i32 range.
+    pub fn offset(self, delta: PointerDelta) -> Self {
+        Self {
+            x: self.x.saturating_add(delta.dx),
+            y: self.y.saturating_add(delta.dy),
+        }
+    }
+
+    /// Position clamped into `0..width` x `0..height`.
+    pub fn clamp_to(self, width: u32, height: u32) -> Self {
+        let max_x = i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX);
+        let max_y = i32::try_from(height.saturating_sub(1)).unwrap_or(i32::MAX);
+        Self {
+            x: self.x.clamp(0, max_x.max(0)),
+            y: self.y.clamp(0, max_y.max(0)),
+        }
+    }
+}
+
+/// Relative pointer motion in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct PointerDelta {
+    pub dx: i32,
+    pub dy: i32,
+}
+
+impl PointerDelta {
+    pub const ZERO: Self = Self { dx: 0, dy: 0 };
+
+    pub const fn new(dx: i32, dy: i32) -> Self {
+        Self { dx, dy }
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.dx == 0 && self.dy == 0
+    }
+}
+
+/// A single pointer button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PointerButton {
+    /// Usually the left button.
+    Primary,
+    /// Usually the right button.
+    Secondary,
+    /// Usually the wheel button.
+    Middle,
+    /// Additional buttons, numbered from 0.
+    Extra(u8),
+}
+
+impl PointerButton {
+    /// Bit used for this button inside `PointerButtons`.
+    const fn bit(self) -> u8 {
+        match self {
+            PointerButton::Primary => 1 << 0,
+            PointerButton::Secondary => 1 << 1,
+            PointerButton::Middle => 1 << 2,
+            // Extra buttons share the remaining bits; beyond five they alias.
+            PointerButton::Extra(index) => {
+                let shift = 3 + (index % 5);
+                1 << shift
+            }
+        }
+    }
+}
+
+impl fmt::Display for PointerButton {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PointerButton::Primary => write!(f, "Primary"),
+            PointerButton::Secondary => write!(f, "Secondary"),
+            PointerButton::Middle => write!(f, "Middle"),
+            PointerButton::Extra(index) => write!(f, "Extra{}", index),
+        }
+    }
+}
+
+/// Set of pointer buttons currently held.
+///
+/// Carried on every pointer event so consumers never have to reconstruct
+/// button state from the history of press/release events they may have
+/// missed while unfocused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct PointerButtons {
+    bits: u8,
+}
+
+impl PointerButtons {
+    pub const NONE: Self = Self { bits: 0 };
+    pub const PRIMARY: Self = Self {
+        bits: PointerButton::Primary.bit(),
+    };
+    pub const SECONDARY: Self = Self {
+        bits: PointerButton::Secondary.bit(),
+    };
+    pub const MIDDLE: Self = Self {
+        bits: PointerButton::Middle.bit(),
+    };
+
+    pub const fn none() -> Self {
+        Self::NONE
+    }
+
+    pub const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.bits
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.bits == 0
+    }
+
+    pub const fn contains(self, button: PointerButton) -> bool {
+        self.bits & button.bit() != 0
+    }
+
+    pub const fn with(self, button: PointerButton) -> Self {
+        Self {
+            bits: self.bits | button.bit(),
+        }
+    }
+
+    pub const fn without(self, button: PointerButton) -> Self {
+        Self {
+            bits: self.bits & !button.bit(),
+        }
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+        }
+    }
+}
+
+/// Whether a button went down or up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ButtonState {
+    Pressed,
+    Released,
+}
+
+/// Pointer capture transitions.
+///
+/// Capture is explicit in PandaGen: a component that starts a drag asks to
+/// capture the pointer, receives every pointer event until capture ends, and
+/// is told when capture is lost so it can cancel the interaction cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PointerCapture {
+    /// The receiver now owns all pointer events.
+    Gained,
+    /// The receiver no longer owns pointer events (released or revoked).
+    Lost,
+}
+
+/// What happened to the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PointerEventKind {
+    /// The pointer moved. `delta` is the motion since the previous event.
+    Move { delta: PointerDelta },
+    /// A button changed state.
+    Button {
+        button: PointerButton,
+        state: ButtonState,
+    },
+    /// Scroll wheel or trackpad scroll. Positive `dy` scrolls content up
+    /// (wheel away from the user); units are device notches.
+    Wheel { dx: i32, dy: i32 },
+    /// Capture ownership changed for the receiver.
+    Capture(PointerCapture),
+}
+
+/// Pointer event
+///
+/// Every variant carries the absolute position, the full held-button set,
+/// and keyboard modifiers at the time of the event, so hit testing and
+/// gesture logic can be written against one event without extra state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PointerEvent {
+    pub kind: PointerEventKind,
+    pub position: PointerPosition,
+    pub buttons: PointerButtons,
+    pub modifiers: Modifiers,
+}
+
+impl PointerEvent {
+    pub const fn new(
+        kind: PointerEventKind,
+        position: PointerPosition,
+        buttons: PointerButtons,
+        modifiers: Modifiers,
+    ) -> Self {
+        Self {
+            kind,
+            position,
+            buttons,
+            modifiers,
+        }
+    }
+
+    /// Pointer moved to `position` by `delta` with `buttons` held.
+    pub const fn moved(
+        position: PointerPosition,
+        delta: PointerDelta,
+        buttons: PointerButtons,
+    ) -> Self {
+        Self::new(
+            PointerEventKind::Move { delta },
+            position,
+            buttons,
+            Modifiers::NONE,
+        )
+    }
+
+    /// `button` pressed at `position`; `buttons` is the held set including it.
+    pub const fn button_pressed(
+        position: PointerPosition,
+        button: PointerButton,
+        buttons: PointerButtons,
+    ) -> Self {
+        Self::new(
+            PointerEventKind::Button {
+                button,
+                state: ButtonState::Pressed,
+            },
+            position,
+            buttons.with(button),
+            Modifiers::NONE,
+        )
+    }
+
+    /// `button` released at `position`; `buttons` is the held set before release.
+    pub const fn button_released(
+        position: PointerPosition,
+        button: PointerButton,
+        buttons: PointerButtons,
+    ) -> Self {
+        Self::new(
+            PointerEventKind::Button {
+                button,
+                state: ButtonState::Released,
+            },
+            position,
+            buttons.without(button),
+            Modifiers::NONE,
+        )
+    }
+
+    pub const fn wheel(
+        position: PointerPosition,
+        dx: i32,
+        dy: i32,
+        buttons: PointerButtons,
+    ) -> Self {
+        Self::new(
+            PointerEventKind::Wheel { dx, dy },
+            position,
+            buttons,
+            Modifiers::NONE,
+        )
+    }
+
+    pub const fn capture(position: PointerPosition, transition: PointerCapture) -> Self {
+        Self::new(
+            PointerEventKind::Capture(transition),
+            position,
+            PointerButtons::NONE,
+            Modifiers::NONE,
+        )
+    }
+
+    pub const fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+
+    pub const fn is_move(&self) -> bool {
+        matches!(self.kind, PointerEventKind::Move { .. })
+    }
+
+    /// The button and state if this is a button event.
+    pub const fn button(&self) -> Option<(PointerButton, ButtonState)> {
+        match self.kind {
+            PointerEventKind::Button { button, state } => Some((button, state)),
+            _ => None,
+        }
+    }
+
+    /// True for a press of `button`.
+    pub fn is_press(&self, button: PointerButton) -> bool {
+        self.button() == Some((button, ButtonState::Pressed))
+    }
+
+    /// True for a release of `button`.
+    pub fn is_release(&self, button: PointerButton) -> bool {
+        self.button() == Some((button, ButtonState::Released))
     }
 }
 
@@ -507,6 +846,143 @@ mod tests {
         let deserialized: InputEvent = serde_json::from_str(&json).unwrap();
 
         assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_pointer_buttons_bitflags() {
+        let held = PointerButtons::none()
+            .with(PointerButton::Primary)
+            .with(PointerButton::Extra(1));
+        assert!(held.contains(PointerButton::Primary));
+        assert!(held.contains(PointerButton::Extra(1)));
+        assert!(!held.contains(PointerButton::Secondary));
+        assert!(!held.contains(PointerButton::Extra(0)));
+        assert!(!held.is_empty());
+
+        let released = held.without(PointerButton::Primary);
+        assert!(!released.contains(PointerButton::Primary));
+        assert!(released.contains(PointerButton::Extra(1)));
+
+        assert_eq!(
+            PointerButtons::PRIMARY.union(PointerButtons::MIDDLE).bits(),
+            0b101
+        );
+        assert_eq!(PointerButtons::from_bits(0b010), PointerButtons::SECONDARY);
+    }
+
+    #[test]
+    fn test_pointer_event_constructors_track_button_state() {
+        let at = PointerPosition::new(40, 12);
+        let press = PointerEvent::button_pressed(at, PointerButton::Primary, PointerButtons::NONE);
+        assert!(press.is_press(PointerButton::Primary));
+        assert!(!press.is_press(PointerButton::Secondary));
+        assert!(!press.is_release(PointerButton::Primary));
+        assert!(press.buttons.contains(PointerButton::Primary));
+        assert_eq!(
+            press.button(),
+            Some((PointerButton::Primary, ButtonState::Pressed))
+        );
+
+        let release = PointerEvent::button_released(at, PointerButton::Primary, press.buttons);
+        assert!(release.is_release(PointerButton::Primary));
+        assert!(release.buttons.is_empty());
+
+        let moved = PointerEvent::moved(
+            at.offset(PointerDelta::new(-5, 3)),
+            PointerDelta::new(-5, 3),
+            PointerButtons::PRIMARY,
+        )
+        .with_modifiers(Modifiers::SHIFT);
+        assert!(moved.is_move());
+        assert_eq!(moved.position, PointerPosition::new(35, 15));
+        assert_eq!(moved.button(), None);
+        assert!(moved.modifiers.is_shift());
+
+        let wheel = PointerEvent::wheel(at, 0, -2, PointerButtons::NONE);
+        assert_eq!(wheel.kind, PointerEventKind::Wheel { dx: 0, dy: -2 });
+
+        let lost = PointerEvent::capture(at, PointerCapture::Lost);
+        assert_eq!(lost.kind, PointerEventKind::Capture(PointerCapture::Lost));
+        assert!(lost.buttons.is_empty());
+    }
+
+    #[test]
+    fn test_pointer_position_offset_and_clamp() {
+        let far = PointerPosition::new(i32::MAX, -7);
+        assert_eq!(
+            far.offset(PointerDelta::new(10, -10)),
+            PointerPosition::new(i32::MAX, -17)
+        );
+        assert_eq!(
+            PointerPosition::new(-3, 900).clamp_to(1280, 800),
+            PointerPosition::new(0, 799)
+        );
+        assert_eq!(
+            PointerPosition::new(5, 5).clamp_to(0, 0),
+            PointerPosition::ORIGIN
+        );
+        assert!(PointerDelta::ZERO.is_zero());
+        assert!(!PointerDelta::new(0, 1).is_zero());
+    }
+
+    #[test]
+    fn test_input_event_pointer_accessors() {
+        let event = InputEvent::pointer(PointerEvent::moved(
+            PointerPosition::new(1, 2),
+            PointerDelta::new(1, 2),
+            PointerButtons::NONE,
+        ));
+        assert!(event.is_pointer());
+        assert!(!event.is_key());
+        assert!(event.as_key().is_none());
+        assert_eq!(
+            event.as_pointer().map(|p| p.position),
+            Some(PointerPosition::new(1, 2))
+        );
+
+        let key = InputEvent::key(KeyEvent::pressed(KeyCode::A, Modifiers::NONE));
+        assert!(key.as_pointer().is_none());
+    }
+
+    #[test]
+    fn test_pointer_event_serialization_round_trip() {
+        let events = [
+            PointerEvent::moved(
+                PointerPosition::new(100, -1),
+                PointerDelta::new(3, -4),
+                PointerButtons::PRIMARY.union(PointerButtons::MIDDLE),
+            )
+            .with_modifiers(Modifiers::CTRL.with(Modifiers::ALT)),
+            PointerEvent::button_pressed(
+                PointerPosition::new(7, 8),
+                PointerButton::Extra(2),
+                PointerButtons::NONE,
+            ),
+            PointerEvent::button_released(
+                PointerPosition::new(7, 8),
+                PointerButton::Secondary,
+                PointerButtons::SECONDARY,
+            ),
+            PointerEvent::wheel(PointerPosition::ORIGIN, -1, 1, PointerButtons::NONE),
+            PointerEvent::capture(PointerPosition::new(0, 0), PointerCapture::Gained),
+        ];
+        for event in events {
+            let wrapped = InputEvent::pointer(event);
+            let json = serde_json::to_string(&wrapped).unwrap();
+            let back: InputEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(wrapped, back, "{json}");
+        }
+
+        // Key events keep their wire shape now that a second variant exists.
+        let key = InputEvent::key(KeyEvent::pressed(KeyCode::Enter, Modifiers::none()));
+        let json = serde_json::to_string(&key).unwrap();
+        assert!(json.starts_with("{\"Key\":"), "{json}");
+    }
+
+    #[test]
+    fn test_pointer_button_display() {
+        assert_eq!(alloc::format!("{}", PointerButton::Primary), "Primary");
+        assert_eq!(alloc::format!("{}", PointerButton::Extra(3)), "Extra3");
     }
 
     #[test]

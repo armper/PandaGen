@@ -448,7 +448,10 @@ impl HostRuntime {
     /// - Command history and editing
     /// - Tab completion
     fn handle_host_control_input(&mut self, event: InputEvent) -> Result<(), HostRuntimeError> {
-        let InputEvent::Key(key_event) = event;
+        // Host control is keyboard-driven; pointer events have no meaning here.
+        let InputEvent::Key(key_event) = event else {
+            return Ok(());
+        };
         match key_event.code {
             input_types::KeyCode::Enter => {
                 // Execute command

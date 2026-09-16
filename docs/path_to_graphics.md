@@ -96,7 +96,7 @@ User-space services should provide policy:
 
 ### Epic 5: Pointer And Graphical Input Model
 
-- [ ] `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
+- [x] `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
 - [ ] `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
 - [ ] `GFX-023` Define hit testing against desktop surfaces and windows.
 - [ ] `GFX-024` Define explicit pointer focus, keyboard focus, and capture semantics for PandaGen.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Milestone A is complete and the desktop text is readable: `DESKTOP_FONT` is the shared 8x16 printable-ASCII font, the caret sits under the glyph it refers to, and `cargo xtask qemu-script` can drive and screenshot both display modes.
+`GFX-021` is in place: `input_types` has `PointerEvent` with move, button, wheel, and capture kinds, absolute position plus held-button set on every event, and serialization round-trip tests.
 
 The best next implementation step is:
 
-- `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
+- `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
 
-Pointer input is the start of Milestone B. Types first keeps the contract testable before any PS/2 mouse driver exists; `GFX-022` then bridges a real device into the same event model the keyboard already uses.
+That means a HAL pointer-device trait, a PS/2 mouse (IRQ 12) driver for `hal_x86_64`, and a bridge that turns packets into `PointerEvent`s with deterministic injection for tests, mirroring how `services_input_hal_bridge` handles the keyboard.
