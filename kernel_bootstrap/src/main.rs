@@ -883,7 +883,7 @@ fn workspace_loop(
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
-            if let (Some(fb), Some(backbuffer)) = (fb_console.as_mut(), fb_shadow.as_ref()) {
+            if let (Some(fb), Some(backbuffer)) = (fb_console.as_mut(), fb_shadow.as_mut()) {
                 present_framebuffer_shadow(serial, fb, backbuffer);
             }
         }
@@ -2037,9 +2037,10 @@ fn render_palette_overlay_fb(
 fn present_framebuffer_shadow(
     serial: &mut serial::SerialPort,
     fb: &mut framebuffer::BareMetalFramebuffer,
-    backbuffer: &framebuffer::BareMetalFramebuffer,
+    backbuffer: &mut framebuffer::BareMetalFramebuffer,
 ) {
-    match fb.present_shadow(backbuffer) {
+    // GFX-019: copy only the shadow's damage bounding box, not the full frame.
+    match fb.present_shadow_damage(backbuffer) {
         Ok(stats) => render_stats::record_desktop_present(stats.copied_pixels as u64),
         Err(err) => {
             render_stats::record_desktop_present_error();

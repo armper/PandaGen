@@ -146,6 +146,109 @@ pub enum DesktopPresentError {
     },
 }
 
+/// Axis-aligned pixel rectangle used for damage tracking (GFX-019).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl DamageRect {
+    pub const fn new(x: usize, y: usize, width: usize, height: usize) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    pub const fn area(&self) -> usize {
+        self.width * self.height
+    }
+
+    const fn right(&self) -> usize {
+        self.x.saturating_add(self.width)
+    }
+
+    const fn bottom(&self) -> usize {
+        self.y.saturating_add(self.height)
+    }
+
+    /// Smallest rectangle covering both `self` and `other`.
+    pub fn union(&self, other: DamageRect) -> DamageRect {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+        DamageRect::new(x, y, right - x, bottom - y)
+    }
+
+    /// Part of `self` inside `clip`, or `None` when they do not overlap.
+    pub fn intersect(&self, clip: DamageRect) -> Option<DamageRect> {
+        let x = self.x.max(clip.x);
+        let y = self.y.max(clip.y);
+        let right = self.right().min(clip.right());
+        let bottom = self.bottom().min(clip.bottom());
+        if right <= x || bottom <= y {
+            return None;
+        }
+        Some(DamageRect::new(x, y, right - x, bottom - y))
+    }
+}
+
+/// Accumulates the bounding box of everything drawn since the last present.
+///
+/// A single bounding box is deliberately simple: the text workspace draws in
+/// row bands, so the box is usually tight, and a present of one box is one
+/// predictable copy loop. Finer-grained region lists can come later without
+/// changing the presenter contract.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub struct DamageTracker {
+    bounds: Option<DamageRect>,
+}
+
+impl DamageTracker {
+    pub const fn new() -> Self {
+        Self { bounds: None }
+    }
+
+    pub fn mark(&mut self, rect: DamageRect) {
+        if rect.is_empty() {
+            return;
+        }
+        self.bounds = Some(match self.bounds {
+            Some(existing) => existing.union(rect),
+            None => rect,
+        });
+    }
+
+    pub const fn peek(&self) -> Option<DamageRect> {
+        self.bounds
+    }
+
+    pub const fn is_clean(&self) -> bool {
+        self.bounds.is_none()
+    }
+
+    /// Return and clear the accumulated damage.
+    pub fn take(&mut self) -> Option<DamageRect> {
+        self.bounds.take()
+    }
+}
+
 /// Glyph entry in the cache
 #[derive(Clone)]
 struct GlyphEntry {
@@ -262,6 +365,7 @@ pub struct BareMetalFramebuffer {
     info: FramebufferInfo,
     buffer: &'static mut [u8],
     glyph_cache: Option<GlyphCache>,
+    damage: DamageTracker,
 }
 
 impl BareMetalFramebuffer {
@@ -308,6 +412,7 @@ impl BareMetalFramebuffer {
             info,
             buffer,
             glyph_cache: None,
+            damage: DamageTracker::new(),
         })
     }
 
@@ -321,7 +426,41 @@ impl BareMetalFramebuffer {
             info,
             buffer,
             glyph_cache: None,
+            damage: DamageTracker::new(),
         }
+    }
+
+    /// Full-surface rectangle for this framebuffer.
+    pub const fn full_rect(&self) -> DamageRect {
+        DamageRect::new(0, 0, self.info.width, self.info.height)
+    }
+
+    /// Damage accumulated since the last `take_damage`.
+    pub const fn damage(&self) -> Option<DamageRect> {
+        self.damage.peek()
+    }
+
+    /// Return and clear accumulated damage.
+    pub fn take_damage(&mut self) -> Option<DamageRect> {
+        self.damage.take()
+    }
+
+    fn mark_damage(&mut self, rect: DamageRect) {
+        self.damage.mark(rect);
+    }
+
+    fn mark_all_damaged(&mut self) {
+        let rect = self.full_rect();
+        self.mark_damage(rect);
+    }
+
+    /// Pixel rectangle covering `len` text cells starting at (col, row).
+    fn text_cell_rect(&self, col: usize, row: usize, len: usize) -> DamageRect {
+        let x = col * FONT_WIDTH;
+        let y = row * FONT_HEIGHT;
+        let width = (len * FONT_WIDTH).min(self.info.width.saturating_sub(x));
+        let height = FONT_HEIGHT.min(self.info.height.saturating_sub(y));
+        DamageRect::new(x, y, width, height)
     }
 
     /// Returns the number of text columns based on the font width
@@ -341,6 +480,8 @@ impl BareMetalFramebuffer {
 
     /// Returns a mutable slice to the framebuffer pixel data
     pub fn buffer_mut(&mut self) -> &mut [u8] {
+        // Raw access can write anywhere; treat the whole surface as damaged.
+        self.mark_all_damaged();
         self.buffer
     }
 
@@ -374,6 +515,68 @@ impl BareMetalFramebuffer {
             shadow.buffer(),
         );
         self.present_desktop_surface(surface)
+    }
+
+    /// Present only the shadow's accumulated damage into this framebuffer.
+    ///
+    /// This is the GFX-019 present path: a paced present copies just the
+    /// bounding box of what changed since the last present, so a single
+    /// keystroke costs one text row band rather than a full-frame copy. The
+    /// shadow's damage is consumed even if the present is rejected, since a
+    /// rejected present is a geometry contract bug that a retry cannot fix.
+    pub fn present_shadow_damage(
+        &mut self,
+        shadow: &mut BareMetalFramebuffer,
+    ) -> Result<DesktopPresentStats, DesktopPresentError> {
+        let damage = shadow.take_damage();
+        let info = shadow.info();
+        let target = self.info();
+        if info.format != target.format {
+            return Err(DesktopPresentError::UnsupportedSourceFormat);
+        }
+        if info.width != target.width || info.height != target.height {
+            return Err(DesktopPresentError::DimensionMismatch {
+                expected_width: target.width,
+                expected_height: target.height,
+                actual_width: info.width,
+                actual_height: info.height,
+            });
+        }
+        if info.stride_pixels != target.stride_pixels {
+            return Err(DesktopPresentError::StrideMismatch {
+                expected_stride_pixels: target.stride_pixels,
+                actual_stride_pixels: info.stride_pixels,
+            });
+        }
+        if shadow.buffer().len() != self.buffer.len() {
+            return Err(DesktopPresentError::BufferLengthMismatch {
+                expected: self.buffer.len(),
+                actual: shadow.buffer().len(),
+            });
+        }
+
+        let Some(rect) = damage.and_then(|d| d.intersect(self.full_rect())) else {
+            return Ok(DesktopPresentStats {
+                copied_pixels: 0,
+                source_bytes: 0,
+            });
+        };
+
+        let bpp = target.format.bytes_per_pixel();
+        let row_bytes = target.stride_pixels * bpp;
+        let span_bytes = rect.width * bpp;
+        let src = shadow.buffer();
+        for y in rect.y..rect.y + rect.height {
+            let start = y * row_bytes + rect.x * bpp;
+            let end = start + span_bytes;
+            self.buffer[start..end].copy_from_slice(&src[start..end]);
+        }
+        self.mark_damage(rect);
+
+        Ok(DesktopPresentStats {
+            copied_pixels: rect.area(),
+            source_bytes: rect.height * span_bytes,
+        })
     }
 
     /// Raw whole-buffer copy. Private on purpose: every caller must go through
@@ -444,6 +647,7 @@ impl BareMetalFramebuffer {
         for y in 0..info.height {
             self.fill_pixel_row(y, bg_bytes);
         }
+        self.mark_all_damaged();
     }
 
     /// Fill a single pixel row with a color (ultra-fast using u64 writes)
@@ -497,6 +701,7 @@ impl BareMetalFramebuffer {
         for y in y_start..y_end {
             self.fill_pixel_row(y, bg_bytes);
         }
+        self.mark_damage(DamageRect::new(0, y_start, info.width, y_end - y_start));
     }
 
     /// Clear a span of text cells on a row with background color.
@@ -514,6 +719,8 @@ impl BareMetalFramebuffer {
         let max_len = (self.cols() - col).min(len);
         let pixel_start = col * FONT_WIDTH;
         let pixel_width = max_len * FONT_WIDTH;
+        let damage = self.text_cell_rect(col, row, max_len);
+        self.mark_damage(damage);
 
         for scanline in 0..FONT_HEIGHT {
             let y = row * FONT_HEIGHT + scanline;
@@ -595,6 +802,8 @@ impl BareMetalFramebuffer {
                 self.buffer[row_base..row_base + 32].copy_from_slice(scanline);
             }
         }
+        let damage = self.text_cell_rect(col, row, 1);
+        self.mark_damage(damage);
 
         true
     }
@@ -657,6 +866,8 @@ impl BareMetalFramebuffer {
                 self.buffer[char_offset..char_offset + 32].copy_from_slice(row_data);
             }
         }
+        let damage = self.text_cell_rect(col, row, max_chars);
+        self.mark_damage(damage);
 
         max_chars
     }
@@ -717,6 +928,12 @@ impl BareMetalFramebuffer {
 
         let text_bytes = text.as_bytes();
         let text_len = text_bytes.len().min(cols);
+        self.mark_damage(DamageRect::new(
+            0,
+            y_start,
+            info.width,
+            FONT_HEIGHT.min(info.height.saturating_sub(y_start)),
+        ));
 
         // Pre-compute u32 pixel values for fg and bg
         let fg_pixel = u32::from_le_bytes(fg_bytes);
@@ -812,10 +1029,12 @@ impl BareMetalFramebuffer {
                 write_pixel(self.buffer, dst_offset, pixel);
             }
         }
+        self.mark_all_damaged();
     }
 
     fn present_native_rgb32(&mut self, pixels: &[u8]) {
         self.blit_from(pixels);
+        self.mark_all_damaged();
     }
 
     /// Scroll the framebuffer up by the given number of text rows.
@@ -850,6 +1069,7 @@ impl BareMetalFramebuffer {
         for y in start_row..info.height {
             self.fill_pixel_row(y, bg_bytes);
         }
+        self.mark_all_damaged();
     }
 }
 
@@ -1054,6 +1274,122 @@ mod tests {
             Err(DesktopPresentError::DimensionMismatch { .. })
         ));
         assert!(target.buffer().iter().all(|b| *b == 0x55));
+    }
+
+    #[test]
+    fn test_damage_rect_union_and_intersect() {
+        let a = DamageRect::new(2, 2, 4, 4);
+        let b = DamageRect::new(5, 1, 2, 2);
+        assert_eq!(a.union(b), DamageRect::new(2, 1, 5, 5));
+        assert_eq!(a.union(DamageRect::new(0, 0, 0, 0)), a);
+        assert_eq!(a.intersect(b), Some(DamageRect::new(5, 2, 1, 1)));
+        assert_eq!(a.intersect(DamageRect::new(10, 10, 1, 1)), None);
+        assert_eq!(
+            a.intersect(DamageRect::new(0, 0, 100, 3)),
+            Some(DamageRect::new(2, 2, 4, 1))
+        );
+    }
+
+    #[test]
+    fn test_draw_calls_accumulate_tight_damage() {
+        let info = FramebufferInfo {
+            width: 64,
+            height: 48,
+            stride_pixels: 64,
+            format: PixelFormat::Rgb32,
+        };
+        let mut fb = test_framebuffer(info, 0);
+        assert_eq!(fb.damage(), None);
+
+        fb.draw_char_at(1, 1, b'x', (255, 255, 255), (0, 0, 0));
+        assert_eq!(fb.damage(), Some(DamageRect::new(8, 16, 8, 16)));
+
+        fb.draw_text_at(3, 2, "abcd", (255, 255, 255), (0, 0, 0));
+        assert_eq!(fb.damage(), Some(DamageRect::new(8, 16, 48, 32)));
+
+        assert_eq!(fb.take_damage(), Some(DamageRect::new(8, 16, 48, 32)));
+        assert_eq!(fb.damage(), None);
+
+        fb.clear_text_span(0, 0, 2, (0, 0, 0));
+        assert_eq!(fb.damage(), Some(DamageRect::new(0, 0, 16, 16)));
+        fb.draw_line(2, "hi", (255, 255, 255), (0, 0, 0));
+        assert_eq!(fb.damage(), Some(DamageRect::new(0, 0, 64, 48)));
+
+        fb.take_damage();
+        fb.scroll_up_text_lines(1, (0, 0, 0));
+        assert_eq!(fb.damage(), Some(fb.full_rect()));
+        fb.take_damage();
+        fb.clear(1, 2, 3);
+        assert_eq!(fb.damage(), Some(fb.full_rect()));
+    }
+
+    #[test]
+    fn test_present_shadow_damage_copies_only_damaged_region() {
+        let info = FramebufferInfo {
+            width: 32,
+            height: 32,
+            stride_pixels: 40,
+            format: PixelFormat::Rgb32,
+        };
+        let mut target = test_framebuffer(info, 0x55);
+        let mut shadow = test_framebuffer(info, 0x00);
+        shadow.clear(0x10, 0x20, 0x30);
+        shadow.take_damage();
+        shadow.draw_char_at(1, 1, b'A', (0xFF, 0xFF, 0xFF), (0x10, 0x20, 0x30));
+
+        let stats = target
+            .present_shadow_damage(&mut shadow)
+            .expect("damage present should succeed");
+        assert_eq!(stats.copied_pixels, 8 * 16);
+        assert_eq!(stats.source_bytes, 16 * 8 * 4);
+        assert_eq!(shadow.damage(), None, "present consumes shadow damage");
+
+        let row_bytes = info.stride_pixels * 4;
+        for y in 0..info.height {
+            for x in 0..info.stride_pixels {
+                let off = y * row_bytes + x * 4;
+                let inside = (8..16).contains(&x) && (16..32).contains(&y);
+                let expected = if inside {
+                    &shadow.buffer()[off..off + 4]
+                } else {
+                    &[0x55u8; 4][..]
+                };
+                assert_eq!(&target.buffer()[off..off + 4], expected, "x={x} y={y}");
+            }
+        }
+
+        // No damage -> nothing copied, target untouched.
+        target.take_damage();
+        let stats = target
+            .present_shadow_damage(&mut shadow)
+            .expect("clean shadow should present as no-op");
+        assert_eq!(stats.copied_pixels, 0);
+        assert_eq!(target.damage(), None);
+    }
+
+    #[test]
+    fn test_present_shadow_damage_rejects_geometry_mismatch_and_consumes_damage() {
+        let target_info = FramebufferInfo {
+            width: 8,
+            height: 8,
+            stride_pixels: 8,
+            format: PixelFormat::Rgb32,
+        };
+        let shadow_info = FramebufferInfo {
+            width: 8,
+            height: 8,
+            stride_pixels: 16,
+            format: PixelFormat::Rgb32,
+        };
+        let mut target = test_framebuffer(target_info, 0x55);
+        let mut shadow = test_framebuffer(shadow_info, 0x00);
+        shadow.clear(1, 1, 1);
+        assert!(matches!(
+            target.present_shadow_damage(&mut shadow),
+            Err(DesktopPresentError::StrideMismatch { .. })
+        ));
+        assert!(target.buffer().iter().all(|b| *b == 0x55));
+        assert_eq!(shadow.damage(), None);
     }
 
     #[test]

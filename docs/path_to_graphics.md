@@ -90,7 +90,7 @@ User-space services should provide policy:
 - [x] `GFX-016` Add a framebuffer presentation path that accepts a desktop pixel buffer from the GUI host path.
 - [x] `GFX-017` Route the current framebuffer backbuffer/blit machinery through that new presentation path.
 - [x] `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
-- [ ] `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
+- [x] `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
 - [ ] `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
 
 ### Epic 5: Pointer And Graphical Input Model
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
+- `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
 
-`GFX-018` is now in place: `kernel_bootstrap::present_policy::FramePacer` separates rendering from presenting. Render passes only mark the shadow dirty; the workspace loop polls the pacer once per iteration and presents at most once per policy interval, coalescing bursts. The next step is to let the presenter copy only damaged rows or rectangles so a paced present is also a small present.
+`GFX-019` is now in place: `BareMetalFramebuffer` tracks a damage bounding box across every draw call, and `present_shadow_damage` copies only that box into the hardware framebuffer. Combined with `GFX-018` pacing, a paced present is now also a small present. The next step is an explicit display-mode contract so the loop can run either the text workspace or the graphical desktop against the same presenter.
