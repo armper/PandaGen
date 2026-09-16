@@ -19,6 +19,7 @@ use hal::{CpuHal, InterruptHal, MemoryHal};
 pub mod idt;
 pub mod interrupts;
 pub mod keyboard;
+pub mod mouse;
 pub mod paging;
 pub mod port_io;
 pub mod tick;
@@ -29,6 +30,7 @@ pub mod virtio_blk;
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;
+pub use mouse::{MouseInitError, MouseInitReport, Ps2MouseInit, Ps2MousePacketParser, X86Ps2Mouse};
 pub use paging::{
     AddressSpaceHandle, PageTable, PageTableEntry, PageTableFlags, PageTableManager, Permissions,
     PhysAddr, VirtAddr, ENTRIES_PER_TABLE, KERNEL_SPACE_START, PAGE_SIZE, PAGE_TABLE_LEVELS,

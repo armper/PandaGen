@@ -47,9 +47,10 @@
 //! ```
 
 use core_types::TaskId;
-use hal::{KeyboardDevice, KeyboardTranslator};
+use hal::{KeyboardDevice, KeyboardTranslator, PointerDevice, PointerTranslator};
 use identity::ExecutionId;
 use input_types::InputEvent;
+use input_types::Modifiers;
 use kernel_api::{KernelApiV0, KernelError};
 use services_input::{
     build_input_event_envelope, InputEventSink, InputService, InputServiceError,
@@ -276,6 +277,149 @@ impl InputHalBridge {
     /// Resets the translator state (all modifiers released)
     pub fn reset_translator(&mut self) {
         self.translator.reset();
+    }
+}
+
+/// Pointer HAL bridge (GFX-022)
+///
+/// The pointer counterpart of [`InputHalBridge`]:
+/// - owns a `PointerDevice` (hardware abstraction)
+/// - owns a `PointerTranslator` (relative packets → absolute typed events)
+/// - delivers `InputEvent::Pointer` through the same subscription contract
+///
+/// One hardware packet may expand to several events (a move, button edges,
+/// a wheel notch); each is delivered separately so consumers see one fact
+/// per message.
+pub struct PointerHalBridge {
+    execution_id: ExecutionId,
+    task_id: TaskId,
+    subscription: InputSubscriptionCap,
+    pointer: Box<dyn PointerDevice>,
+    translator: PointerTranslator,
+    /// Keyboard modifiers stamped onto pointer events (fed by the keyboard path).
+    modifiers: Modifiers,
+    events_delivered: u64,
+    packets_seen: u64,
+}
+
+impl PointerHalBridge {
+    /// `surface_width` x `surface_height` confines the pointer position.
+    pub fn new(
+        execution_id: ExecutionId,
+        task_id: TaskId,
+        subscription: InputSubscriptionCap,
+        pointer: Box<dyn PointerDevice>,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Self {
+        Self {
+            execution_id,
+            task_id,
+            subscription,
+            pointer,
+            translator: PointerTranslator::new(surface_width, surface_height),
+            modifiers: Modifiers::NONE,
+            events_delivered: 0,
+            packets_seen: 0,
+        }
+    }
+
+    /// Update the modifiers applied to subsequent pointer events.
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+    }
+
+    /// Change the confinement surface (display mode or resolution change).
+    pub fn resize_surface(&mut self, width: u32, height: u32) {
+        self.translator.resize_surface(width, height);
+    }
+
+    pub fn translator(&self) -> &PointerTranslator {
+        &self.translator
+    }
+
+    /// Drain one packet and deliver its events through the kernel.
+    pub fn poll<K: KernelApiV0>(
+        &mut self,
+        input_service: &InputService,
+        kernel: &mut K,
+    ) -> Result<PollResult, BridgeError> {
+        let Some(packet) = self.pointer.poll_packet() else {
+            return Ok(PollResult::NoEvent);
+        };
+        self.packets_seen += 1;
+        let batch = self.translator.translate(packet, self.modifiers);
+
+        let mut delivered_any = false;
+        for event in batch.iter() {
+            let input_event = InputEvent::pointer(*event);
+            let active = input_service
+                .deliver_event(&self.subscription, &input_event)
+                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
+            if !active {
+                continue;
+            }
+            let envelope = build_input_event_envelope(&input_event, Some(self.task_id))
+                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
+            kernel
+                .send(self.subscription.channel, envelope)
+                .map_err(InputHalBridge::map_kernel_error)?;
+            self.events_delivered += 1;
+            delivered_any = true;
+        }
+
+        Ok(if delivered_any {
+            PollResult::EventDelivered
+        } else {
+            PollResult::NoEvent
+        })
+    }
+
+    /// Drain one packet and deliver its events through an arbitrary sink.
+    pub fn poll_with_sink<S: InputEventSink>(
+        &mut self,
+        input_service: &InputService,
+        sink: &mut S,
+    ) -> Result<PollResult, BridgeError> {
+        let Some(packet) = self.pointer.poll_packet() else {
+            return Ok(PollResult::NoEvent);
+        };
+        self.packets_seen += 1;
+        let batch = self.translator.translate(packet, self.modifiers);
+
+        let mut delivered_any = false;
+        for event in batch.iter() {
+            let input_event = InputEvent::pointer(*event);
+            let delivered = input_service
+                .deliver_event_with(&self.subscription, &input_event, sink)
+                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
+            if delivered {
+                self.events_delivered += 1;
+                delivered_any = true;
+            }
+        }
+
+        Ok(if delivered_any {
+            PollResult::EventDelivered
+        } else {
+            PollResult::NoEvent
+        })
+    }
+
+    pub fn execution_id(&self) -> ExecutionId {
+        self.execution_id
+    }
+
+    pub fn subscription(&self) -> &InputSubscriptionCap {
+        &self.subscription
+    }
+
+    pub fn events_delivered(&self) -> u64 {
+        self.events_delivered
+    }
+
+    pub fn packets_seen(&self) -> u64 {
+        self.packets_seen
     }
 }
 
@@ -581,5 +725,145 @@ mod tests {
 
         let envelope = kernel_api::KernelApi::receive_message(&mut kernel, channel, None).unwrap();
         assert_eq!(envelope.action, services_input::INPUT_EVENT_ACTION);
+    }
+
+    struct FakePointer {
+        packets: Vec<hal::HalPointerPacket>,
+        index: usize,
+    }
+
+    impl PointerDevice for FakePointer {
+        fn poll_packet(&mut self) -> Option<hal::HalPointerPacket> {
+            let packet = self.packets.get(self.index).copied();
+            self.index += 1;
+            packet
+        }
+    }
+
+    struct RecordingSink {
+        events: Vec<InputEvent>,
+    }
+
+    impl InputEventSink for RecordingSink {
+        fn send_event(
+            &mut self,
+            _cap: &InputSubscriptionCap,
+            event: &InputEvent,
+        ) -> Result<(), InputServiceError> {
+            self.events.push(event.clone());
+            Ok(())
+        }
+    }
+
+    fn pointer_bridge(packets: Vec<hal::HalPointerPacket>) -> (PointerHalBridge, InputService) {
+        let task_id = TaskId::new();
+        let mut input_service = InputService::new();
+        let subscription = input_service
+            .subscribe_keyboard(task_id, ChannelId::new())
+            .unwrap();
+        let bridge = PointerHalBridge::new(
+            ExecutionId::new(),
+            task_id,
+            subscription,
+            Box::new(FakePointer { packets, index: 0 }),
+            640,
+            480,
+        );
+        (bridge, input_service)
+    }
+
+    #[test]
+    fn test_pointer_bridge_expands_packet_into_typed_events() {
+        use input_types::{PointerButton, PointerEventKind, PointerPosition};
+
+        let (mut bridge, input_service) = pointer_bridge(vec![
+            hal::HalPointerPacket::new(10, -4, 0, hal::HalPointerPacket::BUTTON_PRIMARY),
+            hal::HalPointerPacket::new(0, 0, 0, 0),
+        ]);
+        bridge.set_modifiers(Modifiers::SHIFT);
+        let mut sink = RecordingSink { events: vec![] };
+
+        assert_eq!(
+            bridge.poll_with_sink(&input_service, &mut sink).unwrap(),
+            PollResult::EventDelivered
+        );
+        assert_eq!(sink.events.len(), 2, "move then press");
+        let moved = sink.events[0].as_pointer().unwrap();
+        assert!(moved.is_move());
+        assert_eq!(moved.position, PointerPosition::new(330, 244));
+        assert!(moved.modifiers.is_shift());
+        let pressed = sink.events[1].as_pointer().unwrap();
+        assert!(pressed.is_press(PointerButton::Primary));
+        assert_eq!(pressed.position, PointerPosition::new(330, 244));
+
+        // Second packet releases the button at the same place.
+        assert_eq!(
+            bridge.poll_with_sink(&input_service, &mut sink).unwrap(),
+            PollResult::EventDelivered
+        );
+        assert_eq!(sink.events.len(), 3);
+        assert!(matches!(
+            sink.events[2].as_pointer().unwrap().kind,
+            PointerEventKind::Button { .. }
+        ));
+
+        // Device drained.
+        assert_eq!(
+            bridge.poll_with_sink(&input_service, &mut sink).unwrap(),
+            PollResult::NoEvent
+        );
+        assert_eq!(bridge.events_delivered(), 3);
+        assert_eq!(bridge.packets_seen(), 2);
+    }
+
+    #[test]
+    fn test_pointer_bridge_revoked_subscription_delivers_nothing() {
+        let (mut bridge, mut input_service) =
+            pointer_bridge(vec![hal::HalPointerPacket::motion(1, 1)]);
+        let cap = *bridge.subscription();
+        input_service.revoke_subscription(&cap).unwrap();
+        let mut sink = RecordingSink { events: vec![] };
+        assert_eq!(
+            bridge.poll_with_sink(&input_service, &mut sink).unwrap(),
+            PollResult::NoEvent
+        );
+        assert!(sink.events.is_empty());
+        assert_eq!(bridge.packets_seen(), 1);
+    }
+
+    #[test]
+    fn test_pointer_bridge_delivers_through_kernel_channel() {
+        let task_id = TaskId::new();
+        let mut kernel = sim_kernel::SimulatedKernel::new();
+        let channel = kernel_api::KernelApiV0::create_channel(&mut kernel).unwrap();
+        let mut input_service = InputService::new();
+        let subscription = input_service.subscribe_keyboard(task_id, channel).unwrap();
+        let mut bridge = PointerHalBridge::new(
+            ExecutionId::new(),
+            task_id,
+            subscription,
+            Box::new(FakePointer {
+                packets: vec![hal::HalPointerPacket::new(0, 0, 1, 0)],
+                index: 0,
+            }),
+            100,
+            100,
+        );
+
+        assert_eq!(
+            bridge.poll(&input_service, &mut kernel).unwrap(),
+            PollResult::EventDelivered
+        );
+        let envelope = kernel_api::KernelApi::receive_message(&mut kernel, channel, None).unwrap();
+        assert_eq!(envelope.action, services_input::INPUT_EVENT_ACTION);
+        assert_eq!(bridge.events_delivered(), 1);
+    }
+
+    #[test]
+    fn test_pointer_bridge_resize_keeps_pointer_inside() {
+        let (mut bridge, _service) = pointer_bridge(vec![]);
+        bridge.resize_surface(10, 10);
+        let position = bridge.translator().position();
+        assert!(position.x < 10 && position.y < 10);
     }
 }

@@ -27,6 +27,8 @@ pub mod interrupts;
 pub mod keyboard;
 pub mod keyboard_translation;
 pub mod memory;
+pub mod pointer;
+pub mod pointer_translation;
 pub mod timer;
 
 #[cfg(feature = "alloc")]
@@ -38,4 +40,6 @@ pub use interrupts::InterruptHal;
 pub use keyboard::{HalKeyEvent, HalScancode, KeyboardDevice};
 pub use keyboard_translation::{scancode_to_keycode, KeyboardTranslator};
 pub use memory::MemoryHal;
+pub use pointer::{HalPointerPacket, PointerDevice};
+pub use pointer_translation::{PointerEventBatch, PointerTranslator, MAX_EVENTS_PER_PACKET};
 pub use timer::{TimerDevice, TimerInterrupt};
