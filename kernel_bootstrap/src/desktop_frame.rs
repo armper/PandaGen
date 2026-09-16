@@ -98,18 +98,50 @@ impl DesktopLayout {
     }
 }
 
+/// Stable view identities for the desktop's windows.
+///
+/// Focus, hover, and capture are tracked by `ViewId`, so the same window must
+/// keep the same id from frame to frame even though the window list is
+/// rebuilt on every render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopViewIds {
+    pub main: ViewId,
+    pub status: ViewId,
+    pub palette: ViewId,
+}
+
+impl DesktopViewIds {
+    pub fn new() -> Self {
+        Self {
+            main: ViewId::new(),
+            status: ViewId::new(),
+            palette: ViewId::new(),
+        }
+    }
+}
+
+impl Default for DesktopViewIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Map a desktop model into compositor windows.
 ///
 /// Window roles carry z-order policy (`DesktopWindowLayer::for_role`), so the
 /// palette always composes above the main and status windows.
-pub fn build_desktop_windows(layout: &DesktopLayout, model: &DesktopModel) -> Vec<DesktopWindow> {
+pub fn build_desktop_windows(
+    layout: &DesktopLayout,
+    model: &DesktopModel,
+    ids: &DesktopViewIds,
+) -> Vec<DesktopWindow> {
     let mut windows = Vec::with_capacity(3);
 
     let content_rows = layout.main_content_rows();
     let (main_frame, main_title) = match &model.editor {
         Some(editor) => {
             let mut frame = ViewFrame::new(
-                ViewId::new(),
+                ids.main,
                 ViewKind::TextBuffer,
                 0,
                 ViewContent::text_buffer(editor.lines.iter().take(content_rows).cloned().collect()),
@@ -127,7 +159,7 @@ pub fn build_desktop_windows(layout: &DesktopLayout, model: &DesktopModel) -> Ve
             let prompt_line = lines.len();
             lines.push(model.prompt.clone());
             let frame = ViewFrame::new(
-                ViewId::new(),
+                ids.main,
                 ViewKind::TextBuffer,
                 0,
                 ViewContent::text_buffer(lines),
@@ -151,7 +183,7 @@ pub fn build_desktop_windows(layout: &DesktopLayout, model: &DesktopModel) -> Ve
         .map(|editor| editor.status.clone())
         .unwrap_or_else(|| model.status.clone());
     let status_frame = ViewFrame::new(
-        ViewId::new(),
+        ids.status,
         ViewKind::StatusLine,
         0,
         ViewContent::status_line(status_text),
@@ -176,7 +208,7 @@ pub fn build_desktop_windows(layout: &DesktopLayout, model: &DesktopModel) -> Ve
             lines.push(line);
         }
         let palette_frame = ViewFrame::new(
-            ViewId::new(),
+            ids.palette,
             ViewKind::Panel,
             0,
             ViewContent::text_buffer(lines),
@@ -198,6 +230,7 @@ pub struct DesktopFrameRenderer {
     target: RgbaBuffer,
     layout: DesktopLayout,
     compositor: Compositor,
+    ids: DesktopViewIds,
     frames: u64,
 }
 
@@ -210,8 +243,39 @@ impl DesktopFrameRenderer {
             target: RgbaBuffer::new(width, height, CLEAR_COLOR),
             layout: DesktopLayout::for_pixels(width, height),
             compositor: Compositor::new(),
+            ids: DesktopViewIds::new(),
             frames: 0,
         }
+    }
+
+    pub const fn compositor(&self) -> &Compositor {
+        &self.compositor
+    }
+
+    pub const fn view_ids(&self) -> &DesktopViewIds {
+        &self.ids
+    }
+
+    /// Build the window list for `model` with this renderer's stable ids.
+    pub fn windows(&self, model: &DesktopModel) -> Vec<DesktopWindow> {
+        build_desktop_windows(&self.layout, model, &self.ids)
+    }
+
+    /// Compose an already-built window list (lets a caller apply focus first).
+    pub fn render_windows(
+        &mut self,
+        windows: Vec<DesktopWindow>,
+        pointer: Option<(usize, usize)>,
+    ) -> usize {
+        let cursor = pointer.map(|(x, y)| DesktopCursor::new(x, y));
+        let stats = self.compositor.render_desktop_to_target_with_cursor(
+            &mut self.target,
+            windows,
+            None,
+            cursor,
+        );
+        self.frames += 1;
+        stats.painted_windows
     }
 
     pub const fn layout(&self) -> &DesktopLayout {
@@ -232,16 +296,8 @@ impl DesktopFrameRenderer {
 
     /// Compose `model` into the RGBA target. Returns the number of windows painted.
     pub fn render(&mut self, model: &DesktopModel) -> usize {
-        let windows = build_desktop_windows(&self.layout, model);
-        let cursor = model.pointer.map(|(x, y)| DesktopCursor::new(x, y));
-        let stats = self.compositor.render_desktop_to_target_with_cursor(
-            &mut self.target,
-            windows,
-            None,
-            cursor,
-        );
-        self.frames += 1;
-        stats.painted_windows
+        let windows = self.windows(model);
+        self.render_windows(windows, model.pointer)
     }
 
     /// Tightly packed RGBA8888 pixels, `width * height * 4` bytes.
@@ -293,7 +349,7 @@ mod tests {
     #[test]
     fn test_workspace_model_builds_main_and_status_windows() {
         let layout = DesktopLayout::for_pixels(1280, 800);
-        let windows = build_desktop_windows(&layout, &sample_model());
+        let windows = build_desktop_windows(&layout, &sample_model(), &DesktopViewIds::new());
         assert_eq!(windows.len(), 2);
 
         let main = &windows[0];
@@ -324,7 +380,7 @@ mod tests {
         let rows = layout.main_content_rows();
         let mut model = sample_model();
         model.output_lines = (0..50).map(|i| i.to_string()).collect();
-        let windows = build_desktop_windows(&layout, &model);
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
         let ViewContent::TextBuffer { lines } = &windows[0].frame.content else {
             panic!("main must be a text buffer");
         };
@@ -344,7 +400,7 @@ mod tests {
             results: vec!["Open Editor".to_string(), "Open CLI".to_string()],
             selection: 1,
         });
-        let windows = build_desktop_windows(&layout, &model);
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
         assert_eq!(windows.len(), 3);
         assert!(!windows[0].focused);
         let palette = &windows[2];
@@ -367,13 +423,26 @@ mod tests {
             cursor: Some((0, 2)),
             status: "-- NORMAL --".to_string(),
         });
-        let windows = build_desktop_windows(&layout, &model);
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
         assert_eq!(windows[0].frame.title.as_deref(), Some("readme.md"));
         assert_eq!(windows[0].frame.cursor, Some(CursorPosition::new(0, 2)));
         assert_eq!(
             windows[1].frame.content,
             ViewContent::status_line("-- NORMAL --")
         );
+    }
+
+    #[test]
+    fn test_renderer_keeps_view_ids_stable_across_frames() {
+        let renderer = DesktopFrameRenderer::new(RASTER_CELL_WIDTH * 40, RASTER_CELL_HEIGHT * 20);
+        let first = renderer.windows(&sample_model());
+        let mut with_palette = sample_model();
+        with_palette.palette = Some(PaletteModel::default());
+        let second = renderer.windows(&with_palette);
+        assert_eq!(first[0].frame.view_id, second[0].frame.view_id);
+        assert_eq!(first[1].frame.view_id, second[1].frame.view_id);
+        assert_eq!(second[2].frame.view_id, renderer.view_ids().palette);
+        assert_ne!(renderer.view_ids().main, renderer.view_ids().status);
     }
 
     #[test]

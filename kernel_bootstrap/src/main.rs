@@ -995,6 +995,8 @@ fn workspace_loop(
     let mut mouse_parser =
         hal_x86_64::Ps2MousePacketParser::new(mouse_config.is_some_and(|report| report.wheel));
     let mut pointer_translator = hal::PointerTranslator::new(pointer_width, pointer_height);
+    // GFX-024: explicit pointer focus / keyboard focus / capture policy.
+    let mut input_router = services_gui_host::DesktopInputRouter::new();
     workspace.set_pointer_available(mouse_config.is_some());
     workspace.set_pointer_state(
         pointer_translator.position().x,
@@ -1176,8 +1178,29 @@ fn workspace_loop(
                     event.position.y,
                     event.buttons.bits(),
                 );
-                // The cursor is a desktop surface: moving it is a redraw.
+                // Route against the desktop the user currently sees.
                 if display_mode.is_graphics() {
+                    if let Some(renderer) = desktop_renderer.as_ref() {
+                        let model = build_desktop_model(&workspace);
+                        let windows = renderer.windows(&model);
+                        let deliveries =
+                            input_router.route(renderer.compositor(), &windows, *event);
+                        if KBD_DEBUG_LOG {
+                            for delivery in &deliveries {
+                                let _ = writeln!(serial, "pointer route: {:?}", delivery);
+                            }
+                        }
+                        let role_of = |id: Option<view_types::ViewId>| {
+                            id.and_then(|id| windows.iter().find(|w| w.frame.view_id == id))
+                                .map(|w| w.role.label())
+                        };
+                        workspace.set_pointer_routing(
+                            role_of(input_router.hovered()),
+                            role_of(input_router.keyboard_focus()),
+                            input_router.capture().is_some(),
+                        );
+                    }
+                    // The cursor is a desktop surface: moving it is a redraw.
                     input_dirty = true;
                 }
             }
@@ -1252,7 +1275,9 @@ fn workspace_loop(
                 let renderer = desktop_renderer
                     .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
                 let model = build_desktop_model(&workspace);
-                renderer.render(&model);
+                let mut windows = renderer.windows(&model);
+                input_router.apply_focus(&mut windows);
+                renderer.render_windows(windows, model.pointer);
                 present_pacer.mark_dirty();
                 // The text renderer's caches no longer describe the screen.
                 editor_render_cache.invalidate();

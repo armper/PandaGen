@@ -191,6 +191,12 @@ pub struct WorkspaceSession {
     pointer_buttons: u8,
     /// Pointer events observed since boot.
     pointer_events: u64,
+    /// Window role under the pointer (graphics mode), if any.
+    pointer_over: Option<&'static str>,
+    /// Window role owning keyboard focus (graphics mode), if any.
+    pointer_focus: Option<&'static str>,
+    /// Whether a window currently captures the pointer.
+    pointer_captured: bool,
 }
 
 impl WorkspaceSession {
@@ -395,6 +401,9 @@ impl WorkspaceSession {
             pointer_position: (0, 0),
             pointer_buttons: 0,
             pointer_events: 0,
+            pointer_over: None,
+            pointer_focus: None,
+            pointer_captured: false,
         }
     }
 
@@ -1261,6 +1270,18 @@ impl WorkspaceSession {
         self.pointer_events = self.pointer_events.wrapping_add(1);
     }
 
+    /// Record the desktop router's view of the pointer (graphics mode).
+    pub fn set_pointer_routing(
+        &mut self,
+        over: Option<&'static str>,
+        focus: Option<&'static str>,
+        captured: bool,
+    ) {
+        self.pointer_over = over;
+        self.pointer_focus = focus;
+        self.pointer_captured = captured;
+    }
+
     pub fn is_pointer_available(&self) -> bool {
         self.pointer_available
     }
@@ -1296,6 +1317,29 @@ impl WorkspaceSession {
             i32::try_from(self.pointer_events.saturating_sub(1)).unwrap_or(i32::MAX),
         );
         let line = core::str::from_utf8(&buffer[..cursor]).unwrap_or("Pointer: ?");
+        self.emit_line(serial, line);
+
+        let mut buffer = [0u8; OUTPUT_LINE_MAX];
+        let mut cursor = 0usize;
+        cursor = append_bytes(&mut buffer, cursor, b"Routing: over=");
+        cursor = append_bytes(
+            &mut buffer,
+            cursor,
+            self.pointer_over.unwrap_or("desktop").as_bytes(),
+        );
+        cursor = append_bytes(&mut buffer, cursor, b" focus=");
+        cursor = append_bytes(
+            &mut buffer,
+            cursor,
+            self.pointer_focus.unwrap_or("none").as_bytes(),
+        );
+        cursor = append_bytes(&mut buffer, cursor, b" capture=");
+        cursor = append_bytes(
+            &mut buffer,
+            cursor,
+            if self.pointer_captured { b"1" } else { b"0" },
+        );
+        let line = core::str::from_utf8(&buffer[..cursor]).unwrap_or("Routing: ?");
         self.emit_line(serial, line);
     }
 

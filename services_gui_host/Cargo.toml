@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 view_types = { workspace = true }
+input_types = { workspace = true }
 serde = { workspace = true }
 services_workspace_manager = { workspace = true, optional = true }
 graphics_rasterizer = { workspace = true }

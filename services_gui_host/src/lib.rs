@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
+pub mod input_routing;
+pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
+
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
 /// Pixel width of one desktop text cell (window rects are in cell units).
