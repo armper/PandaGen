@@ -8,7 +8,9 @@
 //! - No allocations during measurement
 //! - Collects actionable metrics: pixel writes, char draws, clears, frame times
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
+#[cfg(debug_assertions)]
+use core::sync::atomic::Ordering;
 
 /// Global render statistics (atomic for interrupt safety)
 static RENDER_STATS: RenderStatsGlobal = RenderStatsGlobal::new();

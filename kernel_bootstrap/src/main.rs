@@ -30,6 +30,7 @@ mod vga;
 mod workspace;
 
 #[cfg(not(test))]
+#[cfg(debug_assertions)]
 use crate::minimal_editor::EditorMode;
 #[cfg(not(test))]
 use core::arch::asm;
@@ -135,7 +136,7 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
 const KBD_DEBUG_LOG: bool = false;
-const FB_SHADOW_ENABLED: bool = false;
+const FB_SHADOW_ENABLED: bool = true;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate

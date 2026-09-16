@@ -22,7 +22,6 @@ use alloc::vec::Vec;
 use crate::display_sink::DisplaySink;
 use crate::minimal_editor::MinimalEditor;
 
-#[cfg(debug_assertions)]
 use crate::render_stats;
 
 /// Cell content for comparison
@@ -294,7 +293,7 @@ pub fn render_editor_optimized(
     let (cols, rows) = sink.dims();
     cache.ensure_size(cols, rows);
 
-    #[cfg(debug_assertions)]
+    // `frame_begin` is a no-op outside debug builds; keep the tick observable.
     render_stats::frame_begin(current_tick);
 
     let mut stats = FrameRenderStats::default();

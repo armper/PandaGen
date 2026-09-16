@@ -71,6 +71,16 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
+# Bare-metal kernel image profile used by `cargo xtask iso`.
+#
+# The kernel must be optimized: with opt-level 0 a 4 MiB framebuffer copy
+# takes ~3 s under QEMU because core/compiler_builtins (built via
+# -Zbuild-std) are also unoptimized. Host `cargo test` still uses `dev`.
+[profile.kernel]
+inherits = "release"
+opt-level = 2
+debug = "line-tables-only"
+
 [workspace.dependencies]
 # Core crates
 graphics_rasterizer = { path = "graphics_rasterizer" }

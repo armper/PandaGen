@@ -24,6 +24,12 @@ cargo xtask iso
 Output:
 - `dist/pandagen.iso`
 
+The kernel image is built with the `kernel` Cargo profile (`[profile.kernel]` in
+the root `Cargo.toml`, optimized, line tables only). An unoptimized kernel is
+roughly 100x slower under QEMU: a full 1280x800 framebuffer present measured
+3.2 s at opt-level 0 versus under 10 ms optimized. Host `cargo test` still uses
+the `dev` profile.
+
 ## Run in QEMU
 
 ```
@@ -183,6 +189,25 @@ This makes it easy to pinpoint the failure stage:
 - `kbd irq fired` but no `kbd scancode`: controller read/status issue
 - `kbd scancode` but no `kbd keyevent`: scancode decoder issue
 - `kbd keyevent` but no UI update: render/overlay wiring issue
+
+### Scripted Headless Session (Automated)
+
+```
+cargo xtask qemu-script --keys "h,e,l,p,ret,sleep:0.5,shot:help" \
+    --expect-serial "WS > help" --out dist/qs
+```
+
+Boots the ISO with `-display none`, drives the QEMU monitor over a Unix socket,
+injects keys with `sendkey`, and writes screendumps as PPM files
+(`dist/qs.help.ppm`, `dist/qs.final.ppm`) plus `dist/qs.serial.log`.
+
+Key entries use QEMU `sendkey` names (`ret`, `spc`, `esc`, `shift-semicolon`,
+`shift-1`, `ctrl-p`, `dot`, ...). `sleep:<secs>` pauses and `shot:<name>` takes a
+screendump. `--boot-wait` (default 10 s) and `--after` (default 1 s) tune timing.
+
+The command fails if any `--expect-serial` text is missing, if the serial log
+contains `KERNEL PANIC`, or if the framebuffer presenter rejected a frame. This
+is the way to verify display changes without sitting at the QEMU window.
 
 ### QEMU Smoke Test (Manual)
 

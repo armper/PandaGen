@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 
 const TARGET: &str = "x86_64-unknown-none";
 const KERNEL_CRATE: &str = "kernel_bootstrap";
+/// Cargo profile for the bare-metal image (see `[profile.kernel]` in Cargo.toml).
+const KERNEL_PROFILE: &str = "kernel";
 const LIMINE_VENDOR_DIR: &str = "third_party/limine";
 const ISO_OUTPUT: &str = "dist/pandagen.iso";
 const DISK_OUTPUT: &str = "dist/pandagen.disk";
@@ -17,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("iso") => cmd_iso(),
         Some("qemu") => cmd_qemu(),
         Some("qemu-smoke") => cmd_qemu_smoke(),
+        Some("qemu-script") => cmd_qemu_script(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
@@ -28,6 +31,8 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask iso");
     println!("  cargo xtask qemu");
     println!("  cargo xtask qemu-smoke");
+    println!("  cargo xtask qemu-script [--keys k1,k2,sleep:0.5,shot:name,...] [--boot-wait secs]");
+    println!("                          [--after secs] [--out prefix] [--expect-serial text]");
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::other("unknown xtask command").into())
@@ -186,6 +191,179 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Headless scripted QEMU session: boot the ISO with no display, inject keys
+/// through the QEMU monitor, take screendumps, and check the serial log.
+///
+/// This is the bare-metal counterpart of `pandagend` key scripts: it lets the
+/// real kernel image be exercised end to end without a human at the window.
+/// Screendumps are written as PPM (`<out>.<name>.ppm`, plus `<out>.final.ppm`);
+/// the serial log lands at `<out>.serial.log`.
+///
+/// Key spec entries are QEMU `sendkey` names (`h`, `ret`, `spc`, `esc`,
+/// `shift-semicolon`, `ctrl-p`, ...) plus two directives:
+/// `sleep:<secs>` pauses, `shot:<name>` takes a screendump.
+fn cmd_qemu_script(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let root = repo_root();
+    let iso = root.join(ISO_OUTPUT);
+    if !iso.exists() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("missing {ISO_OUTPUT}; run cargo xtask iso first"),
+        )
+        .into());
+    }
+    let disk = root.join(DISK_OUTPUT);
+    if !disk.exists() {
+        cmd_image()?;
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut boot_wait = 10.0f64;
+    let mut after = 1.0f64;
+    let mut out = root.join("dist/qemu_script");
+    let mut expect_serial: Vec<String> = Vec::new();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            args.next().ok_or_else(|| {
+                io::Error::new(ErrorKind::InvalidInput, format!("{name} expects a value"))
+            })
+        };
+        match arg.as_str() {
+            "--keys" => keys.extend(
+                value("--keys")?
+                    .split(',')
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string),
+            ),
+            "--boot-wait" => boot_wait = value("--boot-wait")?.parse()?,
+            "--after" => after = value("--after")?.parse()?,
+            "--out" => out = root.join(value("--out")?),
+            "--expect-serial" => expect_serial.push(value("--expect-serial")?),
+            other => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("unknown qemu-script argument: {other}"),
+                )
+                .into())
+            }
+        }
+    }
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let out_str = out.to_string_lossy().into_owned();
+    let serial_log = PathBuf::from(format!("{out_str}.serial.log"));
+    let _ = fs::remove_file(&serial_log);
+    // AF_UNIX paths are short; keep the socket out of the (long) repo path.
+    let sock = PathBuf::from(format!("/tmp/pandagen-mon-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&sock);
+
+    let mut child = Command::new("qemu-system-x86_64")
+        .current_dir(&root)
+        .arg("-machine")
+        .arg("pc")
+        .arg("-m")
+        .arg("512M")
+        .arg("-cdrom")
+        .arg(&iso)
+        .arg("-drive")
+        .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
+        .arg("-device")
+        .arg("virtio-blk-pci,drive=hd0")
+        .arg("-serial")
+        .arg(format!("file:{}", serial_log.display()))
+        .arg("-display")
+        .arg("none")
+        .arg("-monitor")
+        .arg(format!("unix:{},server,nowait", sock.display()))
+        .arg("-no-reboot")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    std::thread::sleep(Duration::from_secs_f64(boot_wait));
+
+    let mut monitor = UnixStream::connect(&sock)?;
+    monitor.set_read_timeout(Some(Duration::from_millis(400)))?;
+    let mut mon = |cmd: &str| -> io::Result<()> {
+        monitor.write_all(cmd.as_bytes())?;
+        monitor.write_all(b"\n")?;
+        std::thread::sleep(Duration::from_millis(120));
+        let mut sink = [0u8; 8192];
+        let _ = monitor.read(&mut sink);
+        Ok(())
+    };
+    mon("")?;
+
+    let mut shots = Vec::new();
+    for key in &keys {
+        if let Some(secs) = key.strip_prefix("sleep:") {
+            std::thread::sleep(Duration::from_secs_f64(secs.parse()?));
+        } else if let Some(name) = key.strip_prefix("shot:") {
+            let path = format!("{out_str}.{name}.ppm");
+            mon(&format!("screendump {path}"))?;
+            shots.push(path);
+        } else {
+            mon(&format!("sendkey {key}"))?;
+            std::thread::sleep(Duration::from_millis(60));
+        }
+    }
+    std::thread::sleep(Duration::from_secs_f64(after));
+    let final_path = format!("{out_str}.final.ppm");
+    mon(&format!("screendump {final_path}"))?;
+    shots.push(final_path);
+    std::thread::sleep(Duration::from_millis(400));
+    mon("quit")?;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = fs::remove_file(&sock);
+
+    let log = fs::read_to_string(&serial_log).unwrap_or_default();
+    let mut missing = Vec::new();
+    for needle in &expect_serial {
+        if !log.contains(needle.as_str()) {
+            missing.push(needle.clone());
+        }
+    }
+    if log.contains("KERNEL PANIC") {
+        missing.push("<no kernel panic>".to_string());
+    }
+    if log.contains("framebuffer present rejected") {
+        missing.push("<no rejected framebuffer present>".to_string());
+    }
+
+    println!("serial log: {}", serial_log.display());
+    for shot in &shots {
+        println!("screendump: {shot}");
+    }
+    if missing.is_empty() {
+        println!("qemu-script: PASS");
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "qemu-script: FAIL, unmet expectations: {missing:?}"
+        ))
+        .into())
+    }
+}
+
 fn select_qemu_display() -> String {
     if let Ok(value) = env::var("QEMU_DISPLAY") {
         let trimmed = value.trim();
@@ -233,6 +411,8 @@ fn build_kernel(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .arg("build")
         .arg("-p")
         .arg(KERNEL_CRATE)
+        .arg("--profile")
+        .arg(KERNEL_PROFILE)
         .arg("--target")
         .arg(TARGET)
         .arg("-Zbuild-std=core,alloc"))
@@ -260,7 +440,7 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let kernel_path = root
         .join("target")
         .join(TARGET)
-        .join("debug")
+        .join(KERNEL_PROFILE)
         .join(KERNEL_CRATE);
     if !kernel_path.exists() {
         return Err(io::Error::new(
