@@ -2461,7 +2461,7 @@ fn build_desktop_model(
     if workspace.is_editor_active() {
         if let Some(editor) = workspace.editor() {
             model.editor = Some(desktop_frame::EditorModel {
-                title: String::from("Editor"),
+                title: workspace.editor_title(),
                 lines: (0..editor.viewport_rows())
                     .map(|row| String::from(editor.get_viewport_line(row).unwrap_or("")))
                     .collect(),
@@ -2488,6 +2488,22 @@ fn build_desktop_model(
         })
         .collect();
     model.notices = workspace.notices();
+    // Persistent status card (GFX-034): shown for as long as the condition
+    // holds, computed per frame rather than queued and expired.
+    if let Some(editor) = workspace.editor().filter(|e| e.is_dirty()) {
+        let _ = editor;
+        model.notices.insert(
+            0,
+            services_gui_host::ShellNotice::new(
+                services_gui_host::NoticeLevel::Warning,
+                alloc::format!("Unsaved changes: {}", workspace.editor_title()),
+            )
+            .with_title("UNSAVED"),
+        );
+        model
+            .notices
+            .truncate(services_gui_host::shell::MAX_NOTICES);
+    }
     model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
 
     if workspace.is_palette_open() {

@@ -64,6 +64,37 @@ impl NoticeLevel {
 pub struct ShellNotice {
     pub level: NoticeLevel,
     pub text: String,
+    /// Card title; defaults to the level label. Persistent status cards use
+    /// this to say what they are ("UNSAVED") rather than how severe.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl ShellNotice {
+    pub fn new(level: NoticeLevel, text: impl Into<String>) -> Self {
+        Self {
+            level,
+            text: text.into(),
+            title: None,
+        }
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Title shown on the card.
+    pub fn card_title(&self) -> String {
+        match &self.title {
+            Some(title) => title.clone(),
+            None => {
+                let mut title = String::from(self.level.label());
+                title.make_ascii_uppercase();
+                title
+            }
+        }
+    }
 }
 
 /// Everything the shell shows besides the workspace content.
@@ -300,8 +331,7 @@ pub fn compose_shell(
     );
 
     for (index, notice) in model.notices.iter().take(MAX_NOTICES).enumerate() {
-        let mut title = String::from(notice.level.label());
-        title.make_ascii_uppercase();
+        let title = notice.card_title();
         windows.push(
             DesktopWindow::new(
                 ViewFrame::new(
@@ -359,10 +389,11 @@ mod tests {
                     active: true,
                 },
             ],
-            notices: vec![ShellNotice {
-                level: NoticeLevel::Success,
-                text: "Switched to graphics".to_string(),
-            }],
+            notices: vec![
+                ShellNotice::new(NoticeLevel::Success, "Switched to graphics"),
+                ShellNotice::new(NoticeLevel::Warning, "Unsaved changes: notes.txt")
+                    .with_title("UNSAVED"),
+            ],
             workspace: Some(ViewFrame::new(
                 ViewId::new(),
                 ViewKind::TextBuffer,
@@ -405,7 +436,13 @@ mod tests {
         let rects = shell_layout(160, 44);
         let ids = ShellViewIds::new();
         let windows = compose_shell(&model(), &rects, &ids);
-        assert_eq!(windows.len(), 4);
+        assert_eq!(windows.len(), 5);
+        assert_eq!(windows[4].role, DesktopWindowRole::Notification);
+        assert_eq!(windows[4].frame.title.as_deref(), Some("UNSAVED"));
+        assert!(
+            windows[3].z_index > windows[4].z_index,
+            "newest card on top"
+        );
         assert_eq!(windows[0].role, DesktopWindowRole::Main);
         assert!(windows[0].focused);
         assert_eq!(windows[0].frame.view_id, ids.workspace);

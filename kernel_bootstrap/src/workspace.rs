@@ -204,6 +204,8 @@ pub struct WorkspaceSession {
     pointer_captured: bool,
     /// Shell notices, newest first.
     notices: Vec<PendingNotice>,
+    /// Path of the document open in the editor, if it has one.
+    editor_path: Option<String>,
 }
 
 /// Maximum notices retained for the shell.
@@ -422,6 +424,7 @@ impl WorkspaceSession {
             pointer_focus: None,
             pointer_captured: false,
             notices: Vec::new(),
+            editor_path: None,
         }
     }
 
@@ -1025,6 +1028,7 @@ impl WorkspaceSession {
     }
 
     fn open_editor(&mut self, serial: &mut SerialPort, _path: Option<&str>) {
+        self.editor_path = _path.map(|p| p.to_string());
         #[cfg(not(test))]
         {
             // Recover filesystem from any stale editor instance
@@ -1418,6 +1422,14 @@ impl WorkspaceSession {
         return true;
     }
 
+    /// Display name of the editor document.
+    pub fn editor_title(&self) -> String {
+        match &self.editor_path {
+            Some(path) => path.clone(),
+            None => "new buffer".to_string(),
+        }
+    }
+
     /// Pointer hover over a palette result: move the selection there.
     /// Returns true when the selection changed.
     pub fn palette_hover_result(&mut self, index: usize) -> bool {
@@ -1519,7 +1531,7 @@ impl WorkspaceSession {
         self.notices.insert(
             0,
             PendingNotice {
-                notice: ShellNotice { level, text: line },
+                notice: ShellNotice::new(level, line),
                 shown_at: None,
             },
         );

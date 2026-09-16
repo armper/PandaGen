@@ -483,10 +483,7 @@ mod tests {
             results: vec!["Open Editor".to_string(), "Open CLI".to_string()],
             selection: 1,
         });
-        model.notices = vec![ShellNotice {
-            level: NoticeLevel::Info,
-            text: "Switched to graphics".to_string(),
-        }];
+        model.notices = vec![ShellNotice::new(NoticeLevel::Info, "Switched to graphics")];
         let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
         assert_eq!(windows.len(), 5);
         let main = find(&windows, DesktopWindowRole::Main);

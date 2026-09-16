@@ -115,7 +115,7 @@ User-space services should provide policy:
 - [x] `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
 - [x] `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
 - [x] `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
-- [ ] `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
+- [x] `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
 - [x] `GFX-035` Add shell-level theme tokens so the desktop has a coherent next-gen visual language.
 
 ### Epic 8: Graphical App Surfaces
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-033` is in place: the palette is a graphical control with a highlighted selection row that follows pointer hover, wheel-driven selection, click-to-run, and click-outside-to-dismiss, all backed by the existing command surface.
+Epic 7 (desktop shell) is complete: shell surface, graphical chrome, graphical palette, toasts plus persistent status cards, and theme tokens.
 
 The best next implementation step is:
 
-- `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
+- `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
 
-Transient toasts exist (Phase 231). Persistent status cards, such as an unsaved-changes indicator while the editor buffer is dirty, complete the notification layer.
+The editor already appears in the workspace window as text lines with a caret. A graphical renderer gives it a gutter with line numbers, a current-line highlight, a viewport sized to the window rather than the 23-row text console, and a status strip with mode and dirty state.
