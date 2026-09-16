@@ -1447,7 +1447,7 @@ fn workspace_loop(
                         );
                         input_dirty = false;
                         if let Some(backbuffer) = fb_shadow.as_mut() {
-                            present_framebuffer_shadow(fb, backbuffer);
+                            present_framebuffer_shadow(serial, fb, backbuffer);
                         }
                         continue; // Skip normal workspace rendering when palette open
                     }
@@ -1662,7 +1662,7 @@ fn workspace_loop(
                     }
 
                     if let Some(backbuffer) = fb_shadow.as_mut() {
-                        present_framebuffer_shadow(fb, backbuffer);
+                        present_framebuffer_shadow(serial, fb, backbuffer);
                     }
                 }
             } // End !rendered_editor
@@ -2016,18 +2016,24 @@ fn render_palette_overlay_fb(
     true
 }
 
+/// Present the shadow backbuffer through the desktop presenter (GFX-017).
+///
+/// This is the only place the workspace loop touches the hardware framebuffer
+/// as a whole frame. A rejected present is a contract bug, not a transient
+/// condition, so it is logged once per occurrence on serial and counted in
+/// render stats rather than silently ignored.
 fn present_framebuffer_shadow(
+    serial: &mut serial::SerialPort,
     fb: &mut framebuffer::BareMetalFramebuffer,
-    backbuffer: &mut framebuffer::BareMetalFramebuffer,
+    backbuffer: &framebuffer::BareMetalFramebuffer,
 ) {
-    let info = backbuffer.info();
-    let surface = framebuffer::DesktopSurface::native_rgb32(
-        info.width,
-        info.height,
-        info.stride_pixels,
-        backbuffer.buffer_mut(),
-    );
-    let _ = fb.present_desktop_surface(surface);
+    match fb.present_shadow(backbuffer) {
+        Ok(stats) => render_stats::record_desktop_present(stats.copied_pixels as u64),
+        Err(err) => {
+            render_stats::record_desktop_present_error();
+            let _ = writeln!(serial, "framebuffer present rejected: {:?}", err);
+        }
+    }
 }
 
 fn prompt_view(cmd: &[u8], cols: usize, prefix_len: usize) -> (usize, &[u8], usize) {

@@ -138,6 +138,8 @@ pub enum DesktopPresentError {
         expected: usize,
         actual: usize,
     },
+    /// The source pixel format cannot be presented into this framebuffer.
+    UnsupportedSourceFormat,
     StrideMismatch {
         expected_stride_pixels: usize,
         actual_stride_pixels: usize,
@@ -342,8 +344,42 @@ impl BareMetalFramebuffer {
         self.buffer
     }
 
-    /// Blit from a source buffer into the framebuffer.
-    pub fn blit_from(&mut self, src: &[u8]) {
+    /// Returns a read-only view of the framebuffer pixel data.
+    ///
+    /// Used by the presenter to read a shadow (off-screen) framebuffer as a
+    /// native desktop surface without exposing raw blit access.
+    pub fn buffer(&self) -> &[u8] {
+        self.buffer
+    }
+
+    /// Present a whole shadow framebuffer into this (hardware) framebuffer.
+    ///
+    /// The shadow is the backbuffer the text workspace draws into. Routing it
+    /// through `present_desktop_surface` means the raw hardware copy has a
+    /// single, validated entry point shared with the graphical desktop path
+    /// (GFX-017). A shadow whose geometry does not match the target is
+    /// rejected instead of silently copying a prefix of bytes.
+    pub fn present_shadow(
+        &mut self,
+        shadow: &BareMetalFramebuffer,
+    ) -> Result<DesktopPresentStats, DesktopPresentError> {
+        let info = shadow.info();
+        if info.format != self.info().format {
+            return Err(DesktopPresentError::UnsupportedSourceFormat);
+        }
+        let surface = DesktopSurface::native_rgb32(
+            info.width,
+            info.height,
+            info.stride_pixels,
+            shadow.buffer(),
+        );
+        self.present_desktop_surface(surface)
+    }
+
+    /// Raw whole-buffer copy. Private on purpose: every caller must go through
+    /// `present_desktop_surface`, which validates geometry and stride first.
+    fn blit_from(&mut self, src: &[u8]) {
+        debug_assert_eq!(src.len(), self.buffer.len());
         let len = src.len().min(self.buffer.len());
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.buffer.as_mut_ptr(), len);
@@ -948,6 +984,79 @@ mod tests {
     }
 
     #[test]
+    fn test_present_shadow_copies_backbuffer_into_target() {
+        let info = FramebufferInfo {
+            width: 3,
+            height: 2,
+            stride_pixels: 4,
+            format: PixelFormat::Rgb32,
+        };
+        let mut target = test_framebuffer(info, 0x00);
+        let mut shadow = test_framebuffer(info, 0x00);
+        shadow.clear(0x10, 0x20, 0x30);
+        shadow.draw_char_at(0, 0, b'A', (0xFF, 0xFF, 0xFF), (0x10, 0x20, 0x30));
+
+        let stats = target
+            .present_shadow(&shadow)
+            .expect("matching shadow should present");
+
+        assert_eq!(
+            stats,
+            DesktopPresentStats {
+                copied_pixels: 6,
+                source_bytes: info.buffer_size(),
+            }
+        );
+        assert_eq!(target.buffer(), shadow.buffer());
+    }
+
+    #[test]
+    fn test_present_shadow_rejects_geometry_mismatch() {
+        let target_info = FramebufferInfo {
+            width: 4,
+            height: 4,
+            stride_pixels: 4,
+            format: PixelFormat::Rgb32,
+        };
+        let shadow_info = FramebufferInfo {
+            width: 4,
+            height: 4,
+            stride_pixels: 8,
+            format: PixelFormat::Rgb32,
+        };
+        let mut target = test_framebuffer(target_info, 0x55);
+        let shadow = test_framebuffer(shadow_info, 0xEE);
+
+        let err = target
+            .present_shadow(&shadow)
+            .expect_err("stride mismatch must be rejected");
+        assert_eq!(
+            err,
+            DesktopPresentError::StrideMismatch {
+                expected_stride_pixels: 4,
+                actual_stride_pixels: 8,
+            }
+        );
+        // Target must be untouched after a rejected present.
+        assert!(target.buffer().iter().all(|b| *b == 0x55));
+
+        let smaller = test_framebuffer(
+            FramebufferInfo {
+                width: 2,
+                height: 2,
+                stride_pixels: 4,
+                format: PixelFormat::Rgb32,
+            },
+            0xEE,
+        );
+        assert!(matches!(
+            target.present_shadow(&smaller),
+            Err(DesktopPresentError::DimensionMismatch { .. })
+        ));
+        assert!(target.buffer().iter().all(|b| *b == 0x55));
+    }
+
+    #[test]
     fn test_present_desktop_surface_rejects_dimension_mismatch() {
         let info = FramebufferInfo {
             width: 4,
@@ -1048,8 +1157,8 @@ mod tests {
         };
         let mut framebuffer = test_framebuffer(info, 0);
         let native_pixels = [
-            1, 2, 3, 0, 4, 5, 6, 0, 0xAA, 0xAA, 0xAA, 0xAA, 7, 8, 9, 0, 10, 11, 12, 0, 0xBB,
-            0xBB, 0xBB, 0xBB,
+            1, 2, 3, 0, 4, 5, 6, 0, 0xAA, 0xAA, 0xAA, 0xAA, 7, 8, 9, 0, 10, 11, 12, 0, 0xBB, 0xBB,
+            0xBB, 0xBB,
         ];
 
         let stats = framebuffer

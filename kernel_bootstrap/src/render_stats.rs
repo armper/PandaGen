@@ -35,6 +35,12 @@ struct RenderStatsGlobal {
     min_frame_ticks: AtomicU64,
     /// Maximum frame ticks observed
     max_frame_ticks: AtomicU64,
+    /// Successful whole-frame desktop presents (shadow or GUI surface)
+    desktop_presents: AtomicU64,
+    /// Rejected desktop presents (geometry/stride/format mismatch)
+    desktop_present_errors: AtomicU64,
+    /// Pixels copied by successful desktop presents
+    desktop_present_pixels: AtomicU64,
 }
 
 impl RenderStatsGlobal {
@@ -50,6 +56,9 @@ impl RenderStatsGlobal {
             frame_count: AtomicU64::new(0),
             min_frame_ticks: AtomicU64::new(u64::MAX),
             max_frame_ticks: AtomicU64::new(0),
+            desktop_presents: AtomicU64::new(0),
+            desktop_present_errors: AtomicU64::new(0),
+            desktop_present_pixels: AtomicU64::new(0),
         }
     }
 }
@@ -73,6 +82,9 @@ pub struct RenderCumulativeStats {
     pub max_frame_ticks: u64,
     pub total_pixel_writes: u64,
     pub total_char_draws: u64,
+    pub desktop_presents: u64,
+    pub desktop_present_errors: u64,
+    pub desktop_present_pixels: u64,
 }
 
 /// Start timing a new frame
@@ -169,6 +181,40 @@ pub fn record_pixel_writes(count: u64) {
 #[cfg(not(debug_assertions))]
 pub fn record_pixel_writes(_count: u64) {}
 
+/// Record a successful whole-frame desktop present.
+///
+/// Presents are counted separately from pixel writes because a present is a
+/// copy of already-rendered pixels, not new drawing work. Tracking them lets
+/// the frame pacing policy (GFX-018) see how often the hardware buffer is
+/// actually touched.
+#[inline]
+#[cfg(debug_assertions)]
+pub fn record_desktop_present(copied_pixels: u64) {
+    RENDER_STATS
+        .desktop_presents
+        .fetch_add(1, Ordering::Relaxed);
+    RENDER_STATS
+        .desktop_present_pixels
+        .fetch_add(copied_pixels, Ordering::Relaxed);
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+pub fn record_desktop_present(_copied_pixels: u64) {}
+
+/// Record a rejected desktop present (contract violation at the present edge).
+#[inline]
+#[cfg(debug_assertions)]
+pub fn record_desktop_present_error() {
+    RENDER_STATS
+        .desktop_present_errors
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+pub fn record_desktop_present_error() {}
+
 /// Record a character draw operation
 #[inline]
 #[cfg(debug_assertions)]
@@ -216,6 +262,9 @@ pub fn get_cumulative_stats() -> RenderCumulativeStats {
         max_frame_ticks: RENDER_STATS.max_frame_ticks.load(Ordering::Relaxed),
         total_pixel_writes: RENDER_STATS.pixel_writes.load(Ordering::Relaxed),
         total_char_draws: RENDER_STATS.char_draws.load(Ordering::Relaxed),
+        desktop_presents: RENDER_STATS.desktop_presents.load(Ordering::Relaxed),
+        desktop_present_errors: RENDER_STATS.desktop_present_errors.load(Ordering::Relaxed),
+        desktop_present_pixels: RENDER_STATS.desktop_present_pixels.load(Ordering::Relaxed),
     }
 }
 
@@ -239,6 +288,13 @@ pub fn reset_stats() {
         .min_frame_ticks
         .store(u64::MAX, Ordering::Relaxed);
     RENDER_STATS.max_frame_ticks.store(0, Ordering::Relaxed);
+    RENDER_STATS.desktop_presents.store(0, Ordering::Relaxed);
+    RENDER_STATS
+        .desktop_present_errors
+        .store(0, Ordering::Relaxed);
+    RENDER_STATS
+        .desktop_present_pixels
+        .store(0, Ordering::Relaxed);
 }
 
 #[cfg(not(debug_assertions))]
