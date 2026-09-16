@@ -100,7 +100,7 @@ User-space services should provide policy:
 - [x] `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
 - [x] `GFX-023` Define hit testing against desktop surfaces and windows.
 - [ ] `GFX-024` Define explicit pointer focus, keyboard focus, and capture semantics for PandaGen.
-- [ ] `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
+- [x] `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
 
 ### Epic 6: Basic Scene Primitives
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-023` is in place: `Compositor::hit_test` returns the top-most window under a pixel and whether the hit is border, chrome, or a content cell, using the same composition order the painter uses.
+`GFX-025` is in place: `DesktopCursor` is composed by the GUI host above every window, the kernel desktop model carries the pointer position, and pointer motion in graphics mode marks the desktop dirty so the arrow follows the PS/2 mouse in QEMU.
 
 The best next implementation step is:
 
-- `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
+- `GFX-024` Define explicit pointer focus, keyboard focus, and capture semantics for PandaGen.
 
-A visible pointer makes the whole input path observable on screen and is a prerequisite for meaningful focus and capture behaviour (`GFX-024`).
+Hit testing (`GFX-023`) and a visible pointer (`GFX-025`) exist; the missing piece of Milestone B's input model is the policy that turns a click into focus, routes wheel and motion to the window under the pointer or the capturing window, and emits `PointerCapture` transitions.

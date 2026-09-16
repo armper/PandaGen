@@ -29,6 +29,8 @@ pub const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
 const RASTER_BORDER_THICKNESS: usize = 1;
 
 const DESKTOP_BACKGROUND_COLOR: RgbaColor = RgbaColor::new(12, 18, 28, 255);
+const POINTER_FILL_COLOR: RgbaColor = RgbaColor::new(245, 245, 245, 255);
+const POINTER_OUTLINE_COLOR: RgbaColor = RgbaColor::new(10, 10, 10, 255);
 const WINDOW_FILL_COLOR: RgbaColor = RgbaColor::new(28, 34, 48, 255);
 const FOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(52, 211, 153, 255);
 const UNFOCUSED_BORDER_COLOR: RgbaColor = RgbaColor::new(107, 114, 128, 255);
@@ -382,8 +384,23 @@ impl Compositor {
     pub fn render_desktop_to_target_with_damage(
         &self,
         target: &mut impl RenderTarget,
+        windows: Vec<DesktopWindow>,
+        damage_rect: Option<RasterRect>,
+    ) -> RasterRenderStats {
+        self.render_desktop_to_target_with_cursor(target, windows, damage_rect, None)
+    }
+
+    /// Render windows and then the pointer cursor above them.
+    ///
+    /// The cursor is painted last and unclipped by window damage: when the
+    /// damaged region does not include the sprite, the cursor is still drawn
+    /// so a repaint under a stationary pointer never erases it.
+    pub fn render_desktop_to_target_with_cursor(
+        &self,
+        target: &mut impl RenderTarget,
         mut windows: Vec<DesktopWindow>,
         damage_rect: Option<RasterRect>,
+        cursor: Option<DesktopCursor>,
     ) -> RasterRenderStats {
         let target_bounds = RasterRect::new(0, 0, target.width(), target.height());
         let damage_rect = damage_rect.and_then(|rect| rect.intersect(target_bounds));
@@ -403,6 +420,10 @@ impl Compositor {
             }
         }
 
+        if let Some(cursor) = cursor {
+            raster_cursor(target, &cursor);
+        }
+
         RasterRenderStats {
             frame_count: windows.len(),
             timestamp_ns: windows
@@ -412,6 +433,107 @@ impl Compositor {
                 .unwrap_or(0),
             painted_windows,
             damage_rect,
+        }
+    }
+}
+
+/// Pointer cursor shape.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Arrow,
+}
+
+/// Pointer cursor composed above every window (GFX-025).
+///
+/// The cursor is its own surface layer rather than a glyph in a text grid:
+/// it has a pixel position, a hotspot, and is painted last so it is never
+/// occluded by a window. `visible == false` composes nothing, which is how a
+/// desktop hides the pointer during keyboard-only interaction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesktopCursor {
+    pub x: usize,
+    pub y: usize,
+    pub shape: CursorShape,
+    pub visible: bool,
+}
+
+impl DesktopCursor {
+    pub const fn new(x: usize, y: usize) -> Self {
+        Self {
+            x,
+            y,
+            shape: CursorShape::Arrow,
+            visible: true,
+        }
+    }
+
+    pub const fn hidden() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            shape: CursorShape::Arrow,
+            visible: false,
+        }
+    }
+
+    /// Pixel bounds the cursor sprite covers (for damage tracking).
+    pub fn bounds(&self) -> RasterRect {
+        let (w, h) = cursor_sprite_size(self.shape);
+        RasterRect::new(self.x, self.y, w, h)
+    }
+}
+
+/// Arrow sprite, 12x19. `X` outline, `o` fill, `.` transparent. The hotspot
+/// is the top-left pixel.
+const ARROW_SPRITE: [&str; 19] = [
+    "X...........",
+    "XX..........",
+    "XoX.........",
+    "XooX........",
+    "XoooX.......",
+    "XooooX......",
+    "XoooooX.....",
+    "XooooooX....",
+    "XoooooooX...",
+    "XooooooooX..",
+    "XoooooooooX.",
+    "XooooooXXXXX",
+    "XoooXooX....",
+    "XooX.XooX...",
+    "XoX..XooX...",
+    "XX....XooX..",
+    "X.....XooX..",
+    ".......XX...",
+    "............",
+];
+
+fn cursor_sprite_size(shape: CursorShape) -> (usize, usize) {
+    match shape {
+        CursorShape::Arrow => (ARROW_SPRITE[0].len(), ARROW_SPRITE.len()),
+    }
+}
+
+/// Paint the cursor sprite; pixels outside the target are skipped by the target.
+fn raster_cursor(target: &mut impl RenderTarget, cursor: &DesktopCursor) {
+    if !cursor.visible {
+        return;
+    }
+    let rows: &[&str] = match cursor.shape {
+        CursorShape::Arrow => &ARROW_SPRITE,
+    };
+    for (dy, row) in rows.iter().enumerate() {
+        for (dx, cell) in row.bytes().enumerate() {
+            let color = match cell {
+                b'X' => POINTER_OUTLINE_COLOR,
+                b'o' => POINTER_FILL_COLOR,
+                _ => continue,
+            };
+            let x = cursor.x.saturating_add(dx);
+            let y = cursor.y.saturating_add(dy);
+            if x < target.width() && y < target.height() {
+                target.write_pixel(x, y, color);
+            }
         }
     }
 }
@@ -1806,6 +1928,95 @@ mod tests {
         assert_eq!(stats.damage_rect, Some(damage_rect));
         assert_eq!(target.pixel(w + 3, content_y + 4), Some(CURSOR_COLOR));
         assert_eq!(target.pixel(probe.0, probe.1), preserved_pixel);
+    }
+
+    #[test]
+    fn test_cursor_composes_above_windows_and_clips_at_edges() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec![]),
+            0,
+        );
+        let windows = vec![DesktopWindow::new(frame, SurfaceRect::new(0, 0, 8, 5)).focused()];
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let mut target = RgbaBuffer::new(8 * w, 5 * h, RgbaColor::new(0, 0, 0, 0));
+
+        // Cursor in the middle of the window: hotspot pixel is outline, the
+        // fill shows a few pixels in, and the window fill is untouched elsewhere.
+        let cursor = DesktopCursor::new(3 * w, 2 * h + 4);
+        compositor.render_desktop_to_target_with_cursor(
+            &mut target,
+            windows.clone(),
+            None,
+            Some(cursor),
+        );
+        assert_eq!(
+            target.pixel(cursor.x, cursor.y),
+            Some(POINTER_OUTLINE_COLOR)
+        );
+        assert_eq!(
+            target.pixel(cursor.x + 2, cursor.y + 5),
+            Some(POINTER_FILL_COLOR)
+        );
+        assert_eq!(
+            target.pixel(cursor.x + 11, cursor.y),
+            Some(WINDOW_FILL_COLOR)
+        );
+        assert_eq!(cursor.bounds(), RasterRect::new(cursor.x, cursor.y, 12, 19));
+
+        // Hidden cursor paints nothing.
+        compositor.render_desktop_to_target_with_cursor(
+            &mut target,
+            windows.clone(),
+            None,
+            Some(DesktopCursor::hidden()),
+        );
+        assert_eq!(target.pixel(cursor.x, cursor.y), Some(WINDOW_FILL_COLOR));
+
+        // Cursor hanging off the bottom-right corner is clipped, not a panic.
+        let edge = DesktopCursor::new(8 * w - 3, 5 * h - 2);
+        compositor.render_desktop_to_target_with_cursor(&mut target, windows, None, Some(edge));
+        assert_eq!(target.pixel(edge.x, edge.y), Some(POINTER_OUTLINE_COLOR));
+        assert_eq!(
+            target.pixel(edge.x + 1, edge.y + 1),
+            Some(POINTER_OUTLINE_COLOR)
+        );
+    }
+
+    #[test]
+    fn test_cursor_survives_damage_repaint_elsewhere() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec![]),
+            0,
+        );
+        let windows = vec![DesktopWindow::new(frame, SurfaceRect::new(0, 0, 8, 5)).focused()];
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let mut target = RgbaBuffer::new(8 * w, 5 * h, RgbaColor::new(0, 0, 0, 0));
+        let cursor = DesktopCursor::new(2 * w, 2 * h);
+        compositor.render_desktop_to_target_with_cursor(
+            &mut target,
+            windows.clone(),
+            None,
+            Some(cursor),
+        );
+        // Repaint a region far from the cursor; the cursor must still be there.
+        compositor.render_desktop_to_target_with_cursor(
+            &mut target,
+            windows,
+            Some(RasterRect::new(5 * w, 3 * h, w, h)),
+            Some(cursor),
+        );
+        assert_eq!(
+            target.pixel(cursor.x, cursor.y),
+            Some(POINTER_OUTLINE_COLOR)
+        );
     }
 
     #[test]

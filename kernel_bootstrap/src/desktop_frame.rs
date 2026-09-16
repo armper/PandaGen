@@ -17,8 +17,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use graphics_rasterizer::{RgbaBuffer, RgbaColor};
 use services_gui_host::{
-    Compositor, DesktopWindow, DesktopWindowRole, SurfaceRect, SurfaceSize, RASTER_CELL_HEIGHT,
-    RASTER_CELL_WIDTH,
+    Compositor, DesktopCursor, DesktopWindow, DesktopWindowRole, SurfaceRect, SurfaceSize,
+    RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -56,6 +56,8 @@ pub struct DesktopModel {
     pub main_title: String,
     pub editor: Option<EditorModel>,
     pub palette: Option<PaletteModel>,
+    /// Pointer position in surface pixels; `None` hides the cursor.
+    pub pointer: Option<(usize, usize)>,
 }
 
 /// Desktop layout in cell units derived from the pixel surface.
@@ -231,9 +233,13 @@ impl DesktopFrameRenderer {
     /// Compose `model` into the RGBA target. Returns the number of windows painted.
     pub fn render(&mut self, model: &DesktopModel) -> usize {
         let windows = build_desktop_windows(&self.layout, model);
-        let stats = self
-            .compositor
-            .render_desktop_to_target(&mut self.target, windows);
+        let cursor = model.pointer.map(|(x, y)| DesktopCursor::new(x, y));
+        let stats = self.compositor.render_desktop_to_target_with_cursor(
+            &mut self.target,
+            windows,
+            None,
+            cursor,
+        );
         self.frames += 1;
         stats.painted_windows
     }
@@ -259,6 +265,7 @@ mod tests {
             main_title: "Workspace".to_string(),
             editor: None,
             palette: None,
+            pointer: None,
         }
     }
 
@@ -389,6 +396,13 @@ mod tests {
             )
             .unwrap();
         assert_ne!(inside_main, bg);
+
+        // A pointer paints the cursor sprite on top of the desktop.
+        let mut with_pointer = sample_model();
+        with_pointer.pointer = Some((30, 40));
+        renderer.render(&with_pointer);
+        let hotspot = renderer.target.pixel(30, 40).unwrap();
+        assert_eq!(hotspot, RgbaColor::new(10, 10, 10, 255));
 
         // Re-rendering with a palette repaints the whole target deterministically.
         let mut with_palette = sample_model();

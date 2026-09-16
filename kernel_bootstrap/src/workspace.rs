@@ -1261,6 +1261,10 @@ impl WorkspaceSession {
         self.pointer_events = self.pointer_events.wrapping_add(1);
     }
 
+    pub fn is_pointer_available(&self) -> bool {
+        self.pointer_available
+    }
+
     pub fn pointer_position(&self) -> (i32, i32) {
         self.pointer_position
     }

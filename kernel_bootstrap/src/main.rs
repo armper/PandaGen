@@ -1176,6 +1176,10 @@ fn workspace_loop(
                     event.position.y,
                     event.buttons.bits(),
                 );
+                // The cursor is a desktop surface: moving it is a redraw.
+                if display_mode.is_graphics() {
+                    input_dirty = true;
+                }
             }
         }
 
@@ -2320,6 +2324,11 @@ fn build_desktop_model(workspace: &workspace::WorkspaceSession) -> desktop_frame
                 status: String::from(editor.status_line()),
             });
         }
+    }
+
+    if workspace.is_pointer_available() {
+        let (x, y) = workspace.pointer_position();
+        model.pointer = Some((x.max(0) as usize, y.max(0) as usize));
     }
 
     if workspace.is_palette_open() {
