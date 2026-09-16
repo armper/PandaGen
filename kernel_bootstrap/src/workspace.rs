@@ -6,6 +6,7 @@
 #[cfg(not(test))]
 extern crate alloc;
 
+use crate::display_mode::DisplayMode;
 use core::fmt::Write;
 
 #[cfg(not(test))]
@@ -176,6 +177,12 @@ pub struct WorkspaceSession {
     cli_hint_shown: bool,
     /// Clear screen requested (CLI/workspace)
     clear_requested: bool,
+    /// Display mode currently driving the framebuffer (set by the loop).
+    display_mode: DisplayMode,
+    /// Display mode change requested by the `display` command.
+    display_mode_request: Option<DisplayMode>,
+    /// Whether a framebuffer exists so graphics mode can be entered.
+    graphics_available: bool,
 }
 
 impl WorkspaceSession {
@@ -373,6 +380,9 @@ impl WorkspaceSession {
             cli_cursor: 0,
             cli_hint_shown: false,
             clear_requested: false,
+            display_mode: DisplayMode::DEFAULT,
+            display_mode_request: None,
+            graphics_available: false,
         }
     }
 
@@ -822,6 +832,12 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "display" {
+            self.emit_command_line(serial, command.as_bytes());
+            self.run_display_command(serial, parts.next());
+            return;
+        }
+
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
 
@@ -839,6 +855,7 @@ impl WorkspaceSession {
                 self.emit_line(serial, "list           - List components");
                 self.emit_line(serial, "focus <id>     - Focus component");
                 self.emit_line(serial, "clear | cls    - Clear the screen");
+                self.emit_line(serial, "display <mode> - Switch text | graphics display");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
@@ -1196,6 +1213,65 @@ impl WorkspaceSession {
         for line in text.split('\n') {
             let line = line.trim_end_matches('\r');
             self.push_output_bytes(line.as_bytes());
+        }
+    }
+
+    /// Record which display mode the loop is currently running.
+    pub fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
+    }
+
+    pub fn display_mode(&self) -> DisplayMode {
+        self.display_mode
+    }
+
+    /// Whether the loop has a framebuffer that can host the graphics desktop.
+    pub fn set_graphics_available(&mut self, available: bool) {
+        self.graphics_available = available;
+    }
+
+    /// Take a pending display-mode switch requested by the user.
+    pub fn consume_display_mode_request(&mut self) -> Option<DisplayMode> {
+        self.display_mode_request.take()
+    }
+
+    fn run_display_command(&mut self, serial: &mut SerialPort, arg: Option<&str>) {
+        match arg {
+            None | Some("status") => {
+                let line = if self.graphics_available {
+                    match self.display_mode {
+                        DisplayMode::TextConsole => "Display: text (graphics available)",
+                        DisplayMode::GraphicsDesktop => "Display: graphics (text available)",
+                    }
+                } else {
+                    "Display: text (no framebuffer; graphics unavailable)"
+                };
+                self.emit_line(serial, line);
+            }
+            Some(name) => match DisplayMode::parse(name) {
+                Some(DisplayMode::GraphicsDesktop) if !self.graphics_available => {
+                    self.emit_line(
+                        serial,
+                        "Graphics display needs a framebuffer; staying in text mode.",
+                    );
+                }
+                Some(mode) if mode == self.display_mode => {
+                    self.emit_line(serial, "Display mode unchanged.");
+                }
+                Some(mode) => {
+                    self.display_mode_request = Some(mode);
+                    self.emit_line(
+                        serial,
+                        match mode {
+                            DisplayMode::TextConsole => "Switching display to text.",
+                            DisplayMode::GraphicsDesktop => "Switching display to graphics.",
+                        },
+                    );
+                }
+                None => {
+                    self.emit_line(serial, "Usage: display [text | graphics | status]");
+                }
+            },
         }
     }
 

@@ -8,5 +8,12 @@ license.workspace = true
 [dependencies]
 view_types = { workspace = true }
 serde = { workspace = true }
-services_workspace_manager = { workspace = true }
+services_workspace_manager = { workspace = true, optional = true }
 graphics_rasterizer = { workspace = true }
+
+[features]
+default = ["workspace"]
+# Adapter from `services_workspace_manager` render snapshots to desktop
+# windows. Off in the bare-metal kernel, where the compositor core is used
+# without the (std-only) workspace manager.
+workspace = ["dep:services_workspace_manager"]

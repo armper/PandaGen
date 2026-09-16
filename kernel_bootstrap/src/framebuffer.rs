@@ -449,6 +449,14 @@ impl BareMetalFramebuffer {
         self.damage.mark(rect);
     }
 
+    /// Mark the whole surface damaged so the next present copies everything.
+    ///
+    /// Used when the hardware framebuffer was written by another path (for
+    /// example the graphics desktop) and the shadow must be re-presented in full.
+    pub fn invalidate(&mut self) {
+        self.mark_all_damaged();
+    }
+
     fn mark_all_damaged(&mut self) {
         let rect = self.full_rect();
         self.mark_damage(rect);

@@ -1,16 +1,33 @@
 //! GUI host and compositor on view surfaces.
+//!
+//! The compositor core is `no_std` + `alloc` so the bare-metal kernel can
+//! compose the same desktop the host tests validate. The workspace-manager
+//! adapter is behind the `workspace` feature (on by default).
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use graphics_rasterizer::{
     RasterRect, RenderTarget, RgbaBuffer, RgbaColor, ScissorTarget, DESKTOP_FONT,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "workspace")]
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
-use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
+#[cfg(feature = "workspace")]
+use view_types::ViewId;
+use view_types::{ViewContent, ViewFrame, ViewKind};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
-const RASTER_CELL_WIDTH: usize = DESKTOP_FONT.advance_x();
-const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
+/// Pixel width of one desktop text cell (window rects are in cell units).
+pub const RASTER_CELL_WIDTH: usize = DESKTOP_FONT.advance_x();
+/// Pixel height of one desktop text cell, including line spacing.
+pub const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
 const RASTER_BORDER_THICKNESS: usize = 1;
 
 const DESKTOP_BACKGROUND_COLOR: RgbaColor = RgbaColor::new(12, 18, 28, 255);
@@ -100,7 +117,8 @@ impl DesktopWindowLayer {
         }
     }
 
-    fn sort_key(self) -> usize {
+    /// Composition order: lower keys are painted first (further back).
+    pub fn sort_key(self) -> usize {
         match self {
             Self::Workspace => 0,
             Self::Overlay => 1,
@@ -404,7 +422,10 @@ impl Compositor {
             damage_rect,
         }
     }
+}
 
+#[cfg(feature = "workspace")]
+impl Compositor {
     /// Map a workspace snapshot into tiled desktop windows.
     ///
     /// This is the first bridge from workspace-managed split/tab state into
@@ -699,6 +720,7 @@ fn put_char(canvas: &mut [Vec<char>], x: usize, y: usize, ch: char) {
     }
 }
 
+#[cfg(feature = "workspace")]
 fn workspace_tile_windows(
     size: SurfaceSize,
     snapshot: &WorkspaceRenderSnapshot,
@@ -733,6 +755,7 @@ fn workspace_tile_windows(
         .collect()
 }
 
+#[cfg(feature = "workspace")]
 fn tile_window_frame(
     tile: &WorkspaceTileRenderSnapshot,
     tile_index: usize,
@@ -768,6 +791,7 @@ fn tile_window_frame(
     (frame, role, tabs)
 }
 
+#[cfg(feature = "workspace")]
 fn tile_window_tabs(tile: &WorkspaceTileRenderSnapshot, frame: &ViewFrame) -> Vec<DesktopTab> {
     if tile.tabs.is_empty() {
         return Vec::new();
@@ -791,6 +815,7 @@ fn tile_window_tabs(tile: &WorkspaceTileRenderSnapshot, frame: &ViewFrame) -> Ve
         .collect()
 }
 
+#[cfg(feature = "workspace")]
 fn partition_rects_vertical(size: SurfaceSize, count: usize) -> Vec<SurfaceRect> {
     let slices = partition_extent(size.width, count);
     slices
@@ -799,6 +824,7 @@ fn partition_rects_vertical(size: SurfaceSize, count: usize) -> Vec<SurfaceRect>
         .collect()
 }
 
+#[cfg(feature = "workspace")]
 fn partition_rects_horizontal(size: SurfaceSize, count: usize) -> Vec<SurfaceRect> {
     let slices = partition_extent(size.height, count);
     slices
@@ -807,6 +833,7 @@ fn partition_rects_horizontal(size: SurfaceSize, count: usize) -> Vec<SurfaceRec
         .collect()
 }
 
+#[cfg(feature = "workspace")]
 fn partition_extent(total: usize, count: usize) -> Vec<(usize, usize)> {
     if count == 0 {
         return Vec::new();

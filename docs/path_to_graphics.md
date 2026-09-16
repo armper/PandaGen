@@ -84,6 +84,7 @@ User-space services should provide policy:
 - [x] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
 - [x] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
 - [x] `GFX-015` Add golden surface tests for raster output so pixel logic can be validated without booting QEMU.
+- [ ] `GFX-053` Add a full printable-ASCII desktop font (lowercase and punctuation) so desktop text is readable; the current `DESKTOP_FONT` is uppercase-only and renders `'`, `>`, `|` as `?`.
 
 ### Epic 4: Framebuffer Presentation
 
@@ -91,7 +92,7 @@ User-space services should provide policy:
 - [x] `GFX-017` Route the current framebuffer backbuffer/blit machinery through that new presentation path.
 - [x] `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
 - [x] `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
-- [ ] `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
+- [x] `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
 
 ### Epic 5: Pointer And Graphical Input Model
 
@@ -210,8 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
+Milestone A is reached: `cargo xtask iso` followed by `display graphics` at the workspace prompt (or `display=graphics` on the kernel command line) shows a composited desktop in QEMU with a main window, status window, palette overlay, editor view, focus ring, and cursor, all presented through the paced framebuffer presenter. Keyboard focus and command flow still work in both modes and switching back to text repaints correctly.
+
 The best next implementation step is:
 
-- `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
+- `GFX-053` Add a full printable-ASCII desktop font.
 
-`GFX-019` is now in place: `BareMetalFramebuffer` tracks a damage bounding box across every draw call, and `present_shadow_damage` copies only that box into the hardware framebuffer. Combined with `GFX-018` pacing, a paced present is now also a small present. The next step is an explicit display-mode contract so the loop can run either the text workspace or the graphical desktop against the same presenter.
+It is the most visible defect in the graphical desktop today and it blocks readable app surfaces (Epic 8). The kernel already ships a complete 8x16 font (`kernel_bootstrap/src/font_data_8x16.in`) that can seed a rasterizer `BitmapFont`. After that, `GFX-021` to `GFX-025` (pointer input) begin Milestone B.

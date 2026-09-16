@@ -18,6 +18,8 @@ extern crate alloc;
 
 mod bare_metal_editor_io;
 mod bare_metal_storage;
+mod desktop_frame;
+mod display_mode;
 mod display_sink;
 mod framebuffer;
 mod minimal_editor;
@@ -48,7 +50,8 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use limine::memory_map::EntryType;
 #[cfg(all(not(test), target_os = "none"))]
 use limine::request::{
-    ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
+    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
+    MemoryMapRequest,
 };
 #[cfg(all(not(test), target_os = "none"))]
 use limine::BaseRevision;
@@ -853,6 +856,24 @@ fn workspace_loop(
     // GFX-018: presents of the shadow are paced, not tied 1:1 to render passes.
     let mut present_pacer =
         present_policy::FramePacer::new(present_policy::PresentPolicy::DEFAULT_BARE_METAL);
+
+    // GFX-020: text console vs graphics desktop. Graphics needs a framebuffer.
+    let graphics_available = fb_console.is_some();
+    let mut display_mode = match kernel.boot.display_mode {
+        Some(mode) if mode.is_graphics() && !graphics_available => {
+            kprintln!(
+                serial,
+                "display: graphics requested but no framebuffer; using text"
+            );
+            display_mode::DisplayMode::TextConsole
+        }
+        Some(mode) => mode,
+        None => display_mode::DisplayMode::DEFAULT,
+    };
+    kprintln!(serial, "display: {} mode", display_mode.label());
+    workspace.set_graphics_available(graphics_available);
+    workspace.set_display_mode(display_mode);
+    let mut desktop_renderer: Option<desktop_frame::DesktopFrameRenderer> = None;
     if FB_SHADOW_ENABLED {
         if let Some(ref fb) = fb_console {
             let info = fb.info();
@@ -884,8 +905,14 @@ fn workspace_loop(
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
-            if let (Some(fb), Some(backbuffer)) = (fb_console.as_mut(), fb_shadow.as_mut()) {
-                present_framebuffer_shadow(serial, fb, backbuffer);
+            if let Some(fb) = fb_console.as_mut() {
+                if display_mode.is_graphics() {
+                    if let Some(renderer) = desktop_renderer.as_ref() {
+                        present_desktop_frame(serial, fb, renderer);
+                    }
+                } else if let Some(backbuffer) = fb_shadow.as_mut() {
+                    present_framebuffer_shadow(serial, fb, backbuffer);
+                }
             }
         }
 
@@ -1041,8 +1068,49 @@ fn workspace_loop(
             clear_terminal = true;
         }
 
+        if let Some(requested) = workspace.consume_display_mode_request() {
+            if requested != display_mode && (graphics_available || !requested.is_graphics()) {
+                display_mode = requested;
+                workspace.set_display_mode(requested);
+                kprintln!(serial, "display: switched to {} mode", requested.label());
+                // Whichever renderer takes over must repaint everything: the
+                // hardware buffer holds the other mode's pixels.
+                output_dirty = true;
+                input_dirty = true;
+                output_initialized = false;
+                prompt_initialized = false;
+                status_initialized = false;
+                last_output_rows = 0;
+                last_output_seq = 0;
+                clear_terminal = true;
+                editor_render_cache.invalidate();
+                if let Some(shadow) = fb_shadow.as_mut() {
+                    shadow.invalidate();
+                }
+            }
+        }
+
         // Update display if needed
-        if input_dirty || output_dirty || clear_terminal {
+        if display_mode.is_graphics() && fb_console.is_some() {
+            if input_dirty || output_dirty || clear_terminal {
+                let (width, height) = {
+                    let info = fb_console
+                        .as_ref()
+                        .expect("framebuffer checked above")
+                        .info();
+                    (info.width, info.height)
+                };
+                let renderer = desktop_renderer
+                    .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
+                let model = build_desktop_model(&workspace);
+                renderer.render(&model);
+                present_pacer.mark_dirty();
+                // The text renderer's caches no longer describe the screen.
+                editor_render_cache.invalidate();
+                input_dirty = false;
+                output_dirty = false;
+            }
+        } else if input_dirty || output_dirty || clear_terminal {
             let draw_palette_overlay = workspace.is_palette_open() && input_dirty;
             let mut rendered_editor = false;
             {
@@ -2050,6 +2118,82 @@ fn present_framebuffer_shadow(
     }
 }
 
+/// Present the composed desktop RGBA frame (graphics display mode).
+fn present_desktop_frame(
+    serial: &mut serial::SerialPort,
+    fb: &mut framebuffer::BareMetalFramebuffer,
+    renderer: &desktop_frame::DesktopFrameRenderer,
+) {
+    let surface = framebuffer::DesktopSurface::rgba8888(
+        renderer.width(),
+        renderer.height(),
+        renderer.pixels(),
+    );
+    match fb.present_desktop_surface(surface) {
+        Ok(stats) => render_stats::record_desktop_present(stats.copied_pixels as u64),
+        Err(err) => {
+            render_stats::record_desktop_present_error();
+            let _ = writeln!(serial, "framebuffer present rejected: {:?}", err);
+        }
+    }
+}
+
+/// Snapshot the workspace into the data model the desktop builder consumes.
+fn build_desktop_model(workspace: &workspace::WorkspaceSession) -> desktop_frame::DesktopModel {
+    extern crate alloc;
+    use alloc::string::String;
+
+    let mut model = desktop_frame::DesktopModel::default();
+    for index in 0..workspace.output_line_count() {
+        if let Some(line) = workspace.output_line(index) {
+            model
+                .output_lines
+                .push(String::from_utf8_lossy(line.as_bytes()).into_owned());
+        }
+    }
+    let mut prompt = String::from(workspace.prompt_prefix());
+    prompt.push_str(&String::from_utf8_lossy(workspace.get_command_text()));
+    model.prompt = prompt;
+    model.prompt_cursor = workspace.get_cursor_col();
+    model.status = String::from(workspace.status_line());
+    model.main_title = String::from(if workspace.is_cli_active() {
+        "CLI"
+    } else {
+        "Workspace"
+    });
+
+    if workspace.is_editor_active() {
+        if let Some(editor) = workspace.editor() {
+            model.editor = Some(desktop_frame::EditorModel {
+                title: String::from("Editor"),
+                lines: (0..editor.viewport_rows())
+                    .map(|row| String::from(editor.get_viewport_line(row).unwrap_or("")))
+                    .collect(),
+                cursor: editor
+                    .get_viewport_cursor()
+                    .map(|position| (position.row, position.col)),
+                status: String::from(editor.status_line()),
+            });
+        }
+    }
+
+    if workspace.is_palette_open() {
+        let palette = workspace.palette_overlay();
+        model.palette = Some(desktop_frame::PaletteModel {
+            header: String::from(palette.context_header()),
+            query: String::from(palette.query()),
+            results: palette
+                .displayed_results()
+                .iter()
+                .map(|descriptor| descriptor.name.clone())
+                .collect(),
+            selection: palette.selection_index(),
+        });
+    }
+
+    model
+}
+
 fn prompt_view(cmd: &[u8], cols: usize, prefix_len: usize) -> (usize, &[u8], usize) {
     if cols == 0 {
         return (0, &[], 0);
@@ -2695,6 +2839,18 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
         info.mem_usable_kib = usable / 1024;
     }
 
+    // Kernel command line: `display=text|graphics` selects the boot display mode.
+    if let Some(cmdline) = EXECUTABLE_CMDLINE_REQUEST.get_response() {
+        let bytes = cmdline.cmdline().to_bytes();
+        info.display_mode = display_mode::DisplayMode::from_cmdline(bytes);
+        kprintln!(
+            serial,
+            "cmdline: {:?} display_mode={:?}",
+            core::str::from_utf8(bytes).unwrap_or("<non-utf8>"),
+            info.display_mode.map(|mode| mode.label())
+        );
+    }
+
     // Request framebuffer from Limine
     match FRAMEBUFFER_REQUEST.get_response() {
         Some(fb_resp) => {
@@ -2820,7 +2976,9 @@ fn init_heap(
     allocator: &mut FrameAllocator,
     hhdm_offset: u64,
 ) -> Option<BumpHeap> {
-    const HEAP_PAGES: u64 = 2048;
+    // 32 MiB: the text shadow and the desktop RGBA target are ~4 MiB each at
+    // 1280x800, and the bump allocator never returns per-frame allocations.
+    const HEAP_PAGES: u64 = 8192;
     let Some(phys_base) = allocator.allocate_contiguous(HEAP_PAGES) else {
         let _ = writeln!(serial, "heap: allocation failed");
         return None;
@@ -2870,6 +3028,11 @@ static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressR
 #[used]
 #[link_section = ".limine_requests"]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[cfg(all(not(test), target_os = "none"))]
+#[used]
+#[link_section = ".limine_requests"]
+static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
 #[cfg(all(not(test), target_os = "none"))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
@@ -2984,6 +3147,8 @@ struct BootInfo {
     framebuffer_height: u64,
     framebuffer_pitch: u64,
     framebuffer_bpp: u16,
+    /// Display mode requested on the kernel command line (`display=...`).
+    display_mode: Option<display_mode::DisplayMode>,
 }
 
 impl BootInfo {
@@ -3000,6 +3165,7 @@ impl BootInfo {
             framebuffer_height: 0,
             framebuffer_pitch: 0,
             framebuffer_bpp: 0,
+            display_mode: None,
         }
     }
 }

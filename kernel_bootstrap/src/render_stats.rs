@@ -305,9 +305,15 @@ pub fn reset_stats() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// The counters are process-global, so tests that reset and read them
+    /// must not interleave with each other.
+    static STATS_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_render_stats_frame_tracking() {
+        let _guard = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_stats();
 
         // Simulate a frame
@@ -326,6 +332,7 @@ mod tests {
 
     #[test]
     fn test_cumulative_stats() {
+        let _guard = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_stats();
 
         // Frame 1

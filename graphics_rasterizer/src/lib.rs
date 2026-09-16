@@ -1,5 +1,14 @@
 //! Deterministic software rasterizer primitives for PandaGen graphics.
+//!
+//! The crate is `no_std` + `alloc` so the same pixel logic runs under host
+//! tests and inside the bare-metal kernel image.
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

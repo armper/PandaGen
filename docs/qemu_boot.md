@@ -190,6 +190,28 @@ This makes it easy to pinpoint the failure stage:
 - `kbd scancode` but no `kbd keyevent`: scancode decoder issue
 - `kbd keyevent` but no UI update: render/overlay wiring issue
 
+### Display Modes (Phase 218)
+
+The framebuffer can be driven by two renderers:
+
+- **text** (default): the text workspace draws into a shadow framebuffer that is
+  presented through the damage-aware presenter.
+- **graphics**: workspace state is mapped into desktop windows, composed by
+  `services_gui_host`, rasterized to RGBA, and presented as a full desktop.
+
+Switch at runtime from the workspace prompt:
+
+```
+> display graphics
+> display text
+> display status
+```
+
+Or choose at boot with the kernel command line (`cmdline: display=graphics` in
+`boot/limine.conf`; a second menu entry with that line is provided). Graphics
+mode requires a framebuffer; on VGA-only boots the command reports that and
+stays in text mode.
+
 ### Scripted Headless Session (Automated)
 
 ```
