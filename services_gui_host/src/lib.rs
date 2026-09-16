@@ -24,10 +24,15 @@ pub mod animation;
 pub mod input_routing;
 pub mod layout;
 pub mod scene;
+pub mod shell;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
 pub use layout::{Anchor, Axis, Insets, LayoutId, LayoutNode, Length};
 pub use scene::ScrollRegion;
+pub use shell::{
+    compose_shell, shell_layout, LauncherItem, NoticeLevel, ShellModel, ShellNotice, ShellRects,
+    ShellViewIds,
+};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
@@ -95,6 +100,8 @@ pub enum DesktopWindowRole {
     Notification,
     /// Blocking modal surface that captures interaction priority.
     Modal,
+    /// Shell launcher strip: non-focusable, sits with workspace surfaces.
+    Launcher,
 }
 
 /// Canonical desktop layer ordering policy.
@@ -118,7 +125,9 @@ pub enum DesktopWindowLayer {
 impl DesktopWindowLayer {
     fn for_role(role: DesktopWindowRole) -> Self {
         match role {
-            DesktopWindowRole::Main | DesktopWindowRole::Status => Self::Workspace,
+            DesktopWindowRole::Main | DesktopWindowRole::Status | DesktopWindowRole::Launcher => {
+                Self::Workspace
+            }
             DesktopWindowRole::Overlay => Self::Overlay,
             DesktopWindowRole::Palette => Self::Palette,
             DesktopWindowRole::Notification => Self::Notification,
@@ -168,6 +177,14 @@ pub struct DesktopWindow {
     pub tabs: Vec<DesktopTab>,
     pub z_index: usize,
     pub focused: bool,
+    /// Whether the title/tab strip row is drawn. Shell strips (status bar,
+    /// launcher) turn it off so content starts at the border.
+    #[serde(default = "default_chrome")]
+    pub chrome: bool,
+}
+
+fn default_chrome() -> bool {
+    true
 }
 
 impl DesktopWindow {
@@ -180,6 +197,7 @@ impl DesktopWindow {
             tabs: Vec::new(),
             z_index: 0,
             focused: false,
+            chrome: true,
         }
     }
 
@@ -207,6 +225,21 @@ impl DesktopWindow {
     pub fn focused(mut self) -> Self {
         self.focused = true;
         self
+    }
+
+    /// Draw no title row; content begins right inside the border.
+    pub fn without_chrome(mut self) -> Self {
+        self.chrome = false;
+        self
+    }
+
+    /// Content lines this window can show at its cell height.
+    pub fn content_rows(&self) -> usize {
+        if self.chrome {
+            self.rect.height.saturating_sub(2)
+        } else {
+            self.rect.height
+        }
     }
 }
 
@@ -608,14 +641,14 @@ impl Compositor {
             let local_x = x - rect.x;
             let local_y = y - rect.y;
 
-            let region = if let Some(content) =
-                window_content_rect(rect).filter(|content| content.contains(x, y))
+            let region = if let Some(content) = window_content_rect_for(rect, window.chrome)
+                .filter(|content| content.contains(x, y))
             {
                 HitRegion::Content {
                     line: (y - content.y) / RASTER_CELL_HEIGHT,
                     column: (x - content.x) / RASTER_CELL_WIDTH,
                 }
-            } else if window_chrome_rect(rect).contains(x, y) {
+            } else if window.chrome && window_chrome_rect(rect).contains(x, y) {
                 HitRegion::Chrome
             } else {
                 HitRegion::Border
@@ -775,7 +808,7 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
         }
     }
 
-    if rect.width > 2 {
+    if window.chrome && rect.width > 2 {
         let label = window_chrome_label(window);
         for (offset, ch) in label.chars().take(rect.width - 2).enumerate() {
             put_char(canvas, rect.x + 1 + offset, rect.y, ch);
@@ -846,26 +879,34 @@ fn raster_window(
         );
     }
 
-    let chrome_label = window_chrome_label(window);
-    if let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) {
-        let mut chrome_target = ScissorTarget::new(target, chrome_rect);
-        chrome_target.draw_text_with_font(
-            rect.x + 2,
-            rect.y + 2,
-            &chrome_label,
-            &DESKTOP_FONT,
-            TEXT_COLOR,
-        );
+    if window.chrome {
+        let chrome_label = window_chrome_label(window);
+        if let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) {
+            let mut chrome_target = ScissorTarget::new(target, chrome_rect);
+            chrome_target.draw_text_with_font(
+                rect.x + 2,
+                rect.y + 2,
+                &chrome_label,
+                &DESKTOP_FONT,
+                TEXT_COLOR,
+            );
+        }
     }
 
-    if let Some(content_rect) = window_content_rect(rect) {
+    // Content text starts one cell down when a chrome row is present.
+    let content_top = if window.chrome {
+        rect.y + RASTER_CELL_HEIGHT
+    } else {
+        rect.y
+    };
+    if let Some(content_rect) = window_content_rect_for(rect, window.chrome) {
         if let Some(content_clip) = content_rect.intersect(clipped_rect) {
             let target_height = target.height();
             let mut content_target = ScissorTarget::new(target, content_clip);
-            let line_origin_y = rect.y + RASTER_CELL_HEIGHT + 2;
+            let line_origin_y = content_top + 2;
             for (line_index, line) in render_content_lines(&window.frame.content)
                 .into_iter()
-                .take(window.rect.height.saturating_sub(2))
+                .take(window.content_rows())
                 .enumerate()
             {
                 let y = line_origin_y + line_index * RASTER_CELL_HEIGHT;
@@ -879,7 +920,7 @@ fn raster_window(
                 // Same origin as the text run above so the caret sits under
                 // the glyph it refers to.
                 let cursor_x = rect.x + 2 + cursor.column * RASTER_CELL_WIDTH;
-                let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
+                let cursor_y = content_top + 1 + cursor.line * RASTER_CELL_HEIGHT;
                 content_target.fill_rect(
                     RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
                     CURSOR_COLOR,
@@ -907,6 +948,23 @@ fn window_chrome_rect(rect: RasterRect) -> RasterRect {
         rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
         RASTER_CELL_HEIGHT.saturating_sub(RASTER_BORDER_THICKNESS),
     )
+}
+
+fn window_content_rect_for(rect: RasterRect, chrome: bool) -> Option<RasterRect> {
+    if chrome {
+        return window_content_rect(rect);
+    }
+    let y = rect.y + RASTER_BORDER_THICKNESS;
+    let bottom = rect.y + rect.height;
+    if y >= bottom {
+        return None;
+    }
+    Some(RasterRect::new(
+        rect.x + RASTER_BORDER_THICKNESS,
+        y,
+        rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
+        bottom - y - RASTER_BORDER_THICKNESS,
+    ))
 }
 
 fn window_content_rect(rect: RasterRect) -> Option<RasterRect> {

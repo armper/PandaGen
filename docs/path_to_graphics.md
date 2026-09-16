@@ -112,7 +112,7 @@ User-space services should provide policy:
 
 ### Epic 7: Desktop Shell
 
-- [ ] `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
+- [x] `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
 - [ ] `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
 - [ ] `GFX-033` Add a graphical command palette overlay backed by the existing command surface data.
 - [ ] `GFX-034` Add a system notification layer that can render toasts and persistent status cards.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 6 (basic scene primitives) is complete: draw ops, images, containers and scroll regions, a layout vocabulary, and tick-based animation hooks, with the caret blink as the first animation driven through the frame pacer.
+`GFX-031` is in place: the graphics desktop is now the PandaGen shell, with a status bar, a launcher strip driven by the command palette (clicks run commands), the workspace area, expiring notices, the palette overlay, and the pointer, all composed from a data model and verified in QEMU.
 
 The best next implementation step is:
 
-- `GFX-031` Build a minimal graphical shell surface: background, launcher area, status area, notifications, and workspace area.
+- `GFX-032` Replace text-only window chrome with a graphical title bar, focus ring, and tab strip design.
 
-Everything the shell needs to draw itself now exists. The shell turns the bare "one main window plus status" desktop into the actual PandaGen shell layout, which Epic 8's app surfaces then live inside.
+The shell frame exists; its windows still draw a plain one-pixel border and a text label. A proper title bar and focus ring make focus visible at a glance and give tabs a real strip to live in.

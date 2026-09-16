@@ -30,7 +30,9 @@ impl DesktopWindowRole {
     pub const fn is_focusable(self) -> bool {
         !matches!(
             self,
-            DesktopWindowRole::Status | DesktopWindowRole::Notification
+            DesktopWindowRole::Status
+                | DesktopWindowRole::Notification
+                | DesktopWindowRole::Launcher
         )
     }
 
@@ -43,6 +45,7 @@ impl DesktopWindowRole {
             DesktopWindowRole::Palette => "palette",
             DesktopWindowRole::Notification => "notification",
             DesktopWindowRole::Modal => "modal",
+            DesktopWindowRole::Launcher => "launcher",
         }
     }
 }
@@ -555,6 +558,7 @@ mod tests {
         assert_eq!(router.capture().map(|c| c.target), Some(status));
         assert!(!DesktopWindowRole::Status.is_focusable());
         assert!(!DesktopWindowRole::Notification.is_focusable());
+        assert!(!DesktopWindowRole::Launcher.is_focusable());
         assert!(DesktopWindowRole::Palette.is_focusable());
         assert!(DesktopWindowRole::Modal.is_focusable());
     }

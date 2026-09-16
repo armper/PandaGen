@@ -18,6 +18,10 @@ use std::string::{String, ToString};
 
 #[cfg(not(test))]
 use alloc::vec;
+#[cfg(not(test))]
+use alloc::vec::Vec;
+#[cfg(test)]
+use std::vec::Vec;
 
 use crate::serial::SerialPort;
 use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
@@ -39,7 +43,8 @@ use crate::bare_metal_storage::BareMetalFilesystem;
 #[cfg(feature = "console_vga")]
 use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
 
-use services_command_palette::{CommandDescriptor, CommandPalette};
+use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
+use services_gui_host::{NoticeLevel, ShellNotice};
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -197,6 +202,18 @@ pub struct WorkspaceSession {
     pointer_focus: Option<&'static str>,
     /// Whether a window currently captures the pointer.
     pointer_captured: bool,
+    /// Shell notices, newest first.
+    notices: Vec<PendingNotice>,
+}
+
+/// Maximum notices retained for the shell.
+const MAX_SHELL_NOTICES: usize = 4;
+
+/// A notice plus the tick it was first shown (set by the loop).
+#[derive(Debug, Clone)]
+struct PendingNotice {
+    notice: ShellNotice,
+    shown_at: Option<u64>,
 }
 
 impl WorkspaceSession {
@@ -404,6 +421,7 @@ impl WorkspaceSession {
             pointer_over: None,
             pointer_focus: None,
             pointer_captured: false,
+            notices: Vec::new(),
         }
     }
 
@@ -498,63 +516,7 @@ impl WorkspaceSession {
                         return true;
                     }
                     PaletteKeyAction::Execute(cmd_id) => {
-                        let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
-
-                        match cmd_id.as_str() {
-                            "open_editor" => {
-                                self.open_editor(serial, None);
-                                self.palette_overlay.close();
-                                return true;
-                            }
-                            "open_cli" => {
-                                self.active_component = Some(ComponentType::Cli);
-                                self.set_cli_active(true, serial);
-                                self.palette_overlay.close();
-                                return true;
-                            }
-                            "quit" => {
-                                self.active_component = None;
-                                self.emit_line(serial, "Closed component");
-                                self.palette_overlay.close();
-                                return true;
-                            }
-                            _ => {}
-                        }
-
-                        let prompt_pattern = self
-                            .command_palette
-                            .get_command(&cmd_id)
-                            .and_then(|descriptor| descriptor.prompt_pattern.clone());
-                        if let Some(pattern) = prompt_pattern {
-                            self.set_command_text(&pattern);
-                            self.palette_overlay.close();
-                            return true;
-                        }
-
-                        // Execute command
-                        let result = self.command_palette.execute_command(&cmd_id, &[]);
-                        match result {
-                            Ok(msg) => {
-                                let _ = writeln!(serial, "  palette_result=success msg={}", msg);
-                                self.append_output_text(&msg);
-                            }
-                            Err(err) => {
-                                let _ = writeln!(serial, "  palette_result=error err={}", err);
-                                self.append_output_text(&err);
-                            }
-                        }
-
-                        match cmd_id.as_str() {
-                            "help" | "list" | "halt" | "boot" | "mem" | "ticks" | "ls" => {
-                                self.set_command_text(cmd_id.as_str());
-                                self.execute_command(ctx, serial);
-                            }
-                            _ => {}
-                        }
-
-                        // Close palette after execution
-                        self.palette_overlay.close();
-                        return true;
+                        return self.run_palette_command(cmd_id, ctx, serial);
                     }
                     PaletteKeyAction::Consumed => {
                         let _ = writeln!(serial, "  palette_action=consumed");
@@ -1373,19 +1335,162 @@ impl WorkspaceSession {
                 }
                 Some(mode) => {
                     self.display_mode_request = Some(mode);
-                    self.emit_line(
-                        serial,
-                        match mode {
-                            DisplayMode::TextConsole => "Switching display to text.",
-                            DisplayMode::GraphicsDesktop => "Switching display to graphics.",
-                        },
-                    );
+                    let text = match mode {
+                        DisplayMode::TextConsole => "Switching display to text.",
+                        DisplayMode::GraphicsDesktop => "Switching display to graphics.",
+                    };
+                    self.emit_line(serial, text);
+                    self.push_notice(NoticeLevel::Info, text);
                 }
                 None => {
                     self.emit_line(serial, "Usage: display [text | graphics | status]");
                 }
             },
         }
+    }
+
+    /// Execute a command chosen from the palette or the shell launcher.
+    ///
+    /// Returns true when the workspace state changed (it always does: at
+    /// minimum the palette closes or output is appended).
+    pub fn run_palette_command(
+        &mut self,
+        cmd_id: CommandId,
+        ctx: &mut KernelContext,
+        serial: &mut SerialPort,
+    ) -> bool {
+        let _ = writeln!(serial, "  palette_action=execute cmd={}", cmd_id);
+
+        match cmd_id.as_str() {
+            "open_editor" => {
+                self.open_editor(serial, None);
+                self.palette_overlay.close();
+                return true;
+            }
+            "open_cli" => {
+                self.active_component = Some(ComponentType::Cli);
+                self.set_cli_active(true, serial);
+                self.palette_overlay.close();
+                return true;
+            }
+            "quit" => {
+                self.active_component = None;
+                self.emit_line(serial, "Closed component");
+                self.palette_overlay.close();
+                return true;
+            }
+            _ => {}
+        }
+
+        let prompt_pattern = self
+            .command_palette
+            .get_command(&cmd_id)
+            .and_then(|descriptor| descriptor.prompt_pattern.clone());
+        if let Some(pattern) = prompt_pattern {
+            self.set_command_text(&pattern);
+            self.palette_overlay.close();
+            return true;
+        }
+
+        // Execute command
+        let result = self.command_palette.execute_command(&cmd_id, &[]);
+        match result {
+            Ok(msg) => {
+                let _ = writeln!(serial, "  palette_result=success msg={}", msg);
+                self.append_output_text(&msg);
+            }
+            Err(err) => {
+                let _ = writeln!(serial, "  palette_result=error err={}", err);
+                self.append_output_text(&err);
+            }
+        }
+
+        match cmd_id.as_str() {
+            "help" | "list" | "halt" | "boot" | "mem" | "ticks" | "ls" | "clear" => {
+                self.set_command_text(cmd_id.as_str());
+                self.execute_command(ctx, serial);
+            }
+            _ => {}
+        }
+
+        // Close palette after execution
+        self.palette_overlay.close();
+        return true;
+    }
+
+    /// Launcher entries: enabled commands that need no arguments, sorted by
+    /// name so the strip is stable across frames. The flag marks the entry
+    /// for the component currently open.
+    pub fn launcher_items(&self) -> Vec<(CommandId, String, bool)> {
+        let mut items: Vec<(CommandId, String, bool)> = self
+            .command_palette
+            .list_commands()
+            .into_iter()
+            .filter(|d| d.enabled && !d.requires_args && d.prompt_pattern.is_none())
+            .map(|d| {
+                let active = match d.id.as_str() {
+                    "open_editor" => self.is_editor_active(),
+                    "open_cli" => self.cli_active,
+                    _ => false,
+                };
+                (d.id.clone(), d.name.clone(), active)
+            })
+            .collect();
+        items.sort_by(|a, b| a.1.cmp(&b.1));
+        items
+    }
+
+    /// Run the launcher entry shown on `line` (display order).
+    pub fn activate_launcher_line(
+        &mut self,
+        line: usize,
+        ctx: &mut KernelContext,
+        serial: &mut SerialPort,
+    ) -> bool {
+        let items = self.launcher_items();
+        match items.get(line) {
+            Some((id, _, _)) => {
+                let id = id.clone();
+                let _ = writeln!(serial, "launcher: line={} cmd={}", line, id);
+                self.run_palette_command(id, ctx, serial)
+            }
+            None => false,
+        }
+    }
+
+    /// Queue a shell notice (newest first, oldest dropped past capacity).
+    pub fn push_notice(&mut self, level: NoticeLevel, text: &str) {
+        let mut line = String::new();
+        line.push_str(text);
+        self.notices.insert(
+            0,
+            PendingNotice {
+                notice: ShellNotice { level, text: line },
+                shown_at: None,
+            },
+        );
+        self.notices.truncate(MAX_SHELL_NOTICES);
+    }
+
+    /// Stamp unstamped notices with `now`, drop those older than `ttl`
+    /// ticks, and return the tick at which the next one expires.
+    pub fn stamp_and_expire_notices(&mut self, now: u64, ttl: u64) -> Option<u64> {
+        for pending in &mut self.notices {
+            if pending.shown_at.is_none() {
+                pending.shown_at = Some(now);
+            }
+        }
+        self.notices
+            .retain(|p| p.shown_at.is_none_or(|t| now.saturating_sub(t) < ttl));
+        self.notices
+            .iter()
+            .filter_map(|p| p.shown_at.map(|t| t.saturating_add(ttl)))
+            .min()
+    }
+
+    /// Current notices, newest first.
+    pub fn notices(&self) -> Vec<ShellNotice> {
+        self.notices.iter().map(|p| p.notice.clone()).collect()
     }
 
     pub fn consume_clear_request(&mut self) -> bool {
@@ -1440,6 +1545,7 @@ impl WorkspaceSession {
 
         let line = core::str::from_utf8(&buffer[..len]).unwrap_or("Unknown command.");
         self.emit_line(serial, line);
+        self.push_notice(NoticeLevel::Warning, line);
     }
 
     fn push_output_bytes(&mut self, bytes: &[u8]) {

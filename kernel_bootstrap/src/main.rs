@@ -146,6 +146,8 @@ const KBD_DEBUG_LOG: bool = false;
 const FB_SHADOW_ENABLED: bool = true;
 /// Caret blink period in PIT ticks (100 Hz): on for 0.5 s, off for 0.5 s.
 const CARET_BLINK_PERIOD_TICKS: u64 = 100;
+/// How long a shell notice stays on screen (8 s).
+const NOTICE_TTL_TICKS: u64 = 800;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -1187,13 +1189,52 @@ fn workspace_loop(
                 // Route against the desktop the user currently sees.
                 if display_mode.is_graphics() {
                     if let Some(renderer) = desktop_renderer.as_ref() {
-                        let model = build_desktop_model(&workspace);
+                        let model = build_desktop_model(&workspace, get_tick_count());
                         let windows = renderer.windows(&model);
                         let deliveries =
                             input_router.route(renderer.compositor(), &windows, *event);
                         if KBD_DEBUG_LOG {
                             for delivery in &deliveries {
                                 let _ = writeln!(serial, "pointer route: {:?}", delivery);
+                            }
+                        }
+                        // A primary press on a launcher line runs that command.
+                        let launcher_id = renderer.view_ids().launcher();
+                        for delivery in &deliveries {
+                            let services_gui_host::Delivery::Pointer {
+                                target,
+                                event: routed,
+                                hit: Some(hit),
+                            } = delivery
+                            else {
+                                continue;
+                            };
+                            if *target != launcher_id
+                                || !routed.is_press(input_types::PointerButton::Primary)
+                            {
+                                continue;
+                            }
+                            let services_gui_host::HitRegion::Content { line, .. } = hit.region
+                            else {
+                                continue;
+                            };
+                            let Kernel {
+                                boot,
+                                allocator,
+                                heap,
+                                channels,
+                                next_message_id,
+                                ..
+                            } = kernel;
+                            let mut ctx = KernelContext {
+                                boot,
+                                allocator,
+                                heap,
+                                channels,
+                                next_message_id,
+                            };
+                            if workspace.activate_launcher_line(line, &mut ctx, serial) {
+                                output_dirty = true;
                             }
                         }
                         let role_of = |id: Option<view_types::ViewId>| {
@@ -1290,7 +1331,9 @@ fn workspace_loop(
                 let renderer = desktop_renderer
                     .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
                 let now = get_tick_count();
-                let mut model = build_desktop_model(&workspace);
+                animation_clock
+                    .wake_after(workspace.stamp_and_expire_notices(now, NOTICE_TTL_TICKS));
+                let mut model = build_desktop_model(&workspace, now);
                 model.caret_visible = caret_blink.is_on_at(now);
                 animation_clock.wake_after(caret_blink.next_flip_after(now));
                 let mut windows = renderer.windows(&model);
@@ -2331,7 +2374,10 @@ fn present_desktop_frame(
 }
 
 /// Snapshot the workspace into the data model the desktop builder consumes.
-fn build_desktop_model(workspace: &workspace::WorkspaceSession) -> desktop_frame::DesktopModel {
+fn build_desktop_model(
+    workspace: &workspace::WorkspaceSession,
+    now_tick: u64,
+) -> desktop_frame::DesktopModel {
     extern crate alloc;
     use alloc::string::String;
 
@@ -2373,6 +2419,18 @@ fn build_desktop_model(workspace: &workspace::WorkspaceSession) -> desktop_frame
         let (x, y) = workspace.pointer_position();
         model.pointer = Some((x.max(0) as usize, y.max(0) as usize));
     }
+
+    model.launcher = workspace
+        .launcher_items()
+        .into_iter()
+        .map(|(id, name, active)| services_gui_host::LauncherItem {
+            label: name,
+            command: String::from(id.as_str()),
+            active,
+        })
+        .collect();
+    model.notices = workspace.notices();
+    model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
 
     if workspace.is_palette_open() {
         let palette = workspace.palette_overlay();
