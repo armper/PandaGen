@@ -15,10 +15,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use graphics_rasterizer::RasterRect;
 use graphics_rasterizer::{RgbaBuffer, RgbaColor};
 use services_gui_host::{
-    Compositor, DesktopCursor, DesktopWindow, DesktopWindowRole, SurfaceRect, SurfaceSize,
-    RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
+    Anchor, Compositor, DesktopCursor, DesktopWindow, DesktopWindowRole, Insets, LayoutId,
+    LayoutNode, Length, SurfaceRect, SurfaceSize, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -74,21 +75,52 @@ const STATUS_HEIGHT: usize = 3;
 /// Chrome row plus bottom border, per `services_gui_host` window rendering.
 const WINDOW_CHROME_ROWS: usize = 2;
 
+const MAIN_ID: LayoutId = LayoutId(1);
+const STATUS_ID: LayoutId = LayoutId(2);
+const PALETTE_ID: LayoutId = LayoutId(3);
+
 impl DesktopLayout {
+    /// Declarative description of the desktop in cell units (GFX-029):
+    /// a margin around everything, main area above a fixed status strip with
+    /// one cell of gap, and the palette centred over both at half size.
+    pub fn tree(cols: usize, rows: usize) -> LayoutNode {
+        LayoutNode::padded(
+            Insets::uniform(MARGIN),
+            LayoutNode::overlay(alloc::vec![
+                LayoutNode::vstack(
+                    1,
+                    alloc::vec![
+                        (Length::Weight(1), LayoutNode::Leaf(MAIN_ID)),
+                        (Length::Fixed(STATUS_HEIGHT), LayoutNode::Leaf(STATUS_ID)),
+                    ],
+                ),
+                LayoutNode::anchored(
+                    Anchor::Center,
+                    (cols / 2).max(1),
+                    (rows / 2).max(1),
+                    LayoutNode::Leaf(PALETTE_ID),
+                ),
+            ]),
+        )
+    }
+
     /// Compute the cell layout for a pixel surface.
     pub fn for_pixels(width: usize, height: usize) -> Self {
         let cols = width / RASTER_CELL_WIDTH;
         let rows = height / RASTER_CELL_HEIGHT;
-        let inner_w = cols.saturating_sub(2 * MARGIN);
-        let status_y = rows.saturating_sub(MARGIN + STATUS_HEIGHT);
-        let main_h = status_y.saturating_sub(MARGIN + 1);
-        let palette_w = (cols / 2).max(1);
-        let palette_h = (rows / 2).max(1);
+        let solved = Self::tree(cols, rows).solve(RasterRect::new(0, 0, cols, rows));
+        let find = |id: LayoutId| {
+            solved
+                .iter()
+                .find(|(leaf, _)| *leaf == id)
+                .map(|(_, r)| SurfaceRect::new(r.x, r.y, r.width, r.height))
+                .unwrap_or(SurfaceRect::new(0, 0, 0, 0))
+        };
         Self {
             cells: SurfaceSize::new(cols, rows),
-            main: SurfaceRect::new(MARGIN, MARGIN, inner_w, main_h),
-            status: SurfaceRect::new(MARGIN, status_y, inner_w, STATUS_HEIGHT),
-            palette: SurfaceRect::new(cols / 4, rows / 4, palette_w, palette_h),
+            main: find(MAIN_ID),
+            status: find(STATUS_ID),
+            palette: find(PALETTE_ID),
         }
     }
 
@@ -339,6 +371,15 @@ mod tests {
             layout.cells.height
         );
         assert!(layout.main_content_rows() > 10);
+
+        // The declarative tree reproduces the hand-computed geometry exactly.
+        let (cols, rows) = (layout.cells.width, layout.cells.height);
+        assert_eq!(layout.main, SurfaceRect::new(1, 1, cols - 2, rows - 6));
+        assert_eq!(layout.status, SurfaceRect::new(1, rows - 4, cols - 2, 3));
+        assert_eq!(
+            layout.palette,
+            SurfaceRect::new(cols / 4, rows / 4, cols / 2, rows / 2)
+        );
 
         // Tiny surfaces degrade to empty rects instead of underflowing.
         let tiny = DesktopLayout::for_pixels(RASTER_CELL_WIDTH - 1, RASTER_CELL_HEIGHT - 1);

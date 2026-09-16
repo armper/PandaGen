@@ -107,7 +107,7 @@ User-space services should provide policy:
 - [x] `GFX-026` Add primitive draw ops for fills, lines, borders, rounded rectangles, and text.
 - [x] `GFX-027` Add image or icon surface support for future app and shell visuals.
 - [x] `GFX-028` Add scrollable regions and clipping containers as scene primitives.
-- [ ] `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
+- [x] `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
 - [ ] `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
 
 ### Epic 7: Desktop Shell
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-028` is in place: `ContainerTarget` clips and translates child drawing (optionally scrolled) and nests; `ScrollRegion` owns a vertical offset onto line content with clamping, scroll-into-view, visible-line ranges, a computed scrollbar thumb, and viewport-clipped rendering.
+`GFX-029` is in place: `LayoutNode` (stack/split with fixed and weighted lengths, overlay, anchored, padded) solves to rectangles in one deterministic integer pass, and the kernel desktop layout is now declared with it.
 
 The best next implementation step is:
 
-- `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
+- `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
 
-The desktop frame builder currently hand-computes window rectangles. A small layout model lets the shell (`GFX-031`) express its regions declaratively and lets tests check geometry independent of rendering.
+Tick-based timelines and blink phases let the desktop schedule redraws (a blinking caret, a fading notification) through the existing frame pacer instead of a per-frame render loop.
