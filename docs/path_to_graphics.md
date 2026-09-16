@@ -105,7 +105,7 @@ User-space services should provide policy:
 ### Epic 6: Basic Scene Primitives
 
 - [x] `GFX-026` Add primitive draw ops for fills, lines, borders, rounded rectangles, and text.
-- [ ] `GFX-027` Add image or icon surface support for future app and shell visuals.
+- [x] `GFX-027` Add image or icon surface support for future app and shell visuals.
 - [ ] `GFX-028` Add scrollable regions and clipping containers as scene primitives.
 - [ ] `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
 - [ ] `GFX-030` Add animation timing hooks for transitions without requiring a game-engine model.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-026` is in place: `RenderTarget` now provides fills, borders, horizontal/vertical runs, Bresenham lines with clipping, filled rounded rectangles, and rounded borders, all as trait-provided methods so every target (RGBA buffer, linear framebuffer, scissor) gets them.
+`GFX-027` is in place: `RgbaImage`/`ImageRef` carry RGBA8888 pixels (built from bytes or ASCII art), `RenderTarget::blit_image` composes them with alpha and clipping, and `blend_over` is the shared source-over blend.
 
 The best next implementation step is:
 
-- `GFX-027` Add image or icon surface support for future app and shell visuals.
+- `GFX-028` Add scrollable regions and clipping containers as scene primitives.
 
-Icons are the next visual the shell (`GFX-031`) needs beyond text and shapes: a small RGBA sprite type with alpha blit, in the same spirit as the cursor sprite but data-driven.
+Long documents, command output, and file lists all need a viewport onto content larger than the window; a container that clips and translates child drawing is what makes that composable.

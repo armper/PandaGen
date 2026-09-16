@@ -79,6 +79,178 @@ pub struct RgbaBuffer {
 }
 
 /// Which glyph bitmaps a `BitmapFont` samples from.
+/// Owned RGBA8888 image (icon, sprite, decoded picture) for blitting.
+///
+/// Pixels are tightly packed `[r, g, b, a]` rows, top to bottom. Alpha is
+/// honoured on blit: 0 skips the pixel, 255 overwrites, anything between
+/// blends source-over onto what the target already holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RgbaImage {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+/// Error building an image from raw bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageError {
+    /// `bytes.len()` did not equal `width * height * 4`.
+    LengthMismatch { expected: usize, actual: usize },
+}
+
+impl RgbaImage {
+    /// Fully transparent image.
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![0; width.saturating_mul(height).saturating_mul(4)],
+        }
+    }
+
+    /// Wrap tightly packed RGBA bytes.
+    pub fn from_rgba(width: usize, height: usize, bytes: Vec<u8>) -> Result<Self, ImageError> {
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        if bytes.len() != expected {
+            return Err(ImageError::LengthMismatch {
+                expected,
+                actual: bytes.len(),
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels: bytes,
+        })
+    }
+
+    /// Build from text rows where `palette` maps each character to a colour
+    /// (`None` is transparent). Rows are padded to the longest row.
+    ///
+    /// This is how small shell icons are authored in source without a binary
+    /// asset pipeline.
+    pub fn from_ascii_art(rows: &[&str], palette: impl Fn(char) -> Option<RgbaColor>) -> Self {
+        let width = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut image = Self::new(width, rows.len());
+        for (y, row) in rows.iter().enumerate() {
+            for (x, ch) in row.chars().enumerate() {
+                if let Some(color) = palette(ch) {
+                    image.set_pixel(x, y, color);
+                }
+            }
+        }
+        image
+    }
+
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = (y * self.width + x) * 4;
+        Some(RgbaColor::new(
+            self.pixels[offset],
+            self.pixels[offset + 1],
+            self.pixels[offset + 2],
+            self.pixels[offset + 3],
+        ))
+    }
+
+    pub fn set_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = (y * self.width + x) * 4;
+        self.pixels[offset..offset + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
+    }
+
+    /// Borrowed view for blitting.
+    pub fn as_ref(&self) -> ImageRef<'_> {
+        ImageRef {
+            width: self.width,
+            height: self.height,
+            pixels: &self.pixels,
+        }
+    }
+}
+
+/// Borrowed RGBA8888 image, so a buffer or a static asset can be blitted
+/// without copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRef<'a> {
+    width: usize,
+    height: usize,
+    pixels: &'a [u8],
+}
+
+impl<'a> ImageRef<'a> {
+    /// `pixels.len()` must be `width * height * 4`.
+    pub fn new(width: usize, height: usize, pixels: &'a [u8]) -> Result<Self, ImageError> {
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        if pixels.len() != expected {
+            return Err(ImageError::LengthMismatch {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = (y * self.width + x) * 4;
+        Some(RgbaColor::new(
+            self.pixels[offset],
+            self.pixels[offset + 1],
+            self.pixels[offset + 2],
+            self.pixels[offset + 3],
+        ))
+    }
+}
+
+/// Source-over blend of `src` onto `dst` using `src.a`; result is opaque.
+pub fn blend_over(dst: RgbaColor, src: RgbaColor) -> RgbaColor {
+    match src.a {
+        0 => dst,
+        255 => RgbaColor::new(src.r, src.g, src.b, 255),
+        alpha => {
+            let a = alpha as u32;
+            let inv = 255 - a;
+            let mix = |s: u8, d: u8| ((s as u32 * a + d as u32 * inv + 127) / 255) as u8;
+            RgbaColor::new(mix(src.r, dst.r), mix(src.g, dst.g), mix(src.b, dst.b), 255)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum GlyphSource {
     /// Hand-drawn 5x7 uppercase set with a handful of symbols. Compact and
@@ -358,6 +530,41 @@ pub trait RenderTarget {
         }
     }
 
+    /// Blit an image with its top-left at `(x, y)`, honouring alpha.
+    ///
+    /// The origin may be negative or beyond the target; only overlapping
+    /// pixels are touched. Fully transparent source pixels leave the target
+    /// alone, which is what makes icons composable over any background.
+    fn blit_image(&mut self, x: i64, y: i64, image: ImageRef<'_>) {
+        let (width, height) = (self.width() as i64, self.height() as i64);
+        let x_start = x.max(0);
+        let y_start = y.max(0);
+        let x_end = (x + image.width() as i64).min(width);
+        let y_end = (y + image.height() as i64).min(height);
+        if x_end <= x_start || y_end <= y_start {
+            return;
+        }
+        for ty in y_start..y_end {
+            for tx in x_start..x_end {
+                let sx = (tx - x) as usize;
+                let sy = (ty - y) as usize;
+                let Some(src) = image.pixel(sx, sy) else {
+                    continue;
+                };
+                match src.a {
+                    0 => {}
+                    255 => self.write_pixel(tx as usize, ty as usize, src),
+                    _ => {
+                        let dst = self
+                            .pixel(tx as usize, ty as usize)
+                            .unwrap_or(RgbaColor::new(0, 0, 0, 255));
+                        self.write_pixel(tx as usize, ty as usize, blend_over(dst, src));
+                    }
+                }
+            }
+        }
+    }
+
     fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
         self.draw_text_with_font(x, y, text, &DESKTOP_FONT, color);
     }
@@ -571,6 +778,20 @@ impl RgbaBuffer {
 
     pub fn draw_line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, color: RgbaColor) {
         <Self as RenderTarget>::draw_line(self, x0, y0, x1, y1, color)
+    }
+
+    pub fn blit_image(&mut self, x: i64, y: i64, image: ImageRef<'_>) {
+        <Self as RenderTarget>::blit_image(self, x, y, image)
+    }
+
+    /// Borrow this buffer as an image, e.g. to composite an off-screen
+    /// surface into another target.
+    pub fn as_image(&self) -> ImageRef<'_> {
+        ImageRef {
+            width: self.width,
+            height: self.height,
+            pixels: &self.pixels,
+        }
     }
 
     pub fn fill_rounded_rect(&mut self, rect: RasterRect, radius: usize, color: RgbaColor) {
@@ -1150,6 +1371,100 @@ mod tests {
         assert_eq!(clipped.pixel(1, 8), Some(ACCENT));
         assert_eq!(clipped.pixel(18, 8), Some(CLEAR));
         assert_eq!(count(&clipped, DETAIL), 10);
+    }
+
+    #[test]
+    fn test_image_construction_and_ascii_art() {
+        assert_eq!(
+            RgbaImage::from_rgba(2, 2, vec![0; 15]),
+            Err(ImageError::LengthMismatch {
+                expected: 16,
+                actual: 15
+            })
+        );
+        let image = RgbaImage::from_rgba(1, 1, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(image.pixel(0, 0), Some(RgbaColor::new(1, 2, 3, 4)));
+        assert_eq!(image.pixel(1, 0), None);
+
+        let icon = RgbaImage::from_ascii_art(&["#.", "##", "#"], |ch| match ch {
+            '#' => Some(ACCENT),
+            _ => None,
+        });
+        assert_eq!((icon.width(), icon.height()), (2, 3));
+        assert_eq!(icon.pixel(0, 0), Some(ACCENT));
+        assert_eq!(icon.pixel(1, 0).map(|c| c.a), Some(0));
+        assert_eq!(icon.pixel(1, 2).map(|c| c.a), Some(0), "short row padded");
+        assert_eq!(icon.as_bytes().len(), 2 * 3 * 4);
+
+        let view = ImageRef::new(2, 3, icon.as_bytes()).unwrap();
+        assert_eq!(view.pixel(1, 1), Some(ACCENT));
+        assert!(ImageRef::new(2, 2, icon.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_blit_image_respects_alpha_and_clips() {
+        let mut buffer = RgbaBuffer::new(6, 4, CLEAR);
+        let mut sprite = RgbaImage::new(3, 2);
+        sprite.set_pixel(0, 0, ACCENT); // opaque
+        sprite.set_pixel(1, 0, RgbaColor::new(200, 100, 50, 0)); // transparent
+        sprite.set_pixel(2, 0, RgbaColor::new(255, 255, 255, 128)); // half
+        sprite.set_pixel(0, 1, DETAIL);
+
+        buffer.blit_image(1, 1, sprite.as_ref());
+        assert_eq!(buffer.pixel(1, 1), Some(ACCENT));
+        assert_eq!(buffer.pixel(2, 1), Some(CLEAR), "alpha 0 leaves target");
+        let blended = buffer.pixel(3, 1).unwrap();
+        assert_eq!(
+            blended,
+            blend_over(CLEAR, RgbaColor::new(255, 255, 255, 128))
+        );
+        assert!(blended.r > CLEAR.r && blended.r < 255);
+        assert_eq!(blended.a, 255);
+        assert_eq!(buffer.pixel(1, 2), Some(DETAIL));
+        assert_eq!(buffer.pixel(0, 0), Some(CLEAR));
+
+        // Negative and overflowing origins only touch the overlap.
+        let mut buffer = RgbaBuffer::new(6, 4, CLEAR);
+        let mut full = RgbaImage::new(3, 3);
+        for y in 0..3 {
+            for x in 0..3 {
+                full.set_pixel(x, y, ACCENT);
+            }
+        }
+        buffer.blit_image(-2, -2, full.as_ref());
+        assert_eq!(count(&buffer, ACCENT), 1);
+        assert_eq!(buffer.pixel(0, 0), Some(ACCENT));
+        buffer.blit_image(5, 3, full.as_ref());
+        assert_eq!(count(&buffer, ACCENT), 2);
+        buffer.blit_image(40, 40, full.as_ref());
+        assert_eq!(count(&buffer, ACCENT), 2);
+
+        // A buffer can be blitted into another as an image, under a scissor.
+        let mut layer = RgbaBuffer::new(4, 4, RgbaColor::new(0, 0, 0, 0));
+        layer.fill_rect(RasterRect::new(0, 0, 4, 2), DETAIL);
+        let mut dest = RgbaBuffer::new(8, 8, CLEAR);
+        {
+            let mut scissor = ScissorTarget::new(&mut dest, RasterRect::new(0, 0, 2, 8));
+            scissor.blit_image(0, 0, layer.as_image());
+        }
+        assert_eq!(count(&dest, DETAIL), 4);
+        assert_eq!(dest.pixel(3, 0), Some(CLEAR));
+        assert_eq!(dest.pixel(0, 3), Some(CLEAR), "transparent rows untouched");
+    }
+
+    #[test]
+    fn test_blend_over_endpoints_and_midpoint() {
+        let dst = RgbaColor::new(0, 0, 0, 255);
+        let src = RgbaColor::new(200, 100, 50, 255);
+        assert_eq!(blend_over(dst, src), src);
+        assert_eq!(blend_over(dst, RgbaColor::new(9, 9, 9, 0)), dst);
+        let half = blend_over(dst, RgbaColor::new(200, 100, 50, 128));
+        assert_eq!((half.r, half.g, half.b, half.a), (100, 50, 25, 255));
+        let over_white = blend_over(
+            RgbaColor::new(255, 255, 255, 255),
+            RgbaColor::new(0, 0, 0, 128),
+        );
+        assert_eq!(over_white.r, 127);
     }
 
     #[test]
