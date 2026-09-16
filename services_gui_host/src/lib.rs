@@ -666,7 +666,9 @@ fn raster_window(
             }
 
             if let Some(cursor) = window.frame.cursor {
-                let cursor_x = rect.x + RASTER_CELL_WIDTH + 2 + cursor.column * RASTER_CELL_WIDTH;
+                // Same origin as the text run above so the caret sits under
+                // the glyph it refers to.
+                let cursor_x = rect.x + 2 + cursor.column * RASTER_CELL_WIDTH;
                 let cursor_y = rect.y + RASTER_CELL_HEIGHT + 1 + cursor.line * RASTER_CELL_HEIGHT;
                 content_target.fill_rect(
                     RasterRect::new(cursor_x, cursor_y, 4, RASTER_CELL_HEIGHT.saturating_sub(2)),
@@ -883,12 +885,21 @@ mod tests {
         rows.join("\n")
     }
 
-    fn assert_raster_golden(surface: &RasterSurfaceFrame, expected: &str) {
+    /// Compare against a checked-in fixture. Set `PANDAGEN_UPDATE_GOLDEN=1` to
+    /// rewrite the fixture from the current output instead (review the diff).
+    fn assert_raster_golden(surface: &RasterSurfaceFrame, fixture: &str, expected: &str) {
         let actual = raster_surface_to_golden(surface);
+        if std::env::var_os("PANDAGEN_UPDATE_GOLDEN").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/golden")
+                .join(fixture);
+            std::fs::write(&path, format!("{actual}\n")).expect("write golden fixture");
+            return;
+        }
         let expected = expected.trim_end();
         assert!(
             actual == expected,
-            "golden raster mismatch\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
+            "golden raster mismatch (set PANDAGEN_UPDATE_GOLDEN=1 to regenerate)\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
         );
     }
 
@@ -1104,15 +1115,32 @@ mod tests {
                 .focused()],
         );
 
-        assert_eq!(surface.width, 72);
-        assert_eq!(surface.height, 50);
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        assert_eq!(surface.width, 8 * w);
+        assert_eq!(surface.height, 5 * h);
         assert_eq!(surface.frame_count, 1);
         assert_eq!(surface.timestamp_ns, 33);
         assert_eq!(surface.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
-        assert_eq!(surface.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
-        assert_eq!(surface.pixel(16, 20), Some(WINDOW_FILL_COLOR));
-        assert_eq!(surface.pixel(15, 22), Some(TEXT_COLOR));
-        assert_eq!(surface.pixel(20, 21), Some(CURSOR_COLOR));
+        // Window rect in pixels: (w, h) .. (5w, 4h).
+        assert_eq!(surface.pixel(w, h), Some(FOCUSED_BORDER_COLOR));
+        // Right side of the content area holds no text or cursor.
+        let content_y = h + h + 2;
+        assert_eq!(
+            surface.pixel(5 * w - 3, content_y + 8),
+            Some(WINDOW_FILL_COLOR)
+        );
+        // Text run starts at rect.x + 2: some pixel of 'A' is lit there.
+        let text_lit = (0..w).any(|dx| {
+            (0..DESKTOP_FONT.glyph_height())
+                .any(|dy| surface.pixel(w + 2 + dx, content_y + dy) == Some(TEXT_COLOR))
+        });
+        assert!(text_lit, "content text must be painted at the text origin");
+        // Cursor at column 0 shares that origin (4 px wide caret).
+        assert_eq!(surface.pixel(w + 3, content_y + 4), Some(CURSOR_COLOR));
+        assert_eq!(
+            surface.pixel(w + 2 + w + 3, content_y + 4),
+            Some(WINDOW_FILL_COLOR)
+        );
     }
 
     #[test]
@@ -1592,8 +1620,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(surface.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
-        assert_eq!(surface.pixel(18, 20), Some(UNFOCUSED_BORDER_COLOR));
+        assert_eq!(
+            surface.pixel(RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT),
+            Some(FOCUSED_BORDER_COLOR)
+        );
+        assert_eq!(
+            surface.pixel(2 * RASTER_CELL_WIDTH, 2 * RASTER_CELL_HEIGHT),
+            Some(UNFOCUSED_BORDER_COLOR)
+        );
     }
 
     #[test]
@@ -1609,9 +1643,16 @@ mod tests {
         .with_title("Main")
         .with_cursor(CursorPosition::new(0, 0));
 
-        let mut bytes = vec![0; 72 * 50 * 4];
-        let mut target =
-            LinearFramebufferTarget::new(72, 50, 72, LinearPixelFormat::Rgb32, &mut bytes);
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let (width, height) = (8 * w, 5 * h);
+        let mut bytes = vec![0; width * height * 4];
+        let mut target = LinearFramebufferTarget::new(
+            width,
+            height,
+            width,
+            LinearPixelFormat::Rgb32,
+            &mut bytes,
+        );
 
         let stats = compositor.render_desktop_to_target(
             &mut target,
@@ -1621,9 +1662,14 @@ mod tests {
         assert_eq!(stats.frame_count, 1);
         assert_eq!(stats.timestamp_ns, 44);
         assert_eq!(target.pixel(0, 0), Some(DESKTOP_BACKGROUND_COLOR));
-        assert_eq!(target.pixel(9, 10), Some(FOCUSED_BORDER_COLOR));
-        assert_eq!(target.pixel(15, 22), Some(TEXT_COLOR));
-        assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
+        assert_eq!(target.pixel(w, h), Some(FOCUSED_BORDER_COLOR));
+        let content_y = 2 * h + 2;
+        assert_eq!(target.pixel(w + 3, content_y + 4), Some(CURSOR_COLOR));
+        let text_lit = (0..w).any(|dx| {
+            (0..DESKTOP_FONT.glyph_height())
+                .any(|dy| target.pixel(w + 2 + dx, content_y + dy) == Some(TEXT_COLOR))
+        });
+        assert!(text_lit);
     }
 
     #[test]
@@ -1646,7 +1692,8 @@ mod tests {
         )
         .with_title("Right");
 
-        let mut target = RgbaBuffer::new(108, 50, RgbaColor::new(0, 0, 0, 0));
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let mut target = RgbaBuffer::new(12 * w, 5 * h, RgbaColor::new(0, 0, 0, 0));
         compositor.render_desktop_to_target(
             &mut target,
             vec![
@@ -1654,9 +1701,14 @@ mod tests {
                 DesktopWindow::new(right.clone(), SurfaceRect::new(6, 1, 4, 3)),
             ],
         );
-        let preserved_pixel = target.pixel(56, 21);
+        // A point inside the right window's content area.
+        let probe = (7 * w + 4, 2 * h + 10);
+        let preserved_pixel = target.pixel(probe.0, probe.1);
+        assert_eq!(preserved_pixel, Some(WINDOW_FILL_COLOR));
 
-        let damage_rect = RasterRect::new(18, 20, 8, 8);
+        // Damage covers only the left window's caret cell.
+        let content_y = 2 * h + 2;
+        let damage_rect = RasterRect::new(w + 2, content_y, w, h);
         let stats = compositor.render_desktop_to_target_with_damage(
             &mut target,
             vec![
@@ -1673,8 +1725,8 @@ mod tests {
         assert_eq!(stats.frame_count, 2);
         assert_eq!(stats.painted_windows, 1);
         assert_eq!(stats.damage_rect, Some(damage_rect));
-        assert_eq!(target.pixel(20, 21), Some(CURSOR_COLOR));
-        assert_eq!(target.pixel(56, 21), preserved_pixel);
+        assert_eq!(target.pixel(w + 3, content_y + 4), Some(CURSOR_COLOR));
+        assert_eq!(target.pixel(probe.0, probe.1), preserved_pixel);
     }
 
     #[test]
@@ -1709,6 +1761,7 @@ mod tests {
 
         assert_raster_golden(
             &surface,
+            "desktop_rgba_surface.golden",
             include_str!("../tests/golden/desktop_rgba_surface.golden"),
         );
     }
@@ -1723,6 +1776,7 @@ mod tests {
 
         assert_raster_golden(
             &surface,
+            "workspace_snapshot_rgba_surface.golden",
             include_str!("../tests/golden/workspace_snapshot_rgba_surface.golden"),
         );
     }
@@ -1772,8 +1826,28 @@ mod tests {
             vec![DesktopWindow::new(title, SurfaceRect::new(1, 1, 4, 3)).focused()],
         );
 
-        assert_eq!(surface.pixel(19, 12), Some(WINDOW_FILL_COLOR));
-        assert_eq!(surface.pixel(20, 12), Some(TEXT_COLOR));
+        // Chrome label " II " is drawn at (rect.x + 2, rect.y + 2) with the
+        // desktop font; the second 'I' is exactly one advance to the right.
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let origin = (w + 2 + DESKTOP_FONT.advance_x(), h + 2);
+        let glyph = graphics_rasterizer::ascii_8x16_glyph('I');
+        let mut checked = 0;
+        for (dy, row) in glyph.iter().enumerate() {
+            for dx in 0..8 {
+                if (row >> (7 - dx)) & 1 == 1 {
+                    assert_eq!(
+                        surface.pixel(origin.0 + dx, origin.1 + dy),
+                        Some(TEXT_COLOR)
+                    );
+                    assert_eq!(
+                        surface.pixel(origin.0 + DESKTOP_FONT.advance_x() + dx, origin.1 + dy),
+                        Some(TEXT_COLOR)
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]

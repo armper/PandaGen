@@ -265,7 +265,10 @@ mod tests {
     #[test]
     fn test_layout_fits_inside_surface() {
         let layout = DesktopLayout::for_pixels(1280, 800);
-        assert_eq!(layout.cells, SurfaceSize::new(142, 80));
+        assert_eq!(
+            layout.cells,
+            SurfaceSize::new(1280 / RASTER_CELL_WIDTH, 800 / RASTER_CELL_HEIGHT)
+        );
         assert!(layout.main.x + layout.main.width <= layout.cells.width);
         assert!(layout.main.y + layout.main.height < layout.status.y);
         assert_eq!(
@@ -275,7 +278,7 @@ mod tests {
         assert!(layout.main_content_rows() > 10);
 
         // Tiny surfaces degrade to empty rects instead of underflowing.
-        let tiny = DesktopLayout::for_pixels(8, 8);
+        let tiny = DesktopLayout::for_pixels(RASTER_CELL_WIDTH - 1, RASTER_CELL_HEIGHT - 1);
         assert_eq!(tiny.cells, SurfaceSize::new(0, 0));
         assert_eq!(tiny.main.width, 0);
     }
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_output_tail_is_clipped_to_visible_rows() {
-        let layout = DesktopLayout::for_pixels(9 * 40, 10 * 12);
+        let layout = DesktopLayout::for_pixels(RASTER_CELL_WIDTH * 40, RASTER_CELL_HEIGHT * 12);
         let rows = layout.main_content_rows();
         let mut model = sample_model();
         model.output_lines = (0..50).map(|i| i.to_string()).collect();
@@ -368,8 +371,9 @@ mod tests {
 
     #[test]
     fn test_renderer_paints_exact_framebuffer_size() {
-        let mut renderer = DesktopFrameRenderer::new(9 * 60, 10 * 30);
-        assert_eq!(renderer.pixels().len(), 540 * 300 * 4);
+        let (width, height) = (RASTER_CELL_WIDTH * 60, RASTER_CELL_HEIGHT * 30);
+        let mut renderer = DesktopFrameRenderer::new(width, height);
+        assert_eq!(renderer.pixels().len(), width * height * 4);
         let painted = renderer.render(&sample_model());
         assert_eq!(painted, 2);
         assert_eq!(renderer.frames_rendered(), 1);
@@ -390,6 +394,6 @@ mod tests {
         let mut with_palette = sample_model();
         with_palette.palette = Some(PaletteModel::default());
         assert_eq!(renderer.render(&with_palette), 3);
-        assert_eq!(renderer.pixels().len(), 540 * 300 * 4);
+        assert_eq!(renderer.pixels().len(), width * height * 4);
     }
 }

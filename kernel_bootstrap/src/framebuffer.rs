@@ -1081,18 +1081,15 @@ impl BareMetalFramebuffer {
     }
 }
 
-/// Get bitmap data for a character (8x16 font)
+/// Get bitmap data for a character (8x16 font shared with the rasterizer).
 fn get_char_bitmap(ch: u8) -> &'static [u8; 16] {
     let index = ch as usize;
-    if index < FONT_DATA.len() {
-        &FONT_DATA[index]
+    if index < graphics_rasterizer::FONT_8X16.len() {
+        &graphics_rasterizer::FONT_8X16[index]
     } else {
-        &FONT_DATA[0x3F] // '?' for unknown characters
+        &graphics_rasterizer::FONT_8X16[0x3F] // '?' for unknown characters
     }
 }
-
-/// Simplified 8x16 font data (ASCII 0x00-0x7F)
-static FONT_DATA: [[u8; 16]; 128] = include!("font_data_8x16.in");
 
 fn write_pixel(buffer: &mut [u8], offset: usize, bytes: [u8; 4]) {
     if offset + 4 > buffer.len() {

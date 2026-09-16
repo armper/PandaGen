@@ -78,20 +78,71 @@ pub struct RgbaBuffer {
     pixels: Vec<u8>,
 }
 
+/// Which glyph bitmaps a `BitmapFont` samples from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum GlyphSource {
+    /// Hand-drawn 5x7 uppercase set with a handful of symbols. Compact and
+    /// legible at very small cell sizes, but case-folding and sparse.
+    #[default]
+    Compact5x7,
+    /// Full printable-ASCII 8x16 set (`FONT_8X16`), shared with the kernel
+    /// text console. Distinct lowercase and all punctuation.
+    Ascii8x16,
+}
+
+impl GlyphSource {
+    const fn width(self) -> usize {
+        match self {
+            GlyphSource::Compact5x7 => 5,
+            GlyphSource::Ascii8x16 => 8,
+        }
+    }
+
+    const fn height(self) -> usize {
+        match self {
+            GlyphSource::Compact5x7 => 7,
+            GlyphSource::Ascii8x16 => 16,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BitmapFont {
     glyph_width: usize,
     glyph_height: usize,
     advance_x: usize,
+    #[serde(default)]
+    source: GlyphSource,
 }
 
 impl BitmapFont {
+    /// A font sampled from the compact 5x7 glyph set, scaled to the cell.
     pub const fn new(glyph_width: usize, glyph_height: usize, advance_x: usize) -> Self {
         Self {
             glyph_width,
             glyph_height,
             advance_x,
+            source: GlyphSource::Compact5x7,
         }
+    }
+
+    /// The full-ASCII 8x16 font at native size with the given advance.
+    pub const fn ascii_8x16(advance_x: usize) -> Self {
+        Self {
+            glyph_width: 8,
+            glyph_height: 16,
+            advance_x,
+            source: GlyphSource::Ascii8x16,
+        }
+    }
+
+    pub const fn with_source(mut self, source: GlyphSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub const fn source(&self) -> GlyphSource {
+        self.source
     }
 
     pub const fn glyph_width(&self) -> usize {
@@ -112,7 +163,25 @@ impl BitmapFont {
 }
 
 pub const COMPACT_FONT: BitmapFont = BitmapFont::new(5, 7, 6);
-pub const DESKTOP_FONT: BitmapFont = BitmapFont::new(8, 8, 9);
+/// Desktop text font: full printable ASCII, 8x16 pixels, tiled at 8 px advance.
+pub const DESKTOP_FONT: BitmapFont = BitmapFont::ascii_8x16(8);
+
+/// Complete 8x16 bitmap font for ASCII 0x00..0x7F (one byte per row, MSB is
+/// the leftmost pixel). Also used by the kernel framebuffer text console so
+/// text and graphics modes share one glyph set.
+pub static FONT_8X16: [[u8; 16]; 128] = include!("font_data_8x16.in");
+
+/// 8x16 glyph for `ch`; non-ASCII and control characters map to `?`.
+pub fn ascii_8x16_glyph(ch: char) -> &'static [u8; 16] {
+    let index = ch as usize;
+    if ch.is_ascii() && !ch.is_ascii_control() && index < FONT_8X16.len() {
+        &FONT_8X16[index]
+    } else if ch == ' ' {
+        &FONT_8X16[b' ' as usize]
+    } else {
+        &FONT_8X16[b'?' as usize]
+    }
+}
 
 pub trait RenderTarget {
     fn width(&self) -> usize;
@@ -432,7 +501,6 @@ impl<T: RenderTarget + ?Sized> RenderTarget for ScissorTarget<'_, T> {
     }
 }
 
-const SOURCE_GLYPH_WIDTH: usize = 5;
 const SOURCE_GLYPH_HEIGHT: usize = 7;
 const MAX_GLYPH_HEIGHT: usize = 16;
 
@@ -461,19 +529,39 @@ fn draw_glyph(
 }
 
 fn rasterize_glyph(font: &BitmapFont, ch: char) -> [u16; MAX_GLYPH_HEIGHT] {
-    let source = compact_glyph_for(ch);
-    let mut rows = [0u16; MAX_GLYPH_HEIGHT];
+    match font.source() {
+        GlyphSource::Compact5x7 => {
+            let source = compact_glyph_for(ch);
+            scale_glyph(font, &source, GlyphSource::Compact5x7)
+        }
+        GlyphSource::Ascii8x16 => {
+            let source = ascii_8x16_glyph(ch);
+            scale_glyph(font, source, GlyphSource::Ascii8x16)
+        }
+    }
+}
 
-    for target_y in 0..font.glyph_height() {
-        let source_y = target_y * SOURCE_GLYPH_HEIGHT / font.glyph_height();
+/// Nearest-neighbour scale of a source bitmap into the font's cell.
+fn scale_glyph(font: &BitmapFont, source: &[u8], kind: GlyphSource) -> [u16; MAX_GLYPH_HEIGHT] {
+    let source_width = kind.width();
+    let source_height = kind.height();
+    let mut rows = [0u16; MAX_GLYPH_HEIGHT];
+    let glyph_width = font.glyph_width().min(16);
+    let glyph_height = font.glyph_height().min(MAX_GLYPH_HEIGHT);
+    if glyph_width == 0 || glyph_height == 0 {
+        return rows;
+    }
+
+    for target_y in 0..glyph_height {
+        let source_y = target_y * source_height / glyph_height;
         let source_row = source[source_y];
         let mut row = 0u16;
 
-        for target_x in 0..font.glyph_width() {
-            let source_x = target_x * SOURCE_GLYPH_WIDTH / font.glyph_width();
-            let bit = (source_row >> (SOURCE_GLYPH_WIDTH - 1 - source_x)) & 1;
+        for target_x in 0..glyph_width {
+            let source_x = target_x * source_width / glyph_width;
+            let bit = (source_row >> (source_width - 1 - source_x)) & 1;
             if bit != 0 {
-                row |= 1 << (font.glyph_width() - 1 - target_x);
+                row |= 1 << (glyph_width - 1 - target_x);
             }
         }
 
@@ -746,17 +834,86 @@ mod tests {
 
     #[test]
     fn test_desktop_font_reports_readable_metrics() {
-        assert_eq!(DESKTOP_FONT.measure_text("Ab"), (18, 8));
+        assert_eq!(DESKTOP_FONT.measure_text("Ab"), (16, 16));
+        assert_eq!(DESKTOP_FONT.source(), GlyphSource::Ascii8x16);
+        assert_eq!(COMPACT_FONT.source(), GlyphSource::Compact5x7);
+    }
+
+    fn glyph_pixels(font: &BitmapFont, ch: char) -> Vec<(usize, usize)> {
+        let mut buffer = RgbaBuffer::new(font.glyph_width(), font.glyph_height(), CLEAR);
+        buffer.draw_text_with_font(0, 0, &ch.to_string(), font, ACCENT);
+        let mut lit = Vec::new();
+        for y in 0..font.glyph_height() {
+            for x in 0..font.glyph_width() {
+                if buffer.pixel(x, y) == Some(ACCENT) {
+                    lit.push((x, y));
+                }
+            }
+        }
+        lit
     }
 
     #[test]
-    fn test_draw_text_with_desktop_font_preserves_glyph_gap() {
-        let mut buffer = RgbaBuffer::new(32, 12, CLEAR);
+    fn test_ascii_font_distinguishes_case_and_punctuation() {
+        let upper = glyph_pixels(&DESKTOP_FONT, 'A');
+        let lower = glyph_pixels(&DESKTOP_FONT, 'a');
+        assert!(!upper.is_empty() && !lower.is_empty());
+        assert_ne!(upper, lower, "lowercase must not fold to uppercase");
 
+        let question = glyph_pixels(&DESKTOP_FONT, '?');
+        for ch in ['\'', '>', '|', '<', '~', '`', '{'] {
+            let glyph = glyph_pixels(&DESKTOP_FONT, ch);
+            assert!(!glyph.is_empty(), "{ch:?} must have a glyph");
+            assert_ne!(glyph, question, "{ch:?} must not fall back to '?'");
+        }
+
+        assert!(glyph_pixels(&DESKTOP_FONT, ' ').is_empty());
+        assert_eq!(glyph_pixels(&DESKTOP_FONT, 'é'), question);
+        assert_eq!(glyph_pixels(&DESKTOP_FONT, '\u{1}'), question);
+    }
+
+    #[test]
+    fn test_ascii_font_matches_source_bitmap_at_native_size() {
+        // At 8x16 the rasterized glyph must equal the source rows bit for bit.
+        let lit = glyph_pixels(&DESKTOP_FONT, 'g');
+        let source = ascii_8x16_glyph('g');
+        let mut expected = Vec::new();
+        for (y, row) in source.iter().enumerate() {
+            for x in 0..8 {
+                if (row >> (7 - x)) & 1 == 1 {
+                    expected.push((x, y));
+                }
+            }
+        }
+        assert_eq!(lit, expected);
+    }
+
+    #[test]
+    fn test_ascii_font_scales_to_smaller_cells() {
+        let small = BitmapFont::new(4, 8, 5).with_source(GlyphSource::Ascii8x16);
+        let lit = glyph_pixels(&small, 'M');
+        assert!(!lit.is_empty());
+        assert!(lit.iter().all(|&(x, y)| x < 4 && y < 8));
+    }
+
+    #[test]
+    fn test_draw_text_with_desktop_font_advances_one_cell() {
+        let mut buffer = RgbaBuffer::new(40, 20, CLEAR);
         buffer.draw_text_with_font(1, 1, "II", &DESKTOP_FONT, ACCENT);
 
-        assert_eq!(buffer.pixel(9, 1), Some(CLEAR));
-        assert_eq!(buffer.pixel(10, 1), Some(ACCENT));
+        let first: Vec<usize> = (1..9)
+            .filter(|&x| (1..17).any(|y| buffer.pixel(x, y) == Some(ACCENT)))
+            .collect();
+        let second: Vec<usize> = (9..17)
+            .filter(|&x| (1..17).any(|y| buffer.pixel(x, y) == Some(ACCENT)))
+            .collect();
+        assert!(!first.is_empty() && !second.is_empty());
+        let shifted: Vec<usize> = first.iter().map(|x| x + 8).collect();
+        assert_eq!(
+            second, shifted,
+            "second glyph is the first shifted by advance"
+        );
+        assert!((17..40).all(|x| (0..20).all(|y| buffer.pixel(x, y) != Some(ACCENT))));
     }
 
     #[test]

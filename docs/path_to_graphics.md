@@ -84,7 +84,7 @@ User-space services should provide policy:
 - [x] `GFX-013` Add font raster or bitmap atlas support for readable desktop text without relying on console glyph code.
 - [x] `GFX-014` Add clipping, scissoring, and damage-aware redraw support.
 - [x] `GFX-015` Add golden surface tests for raster output so pixel logic can be validated without booting QEMU.
-- [ ] `GFX-053` Add a full printable-ASCII desktop font (lowercase and punctuation) so desktop text is readable; the current `DESKTOP_FONT` is uppercase-only and renders `'`, `>`, `|` as `?`.
+- [x] `GFX-053` Add a full printable-ASCII desktop font (lowercase and punctuation) so desktop text is readable.
 
 ### Epic 4: Framebuffer Presentation
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Milestone A is reached: `cargo xtask iso` followed by `display graphics` at the workspace prompt (or `display=graphics` on the kernel command line) shows a composited desktop in QEMU with a main window, status window, palette overlay, editor view, focus ring, and cursor, all presented through the paced framebuffer presenter. Keyboard focus and command flow still work in both modes and switching back to text repaints correctly.
+Milestone A is complete and the desktop text is readable: `DESKTOP_FONT` is the shared 8x16 printable-ASCII font, the caret sits under the glyph it refers to, and `cargo xtask qemu-script` can drive and screenshot both display modes.
 
 The best next implementation step is:
 
-- `GFX-053` Add a full printable-ASCII desktop font.
+- `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
 
-It is the most visible defect in the graphical desktop today and it blocks readable app surfaces (Epic 8). The kernel already ships a complete 8x16 font (`kernel_bootstrap/src/font_data_8x16.in`) that can seed a rasterizer `BitmapFont`. After that, `GFX-021` to `GFX-025` (pointer input) begin Milestone B.
+Pointer input is the start of Milestone B. Types first keeps the contract testable before any PS/2 mouse driver exists; `GFX-022` then bridges a real device into the same event model the keyboard already uses.
