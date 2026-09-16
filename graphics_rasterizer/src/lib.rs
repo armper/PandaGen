@@ -891,6 +891,92 @@ impl RenderTarget for LinearFramebufferTarget<'_> {
     }
 }
 
+/// A child drawing space inside a parent target (GFX-028).
+///
+/// Drawing at local `(x, y)` lands at parent
+/// `(viewport.x + x - scroll_x, viewport.y + y - scroll_y)` and is clipped to
+/// `viewport`. With zero scroll this is a clipping container with its own
+/// origin; with a scroll offset it is a viewport onto larger content. Children
+/// never learn where they are on screen, which keeps layout a parent concern.
+pub struct ContainerTarget<'a, T: RenderTarget + ?Sized> {
+    target: &'a mut T,
+    viewport: RasterRect,
+    scroll_x: usize,
+    scroll_y: usize,
+}
+
+impl<'a, T: RenderTarget + ?Sized> ContainerTarget<'a, T> {
+    /// Clipping container at `viewport` with local origin at its top-left.
+    pub fn new(target: &'a mut T, viewport: RasterRect) -> Self {
+        Self {
+            target,
+            viewport,
+            scroll_x: 0,
+            scroll_y: 0,
+        }
+    }
+
+    /// Container whose local origin is shifted up/left by the scroll offset,
+    /// so local `(scroll_x, scroll_y)` is the viewport's top-left.
+    pub fn scrolled(
+        target: &'a mut T,
+        viewport: RasterRect,
+        scroll_x: usize,
+        scroll_y: usize,
+    ) -> Self {
+        Self {
+            target,
+            viewport,
+            scroll_x,
+            scroll_y,
+        }
+    }
+
+    pub const fn viewport(&self) -> RasterRect {
+        self.viewport
+    }
+
+    pub const fn scroll(&self) -> (usize, usize) {
+        (self.scroll_x, self.scroll_y)
+    }
+
+    /// Map a local point to parent coordinates if it is inside the viewport.
+    fn to_parent(&self, x: usize, y: usize) -> Option<(usize, usize)> {
+        if x < self.scroll_x || y < self.scroll_y {
+            return None;
+        }
+        let px = self.viewport.x.checked_add(x - self.scroll_x)?;
+        let py = self.viewport.y.checked_add(y - self.scroll_y)?;
+        if self.viewport.contains(px, py) {
+            Some((px, py))
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: RenderTarget + ?Sized> RenderTarget for ContainerTarget<'_, T> {
+    /// Local extent that can reach the viewport: everything up to its right edge.
+    fn width(&self) -> usize {
+        self.scroll_x.saturating_add(self.viewport.width)
+    }
+
+    fn height(&self) -> usize {
+        self.scroll_y.saturating_add(self.viewport.height)
+    }
+
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        if let Some((px, py)) = self.to_parent(x, y) {
+            self.target.write_pixel(px, py, color);
+        }
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        let (px, py) = self.to_parent(x, y)?;
+        self.target.pixel(px, py)
+    }
+}
+
 impl<T: RenderTarget + ?Sized> RenderTarget for ScissorTarget<'_, T> {
     fn width(&self) -> usize {
         self.target.width()
@@ -1465,6 +1551,87 @@ mod tests {
             RgbaColor::new(0, 0, 0, 128),
         );
         assert_eq!(over_white.r, 127);
+    }
+
+    #[test]
+    fn test_container_translates_and_clips_child_drawing() {
+        let mut parent = RgbaBuffer::new(20, 12, CLEAR);
+        {
+            let mut child = ContainerTarget::new(&mut parent, RasterRect::new(5, 3, 8, 4));
+            assert_eq!((child.width(), child.height()), (8, 4));
+            // Local origin is the viewport's corner.
+            child.write_pixel(0, 0, ACCENT);
+            // Overflowing the viewport is clipped, including via provided ops.
+            child.fill_rect(RasterRect::new(6, 2, 10, 10), DETAIL);
+            child.write_pixel(8, 0, ACCENT);
+            assert_eq!(child.pixel(0, 0), Some(ACCENT));
+            assert_eq!(child.pixel(8, 0), None, "outside the viewport reads None");
+        }
+        assert_eq!(parent.pixel(5, 3), Some(ACCENT));
+        assert_eq!(parent.pixel(13, 3), Some(CLEAR));
+        assert_eq!(parent.pixel(11, 5), Some(DETAIL));
+        assert_eq!(parent.pixel(12, 6), Some(DETAIL));
+        assert_eq!(
+            parent.pixel(13, 6),
+            Some(CLEAR),
+            "clipped at viewport right edge"
+        );
+        assert_eq!(
+            parent.pixel(12, 7),
+            Some(CLEAR),
+            "clipped at viewport bottom edge"
+        );
+        assert_eq!(count(&parent, DETAIL), 2 * 2);
+    }
+
+    #[test]
+    fn test_scrolled_container_shows_a_window_onto_content() {
+        let mut parent = RgbaBuffer::new(10, 10, CLEAR);
+        {
+            // Viewport 4x4 at (2,2), scrolled 3 px down and 1 right: local
+            // (1,3) is the top-left visible pixel.
+            let mut view =
+                ContainerTarget::scrolled(&mut parent, RasterRect::new(2, 2, 4, 4), 1, 3);
+            assert_eq!((view.width(), view.height()), (5, 7));
+            view.write_pixel(0, 3, ACCENT); // scrolled off to the left
+            view.write_pixel(1, 2, ACCENT); // scrolled off above
+            view.write_pixel(1, 3, DETAIL); // first visible
+            view.write_pixel(4, 6, DETAIL); // last visible
+            view.write_pixel(5, 6, ACCENT); // past the right edge
+            view.write_pixel(4, 7, ACCENT); // past the bottom edge
+            assert_eq!(view.pixel(1, 3), Some(DETAIL));
+            assert_eq!(view.pixel(0, 3), None);
+        }
+        assert_eq!(count(&parent, ACCENT), 0);
+        assert_eq!(parent.pixel(2, 2), Some(DETAIL));
+        assert_eq!(parent.pixel(5, 5), Some(DETAIL));
+
+        // Text drawn in local coordinates scrolls with the content.
+        let mut parent = RgbaBuffer::new(40, 40, CLEAR);
+        let mut unscrolled = RgbaBuffer::new(40, 40, CLEAR);
+        unscrolled.draw_text_with_font(2, 2, "A", &DESKTOP_FONT, ACCENT);
+        {
+            let mut view =
+                ContainerTarget::scrolled(&mut parent, RasterRect::new(2, 2, 30, 30), 0, 5);
+            view.draw_text_with_font(0, 5, "A", &DESKTOP_FONT, ACCENT);
+        }
+        assert_eq!(parent.as_bytes(), unscrolled.as_bytes());
+    }
+
+    #[test]
+    fn test_containers_nest() {
+        let mut parent = RgbaBuffer::new(30, 30, CLEAR);
+        {
+            let mut outer = ContainerTarget::new(&mut parent, RasterRect::new(10, 10, 10, 10));
+            let mut inner = ContainerTarget::new(&mut outer, RasterRect::new(5, 5, 20, 20));
+            // Inner viewport extends past the outer one; the outer clips it.
+            inner.fill_rect(RasterRect::new(0, 0, 20, 20), ACCENT);
+        }
+        assert_eq!(count(&parent, ACCENT), 5 * 5);
+        assert_eq!(parent.pixel(15, 15), Some(ACCENT));
+        assert_eq!(parent.pixel(14, 15), Some(CLEAR));
+        assert_eq!(parent.pixel(19, 19), Some(ACCENT));
+        assert_eq!(parent.pixel(20, 20), Some(CLEAR));
     }
 
     #[test]

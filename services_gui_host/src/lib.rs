@@ -21,7 +21,9 @@ use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTi
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 pub mod input_routing;
+pub mod scene;
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
+pub use scene::ScrollRegion;
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
