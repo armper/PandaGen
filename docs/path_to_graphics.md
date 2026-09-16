@@ -98,7 +98,7 @@ User-space services should provide policy:
 
 - [x] `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
 - [x] `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
-- [ ] `GFX-023` Define hit testing against desktop surfaces and windows.
+- [x] `GFX-023` Define hit testing against desktop surfaces and windows.
 - [ ] `GFX-024` Define explicit pointer focus, keyboard focus, and capture semantics for PandaGen.
 - [ ] `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-022` is in place end to end: PS/2 mouse bring-up with IntelliMouse wheel detection, IRQ 12 into a byte queue, packet framing and translation in the kernel loop, a `PointerHalBridge` for service-level delivery, and `cargo xtask qemu-script` mouse directives that verified motion, buttons, wheel, and edge clamping on the real image.
+`GFX-023` is in place: `Compositor::hit_test` returns the top-most window under a pixel and whether the hit is border, chrome, or a content cell, using the same composition order the painter uses.
 
 The best next implementation step is:
 
-- `GFX-023` Define hit testing against desktop surfaces and windows.
+- `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
 
-With typed pointer events arriving, the compositor needs to answer "which window, and which part of it, is under this position" respecting z-order. That unlocks `GFX-025` (a visible cursor surface) and `GFX-024` (focus and capture policy).
+A visible pointer makes the whole input path observable on screen and is a prerequisite for meaningful focus and capture behaviour (`GFX-024`).

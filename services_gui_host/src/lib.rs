@@ -18,9 +18,7 @@ use graphics_rasterizer::{
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "workspace")]
 use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTileRenderSnapshot};
-#[cfg(feature = "workspace")]
-use view_types::ViewId;
-use view_types::{ViewContent, ViewFrame, ViewKind};
+use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
@@ -396,13 +394,7 @@ impl Compositor {
             target.clear(DESKTOP_BACKGROUND_COLOR);
         }
 
-        windows.sort_by_key(|window| {
-            (
-                window.layer.sort_key(),
-                window.z_index,
-                window.frame.view_id.as_uuid(),
-            )
-        });
+        windows.sort_by_key(composition_sort_key);
 
         let mut painted_windows = 0;
         for window in &windows {
@@ -421,6 +413,93 @@ impl Compositor {
             painted_windows,
             damage_rect,
         }
+    }
+}
+
+/// Which part of a window a pixel lands on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HitRegion {
+    /// The one-pixel frame around the window.
+    Border,
+    /// The title/tab strip row.
+    Chrome,
+    /// The content area, with the text cell under the pointer.
+    Content { line: usize, column: usize },
+}
+
+/// Result of hit testing a desktop position.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HitTarget {
+    /// Index into the window slice that was tested.
+    pub window_index: usize,
+    pub view_id: ViewId,
+    pub role: DesktopWindowRole,
+    pub region: HitRegion,
+    /// Pixel offset from the window's top-left corner.
+    pub local_x: usize,
+    pub local_y: usize,
+}
+
+/// Sort key shared by painting and hit testing: layer policy first, then
+/// z-index, then view id for determinism. Later entries paint on top.
+fn composition_sort_key(window: &DesktopWindow) -> (usize, usize, [u8; 16]) {
+    (
+        window.layer.sort_key(),
+        window.z_index,
+        *window.frame.view_id.as_uuid().as_bytes(),
+    )
+}
+
+/// Window indices from bottom-most to top-most.
+pub fn composition_order(windows: &[DesktopWindow]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..windows.len()).collect();
+    order.sort_by_key(|&index| composition_sort_key(&windows[index]));
+    order
+}
+
+/// Pixel rectangle of a window placed in cell units.
+pub fn window_pixel_rect(rect: SurfaceRect) -> RasterRect {
+    pixel_rect(rect)
+}
+
+impl Compositor {
+    /// Find the top-most window under desktop pixel `(x, y)`.
+    ///
+    /// Uses the exact ordering the painter uses, so whatever the user sees on
+    /// top is what receives the hit. Returns `None` over bare desktop.
+    pub fn hit_test(&self, windows: &[DesktopWindow], x: usize, y: usize) -> Option<HitTarget> {
+        for index in composition_order(windows).into_iter().rev() {
+            let window = &windows[index];
+            let rect = pixel_rect(window.rect);
+            if !rect.contains(x, y) {
+                continue;
+            }
+            let local_x = x - rect.x;
+            let local_y = y - rect.y;
+
+            let region = if let Some(content) =
+                window_content_rect(rect).filter(|content| content.contains(x, y))
+            {
+                HitRegion::Content {
+                    line: (y - content.y) / RASTER_CELL_HEIGHT,
+                    column: (x - content.x) / RASTER_CELL_WIDTH,
+                }
+            } else if window_chrome_rect(rect).contains(x, y) {
+                HitRegion::Chrome
+            } else {
+                HitRegion::Border
+            };
+
+            return Some(HitTarget {
+                window_index: index,
+                view_id: window.frame.view_id,
+                role: window.role,
+                region,
+                local_x,
+                local_y,
+            });
+        }
+        None
     }
 }
 
@@ -1727,6 +1806,121 @@ mod tests {
         assert_eq!(stats.damage_rect, Some(damage_rect));
         assert_eq!(target.pixel(w + 3, content_y + 4), Some(CURSOR_COLOR));
         assert_eq!(target.pixel(probe.0, probe.1), preserved_pixel);
+    }
+
+    #[test]
+    fn test_hit_test_reports_regions_and_content_cells() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["abc".to_string()]),
+            0,
+        );
+        let view_id = frame.view_id;
+        let windows = vec![DesktopWindow::new(frame, SurfaceRect::new(1, 1, 6, 4)).focused()];
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+
+        // Bare desktop.
+        assert_eq!(compositor.hit_test(&windows, 0, 0), None);
+        assert_eq!(compositor.hit_test(&windows, 7 * w, 5 * h), None);
+
+        // Top-left pixel is border.
+        let border = compositor.hit_test(&windows, w, h).unwrap();
+        assert_eq!(border.region, HitRegion::Border);
+        assert_eq!(border.view_id, view_id);
+        assert_eq!((border.local_x, border.local_y), (0, 0));
+        assert_eq!(border.window_index, 0);
+        assert_eq!(border.role, DesktopWindowRole::Main);
+
+        // Inside the title row.
+        let chrome = compositor.hit_test(&windows, w + 5, h + 3).unwrap();
+        assert_eq!(chrome.region, HitRegion::Chrome);
+
+        // Content row 0, column 2: content starts one cell below the top plus
+        // the border, one border pixel in from the left.
+        let content_x = w + RASTER_BORDER_THICKNESS + 2 * w + 1;
+        let content_y = h + h + RASTER_BORDER_THICKNESS + 1;
+        let content = compositor.hit_test(&windows, content_x, content_y).unwrap();
+        assert_eq!(content.region, HitRegion::Content { line: 0, column: 2 });
+        let content = compositor
+            .hit_test(&windows, content_x, content_y + h)
+            .unwrap();
+        assert_eq!(content.region, HitRegion::Content { line: 1, column: 2 });
+
+        // Bottom border pixel.
+        let bottom = compositor.hit_test(&windows, w + 5, 5 * h - 1).unwrap();
+        assert_eq!(bottom.region, HitRegion::Border);
+    }
+
+    #[test]
+    fn test_hit_test_follows_paint_order() {
+        let compositor = Compositor::new();
+        let make = |title: &str| {
+            ViewFrame::new(
+                ViewId::new(),
+                ViewKind::TextBuffer,
+                1,
+                ViewContent::text_buffer(vec![]),
+                0,
+            )
+            .with_title(title)
+        };
+        let windows = vec![
+            // Full-screen Main at the bottom of its layer.
+            DesktopWindow::new(make("main"), SurfaceRect::new(0, 0, 10, 10))
+                .with_z_index(0)
+                .focused(),
+            DesktopWindow::new(make("palette"), SurfaceRect::new(2, 2, 4, 4))
+                .with_role(DesktopWindowRole::Palette),
+            // Two overlapping Main windows: higher z-index wins.
+            DesktopWindow::new(make("low"), SurfaceRect::new(6, 6, 4, 4)).with_z_index(1),
+            DesktopWindow::new(make("high"), SurfaceRect::new(7, 7, 3, 3)).with_z_index(2),
+        ];
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+
+        let hit = compositor.hit_test(&windows, 3 * w, 3 * h).unwrap();
+        assert_eq!(hit.window_index, 1);
+        assert_eq!(hit.role, DesktopWindowRole::Palette);
+
+        let hit = compositor.hit_test(&windows, 8 * w, 8 * h).unwrap();
+        assert_eq!(hit.window_index, 3);
+
+        let hit = compositor.hit_test(&windows, 6 * w + 2, 6 * h + 2).unwrap();
+        assert_eq!(hit.window_index, 2);
+
+        let hit = compositor.hit_test(&windows, 1, 1).unwrap();
+        assert_eq!(hit.window_index, 0);
+
+        assert_eq!(composition_order(&windows), vec![0, 2, 3, 1]);
+
+        // Layer policy beats z-index: a Main with a huge z-index stays under a Palette.
+        let mut boosted = windows.clone();
+        boosted[0].z_index = 1000;
+        let hit = compositor.hit_test(&boosted, 3 * w, 3 * h).unwrap();
+        assert_eq!(hit.role, DesktopWindowRole::Palette);
+        assert_eq!(composition_order(&boosted), vec![2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn test_hit_test_on_windows_too_small_for_content() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::StatusLine,
+            1,
+            ViewContent::status_line("s"),
+            0,
+        );
+        // Height 1 cell: chrome row only, no content rect.
+        let windows = vec![DesktopWindow::new(frame, SurfaceRect::new(0, 0, 4, 1))];
+        let hit = compositor.hit_test(&windows, 3, 3).unwrap();
+        assert_eq!(hit.region, HitRegion::Chrome);
+        assert_eq!(
+            compositor.hit_test(&windows, 0, 0).unwrap().region,
+            HitRegion::Border
+        );
     }
 
     #[test]
