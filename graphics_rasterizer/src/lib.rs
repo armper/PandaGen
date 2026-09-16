@@ -245,6 +245,119 @@ pub trait RenderTarget {
         );
     }
 
+    /// Horizontal run of `len` pixels starting at `(x, y)`.
+    fn draw_hline(&mut self, x: usize, y: usize, len: usize, color: RgbaColor) {
+        self.fill_rect(RasterRect::new(x, y, len, 1), color);
+    }
+
+    /// Vertical run of `len` pixels starting at `(x, y)`.
+    fn draw_vline(&mut self, x: usize, y: usize, len: usize, color: RgbaColor) {
+        self.fill_rect(RasterRect::new(x, y, 1, len), color);
+    }
+
+    /// One-pixel line between two points (inclusive), Bresenham.
+    ///
+    /// Endpoints may lie outside the target; only in-bounds pixels are
+    /// written, so callers can draw against a virtual coordinate space.
+    fn draw_line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, color: RgbaColor) {
+        let (width, height) = (self.width() as i64, self.height() as i64);
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx: i64 = if x0 < x1 { 1 } else { -1 };
+        let sy: i64 = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let (mut x, mut y) = (x0, y0);
+        loop {
+            if x >= 0 && y >= 0 && x < width && y < height {
+                self.write_pixel(x as usize, y as usize, color);
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let twice = 2 * err;
+            if twice >= dy {
+                err += dy;
+                x += sx;
+            }
+            if twice <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Filled rectangle with quarter-circle corners of `radius` pixels.
+    /// A radius of zero is a plain `fill_rect`.
+    fn fill_rounded_rect(&mut self, rect: RasterRect, radius: usize, color: RgbaColor) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let radius = clamp_radius(rect, radius);
+        for row in 0..rect.height {
+            if let Some((start, end)) = rounded_row_span(rect, radius, row) {
+                self.fill_rect(RasterRect::new(start, rect.y + row, end - start, 1), color);
+            }
+        }
+    }
+
+    /// Rounded outline of `thickness` pixels; the interior is left untouched.
+    fn draw_rounded_border(
+        &mut self,
+        rect: RasterRect,
+        radius: usize,
+        thickness: usize,
+        color: RgbaColor,
+    ) {
+        if rect.width == 0 || rect.height == 0 || thickness == 0 {
+            return;
+        }
+        let radius = clamp_radius(rect, radius);
+        let thickness = thickness
+            .min(rect.width.div_ceil(2))
+            .min(rect.height.div_ceil(2));
+        let inner = RasterRect::new(
+            rect.x + thickness,
+            rect.y + thickness,
+            rect.width.saturating_sub(thickness * 2),
+            rect.height.saturating_sub(thickness * 2),
+        );
+        let inner_radius = radius.saturating_sub(thickness);
+
+        for row in 0..rect.height {
+            let Some((outer_start, outer_end)) = rounded_row_span(rect, radius, row) else {
+                continue;
+            };
+            let y = rect.y + row;
+            let inner_span = if inner.width > 0 && inner.height > 0 && row >= thickness {
+                rounded_row_span(inner, inner_radius, row - thickness)
+            } else {
+                None
+            };
+            match inner_span {
+                Some((inner_start, inner_end)) => {
+                    if inner_start > outer_start {
+                        self.fill_rect(
+                            RasterRect::new(outer_start, y, inner_start - outer_start, 1),
+                            color,
+                        );
+                    }
+                    if outer_end > inner_end {
+                        self.fill_rect(
+                            RasterRect::new(inner_end, y, outer_end - inner_end, 1),
+                            color,
+                        );
+                    }
+                }
+                None => {
+                    self.fill_rect(
+                        RasterRect::new(outer_start, y, outer_end - outer_start, 1),
+                        color,
+                    );
+                }
+            }
+        }
+    }
+
     fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
         self.draw_text_with_font(x, y, text, &DESKTOP_FONT, color);
     }
@@ -266,6 +379,68 @@ pub trait RenderTarget {
             }
         }
     }
+}
+
+/// Largest radius that still leaves the rectangle well-formed.
+fn clamp_radius(rect: RasterRect, radius: usize) -> usize {
+    radius.min(rect.width / 2).min(rect.height / 2)
+}
+
+/// Horizontal pixel span `[start, end)` of a rounded rectangle at `row`
+/// (0-based from the top of `rect`), or `None` when the row is empty.
+fn rounded_row_span(rect: RasterRect, radius: usize, row: usize) -> Option<(usize, usize)> {
+    if row >= rect.height || rect.width == 0 {
+        return None;
+    }
+    if radius == 0 {
+        return Some((rect.x, rect.x + rect.width));
+    }
+    // Distance of this row from the nearest corner-arc centre row, or zero
+    // when the row is in the straight middle section.
+    let from_top = row;
+    let from_bottom = rect.height - 1 - row;
+    let dy = if from_top < radius {
+        radius - from_top
+    } else if from_bottom < radius {
+        radius - from_bottom
+    } else {
+        0
+    };
+    // Horizontal inset such that (inset, dy) lies on the quarter circle. Using
+    // (radius - 0.5) keeps the outline visually round at small radii.
+    let inset = if dy == 0 {
+        0
+    } else {
+        let r2 = (radius * radius) as i64;
+        let dy2 = ((dy - 1) * (dy - 1)) as i64;
+        let dx = isqrt(r2 - dy2);
+        radius - (dx as usize).min(radius)
+    };
+    let start = rect.x + inset;
+    let end = rect.x + rect.width - inset;
+    if end <= start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+/// Integer square root (floor), enough for pixel radii.
+fn isqrt(value: i64) -> i64 {
+    if value <= 0 {
+        return 0;
+    }
+    let mut lo = 0i64;
+    let mut hi = value.min(1 << 31);
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if mid * mid <= value {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +567,24 @@ impl RgbaBuffer {
 
     pub fn draw_border(&mut self, rect: RasterRect, thickness: usize, color: RgbaColor) {
         <Self as RenderTarget>::draw_border(self, rect, thickness, color)
+    }
+
+    pub fn draw_line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, color: RgbaColor) {
+        <Self as RenderTarget>::draw_line(self, x0, y0, x1, y1, color)
+    }
+
+    pub fn fill_rounded_rect(&mut self, rect: RasterRect, radius: usize, color: RgbaColor) {
+        <Self as RenderTarget>::fill_rounded_rect(self, rect, radius, color)
+    }
+
+    pub fn draw_rounded_border(
+        &mut self,
+        rect: RasterRect,
+        radius: usize,
+        thickness: usize,
+        color: RgbaColor,
+    ) {
+        <Self as RenderTarget>::draw_rounded_border(self, rect, radius, thickness, color)
     }
 
     pub fn draw_text(&mut self, x: usize, y: usize, text: &str, color: RgbaColor) {
@@ -552,7 +745,7 @@ fn scale_glyph(font: &BitmapFont, source: &[u8], kind: GlyphSource) -> [u16; MAX
         return rows;
     }
 
-    for target_y in 0..glyph_height {
+    for (target_y, slot) in rows.iter_mut().enumerate().take(glyph_height) {
         let source_y = target_y * source_height / glyph_height;
         let source_row = source[source_y];
         let mut row = 0u16;
@@ -565,7 +758,7 @@ fn scale_glyph(font: &BitmapFont, source: &[u8], kind: GlyphSource) -> [u16; MAX
             }
         }
 
-        rows[target_y] = row;
+        *slot = row;
     }
 
     rows
@@ -830,6 +1023,133 @@ mod tests {
         );
         assert_eq!(framebuffer.pixel(1, 0), Some(ACCENT));
         assert_eq!(framebuffer.pixel(2, 1), Some(CLEAR));
+    }
+
+    fn count(buffer: &RgbaBuffer, color: RgbaColor) -> usize {
+        let mut n = 0;
+        for y in 0..buffer.height() {
+            for x in 0..buffer.width() {
+                if buffer.pixel(x, y) == Some(color) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn test_draw_line_covers_endpoints_and_clips() {
+        let mut buffer = RgbaBuffer::new(10, 10, CLEAR);
+        buffer.draw_line(1, 1, 8, 8, ACCENT);
+        assert_eq!(buffer.pixel(1, 1), Some(ACCENT));
+        assert_eq!(buffer.pixel(8, 8), Some(ACCENT));
+        assert_eq!(buffer.pixel(4, 4), Some(ACCENT));
+        assert_eq!(buffer.pixel(4, 5), Some(CLEAR));
+        assert_eq!(
+            count(&buffer, ACCENT),
+            8,
+            "diagonal touches one pixel per row"
+        );
+
+        // Steep, reversed, and partially off-target lines still draw in-bounds pixels.
+        let mut buffer = RgbaBuffer::new(10, 10, CLEAR);
+        buffer.draw_line(2, 9, 2, -5, ACCENT);
+        assert_eq!(count(&buffer, ACCENT), 10);
+        assert_eq!(buffer.pixel(2, 0), Some(ACCENT));
+        assert_eq!(buffer.pixel(2, 9), Some(ACCENT));
+
+        let mut buffer = RgbaBuffer::new(10, 10, CLEAR);
+        buffer.draw_line(-3, 5, 30, 5, ACCENT);
+        assert_eq!(count(&buffer, ACCENT), 10);
+
+        // hline/vline are one-pixel-thick rect fills.
+        let mut buffer = RgbaBuffer::new(10, 10, CLEAR);
+        buffer.draw_hline(1, 2, 5, ACCENT);
+        buffer.draw_vline(7, 0, 4, DETAIL);
+        assert_eq!(count(&buffer, ACCENT), 5);
+        assert_eq!(count(&buffer, DETAIL), 4);
+        assert_eq!(buffer.pixel(5, 2), Some(ACCENT));
+        assert_eq!(buffer.pixel(6, 2), Some(CLEAR));
+    }
+
+    #[test]
+    fn test_fill_rounded_rect_rounds_corners_only() {
+        let rect = RasterRect::new(2, 2, 16, 12);
+        let mut plain = RgbaBuffer::new(20, 16, CLEAR);
+        plain.fill_rect(rect, ACCENT);
+        let mut zero = RgbaBuffer::new(20, 16, CLEAR);
+        zero.fill_rounded_rect(rect, 0, ACCENT);
+        assert_eq!(
+            plain.as_bytes(),
+            zero.as_bytes(),
+            "radius 0 is a plain fill"
+        );
+
+        let mut rounded = RgbaBuffer::new(20, 16, CLEAR);
+        rounded.fill_rounded_rect(rect, 4, ACCENT);
+        // Corner pixels are clipped, edge midpoints and the centre are filled.
+        for (x, y) in [(2, 2), (17, 2), (2, 13), (17, 13)] {
+            assert_eq!(rounded.pixel(x, y), Some(CLEAR), "corner {x},{y}");
+        }
+        assert_eq!(rounded.pixel(10, 2), Some(ACCENT));
+        assert_eq!(rounded.pixel(2, 8), Some(ACCENT));
+        assert_eq!(rounded.pixel(17, 8), Some(ACCENT));
+        assert_eq!(rounded.pixel(10, 13), Some(ACCENT));
+        assert_eq!(rounded.pixel(9, 7), Some(ACCENT));
+        let filled = count(&rounded, ACCENT);
+        assert!(filled < 16 * 12 && filled > 16 * 12 - 4 * 8, "{filled}");
+
+        // The shape is left/right and top/bottom symmetric.
+        for y in 2..14 {
+            for x in 2..18 {
+                let mirror_x = 2 + 17 - x;
+                let mirror_y = 2 + 13 - y;
+                assert_eq!(rounded.pixel(x, y), rounded.pixel(mirror_x, y));
+                assert_eq!(rounded.pixel(x, y), rounded.pixel(x, mirror_y));
+            }
+        }
+
+        // Oversized radius is clamped to half the shorter side (a pill).
+        let mut pill = RgbaBuffer::new(20, 16, CLEAR);
+        pill.fill_rounded_rect(RasterRect::new(0, 0, 20, 6), 100, ACCENT);
+        assert_eq!(pill.pixel(10, 3), Some(ACCENT));
+        assert_eq!(pill.pixel(0, 0), Some(CLEAR));
+    }
+
+    #[test]
+    fn test_draw_rounded_border_leaves_interior_untouched() {
+        let rect = RasterRect::new(1, 1, 18, 14);
+        let mut buffer = RgbaBuffer::new(20, 16, CLEAR);
+        buffer.draw_rounded_border(rect, 4, 2, ACCENT);
+
+        // Ring pixels on the straight edges, two thick.
+        assert_eq!(buffer.pixel(9, 1), Some(ACCENT));
+        assert_eq!(buffer.pixel(9, 2), Some(ACCENT));
+        assert_eq!(buffer.pixel(9, 3), Some(CLEAR));
+        assert_eq!(buffer.pixel(1, 8), Some(ACCENT));
+        assert_eq!(buffer.pixel(2, 8), Some(ACCENT));
+        assert_eq!(buffer.pixel(3, 8), Some(CLEAR));
+        // Interior stays clear, corner pixel stays clear.
+        assert_eq!(buffer.pixel(9, 8), Some(CLEAR));
+        assert_eq!(buffer.pixel(1, 1), Some(CLEAR));
+
+        // Thickness covering everything degenerates to a filled rounded rect.
+        let mut thick = RgbaBuffer::new(20, 16, CLEAR);
+        thick.draw_rounded_border(rect, 4, 50, ACCENT);
+        let mut filled = RgbaBuffer::new(20, 16, CLEAR);
+        filled.fill_rounded_rect(rect, 4, ACCENT);
+        assert_eq!(thick.as_bytes(), filled.as_bytes());
+
+        // Primitives honour a scissor like everything else.
+        let mut clipped = RgbaBuffer::new(20, 16, CLEAR);
+        {
+            let mut scissor = ScissorTarget::new(&mut clipped, RasterRect::new(0, 0, 10, 16));
+            scissor.draw_rounded_border(rect, 4, 2, ACCENT);
+            scissor.draw_line(0, 15, 19, 15, DETAIL);
+        }
+        assert_eq!(clipped.pixel(1, 8), Some(ACCENT));
+        assert_eq!(clipped.pixel(18, 8), Some(CLEAR));
+        assert_eq!(count(&clipped, DETAIL), 10);
     }
 
     #[test]

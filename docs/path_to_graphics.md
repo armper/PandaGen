@@ -104,7 +104,7 @@ User-space services should provide policy:
 
 ### Epic 6: Basic Scene Primitives
 
-- [ ] `GFX-026` Add primitive draw ops for fills, lines, borders, rounded rectangles, and text.
+- [x] `GFX-026` Add primitive draw ops for fills, lines, borders, rounded rectangles, and text.
 - [ ] `GFX-027` Add image or icon surface support for future app and shell visuals.
 - [ ] `GFX-028` Add scrollable regions and clipping containers as scene primitives.
 - [ ] `GFX-029` Add a simple layout vocabulary for stack, split, overlay, and anchored elements.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 5 (pointer and graphical input model) is complete: typed pointer events, a PS/2 bridge into the kernel, hit testing, an explicit focus/capture router, and a composed cursor, all verified in QEMU.
+`GFX-026` is in place: `RenderTarget` now provides fills, borders, horizontal/vertical runs, Bresenham lines with clipping, filled rounded rectangles, and rounded borders, all as trait-provided methods so every target (RGBA buffer, linear framebuffer, scissor) gets them.
 
 The best next implementation step is:
 
-- `GFX-026` Add primitive draw ops for fills, lines, borders, rounded rectangles, and text.
+- `GFX-027` Add image or icon surface support for future app and shell visuals.
 
-The rasterizer paints fills, borders, and glyphs today. Lines and rounded rectangles are the missing primitives the shell chrome (`GFX-031`, `GFX-032`) and graphical app surfaces (Epic 8) will draw with, so they come before the shell itself.
+Icons are the next visual the shell (`GFX-031`) needs beyond text and shapes: a small RGBA sprite type with alpha blit, in the same spirit as the cursor sprite but data-driven.
