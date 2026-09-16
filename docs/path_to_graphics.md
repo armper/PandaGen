@@ -89,7 +89,7 @@ User-space services should provide policy:
 
 - [x] `GFX-016` Add a framebuffer presentation path that accepts a desktop pixel buffer from the GUI host path.
 - [x] `GFX-017` Route the current framebuffer backbuffer/blit machinery through that new presentation path.
-- [ ] `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
+- [x] `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
 - [ ] `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
 - [ ] `GFX-020` Add boot/runtime switching between text console mode and graphics desktop mode.
 
@@ -212,6 +212,6 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 The best next implementation step is:
 
-- `GFX-018` Add a stable frame pacing and present policy so redraws are explicit and bounded.
+- `GFX-019` Add damage-region presentation so unchanged areas do not force full-screen redraw.
 
-`GFX-017` is now in place: the raw framebuffer blit is private, the workspace shadow backbuffer is presented through `BareMetalFramebuffer::present_shadow`, rejected presents are logged and counted, and render stats now report desktop present counts. The next step is to make *when* a present happens an explicit, bounded policy instead of an implicit side effect of each render pass.
+`GFX-018` is now in place: `kernel_bootstrap::present_policy::FramePacer` separates rendering from presenting. Render passes only mark the shadow dirty; the workspace loop polls the pacer once per iteration and presents at most once per policy interval, coalescing bursts. The next step is to let the presenter copy only damaged rows or rectangles so a paced present is also a small present.

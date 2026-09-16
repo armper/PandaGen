@@ -24,6 +24,7 @@ mod minimal_editor;
 mod optimized_render;
 mod output;
 mod palette_overlay;
+mod present_policy;
 mod render_stats;
 mod vga;
 mod workspace;
@@ -848,6 +849,9 @@ fn workspace_loop(
         unsafe { console_vga::VgaConsole::new(vga_backbuffer.as_mut_ptr() as usize) };
 
     let mut fb_shadow: Option<framebuffer::BareMetalFramebuffer> = None;
+    // GFX-018: presents of the shadow are paced, not tied 1:1 to render passes.
+    let mut present_pacer =
+        present_policy::FramePacer::new(present_policy::PresentPolicy::DEFAULT_BARE_METAL);
     if FB_SHADOW_ENABLED {
         if let Some(ref fb) = fb_console {
             let info = fb.info();
@@ -875,6 +879,14 @@ fn workspace_loop(
     loop {
         // Run kernel tasks
         let kernel_progressed = kernel.run_once(serial);
+
+        // Present any shadow content whose pacing interval has elapsed. This
+        // is the single hardware present point of the loop.
+        if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
+            if let (Some(fb), Some(backbuffer)) = (fb_console.as_mut(), fb_shadow.as_ref()) {
+                present_framebuffer_shadow(serial, fb, backbuffer);
+            }
+        }
 
         // Process keyboard input
         let mut input_progressed = false;
@@ -1446,8 +1458,8 @@ fn workspace_loop(
                             &mut last_palette_selection,
                         );
                         input_dirty = false;
-                        if let Some(backbuffer) = fb_shadow.as_mut() {
-                            present_framebuffer_shadow(serial, fb, backbuffer);
+                        if fb_shadow.is_some() {
+                            present_pacer.mark_dirty();
                         }
                         continue; // Skip normal workspace rendering when palette open
                     }
@@ -1661,8 +1673,8 @@ fn workspace_loop(
                         input_dirty = false;
                     }
 
-                    if let Some(backbuffer) = fb_shadow.as_mut() {
-                        present_framebuffer_shadow(serial, fb, backbuffer);
+                    if fb_shadow.is_some() {
+                        present_pacer.mark_dirty();
                     }
                 }
             } // End !rendered_editor
@@ -1671,7 +1683,7 @@ fn workspace_loop(
             output_dirty = false;
         }
 
-        if !kernel_progressed && !input_progressed {
+        if !kernel_progressed && !input_progressed && !present_pacer.is_pending() {
             idle_pause();
         }
     }
