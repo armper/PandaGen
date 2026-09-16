@@ -302,18 +302,22 @@ pub fn reset_stats() {
 #[cfg(not(debug_assertions))]
 pub fn reset_stats() {}
 
+/// Serialises tests that touch the process-global counters (directly or via
+/// `render_editor_optimized`), so parallel test threads cannot interleave a
+/// frame's begin/end with another test's.
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static STATS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// The counters are process-global, so tests that reset and read them
-    /// must not interleave with each other.
-    static STATS_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_render_stats_frame_tracking() {
-        let _guard = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_guard();
         reset_stats();
 
         // Simulate a frame
@@ -332,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_cumulative_stats() {
-        let _guard = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_guard();
         reset_stats();
 
         // Frame 1

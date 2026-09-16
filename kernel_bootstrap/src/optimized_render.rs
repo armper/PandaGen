@@ -673,6 +673,7 @@ mod tests {
 
     #[test]
     fn test_incremental_vs_full_writes() {
+        let _guard = crate::render_stats::test_guard();
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let editor = MinimalEditor::new(24);
@@ -705,6 +706,7 @@ mod tests {
 
     #[test]
     fn test_cursor_only_change_minimal_writes() {
+        let _guard = crate::render_stats::test_guard();
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
         let mut editor = MinimalEditor::new(24);
@@ -740,6 +742,7 @@ mod tests {
 
     #[test]
     fn test_typing_50_characters_performance() {
+        let _guard = crate::render_stats::test_guard();
         // Simulate typing 50 characters and measure total cell writes
         // Before optimization: ~80*25*50 = 100,000 cell writes
         // After optimization: ~50*80 + overhead = ~5,000 cell writes
@@ -795,6 +798,7 @@ mod tests {
 
     #[test]
     fn test_hjkl_movement_performance() {
+        let _guard = crate::render_stats::test_guard();
         // Test that cursor movement is very cheap
         let mut sink = TestSink::new(80, 25);
         let mut cache = EditorRenderCache::new();
