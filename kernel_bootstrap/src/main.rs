@@ -138,6 +138,10 @@ static KERNEL_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
 static KEYBOARD_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
 
+// PS/2 mouse byte queue (same IRQ-to-loop ring buffer, fed from IRQ 12).
+#[cfg(not(test))]
+static MOUSE_EVENT_QUEUE: KeyboardEventQueue = KeyboardEventQueue::new();
+
 const KBD_DEBUG_LOG: bool = false;
 const FB_SHADOW_ENABLED: bool = true;
 
@@ -225,6 +229,45 @@ irq_keyboard_entry:
     pop rcx
     pop rax
     iretq
+
+.global irq_mouse_entry
+irq_mouse_entry:
+    # Save all general-purpose registers
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    call mouse_irq_handler
+    
+    # Restore all registers in reverse order
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 "#
 );
 
@@ -232,6 +275,7 @@ irq_keyboard_entry:
 extern "C" {
     fn irq_timer_entry();
     fn irq_keyboard_entry();
+    fn irq_mouse_entry();
 }
 
 #[cfg(not(test))]
@@ -276,6 +320,26 @@ extern "C" fn keyboard_irq_handler() {
     }
 }
 
+/// IRQ 12: one PS/2 mouse byte is waiting in the controller output buffer.
+///
+/// Only the raw byte is queued here; packet framing happens in the main loop
+/// so the interrupt path stays a few port reads long. Both PICs need an EOI
+/// because IRQ 12 arrives through the slave.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn mouse_irq_handler() {
+    unsafe {
+        let status = inb(0x64);
+        // Bit 0: output buffer full. Bit 5: the byte is auxiliary (mouse) data.
+        if (status & 0x21) == 0x21 {
+            let byte = inb(0x60);
+            MOUSE_EVENT_QUEUE.push(byte);
+        }
+        outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+    }
+}
+
 #[cfg(not(test))]
 unsafe fn outb(port: u16, value: u8) {
     asm!(
@@ -295,6 +359,9 @@ fn install_idt() {
 
         // Set up keyboard interrupt (IRQ 1 = vector 33)
         IDT[33].set_handler(irq_keyboard_entry, code_segment);
+
+        // Set up PS/2 mouse interrupt (IRQ 12 = vector 44, via slave PIC)
+        IDT[44].set_handler(irq_mouse_entry, code_segment);
 
         let idtr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -377,6 +444,18 @@ fn unmask_keyboard_irq() {
     unsafe {
         let mask = inb(0x21);
         outb(0x21, mask & !0x02); // Unmask IRQ 1
+    }
+}
+
+#[cfg(not(test))]
+fn unmask_mouse_irq() {
+    unsafe {
+        // IRQ 12 lives on the slave PIC, which reaches the CPU through the
+        // master's IRQ 2 cascade line; both must be unmasked.
+        let master = inb(0x21);
+        outb(0x21, master & !0x04);
+        let slave = inb(0xA1);
+        outb(0xA1, slave & !0x10);
     }
 }
 
@@ -623,11 +702,34 @@ pub extern "C" fn rust_main() -> ! {
     kprintln!(serial, "PS/2 controller: enabling keyboard IRQ1");
     enable_ps2_keyboard_irq(&mut serial);
 
+    // Bring up the PS/2 mouse while interrupts are still off, so the ACK
+    // bytes of the handshake are read here instead of by the IRQ handler.
+    let mouse_config = match hal_x86_64::Ps2MouseInit::initialize(&mut hal_x86_64::RealPortIo::new())
+    {
+        Ok(report) => {
+            kprintln!(
+                serial,
+                "ps2 mouse: ready (id={} wheel={} cmd_byte={:#04x})",
+                report.device_id,
+                report.wheel,
+                report.command_byte
+            );
+            Some(report)
+        }
+        Err(err) => {
+            kprintln!(serial, "ps2 mouse: unavailable ({:?})", err);
+            None
+        }
+    };
+
     init_pit();
     kprintln!(serial, "PIT configured for 100 Hz");
 
     unmask_timer_irq();
     unmask_keyboard_irq();
+    if mouse_config.is_some() {
+        unmask_mouse_irq();
+    }
     enable_interrupts();
     if KBD_DEBUG_LOG {
         log_pic_masks(&mut serial);
@@ -708,6 +810,7 @@ pub extern "C" fn rust_main() -> ! {
                 vga_console.as_mut(),
                 fb_console.as_mut(),
                 None,
+                mouse_config,
             )
         }
     };
@@ -738,6 +841,7 @@ pub extern "C" fn rust_main() -> ! {
         vga_console.as_mut(),
         fb_console.as_mut(),
         Some(filesystem),
+        mouse_config,
     )
 }
 
@@ -808,6 +912,7 @@ fn workspace_loop(
     mut vga_console: Option<&mut console_vga::VgaConsole>,
     mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
     filesystem: Option<bare_metal_storage::BareMetalFilesystem>,
+    mouse_config: Option<hal_x86_64::MouseInitReport>,
 ) -> ! {
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
@@ -874,6 +979,28 @@ fn workspace_loop(
     workspace.set_graphics_available(graphics_available);
     workspace.set_display_mode(display_mode);
     let mut desktop_renderer: Option<desktop_frame::DesktopFrameRenderer> = None;
+
+    // GFX-022: pointer path. IRQ 12 queues raw bytes; the loop frames packets
+    // and translates them into absolute pointer events confined to the display.
+    let (pointer_width, pointer_height) = match fb_console.as_ref() {
+        Some(fb) => {
+            let info = fb.info();
+            (info.width as u32, info.height as u32)
+        }
+        None => (
+            console_vga::VGA_WIDTH as u32 * 8,
+            console_vga::VGA_HEIGHT as u32 * 16,
+        ),
+    };
+    let mut mouse_parser =
+        hal_x86_64::Ps2MousePacketParser::new(mouse_config.is_some_and(|report| report.wheel));
+    let mut pointer_translator = hal::PointerTranslator::new(pointer_width, pointer_height);
+    workspace.set_pointer_available(mouse_config.is_some());
+    workspace.set_pointer_state(
+        pointer_translator.position().x,
+        pointer_translator.position().y,
+        0,
+    );
     if FB_SHADOW_ENABLED {
         if let Some(ref fb) = fb_console {
             let info = fb.info();
@@ -1031,6 +1158,24 @@ fn workspace_loop(
                 }
                 workspace.show_prompt(serial);
                 input_dirty = true;
+            }
+        }
+
+        // Drain PS/2 mouse bytes into packets, then into pointer events.
+        while let Some(byte) = MOUSE_EVENT_QUEUE.pop() {
+            let Some(packet) = mouse_parser.feed(byte) else {
+                continue;
+            };
+            let batch = pointer_translator.translate(packet, input_types::Modifiers::NONE);
+            for event in batch.iter() {
+                if KBD_DEBUG_LOG {
+                    let _ = writeln!(serial, "pointer event: {:?}", event);
+                }
+                workspace.set_pointer_state(
+                    event.position.x,
+                    event.position.y,
+                    event.buttons.bits(),
+                );
             }
         }
 

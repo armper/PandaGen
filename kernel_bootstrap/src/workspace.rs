@@ -183,6 +183,14 @@ pub struct WorkspaceSession {
     display_mode_request: Option<DisplayMode>,
     /// Whether a framebuffer exists so graphics mode can be entered.
     graphics_available: bool,
+    /// Whether a pointer device was brought up at boot.
+    pointer_available: bool,
+    /// Last known pointer position in display pixels.
+    pointer_position: (i32, i32),
+    /// Held pointer buttons as a bit set (bit 0 primary).
+    pointer_buttons: u8,
+    /// Pointer events observed since boot.
+    pointer_events: u64,
 }
 
 impl WorkspaceSession {
@@ -383,6 +391,10 @@ impl WorkspaceSession {
             display_mode: DisplayMode::DEFAULT,
             display_mode_request: None,
             graphics_available: false,
+            pointer_available: false,
+            pointer_position: (0, 0),
+            pointer_buttons: 0,
+            pointer_events: 0,
         }
     }
 
@@ -838,6 +850,12 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "pointer" {
+            self.emit_command_line(serial, command.as_bytes());
+            self.run_pointer_command(serial);
+            return;
+        }
+
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
 
@@ -856,6 +874,7 @@ impl WorkspaceSession {
                 self.emit_line(serial, "focus <id>     - Focus component");
                 self.emit_line(serial, "clear | cls    - Clear the screen");
                 self.emit_line(serial, "display <mode> - Switch text | graphics display");
+                self.emit_line(serial, "pointer        - Show pointer position and buttons");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
@@ -1230,6 +1249,52 @@ impl WorkspaceSession {
         self.graphics_available = available;
     }
 
+    /// Record whether a pointer device exists.
+    pub fn set_pointer_available(&mut self, available: bool) {
+        self.pointer_available = available;
+    }
+
+    /// Record the latest pointer state (called once per pointer event).
+    pub fn set_pointer_state(&mut self, x: i32, y: i32, buttons: u8) {
+        self.pointer_position = (x, y);
+        self.pointer_buttons = buttons;
+        self.pointer_events = self.pointer_events.wrapping_add(1);
+    }
+
+    pub fn pointer_position(&self) -> (i32, i32) {
+        self.pointer_position
+    }
+
+    pub fn pointer_buttons(&self) -> u8 {
+        self.pointer_buttons
+    }
+
+    fn run_pointer_command(&mut self, serial: &mut SerialPort) {
+        if !self.pointer_available {
+            self.emit_line(serial, "Pointer: no device");
+            return;
+        }
+        let mut buffer = [0u8; OUTPUT_LINE_MAX];
+        let mut cursor = 0usize;
+        cursor = append_bytes(&mut buffer, cursor, b"Pointer: x=");
+        cursor = append_i32(&mut buffer, cursor, self.pointer_position.0);
+        cursor = append_bytes(&mut buffer, cursor, b" y=");
+        cursor = append_i32(&mut buffer, cursor, self.pointer_position.1);
+        cursor = append_bytes(&mut buffer, cursor, b" buttons=");
+        for bit in 0..3 {
+            let down = self.pointer_buttons & (1 << bit) != 0;
+            cursor = append_bytes(&mut buffer, cursor, if down { b"1" } else { b"0" });
+        }
+        cursor = append_bytes(&mut buffer, cursor, b" events=");
+        cursor = append_i32(
+            &mut buffer,
+            cursor,
+            i32::try_from(self.pointer_events.saturating_sub(1)).unwrap_or(i32::MAX),
+        );
+        let line = core::str::from_utf8(&buffer[..cursor]).unwrap_or("Pointer: ?");
+        self.emit_line(serial, line);
+    }
+
     /// Take a pending display-mode switch requested by the user.
     pub fn consume_display_mode_request(&mut self) -> Option<DisplayMode> {
         self.display_mode_request.take()
@@ -1414,6 +1479,32 @@ impl OutputLine {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+}
+
+/// Append a signed decimal without allocating.
+fn append_i32(buffer: &mut [u8], len: usize, value: i32) -> usize {
+    let mut digits = [0u8; 11];
+    let mut count = 0usize;
+    let mut magnitude = value.unsigned_abs();
+    if magnitude == 0 {
+        digits[0] = b'0';
+        count = 1;
+    }
+    while magnitude > 0 {
+        digits[count] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        count += 1;
+    }
+    let mut len = if value < 0 {
+        append_bytes(buffer, len, b"-")
+    } else {
+        len
+    };
+    while count > 0 {
+        count -= 1;
+        len = append_bytes(buffer, len, &digits[count..count + 1]);
+    }
+    len
 }
 
 fn append_bytes(buffer: &mut [u8], mut len: usize, bytes: &[u8]) -> usize {

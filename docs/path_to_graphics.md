@@ -97,7 +97,7 @@ User-space services should provide policy:
 ### Epic 5: Pointer And Graphical Input Model
 
 - [x] `GFX-021` Add pointer event types to `input_types` for move, button, wheel, and capture transitions.
-- [ ] `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
+- [x] `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
 - [ ] `GFX-023` Define hit testing against desktop surfaces and windows.
 - [ ] `GFX-024` Define explicit pointer focus, keyboard focus, and capture semantics for PandaGen.
 - [ ] `GFX-025` Add cursor composition as a first-class surface, not a side effect of text rendering.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-021` is in place: `input_types` has `PointerEvent` with move, button, wheel, and capture kinds, absolute position plus held-button set on every event, and serialization round-trip tests.
+`GFX-022` is in place end to end: PS/2 mouse bring-up with IntelliMouse wheel detection, IRQ 12 into a byte queue, packet framing and translation in the kernel loop, a `PointerHalBridge` for service-level delivery, and `cargo xtask qemu-script` mouse directives that verified motion, buttons, wheel, and edge clamping on the real image.
 
 The best next implementation step is:
 
-- `GFX-022` Add a pointer device bridge comparable to the keyboard HAL bridge.
+- `GFX-023` Define hit testing against desktop surfaces and windows.
 
-That means a HAL pointer-device trait, a PS/2 mouse (IRQ 12) driver for `hal_x86_64`, and a bridge that turns packets into `PointerEvent`s with deterministic injection for tests, mirroring how `services_input_hal_bridge` handles the keyboard.
+With typed pointer events arriving, the compositor needs to answer "which window, and which part of it, is under this position" respecting z-order. That unlocks `GFX-025` (a visible cursor surface) and `GFX-024` (focus and capture policy).

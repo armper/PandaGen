@@ -225,7 +225,14 @@ injects keys with `sendkey`, and writes screendumps as PPM files
 
 Key entries use QEMU `sendkey` names (`ret`, `spc`, `esc`, `shift-semicolon`,
 `shift-1`, `ctrl-p`, `dot`, ...). `sleep:<secs>` pauses and `shot:<name>` takes a
-screendump. `--boot-wait` (default 10 s) and `--after` (default 1 s) tune timing.
+screendump. `mouse:dx;dy[;dz]` moves the PS/2 mouse (semicolons, since commas
+separate entries) and `mbtn:<mask>` sets buttons (1 left, 2 right, 4 middle).
+`--boot-wait` (default 10 s) and `--after` (default 1 s) tune timing.
+
+The workspace `pointer` command prints the last pointer position, held buttons,
+and event count, which is how mouse delivery is asserted from the serial log.
+Note that QEMU splits large `mouse_move` deltas into 127-count packets that
+drain across later events.
 
 The command fails if any `--expect-serial` text is missing, if the serial log
 contains `KERNEL PANIC`, or if the framebuffer presenter rejected a frame. This

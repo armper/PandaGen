@@ -200,8 +200,9 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
 /// the serial log lands at `<out>.serial.log`.
 ///
 /// Key spec entries are QEMU `sendkey` names (`h`, `ret`, `spc`, `esc`,
-/// `shift-semicolon`, `ctrl-p`, ...) plus two directives:
-/// `sleep:<secs>` pauses, `shot:<name>` takes a screendump.
+/// `shift-semicolon`, `ctrl-p`, ...) plus directives: `sleep:<secs>` pauses,
+/// `shot:<name>` takes a screendump, `mouse:dx;dy[;dz]` moves the pointer,
+/// and `mbtn:<mask>` sets the button state (1 left, 2 right, 4 middle).
 fn cmd_qemu_script(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -310,6 +311,18 @@ fn cmd_qemu_script(
             let path = format!("{out_str}.{name}.ppm");
             mon(&format!("screendump {path}"))?;
             shots.push(path);
+        } else if let Some(motion) = key.strip_prefix("mouse:") {
+            // mouse:dx;dy[;dz] -> relative motion (semicolons: commas split keys)
+            let parts: Vec<&str> = motion.split(';').collect();
+            let dx = parts.first().copied().unwrap_or("0");
+            let dy = parts.get(1).copied().unwrap_or("0");
+            let dz = parts.get(2).copied().unwrap_or("0");
+            mon(&format!("mouse_move {dx} {dy} {dz}"))?;
+            std::thread::sleep(Duration::from_millis(60));
+        } else if let Some(mask) = key.strip_prefix("mbtn:") {
+            // mbtn:<mask> -> button state bitmask (1 left, 2 right, 4 middle)
+            mon(&format!("mouse_button {mask}"))?;
+            std::thread::sleep(Duration::from_millis(60));
         } else {
             mon(&format!("sendkey {key}"))?;
             std::thread::sleep(Duration::from_millis(60));
