@@ -1485,9 +1485,20 @@ fn workspace_loop(
     workspace.append_output_text("PandaGen Workspace");
     workspace.append_output_text("Type 'help' for commands");
 
+    KERNEL_READY.store(true, core::sync::atomic::Ordering::Release);
+
     loop {
-        // Run kernel tasks
-        let kernel_progressed = kernel.run_once(serial);
+        // Run kernel tasks (idle application processors poll them too).
+        let kernel_progressed = {
+            let wait_started = hal_x86_64::rdtsc();
+            if KERNEL_LOCK.is_locked() {
+                BSP_LOCK_CONTENDED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            let _kernel_guard = KERNEL_LOCK.lock();
+            let waited = hal_x86_64::rdtsc().saturating_sub(wait_started);
+            BSP_LOCK_WAIT_MAX.fetch_max(waited, core::sync::atomic::Ordering::Relaxed);
+            kernel.run_once(serial)
+        };
 
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
@@ -1535,6 +1546,7 @@ fn workspace_loop(
                     }
                 }
                 // Build kernel context
+                let _kernel_guard = KERNEL_LOCK.lock();
                 let Kernel {
                     boot,
                     allocator,
@@ -1589,6 +1601,7 @@ fn workspace_loop(
         }
 
         // Check for responses from command service
+        let _kernel_guard = KERNEL_LOCK.lock();
         let Kernel {
             boot,
             allocator,
@@ -1709,6 +1722,7 @@ fn workspace_loop(
                                     }
                                     _ if primary_press => {
                                         if let Some(index) = result {
+                                            let _kernel_guard = KERNEL_LOCK.lock();
                                             let Kernel {
                                                 boot,
                                                 allocator,
@@ -3327,6 +3341,7 @@ fn run_present_bands(bands: &[framebuffer::PresentBand]) {
     unsafe { framebuffer::convert_rgba_rows(&bands[0]) };
     for (i, id) in ids.iter().enumerate().take(bands.len()).skip(1) {
         if *id == u32::MAX || WORK.wait(*id, 100_000_000).is_none() {
+            PRESENT_FALLBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Nobody picked it up (or it is still running: the queue slot is
             // consumed, so redoing the rows here is only redundant work).
             // SAFETY: as above.
@@ -4378,6 +4393,30 @@ impl RemoteToken {
     }
 }
 
+/// Serialises every touch of the kernel object (`KERNEL_STORAGE`): the boot
+/// CPU's loop and any application processor polling kernel tasks.
+static KERNEL_LOCK: hal_x86_64::SpinLock<()> = hal_x86_64::SpinLock::new(());
+
+/// Set once the kernel and its service tasks exist, so idle APs may poll them.
+static KERNEL_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Kernel task polls that made progress, by CPU registry index.
+static TASK_RUNS_BY_CPU: [core::sync::atomic::AtomicU64; hal_x86_64::MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [ZERO; hal_x86_64::MAX_CPUS]
+};
+
+/// Diagnostics for the SMP paths (shown by `cpus`).
+static PRESENT_FALLBACKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static AP_KERNEL_POLLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static AP_KERNEL_POLL_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BSP_LOCK_WAIT_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BSP_LOCK_CONTENDED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static AP_KERNEL_POLL_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Whether idle application processors poll kernel tasks (`smp poll on|off`).
+static AP_POLL_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// Jobs for application processors (`smp run <n>`).
 static WORK: hal_x86_64::WorkQueue<32> = hal_x86_64::WorkQueue::new();
 
@@ -4431,13 +4470,42 @@ fn ap_idle_loop(lapic_id: u32) -> ! {
             }
         }
         unsafe { asm!("cli", options(nomem, nostack)) };
-        match WORK.take() {
-            Some(job) => {
-                unsafe { asm!("sti", options(nomem, nostack)) };
-                let value = run_job(job);
-                WORK.complete(job.id, lapic_id, value);
+        if let Some(job) = WORK.take() {
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            let value = run_job(job);
+            WORK.complete(job.id, lapic_id, value);
+            continue;
+        }
+        unsafe { asm!("sti", options(nomem, nostack)) };
+
+        // No band or job work: poll a kernel task if the boot CPU is not
+        // inside the kernel right now.
+        if KERNEL_READY.load(core::sync::atomic::Ordering::Acquire)
+            && AP_POLL_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(_guard) = KERNEL_LOCK.try_lock() {
+                let started = hal_x86_64::rdtsc();
+                let mut serial = serial::SerialPort::new(serial::COM1);
+                // SAFETY: KERNEL_READY guarantees initialisation and the lock
+                // guarantees exclusive access.
+                let kernel = unsafe { &mut *KERNEL_STORAGE.as_mut_ptr() };
+                let progressed = kernel.run_once(&mut serial);
+                let spent = hal_x86_64::rdtsc().saturating_sub(started);
+                AP_KERNEL_POLLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                AP_KERNEL_POLL_CYCLES.fetch_add(spent, core::sync::atomic::Ordering::Relaxed);
+                AP_KERNEL_POLL_MAX.fetch_max(spent, core::sync::atomic::Ordering::Relaxed);
+                if progressed {
+                    continue;
+                }
             }
-            None => unsafe { asm!("sti", "hlt", options(nomem, nostack)) },
+        }
+
+        // Sleep until an IPI or the timer, unless work arrived meanwhile.
+        unsafe { asm!("cli", options(nomem, nostack)) };
+        if WORK.pending() == 0 {
+            unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+        } else {
+            unsafe { asm!("sti", options(nomem, nostack)) };
         }
     }
 }
@@ -5138,7 +5206,14 @@ impl Kernel {
             channels,
             next_message_id,
         };
-        task.poll(&mut ctx, serial)
+        let progressed = task.poll(&mut ctx, serial);
+        #[cfg(all(not(test), target_os = "none"))]
+        if progressed {
+            if let Some(index) = current_cpu_index() {
+                TASK_RUNS_BY_CPU[index].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        progressed
     }
 
     fn spawn_task(
@@ -5324,16 +5399,10 @@ impl CommandService {
     fn poll(&mut self, ctx: &mut KernelContext, serial: &mut serial::SerialPort) -> bool {
         let mut progressed = false;
 
-        // Demonstrate syscalls (alternating between yield and sleep)
-        #[cfg(not(test))]
-        {
-            if self.poll_count % 2 == 0 {
-                sys_yield();
-            } else {
-                sys_sleep(1); // Sleep for 1 tick
-            }
-            self.poll_count += 1;
-        }
+        // The original scaffold slept a full PIT tick here on every other poll
+        // ("syscall demo"); that stalled whichever CPU polled this task and
+        // held the kernel lock for up to 10 ms.
+        self.poll_count += 1;
 
         while let Some(message) = ctx.try_recv(self.command_channel) {
             progressed = true;
@@ -5558,6 +5627,37 @@ impl CommandService {
                             present_workers()
                         );
                     }
+                    (Some("diag"), _) => {
+                        #[cfg(not(test))]
+                        let bsp_ticks = get_tick_count();
+                        #[cfg(test)]
+                        let bsp_ticks = 0u64;
+                        let _ = writeln!(
+                            output,
+                            "lapic timer: initial={} ({} Hz), bsp ticks={}",
+                            LAPIC_TIMER_INITIAL.load(core::sync::atomic::Ordering::Relaxed),
+                            LAPIC_TIMER_HZ,
+                            bsp_ticks
+                        );
+                        let _ = writeln!(
+                    output,
+                    "smp diag: fallbacks={} ap_polls={} ap_cycles={} ap_max={} bsp_lock_max={} contended={}",
+                    PRESENT_FALLBACKS.load(core::sync::atomic::Ordering::Relaxed),
+                    AP_KERNEL_POLLS.load(core::sync::atomic::Ordering::Relaxed),
+                    AP_KERNEL_POLL_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
+                    AP_KERNEL_POLL_MAX.load(core::sync::atomic::Ordering::Relaxed),
+                    BSP_LOCK_WAIT_MAX.load(core::sync::atomic::Ordering::Relaxed),
+                    BSP_LOCK_CONTENDED.load(core::sync::atomic::Ordering::Relaxed)
+                );
+                    }
+                    (Some("poll"), Some("on")) => {
+                        AP_POLL_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(output, "smp: ap kernel polling on");
+                    }
+                    (Some("poll"), Some("off")) => {
+                        AP_POLL_ENABLED.store(false, core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(output, "smp: ap kernel polling off");
+                    }
                     (Some("present"), Some("off")) => {
                         PARALLEL_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
                         let _ = writeln!(output, "smp: parallel present off");
@@ -5572,7 +5672,10 @@ impl CommandService {
                         );
                     }
                     _ => {
-                        let _ = writeln!(output, "usage: smp run <jobs> | smp present [on|off]");
+                        let _ = writeln!(
+                            output,
+                            "usage: smp run <jobs> | present [on|off] | poll [on|off] | diag"
+                        );
                     }
                 }
             }
@@ -5585,23 +5688,13 @@ impl CommandService {
                     total,
                     BSP_LAPIC_ID.load(core::sync::atomic::Ordering::Acquire)
                 );
-                #[cfg(not(test))]
-                let bsp_ticks = get_tick_count();
-                #[cfg(test)]
-                let bsp_ticks = 0u64;
-                let _ = writeln!(
-                    output,
-                    "lapic timer: initial={} ({} Hz), bsp ticks={}",
-                    LAPIC_TIMER_INITIAL.load(core::sync::atomic::Ordering::Relaxed),
-                    LAPIC_TIMER_HZ,
-                    bsp_ticks
-                );
                 for index in 0..CPUS.online() {
                     if let Some(lapic) = CPUS.lapic_id(index) {
                         let _ = writeln!(
                             output,
-                            "  cpu{index}: lapic={lapic} ticks={}",
-                            CPU_TICKS[index].load(core::sync::atomic::Ordering::Relaxed)
+                            "  cpu{index} lapic={lapic} ticks={} runs={}",
+                            CPU_TICKS[index].load(core::sync::atomic::Ordering::Relaxed),
+                            TASK_RUNS_BY_CPU[index].load(core::sync::atomic::Ordering::Relaxed)
                         );
                     }
                 }
