@@ -524,6 +524,7 @@ fn cmd_qemu_script(
 
     let mut shots = Vec::new();
     let mut udp_failures: Vec<String> = Vec::new();
+    let mut background_remote: Option<std::thread::JoinHandle<Result<String, String>>> = None;
     for key in &keys {
         if let Some(secs) = key.strip_prefix("sleep:") {
             std::thread::sleep(Duration::from_secs_f64(secs.parse()?));
@@ -586,6 +587,23 @@ fn cmd_qemu_script(
                     "<remote-tcp {command:?} reply {reply:?} vs {expected:?}>"
                 )),
                 (Err(err), _) => udp_failures.push(format!("<remote-tcp {command:?}: {err}>")),
+            }
+        } else if let Some(command) = key.strip_prefix("remote-tcp-bg:") {
+            // remote-tcp-bg:<command> -> start the call on a thread so later
+            // steps (mouse, keys) overlap it; remote-join waits for it.
+            let command = command.to_string();
+            let token = remote_token();
+            background_remote = Some(std::thread::spawn(move || {
+                remote_tcp_call(&command, Duration::from_secs(10), &token)
+                    .map(|r| format!("{command} -> {}", r.trim_end()))
+                    .map_err(|e| format!("{command}: {e}"))
+            }));
+        } else if key == "remote-join" {
+            match background_remote.take().map(|h| h.join()) {
+                Some(Ok(Ok(reply))) => println!("remote-tcp (background) ok: {reply}"),
+                Some(Ok(Err(err))) => udp_failures.push(format!("<background {err}>")),
+                Some(Err(_)) => udp_failures.push("<background remote panicked>".to_string()),
+                None => udp_failures.push("<remote-join without remote-tcp-bg>".to_string()),
             }
         } else if let Some(command) = key.strip_prefix("replay:") {
             // replay:<command> -> send one signed call, expect a reply, then

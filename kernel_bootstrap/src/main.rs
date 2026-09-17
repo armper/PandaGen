@@ -199,7 +199,7 @@ extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
     let frame = unsafe { &*frame };
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
-    let mut serial = serial::SerialPort::new(serial::COM1);
+    let mut serial = serial::UnlockedSerial(serial::SerialPort::new(serial::COM1));
     let cpu = LAPIC.get().map(|apic| apic.id());
     let _ = writeln!(
         serial,
@@ -1492,16 +1492,11 @@ fn workspace_loop(
 
     loop {
         // Run kernel tasks (idle application processors poll them too).
-        let kernel_progressed = {
-            let wait_started = hal_x86_64::rdtsc();
-            if KERNEL_LOCK.is_locked() {
-                BSP_LOCK_CONTENDED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            }
-            let _kernel_guard = KERNEL_LOCK.lock();
-            let waited = hal_x86_64::rdtsc().saturating_sub(wait_started);
-            BSP_LOCK_WAIT_MAX.fetch_max(waited, core::sync::atomic::Ordering::Relaxed);
-            kernel.run_once(serial)
-        };
+        // Application processors run command tasks; this CPU keeps the
+        // console task and the desktop responsive.
+        let skip_commands =
+            CPUS.online() > 1 && !BSP_RUNS_COMMANDS.load(core::sync::atomic::Ordering::Relaxed);
+        let kernel_progressed = kernel.run_once_filtered(serial, skip_commands);
 
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
@@ -1549,23 +1544,7 @@ fn workspace_loop(
                     }
                 }
                 // Build kernel context
-                let _kernel_guard = KERNEL_LOCK.lock();
-                let Kernel {
-                    boot,
-                    allocator,
-                    heap,
-                    channels,
-                    next_message_id,
-                    ..
-                } = kernel;
-
-                let mut ctx = KernelContext {
-                    boot,
-                    allocator,
-                    heap,
-                    channels,
-                    next_message_id,
-                };
+                let mut ctx = kernel.context();
 
                 input_progressed = workspace.process_input(ch, &mut ctx, serial);
                 #[cfg(debug_assertions)]
@@ -1604,23 +1583,7 @@ fn workspace_loop(
         }
 
         // Check for responses from command service
-        let _kernel_guard = KERNEL_LOCK.lock();
-        let Kernel {
-            boot,
-            allocator,
-            heap,
-            channels,
-            next_message_id,
-            ..
-        } = kernel;
-
-        let mut ctx = KernelContext {
-            boot,
-            allocator,
-            heap,
-            channels,
-            next_message_id,
-        };
+        let mut ctx = kernel.context();
 
         // Service the network (ARP, ping, UDP echo, remote calls).
         #[cfg(all(not(test), target_os = "none"))]
@@ -1725,22 +1688,7 @@ fn workspace_loop(
                                     }
                                     _ if primary_press => {
                                         if let Some(index) = result {
-                                            let _kernel_guard = KERNEL_LOCK.lock();
-                                            let Kernel {
-                                                boot,
-                                                allocator,
-                                                heap,
-                                                channels,
-                                                next_message_id,
-                                                ..
-                                            } = kernel;
-                                            let mut ctx = KernelContext {
-                                                boot,
-                                                allocator,
-                                                heap,
-                                                channels,
-                                                next_message_id,
-                                            };
+                                            let mut ctx = kernel.context();
                                             if workspace
                                                 .palette_click_result(index, &mut ctx, serial)
                                             {
@@ -1834,21 +1782,7 @@ fn workspace_loop(
                                 let Some(line) = content_line else {
                                     continue;
                                 };
-                                let Kernel {
-                                    boot,
-                                    allocator,
-                                    heap,
-                                    channels,
-                                    next_message_id,
-                                    ..
-                                } = kernel;
-                                let mut ctx = KernelContext {
-                                    boot,
-                                    allocator,
-                                    heap,
-                                    channels,
-                                    next_message_id,
-                                };
+                                let mut ctx = kernel.context();
                                 if workspace.activate_launcher_line(line, &mut ctx, serial) {
                                     output_dirty = true;
                                 }
@@ -1872,21 +1806,7 @@ fn workspace_loop(
 
         // Advance any pipeline run through the kernel command service.
         {
-            let Kernel {
-                boot,
-                allocator,
-                heap,
-                channels,
-                next_message_id,
-                ..
-            } = kernel;
-            let mut ctx = KernelContext {
-                boot,
-                allocator,
-                heap,
-                channels,
-                next_message_id,
-            };
+            let mut ctx = kernel.context();
             if workspace.pipeline_poll(&mut ctx, serial, get_tick_count()) {
                 input_dirty = true;
                 output_dirty = true;
@@ -3101,7 +3021,9 @@ fn present_framebuffer_shadow(
 
 /// Present the composed desktop RGBA frame (graphics display mode).
 /// Read-only commands a remote caller may run.
-const REMOTE_ALLOWED_COMMANDS: [&str; 7] = ["help", "boot", "mem", "cpus", "heap", "ticks", "net"];
+const REMOTE_ALLOWED_COMMANDS: [&str; 8] = [
+    "help", "boot", "mem", "cpus", "heap", "ticks", "net", "spin",
+];
 
 /// Whether a remote command line is on the read-only allowlist. `net`
 /// is allowed only without arguments (status).
@@ -4454,10 +4376,6 @@ impl RemoteToken {
     }
 }
 
-/// Serialises every touch of the kernel object (`KERNEL_STORAGE`): the boot
-/// CPU's loop and any application processor polling kernel tasks.
-static KERNEL_LOCK: hal_x86_64::SpinLock<()> = hal_x86_64::SpinLock::new(());
-
 /// Set once the kernel and its service tasks exist, so idle APs may poll them.
 static KERNEL_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -4472,9 +4390,11 @@ static TASK_RUNS_BY_CPU: [core::sync::atomic::AtomicU64; hal_x86_64::MAX_CPUS] =
 static PRESENT_FALLBACKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AP_KERNEL_POLLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AP_KERNEL_POLL_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static BSP_LOCK_WAIT_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static BSP_LOCK_CONTENDED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AP_KERNEL_POLL_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Whether the boot CPU also runs command tasks (`smp bsp-commands on|off`);
+/// off by default when other CPUs exist, so commands never stall the desktop.
+static BSP_RUNS_COMMANDS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 /// Whether idle application processors poll kernel tasks (`smp poll on|off`).
 static AP_POLL_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
@@ -4544,12 +4464,12 @@ fn ap_idle_loop(lapic_id: u32) -> ! {
         if KERNEL_READY.load(core::sync::atomic::Ordering::Acquire)
             && AP_POLL_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         {
-            if let Some(_guard) = KERNEL_LOCK.try_lock() {
+            {
                 let started = hal_x86_64::rdtsc();
                 let mut serial = serial::SerialPort::new(serial::COM1);
-                // SAFETY: KERNEL_READY guarantees initialisation and the lock
-                // guarantees exclusive access.
-                let kernel = unsafe { &mut *KERNEL_STORAGE.as_mut_ptr() };
+                // SAFETY: KERNEL_READY guarantees initialisation; the kernel
+                // is shared and internally locked.
+                let kernel = unsafe { &*KERNEL_STORAGE.as_ptr() };
                 let progressed = kernel.run_once(&mut serial);
                 let spent = hal_x86_64::rdtsc().saturating_sub(started);
                 AP_KERNEL_POLLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -5119,24 +5039,25 @@ trait KernelApiV0 {
 
 struct KernelContext<'a> {
     boot: &'a BootInfo,
-    allocator: &'a mut Option<FrameAllocator>,
-    heap: &'a mut Option<BumpHeap>,
-    channels: &'a mut [Channel; MAX_CHANNELS],
-    next_message_id: &'a mut u64,
+    allocator: &'a hal_x86_64::SpinLock<Option<FrameAllocator>>,
+    heap: &'a hal_x86_64::SpinLock<Option<BumpHeap>>,
+    channels: &'a [hal_x86_64::SpinLock<Channel>; MAX_CHANNELS],
+    next_message_id: &'a core::sync::atomic::AtomicU64,
 }
 
 impl KernelContext<'_> {
     fn next_message_id(&mut self) -> MessageId {
-        let id = *self.next_message_id;
-        *self.next_message_id = (*self.next_message_id).saturating_add(1);
-        MessageId(id)
+        MessageId(
+            self.next_message_id
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     fn try_recv(&mut self, channel: ChannelId) -> Option<KernelMessage> {
         if channel.index() >= MAX_CHANNELS {
             return None;
         }
-        self.channels[channel.index()].recv()
+        self.channels[channel.index()].lock().recv()
     }
 
     fn boot(&self) -> &BootInfo {
@@ -5158,6 +5079,7 @@ impl KernelApiV0 for KernelContext<'_> {
             return Err(KernelError::InvalidChannel);
         }
         self.channels[channel.index()]
+            .lock()
             .send(message)
             .map_err(|_| KernelError::ChannelFull)
     }
@@ -5167,21 +5089,30 @@ impl KernelApiV0 for KernelContext<'_> {
             return Err(KernelError::InvalidChannel);
         }
         self.channels[channel.index()]
+            .lock()
             .recv()
             .ok_or(KernelError::ChannelEmpty)
     }
 }
 
+/// Kernel state shared by every CPU. Each piece has its own lock, so tasks
+/// polled on different CPUs run in parallel and only serialise on the
+/// channel or slot they touch.
 struct Kernel {
     boot: BootInfo,
-    allocator: Option<FrameAllocator>,
-    heap: Option<BumpHeap>,
-    channels: [Channel; MAX_CHANNELS],
+    allocator: hal_x86_64::SpinLock<Option<FrameAllocator>>,
+    heap: hal_x86_64::SpinLock<Option<BumpHeap>>,
+    channels: [hal_x86_64::SpinLock<Channel>; MAX_CHANNELS],
     channel_count: u8,
-    next_message_id: u64,
-    scheduler: CooperativeScheduler,
-    tasks: [Option<TaskSlot>; MAX_TASKS],
+    next_message_id: core::sync::atomic::AtomicU64,
+    scheduler: hal_x86_64::SpinLock<CooperativeScheduler>,
+    tasks: [hal_x86_64::SpinLock<Option<TaskSlot>>; MAX_TASKS],
 }
+
+// SAFETY: every mutable part is behind a lock or atomic; `BootInfo` holds a
+// framebuffer pointer that is only ever read through it.
+unsafe impl Sync for Kernel {}
+unsafe impl Send for Kernel {}
 
 impl Kernel {
     /// Initializes a kernel directly in the provided storage.
@@ -5196,20 +5127,26 @@ impl Kernel {
         let ptr = storage.as_mut_ptr();
 
         core::ptr::addr_of_mut!((*ptr).boot).write(boot);
-        core::ptr::addr_of_mut!((*ptr).allocator).write(allocator);
-        core::ptr::addr_of_mut!((*ptr).heap).write(heap);
+        core::ptr::addr_of_mut!((*ptr).allocator).write(hal_x86_64::SpinLock::new(allocator));
+        core::ptr::addr_of_mut!((*ptr).heap).write(hal_x86_64::SpinLock::new(heap));
         core::ptr::addr_of_mut!((*ptr).channel_count).write(0);
-        core::ptr::addr_of_mut!((*ptr).next_message_id).write(1);
-        core::ptr::addr_of_mut!((*ptr).scheduler).write(CooperativeScheduler::new());
+        core::ptr::addr_of_mut!((*ptr).next_message_id)
+            .write(core::sync::atomic::AtomicU64::new(1));
+        core::ptr::addr_of_mut!((*ptr).scheduler)
+            .write(hal_x86_64::SpinLock::new(CooperativeScheduler::new()));
 
-        let channels_ptr = core::ptr::addr_of_mut!((*ptr).channels) as *mut Channel;
+        let channels_ptr =
+            core::ptr::addr_of_mut!((*ptr).channels) as *mut hal_x86_64::SpinLock<Channel>;
         for idx in 0..MAX_CHANNELS {
-            channels_ptr.add(idx).write(Channel::new());
+            channels_ptr
+                .add(idx)
+                .write(hal_x86_64::SpinLock::new(Channel::new()));
         }
 
-        let tasks_ptr = core::ptr::addr_of_mut!((*ptr).tasks) as *mut Option<TaskSlot>;
+        let tasks_ptr =
+            core::ptr::addr_of_mut!((*ptr).tasks) as *mut hal_x86_64::SpinLock<Option<TaskSlot>>;
         for idx in 0..MAX_TASKS {
-            tasks_ptr.add(idx).write(None);
+            tasks_ptr.add(idx).write(hal_x86_64::SpinLock::new(None));
         }
 
         let kernel = &mut *ptr;
@@ -5228,13 +5165,13 @@ impl Kernel {
     fn new(boot: BootInfo, allocator: Option<FrameAllocator>, heap: Option<BumpHeap>) -> Self {
         let mut kernel = Self {
             boot,
-            allocator,
-            heap,
-            channels: [Channel::new(); MAX_CHANNELS],
+            allocator: hal_x86_64::SpinLock::new(allocator),
+            heap: hal_x86_64::SpinLock::new(heap),
+            channels: core::array::from_fn(|_| hal_x86_64::SpinLock::new(Channel::new())),
             channel_count: 0,
-            next_message_id: 1,
-            scheduler: CooperativeScheduler::new(),
-            tasks: core::array::from_fn(|_| None),
+            next_message_id: core::sync::atomic::AtomicU64::new(1),
+            scheduler: hal_x86_64::SpinLock::new(CooperativeScheduler::new()),
+            tasks: core::array::from_fn(|_| hal_x86_64::SpinLock::new(None)),
         };
 
         let command_channel = kernel.create_channel().expect("command channel available");
@@ -5249,32 +5186,40 @@ impl Kernel {
         kernel
     }
 
-    fn run_once(&mut self, serial: &mut serial::SerialPort) -> bool {
-        let Kernel {
-            boot,
-            allocator,
-            heap,
-            channels,
-            next_message_id,
-            scheduler,
-            tasks,
-            ..
-        } = self;
+    /// A context over the shared kernel state for one task poll or one
+    /// piece of loop work; every access goes through the fine-grained locks.
+    fn context(&self) -> KernelContext<'_> {
+        KernelContext {
+            boot: &self.boot,
+            allocator: &self.allocator,
+            heap: &self.heap,
+            channels: &self.channels,
+            next_message_id: &self.next_message_id,
+        }
+    }
 
-        let Some(task_id) = scheduler.next_task() else {
+    fn run_once(&self, serial: &mut serial::SerialPort) -> bool {
+        self.run_once_filtered(serial, false)
+    }
+
+    /// Poll the next scheduled task unless another CPU is already running
+    /// it. With `skip_commands`, command-service tasks are left to the
+    /// application processors so a long command never stalls this CPU.
+    fn run_once_filtered(&self, serial: &mut serial::SerialPort, skip_commands: bool) -> bool {
+        let Some(task_id) = self.scheduler.lock().next_task() else {
             return false;
         };
         let index = task_id.0 as usize;
-        let Some(task) = tasks.get_mut(index).and_then(Option::as_mut) else {
+        let Some(mut slot) = self.tasks.get(index).and_then(|slot| slot.try_lock()) else {
             return false;
         };
-        let mut ctx = KernelContext {
-            boot,
-            allocator,
-            heap,
-            channels,
-            next_message_id,
+        let Some(task) = slot.as_mut() else {
+            return false;
         };
+        if skip_commands && matches!(task.kind, TaskKind::Command(_)) {
+            return false;
+        }
+        let mut ctx = self.context();
         let progressed = task.poll(&mut ctx, serial);
         #[cfg(all(not(test), target_os = "none"))]
         if progressed {
@@ -5290,25 +5235,22 @@ impl Kernel {
         domain: TaskDomain,
         mut kind: TaskKind,
     ) -> Result<TaskId, KernelError> {
-        if let Some((index, slot_ref)) = self
-            .tasks
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        {
-            let id = TaskId(index as u32);
-            kind.set_task_id(id);
-            *slot_ref = Some(TaskSlot {
-                id,
-                domain,
-                time_slice: TimeSlice::new(5),
-                kind,
-            });
-            self.scheduler.add_task(id);
-            Ok(id)
-        } else {
-            Err(KernelError::OutOfTasks)
+        for (index, slot) in self.tasks.iter().enumerate() {
+            let mut slot = slot.lock();
+            if slot.is_none() {
+                let id = TaskId(index as u32);
+                kind.set_task_id(id);
+                *slot = Some(TaskSlot {
+                    id,
+                    domain,
+                    time_slice: TimeSlice::new(5),
+                    kind,
+                });
+                self.scheduler.lock().add_task(id);
+                return Ok(id);
+            }
         }
+        Err(KernelError::OutOfTasks)
     }
 }
 
@@ -5323,26 +5265,16 @@ impl KernelApiV0 for Kernel {
         }
         let id = ChannelId(self.channel_count);
         self.channel_count = self.channel_count.saturating_add(1);
-        self.channels[id.index()].reset();
+        self.channels[id.index()].lock().reset();
         Ok(id)
     }
 
     fn send(&mut self, channel: ChannelId, message: KernelMessage) -> Result<(), KernelError> {
-        if channel.index() >= MAX_CHANNELS {
-            return Err(KernelError::InvalidChannel);
-        }
-        self.channels[channel.index()]
-            .send(message)
-            .map_err(|_| KernelError::ChannelFull)
+        self.context().send(channel, message)
     }
 
     fn recv(&mut self, channel: ChannelId) -> Result<KernelMessage, KernelError> {
-        if channel.index() >= MAX_CHANNELS {
-            return Err(KernelError::InvalidChannel);
-        }
-        self.channels[channel.index()]
-            .recv()
-            .ok_or(KernelError::ChannelEmpty)
+        self.context().recv(channel)
     }
 }
 
@@ -5712,15 +5644,18 @@ impl CommandService {
                             bsp_ticks
                         );
                         let _ = writeln!(
-                    output,
-                    "smp diag: fallbacks={} ap_polls={} ap_cycles={} ap_max={} bsp_lock_max={} contended={}",
-                    PRESENT_FALLBACKS.load(core::sync::atomic::Ordering::Relaxed),
-                    AP_KERNEL_POLLS.load(core::sync::atomic::Ordering::Relaxed),
-                    AP_KERNEL_POLL_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
-                    AP_KERNEL_POLL_MAX.load(core::sync::atomic::Ordering::Relaxed),
-                    BSP_LOCK_WAIT_MAX.load(core::sync::atomic::Ordering::Relaxed),
-                    BSP_LOCK_CONTENDED.load(core::sync::atomic::Ordering::Relaxed)
-                );
+                            output,
+                            "smp diag: fallbacks={} ap_polls={} ap_cycles={} ap_max={}",
+                            PRESENT_FALLBACKS.load(core::sync::atomic::Ordering::Relaxed),
+                            AP_KERNEL_POLLS.load(core::sync::atomic::Ordering::Relaxed),
+                            AP_KERNEL_POLL_CYCLES.load(core::sync::atomic::Ordering::Relaxed),
+                            AP_KERNEL_POLL_MAX.load(core::sync::atomic::Ordering::Relaxed)
+                        );
+                    }
+                    (Some("bsp-commands"), Some(state @ ("on" | "off"))) => {
+                        BSP_RUNS_COMMANDS
+                            .store(state == "on", core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(output, "smp: boot cpu runs commands: {state}");
                     }
                     (Some("poll"), Some("on")) => {
                         AP_POLL_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -5750,6 +5685,28 @@ impl CommandService {
                         );
                     }
                 }
+            }
+            cmd if cmd.starts_with("spin") => {
+                // Busy-wait for up to 500 ticks: shows which CPU runs
+                // commands and whether the desktop keeps rendering meanwhile.
+                let ticks: u64 = cmd
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|t| t.parse().ok())
+                    .unwrap_or(100)
+                    .min(500);
+                #[cfg(not(test))]
+                {
+                    let start = get_tick_count();
+                    while get_tick_count().saturating_sub(start) < ticks {
+                        core::hint::spin_loop();
+                    }
+                }
+                #[cfg(all(not(test), target_os = "none"))]
+                let cpu = current_cpu_index();
+                #[cfg(any(test, not(target_os = "none")))]
+                let cpu: Option<usize> = None;
+                let _ = writeln!(output, "spin: {ticks} ticks on cpu {cpu:?}");
             }
             "cpus" => {
                 let total = CPU_TOTAL.load(core::sync::atomic::Ordering::Acquire);
@@ -5793,7 +5750,7 @@ impl CommandService {
                         heap.free_blocks
                     );
                 }
-                if let Some(allocator) = ctx.allocator.as_ref() {
+                if let Some(allocator) = ctx.allocator.lock().as_ref() {
                     let _ = writeln!(
                         output,
                         "allocator: ranges={} frames={} next=0x{:x} reclaimed={}",
@@ -5807,7 +5764,7 @@ impl CommandService {
                 }
             }
             "alloc" => {
-                if let Some(allocator) = ctx.allocator.as_mut() {
+                if let Some(allocator) = ctx.allocator.lock().as_mut() {
                     if let Some(frame) = allocator.allocate_frame() {
                         if let Some(offset) = ctx.boot().hhdm_offset {
                             let virt = offset + frame;
@@ -5832,7 +5789,7 @@ impl CommandService {
                 }
             }
             "heap" => {
-                if let Some(heap) = ctx.heap.as_ref() {
+                if let Some(heap) = ctx.heap.lock().as_ref() {
                     let stats = heap.stats();
                     let _ = writeln!(
                         output,
@@ -5844,7 +5801,7 @@ impl CommandService {
                 }
             }
             "heap-alloc" => {
-                if let Some(heap) = ctx.heap.as_mut() {
+                if let Some(heap) = ctx.heap.lock().as_mut() {
                     match heap.alloc(64, 16, AllocationLifetime::KernelTransient) {
                         Some(record) => {
                             let _ = writeln!(
@@ -6394,8 +6351,12 @@ pub mod serial {
         }
     }
 
-    impl fmt::Write for SerialPort {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
+    /// One writer at a time: several CPUs print now.
+    static SERIAL_LOCK: hal_x86_64::SpinLock<()> = hal_x86_64::SpinLock::new(());
+
+    impl SerialPort {
+        /// Write without taking the writer lock (fatal exception path only).
+        pub fn write_str_unlocked(&mut self, s: &str) -> fmt::Result {
             for byte in s.bytes() {
                 if byte == b'\n' {
                     self.write_byte(b'\r')?;
@@ -6403,6 +6364,23 @@ pub mod serial {
                 self.write_byte(byte)?;
             }
             Ok(())
+        }
+    }
+
+    impl fmt::Write for SerialPort {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            let _writer = SERIAL_LOCK.lock();
+            self.write_str_unlocked(s)
+        }
+    }
+
+    /// Serial writer for the exception handler: never blocks on the lock a
+    /// faulting CPU might itself hold.
+    pub struct UnlockedSerial(pub SerialPort);
+
+    impl fmt::Write for UnlockedSerial {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.0.write_str_unlocked(s)
         }
     }
 }

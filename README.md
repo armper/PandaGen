@@ -348,7 +348,7 @@ cargo test --all
 - [x] Model-based checkers for capabilities, scheduling (round-robin and EDF), IPC access, message budgets, and the kernel heap; nine `sim_kernel` defects found and fixed (264-271)
 
 ### 🔄 Open Work (see `docs/next_steps.md`)
-- [ ] True parallel task execution (tasks still run under one kernel lock)
+- [x] Parallel task execution across CPUs (Phase 275); preemptive tasks with context switching remain open
 - [ ] Per-caller keys for remote commands; DHCP lease renewal
 - [ ] Out-of-order TCP reassembly and congestion control
 
