@@ -327,6 +327,7 @@ fn cmd_qemu_script(
     let mut after = 1.0f64;
     let mut out = root.join("dist/qemu_script");
     let mut expect_serial: Vec<String> = Vec::new();
+    let mut allow_exception = false;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -344,6 +345,7 @@ fn cmd_qemu_script(
             "--after" => after = value("--after")?.parse()?,
             "--out" => out = root.join(value("--out")?),
             "--expect-serial" => expect_serial.push(value("--expect-serial")?),
+            "--allow-exception" => allow_exception = true,
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -509,6 +511,9 @@ fn cmd_qemu_script(
     }
     if log.contains("KERNEL PANIC") {
         missing.push("<no kernel panic>".to_string());
+    }
+    if log.contains("KERNEL EXCEPTION") && !allow_exception {
+        missing.push("<no kernel exception>".to_string());
     }
     missing.extend(udp_failures);
     if log.contains("framebuffer present rejected") {

@@ -113,14 +113,118 @@ impl IdtEntry {
     }
 
     fn set_handler(&mut self, handler: unsafe extern "C" fn(), selector: u16) {
+        self.set_handler_ist(handler, selector, 0);
+    }
+
+    /// Like `set_handler`, switching to interrupt stack `ist` (1-7) on entry.
+    fn set_handler_ist(&mut self, handler: unsafe extern "C" fn(), selector: u16, ist: u8) {
         let addr = handler as usize;
         self.offset_low = (addr & 0xFFFF) as u16;
         self.offset_mid = ((addr >> 16) & 0xFFFF) as u16;
         self.offset_high = ((addr >> 32) & 0xFFFFFFFF) as u32;
         self.selector = selector;
-        self.ist = 0;
+        self.ist = ist & 0x7;
         self.flags = IDT_PRESENT_INTERRUPT_GATE;
         self.reserved = 0;
+    }
+}
+
+/// CPUs that get their own GDT, TSS, and interrupt stack.
+const MAX_TABLE_CPUS: usize = 8;
+/// Bytes per double-fault interrupt stack.
+const IST_STACK_BYTES: usize = 16 * 1024;
+
+#[cfg(all(not(test), target_os = "none"))]
+static mut CPU_GDTS: [hal_x86_64::Gdt; MAX_TABLE_CPUS] = [hal_x86_64::Gdt::new(); MAX_TABLE_CPUS];
+#[cfg(all(not(test), target_os = "none"))]
+static mut CPU_TSSS: [hal_x86_64::Tss; MAX_TABLE_CPUS] = [hal_x86_64::Tss::new(); MAX_TABLE_CPUS];
+#[cfg(all(not(test), target_os = "none"))]
+#[repr(C, align(16))]
+struct IstStacks([[u8; IST_STACK_BYTES]; MAX_TABLE_CPUS]);
+#[cfg(all(not(test), target_os = "none"))]
+static mut IST_STACKS: IstStacks = IstStacks([[0; IST_STACK_BYTES]; MAX_TABLE_CPUS]);
+
+/// Install this CPU's GDT and TSS (with IST1 for double faults). CPUs past
+/// `MAX_TABLE_CPUS` keep the bootloader's tables. Returns whether loaded.
+#[cfg(all(not(test), target_os = "none"))]
+fn init_cpu_tables(cpu_index: usize) -> bool {
+    if cpu_index >= MAX_TABLE_CPUS {
+        return false;
+    }
+    // SAFETY: each CPU touches only its own slot, once, before using it.
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSSS[cpu_index]);
+        let stack_top =
+            core::ptr::addr_of!(IST_STACKS.0[cpu_index]) as u64 + IST_STACK_BYTES as u64;
+        (*tss).ist[0] = stack_top;
+        let gdt = core::ptr::addr_of_mut!(CPU_GDTS[cpu_index]);
+        (*gdt).set_tss(tss);
+        hal_x86_64::gdt::load(&*gdt);
+    }
+    true
+}
+
+/// Registers as pushed by the exception stubs, followed by the vector,
+/// error code, and the CPU's interrupt frame.
+#[repr(C)]
+struct ExceptionFrame {
+    regs: [u64; 15],
+    vector: u64,
+    error_code: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+fn exception_name(vector: u64) -> &'static str {
+    match vector {
+        0 => "#DE divide error",
+        6 => "#UD invalid opcode",
+        8 => "#DF double fault",
+        13 => "#GP general protection",
+        14 => "#PF page fault",
+        _ => "exception",
+    }
+}
+
+/// Print a fatal exception and stop this CPU. Nothing is recoverable yet.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
+    // SAFETY: the stub passes a pointer to the frame it just built.
+    let frame = unsafe { &*frame };
+    let cr2: u64;
+    unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+    let mut serial = serial::SerialPort::new(serial::COM1);
+    let cpu = LAPIC.get().map(|apic| apic.id());
+    let _ = writeln!(
+        serial,
+        "KERNEL EXCEPTION {} vector={} err=0x{:x} rip=0x{:x} cs=0x{:x} rflags=0x{:x} rsp=0x{:x} cr2=0x{:x} cpu_lapic={:?}",
+        exception_name(frame.vector),
+        frame.vector,
+        frame.error_code,
+        frame.rip,
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        cr2,
+        cpu
+    );
+    let _ = writeln!(
+        serial,
+        "  rax=0x{:x} rbx=0x{:x} rcx=0x{:x} rdx=0x{:x} rsi=0x{:x} rdi=0x{:x} rbp=0x{:x}",
+        frame.regs[14],
+        frame.regs[11],
+        frame.regs[13],
+        frame.regs[12],
+        frame.regs[9],
+        frame.regs[8],
+        frame.regs[10]
+    );
+    loop {
+        unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
     }
 }
 
@@ -329,6 +433,50 @@ irq_ipi_entry:
 irq_spurious_entry:
     iretq
 
+.macro EXC_NOERR name, vector
+.global \name
+\name:
+    push 0
+    push \vector
+    jmp exception_common
+.endm
+
+.macro EXC_ERR name, vector
+.global \name
+\name:
+    push \vector
+    jmp exception_common
+.endm
+
+EXC_NOERR exc_divide_entry, 0
+EXC_NOERR exc_invalid_opcode_entry, 6
+EXC_ERR exc_double_fault_entry, 8
+EXC_ERR exc_general_protection_entry, 13
+EXC_ERR exc_page_fault_entry, 14
+
+exception_common:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    and rsp, -16
+    call exception_handler
+1:
+    hlt
+    jmp 1b
+
 .global irq_lapic_timer_entry
 irq_lapic_timer_entry:
     push rax
@@ -374,6 +522,11 @@ extern "C" {
     fn irq_ipi_entry();
     fn irq_spurious_entry();
     fn irq_lapic_timer_entry();
+    fn exc_divide_entry();
+    fn exc_invalid_opcode_entry();
+    fn exc_double_fault_entry();
+    fn exc_general_protection_entry();
+    fn exc_page_fault_entry();
 }
 
 /// Vector used to wake application processors.
@@ -555,6 +708,14 @@ fn install_idt() {
         IDT[IPI_WAKE_VECTOR as usize].set_handler(irq_ipi_entry, code_segment);
         IDT[SPURIOUS_VECTOR as usize].set_handler(irq_spurious_entry, code_segment);
         IDT[LAPIC_TIMER_VECTOR as usize].set_handler(irq_lapic_timer_entry, code_segment);
+
+        // CPU exceptions: diagnostics instead of a silent triple fault. The
+        // double fault runs on IST1 so a blown stack still reports.
+        IDT[0].set_handler(exc_divide_entry, code_segment);
+        IDT[6].set_handler(exc_invalid_opcode_entry, code_segment);
+        IDT[8].set_handler_ist(exc_double_fault_entry, code_segment, 1);
+        IDT[13].set_handler(exc_general_protection_entry, code_segment);
+        IDT[14].set_handler(exc_page_fault_entry, code_segment);
 
         load_idt();
     }
@@ -877,6 +1038,12 @@ pub extern "C" fn rust_main() -> ! {
     let (mut allocator, heap) = init_memory(&mut serial, &boot);
 
     kprintln!(serial, "Initializing interrupts...");
+    if init_cpu_tables(0) {
+        kprintln!(
+            serial,
+            "GDT/TSS installed for cpu0 (IST1 for double faults)"
+        );
+    }
     install_idt();
     klog!(
         serial,
@@ -4282,11 +4449,12 @@ fn ap_idle_loop(lapic_id: u32) -> ! {
 /// kernel has work to schedule on it.
 #[cfg(all(not(test), target_os = "none"))]
 unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
+    let index = CPUS.register(cpu.lapic_id).unwrap_or(MAX_TABLE_CPUS);
+    init_cpu_tables(index);
     load_idt();
     if let Some(mut apic) = LAPIC.get() {
         apic.enable(SPURIOUS_VECTOR);
     }
-    let _ = CPUS.register(cpu.lapic_id);
     ap_idle_loop(cpu.lapic_id)
 }
 
@@ -5263,6 +5431,29 @@ impl CommandService {
                     output,
                     "commands: help, halt, boot, mem, cpus, alloc, heap, heap-alloc, ticks"
                 );
+            }
+            cmd if cmd.starts_with("fault") => {
+                // Deliberate CPU exceptions for testing the handlers.
+                let kind = cmd.split_whitespace().nth(1).unwrap_or("");
+                #[cfg(not(test))]
+                match kind {
+                    "pf" => unsafe {
+                        let _ = core::ptr::read_volatile(0x10 as *const u64);
+                    },
+                    "ud" => unsafe { asm!("ud2", options(nomem, nostack)) },
+                    "de" => unsafe {
+                        asm!(
+                            "xor edx, edx",
+                            "mov eax, 1",
+                            "xor ecx, ecx",
+                            "div ecx",
+                            out("eax") _, out("edx") _, out("ecx") _,
+                            options(nomem, nostack)
+                        )
+                    },
+                    _ => {}
+                }
+                let _ = writeln!(output, "usage: fault pf|ud|de");
             }
             "halt" => {
                 #[cfg(not(test))]

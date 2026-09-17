@@ -16,6 +16,7 @@ use core::prelude::v1::*;
 use hal::memory::MemoryError;
 use hal::{CpuHal, InterruptHal, MemoryHal};
 
+pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod keyboard;
@@ -36,6 +37,7 @@ pub mod virtio_net;
 pub mod virtio_pci;
 pub mod work_queue;
 
+pub use gdt::{Gdt, Tss, KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, TSS_SELECTOR};
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;

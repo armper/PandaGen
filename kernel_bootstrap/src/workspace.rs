@@ -1018,6 +1018,13 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "fault" {
+            // Deliberate CPU exception (see the kernel command service).
+            self.emit_command_line(serial, command.as_bytes());
+            self.delegate_to_command_service(ctx, serial, command);
+            return;
+        }
+
         if cmd == "heap" {
             self.emit_command_line(serial, command.as_bytes());
             let sub = parts.next();
