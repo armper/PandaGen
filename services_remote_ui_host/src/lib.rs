@@ -5,7 +5,7 @@ use ipc::ChannelId;
 use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{KernelApi, KernelError};
 use serde::{Deserialize, Serialize};
-use services_gui_host::DesktopScene;
+use services_gui_host::{DesktopScene, SceneEncoder, SceneUpdate};
 use services_workspace_manager::WorkspaceRenderSnapshot;
 use std::io::Write;
 use thiserror::Error;
@@ -17,13 +17,16 @@ const REMOTE_UI_SCHEMA: SchemaVersion = SchemaVersion::new(1, 0);
 pub const REMOTE_DESKTOP_ACTION: &str = "ui.desktop";
 pub const REMOTE_DESKTOP_SCHEMA: SchemaVersion = SchemaVersion::new(1, 0);
 
-/// A graphical desktop frame: the scene data, not pixels.
+/// A graphical desktop frame: a keyframe or delta (GFX-042), not pixels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDesktopFrame {
     pub revision: u64,
     pub timestamp_ns: u64,
-    pub scene: DesktopScene,
+    pub update: SceneUpdate,
 }
+
+/// Default keyframe cadence for remote desktop streams.
+pub const DEFAULT_KEYFRAME_INTERVAL: u32 = 60;
 
 /// Snapshot frame streamed to remote UI clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +70,7 @@ pub trait SnapshotSink {
 pub struct RemoteUiHost {
     revision: u64,
     sinks: Vec<Box<dyn SnapshotSink>>,
+    encoder: SceneEncoder,
 }
 
 impl Default for RemoteUiHost {
@@ -80,6 +84,7 @@ impl RemoteUiHost {
         Self {
             revision: 0,
             sinks: Vec::new(),
+            encoder: SceneEncoder::new(DEFAULT_KEYFRAME_INTERVAL),
         }
     }
 
@@ -106,8 +111,9 @@ impl RemoteUiHost {
         Ok(frame)
     }
 
-    /// Ship a graphical desktop scene to every sink. Shares the revision
-    /// counter with text snapshots so a mixed stream stays totally ordered.
+    /// Ship a graphical desktop scene to every sink as a keyframe or delta.
+    /// Shares the revision counter with text snapshots so a mixed stream
+    /// stays totally ordered.
     pub fn push_desktop(
         &mut self,
         scene: DesktopScene,
@@ -117,12 +123,17 @@ impl RemoteUiHost {
         let frame = RemoteDesktopFrame {
             revision: self.revision,
             timestamp_ns,
-            scene,
+            update: self.encoder.encode(&scene),
         };
         for sink in &mut self.sinks {
             sink.send_desktop(frame.clone())?;
         }
         Ok(frame)
+    }
+
+    /// Force the next desktop frame to be a keyframe (a viewer joined).
+    pub fn request_keyframe(&mut self) {
+        self.encoder.reset();
     }
 
     pub fn revision(&self) -> u64 {
@@ -453,7 +464,7 @@ mod tests {
         assert_eq!(sink.frames.len(), 1);
         assert_eq!(sink.desktop_frames.len(), 1);
         assert_eq!(sink.desktop_frames[0], frame);
-        assert_eq!(sink.desktop_frames[0].scene, scene);
+        assert_eq!(sink.desktop_frames[0].update, SceneUpdate::Keyframe(scene));
     }
 
     #[test]
@@ -472,7 +483,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].1.action, REMOTE_DESKTOP_ACTION);
         let decoded: RemoteDesktopFrame = sent[0].1.payload.deserialize().unwrap();
-        assert_eq!(decoded.scene, scene);
+        assert_eq!(decoded.update, SceneUpdate::Keyframe(scene));
     }
 
     #[test]
@@ -503,10 +514,33 @@ mod tests {
         match second {
             JsonLineRecord::Desktop(frame) => {
                 assert_eq!(frame.revision, 2);
-                assert_eq!(frame.scene, scene);
+                assert_eq!(frame.update, SceneUpdate::Keyframe(scene));
             }
             other => panic!("{other:?}"),
         }
         assert!(lines[1].starts_with(r#"{"kind":"desktop""#));
+    }
+
+    #[test]
+    fn test_second_desktop_frame_is_a_delta_until_a_keyframe_is_requested() {
+        use services_gui_host::{DesktopCursor, SceneDecoder};
+        let mut host = RemoteUiHost::new();
+        let first = host.push_desktop(sample_scene(), 1).unwrap();
+        let mut moved = sample_scene();
+        moved.cursor = Some(DesktopCursor::new(7, 7));
+        let second = host.push_desktop(moved.clone(), 2).unwrap();
+        assert!(matches!(first.update, SceneUpdate::Keyframe(_)));
+        assert!(matches!(second.update, SceneUpdate::Delta(_)));
+
+        let mut decoder = SceneDecoder::new();
+        decoder.apply(&first.update).unwrap();
+        let mut got = decoder.apply(&second.update).unwrap().clone();
+        got.damage = None;
+        assert_eq!(got, moved);
+
+        host.request_keyframe();
+        let third = host.push_desktop(moved, 3).unwrap();
+        assert!(matches!(third.update, SceneUpdate::Keyframe(_)));
+        assert_eq!(third.revision, 3);
     }
 }

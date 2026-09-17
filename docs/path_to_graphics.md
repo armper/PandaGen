@@ -129,7 +129,7 @@ User-space services should provide policy:
 ### Epic 9: Remote And Replayability
 
 - [x] `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
-- [ ] `GFX-042` Define a compact transport format for graphical updates and damage regions.
+- [x] `GFX-042` Define a compact transport format for graphical updates and damage regions.
 - [ ] `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
 - [ ] `GFX-044` Add round-trip tests for graphical snapshot serialization and remote transport.
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-041` is in place: `DesktopScene` (windows in cell units, cursor, theme, damage) is the serialisable description of a frame, `Compositor::render_scene` reproduces it pixel-for-pixel on any host, and `RemoteUiHost::push_desktop` ships it over IPC (`ui.desktop`) or JSON lines alongside text snapshots on one revision stream.
+`GFX-042` is in place: `SceneUpdate::{Keyframe, Delta}`, `diff_scenes`/`apply_delta` keyed by view id with computed damage, and `SceneEncoder`/`SceneDecoder` with forced keyframes on first frame, size change, interval, or viewer join. The remote UI host now streams keyframes and deltas.
 
 The best next implementation step is:
 
-- `GFX-042` Define a compact transport format for graphical updates and damage regions.
+- `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
 
-A full scene per frame is correct but wasteful when only the caret blinked; a delta format that carries changed windows and the damage rectangle, with a full-scene keyframe when needed, keeps remote sessions cheap without giving up determinism.
+A recorded stream of desktop frames should reconstruct every scene and every pixel exactly; a replay type over the decoder plus a pixel-identity check against live rendering makes that a tested guarantee.

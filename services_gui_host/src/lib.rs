@@ -27,6 +27,7 @@ pub mod layout;
 pub mod scene;
 pub mod shell;
 pub mod theme;
+pub mod transport;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
 pub use host::{HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
@@ -37,6 +38,9 @@ pub use shell::{
     ShellViewIds,
 };
 pub use theme::Theme;
+pub use transport::{
+    apply_delta, diff_scenes, DecodeError, SceneDecoder, SceneDelta, SceneEncoder, SceneUpdate,
+};
 
 const DESKTOP_BACKGROUND: char = '.';
 const CURSOR_GLYPH: char = '@';
