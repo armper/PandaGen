@@ -328,9 +328,11 @@ pub mod line {
     /// TCP port the kernel serves signed command lines on.
     pub const KERNEL_COMMAND_PORT: u16 = 7780;
 
-    fn signing_input(nonce_hex: &str, command: &str) -> Vec<u8> {
-        let mut input = Vec::with_capacity(nonce_hex.len() + 1 + command.len());
+    fn signing_input(nonce_hex: &str, caller: &str, command: &str) -> Vec<u8> {
+        let mut input = Vec::with_capacity(nonce_hex.len() + caller.len() + command.len() + 2);
         input.extend_from_slice(nonce_hex.as_bytes());
+        input.push(0);
+        input.extend_from_slice(caller.as_bytes());
         input.push(0);
         input.extend_from_slice(command.as_bytes());
         input
@@ -359,11 +361,14 @@ pub mod line {
         Some(value)
     }
 
-    /// Build a request line (without the trailing newline).
-    pub fn sign(token: &[u8], nonce: u128, command: &str) -> String {
+    /// Build a request line (without the trailing newline):
+    /// `<nonce> <caller> <tag> <command>`.
+    pub fn sign(key: &super::CallerKey, nonce: u128, command: &str) -> String {
         let nonce_hex = nonce_hex(nonce);
-        let tag = sha256::hmac(token, &signing_input(&nonce_hex, command));
+        let tag = sha256::hmac(&key.key, &signing_input(&nonce_hex, &key.caller, command));
         let mut line = nonce_hex;
+        line.push(' ');
+        line.push_str(&key.caller);
         line.push(' ');
         line.push_str(&b64::encode(&tag));
         line.push(' ');
@@ -371,18 +376,23 @@ pub mod line {
         line
     }
 
-    /// Verify a request line; returns the nonce and command.
-    pub fn verify<'a>(token: &[u8], line: &'a str) -> Option<(u128, &'a str)> {
+    /// Verify a request line; returns the nonce, caller, and command.
+    pub fn verify<'a>(
+        keys: &dyn super::KeySource,
+        line: &'a str,
+    ) -> Option<(u128, &'a str, &'a str)> {
         let line = line.trim_end_matches(['\r', '\n']);
         let (nonce_hex, rest) = line.split_once(' ')?;
+        let (caller, rest) = rest.split_once(' ')?;
         let (tag_b64, command) = rest.split_once(' ')?;
         let nonce = parse_nonce(nonce_hex)?;
         let tag = b64::decode(tag_b64)?;
-        let expected = sha256::hmac(token, &signing_input(nonce_hex, command));
+        let key = keys.key_for(caller)?;
+        let expected = sha256::hmac(&key, &signing_input(nonce_hex, caller, command));
         if !sha256::tags_equal(&expected, &tag) {
             return None;
         }
-        Some((nonce, command))
+        Some((nonce, caller, command))
     }
 
     /// Encode a reply line (without the trailing newline).
@@ -408,6 +418,54 @@ pub mod line {
             return b64::decode(payload).map(Ok);
         }
         line.strip_prefix('-').map(|err| Err(String::from(err)))
+    }
+}
+
+/// Per-caller key derived from the master secret: the kernel keeps the
+/// master and derives on demand; each caller only ever holds its own key.
+pub fn derive_caller_key(master: &[u8], caller: &str) -> [u8; 32] {
+    let mut input = Vec::with_capacity(7 + caller.len());
+    input.extend_from_slice(b"caller:");
+    input.extend_from_slice(caller.as_bytes());
+    sha256::hmac(master, &input)
+}
+
+/// Where verification finds the key for a caller name.
+pub trait KeySource {
+    fn key_for(&self, caller: &str) -> Option<[u8; 32]>;
+}
+
+/// The master secret: any caller's key can be derived.
+pub struct MasterKey<'a>(pub &'a [u8]);
+
+impl KeySource for MasterKey<'_> {
+    fn key_for(&self, caller: &str) -> Option<[u8; 32]> {
+        if caller.is_empty() || caller.len() > 32 || caller.contains(' ') {
+            return None;
+        }
+        Some(derive_caller_key(self.0, caller))
+    }
+}
+
+/// One caller's own key (the client side).
+#[derive(Clone)]
+pub struct CallerKey {
+    pub caller: String,
+    pub key: [u8; 32],
+}
+
+impl CallerKey {
+    pub fn derived(master: &[u8], caller: &str) -> Self {
+        Self {
+            caller: String::from(caller),
+            key: derive_caller_key(master, caller),
+        }
+    }
+}
+
+impl KeySource for CallerKey {
+    fn key_for(&self, caller: &str) -> Option<[u8; 32]> {
+        (caller == self.caller).then_some(self.key)
     }
 }
 
@@ -581,15 +639,19 @@ struct WireEnvelope {
     correlation_id: Option<MessageId>,
     #[serde(with = "b64::bytes")]
     payload: Vec<u8>,
-    /// HMAC-SHA256 over id, action and payload with the shared token.
+    /// Who signed it; selects the key.
+    caller: String,
+    /// HMAC-SHA256 over id, caller, action and payload with the caller's key.
     #[serde(with = "b64::bytes")]
     tag: Vec<u8>,
 }
 
-/// What the tag covers: the message id, the action, and the payload bytes.
-fn signing_input(id: MessageId, action: &str, payload: &[u8]) -> Vec<u8> {
-    let mut input = Vec::with_capacity(16 + action.len() + payload.len() + 2);
+/// What the tag covers: the message id, caller, action, and payload bytes.
+fn signing_input(id: MessageId, caller: &str, action: &str, payload: &[u8]) -> Vec<u8> {
+    let mut input = Vec::with_capacity(16 + caller.len() + action.len() + payload.len() + 3);
     input.extend_from_slice(id.as_uuid().as_bytes());
+    input.push(0);
+    input.extend_from_slice(caller.as_bytes());
     input.push(0);
     input.extend_from_slice(action.as_bytes());
     input.push(0);
@@ -597,13 +659,17 @@ fn signing_input(id: MessageId, action: &str, payload: &[u8]) -> Vec<u8> {
     input
 }
 
-/// Serialize and sign an envelope for a datagram transport.
+/// Serialize and sign an envelope for a datagram transport as `caller`.
 pub fn envelope_to_bytes(
     message: &MessageEnvelope,
-    token: &[u8],
+    caller: &str,
+    key: &[u8; 32],
 ) -> Result<Vec<u8>, RemoteIpcError> {
     let payload = message.payload.as_bytes().to_vec();
-    let tag = sha256::hmac(token, &signing_input(message.id, &message.action, &payload));
+    let tag = sha256::hmac(
+        key,
+        &signing_input(message.id, caller, &message.action, &payload),
+    );
     let wire = WireEnvelope {
         id: message.id,
         destination: message.destination,
@@ -612,29 +678,43 @@ pub fn envelope_to_bytes(
         schema_version: message.schema_version,
         correlation_id: message.correlation_id,
         payload,
+        caller: String::from(caller),
         tag: tag.to_vec(),
     };
     serde_json::to_vec(&wire).map_err(|err| RemoteIpcError::Codec(err.to_string()))
 }
 
 /// Parse an envelope received from a datagram transport, rejecting it as
-/// `Unauthorized` unless its tag matches `token`.
-pub fn envelope_from_bytes(bytes: &[u8], token: &[u8]) -> Result<MessageEnvelope, RemoteIpcError> {
+/// `Unauthorized` unless its tag verifies under the caller's key. Returns
+/// the envelope and the caller name.
+pub fn envelope_from_bytes(
+    bytes: &[u8],
+    keys: &dyn KeySource,
+) -> Result<(MessageEnvelope, String), RemoteIpcError> {
     let wire: WireEnvelope =
         serde_json::from_slice(bytes).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
-    let expected = sha256::hmac(token, &signing_input(wire.id, &wire.action, &wire.payload));
+    let key = keys
+        .key_for(&wire.caller)
+        .ok_or(RemoteIpcError::Unauthorized)?;
+    let expected = sha256::hmac(
+        &key,
+        &signing_input(wire.id, &wire.caller, &wire.action, &wire.payload),
+    );
     if !sha256::tags_equal(&expected, &wire.tag) {
         return Err(RemoteIpcError::Unauthorized);
     }
-    Ok(MessageEnvelope {
-        id: wire.id,
-        destination: wire.destination,
-        source: wire.source,
-        action: wire.action,
-        schema_version: wire.schema_version,
-        correlation_id: wire.correlation_id,
-        payload: MessagePayload::from_raw(wire.payload),
-    })
+    Ok((
+        MessageEnvelope {
+            id: wire.id,
+            destination: wire.destination,
+            source: wire.source,
+            action: wire.action,
+            schema_version: wire.schema_version,
+            correlation_id: wire.correlation_id,
+            payload: MessagePayload::from_raw(wire.payload),
+        },
+        wire.caller,
+    ))
 }
 
 pub fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> {
@@ -765,11 +845,20 @@ mod tests {
             payload: b"cpus".to_vec(),
             authority,
         };
-        let token = DEFAULT_REMOTE_TOKEN.as_bytes();
-        let bytes = envelope_to_bytes(&encode_call(call.clone()).unwrap(), token).unwrap();
-        let envelope = envelope_from_bytes(&bytes, token).unwrap();
+        let master = DEFAULT_REMOTE_TOKEN.as_bytes();
+        let key = CallerKey::derived(master, "host");
+        let bytes =
+            envelope_to_bytes(&encode_call(call.clone()).unwrap(), "host", &key.key).unwrap();
+        let (envelope, caller) = envelope_from_bytes(&bytes, &MasterKey(master)).unwrap();
+        assert_eq!(caller, "host");
         assert!(matches!(
-            envelope_from_bytes(&bytes, b"other-token"),
+            envelope_from_bytes(&bytes, &MasterKey(b"other-master")),
+            Err(RemoteIpcError::Unauthorized)
+        ));
+        // The client verifies replies with only its own key.
+        assert!(envelope_from_bytes(&bytes, &key).is_ok());
+        assert!(matches!(
+            envelope_from_bytes(&bytes, &CallerKey::derived(master, "someone-else")),
             Err(RemoteIpcError::Unauthorized)
         ));
         let decoded = authorize_call(&envelope, &[CAP_KERNEL_COMMAND]).unwrap();
@@ -786,14 +875,17 @@ mod tests {
             envelope.id,
         )
         .unwrap();
-        let back =
-            envelope_from_bytes(&envelope_to_bytes(&response, token).unwrap(), token).unwrap();
+        let (back, _) = envelope_from_bytes(
+            &envelope_to_bytes(&response, "host", &key.key).unwrap(),
+            &MasterKey(master),
+        )
+        .unwrap();
         assert_eq!(back.correlation_id, Some(envelope.id));
         assert_eq!(
             decode_response(&back).unwrap().result,
             Ok(b"cpus: online=4".to_vec())
         );
-        assert!(envelope_from_bytes(b"not json", token).is_err());
+        assert!(envelope_from_bytes(b"not json", &MasterKey(master)).is_err());
     }
 
     #[test]
@@ -818,9 +910,10 @@ mod tests {
             MessageId::new(),
         )
         .unwrap();
-        let bytes = envelope_to_bytes(&response, b"k").unwrap();
+        let key = CallerKey::derived(b"k", "budget-test-caller-with-a-long-name");
+        let bytes = envelope_to_bytes(&response, &key.caller, &key.key).unwrap();
         assert!(bytes.len() <= 1472, "datagram is {} bytes", bytes.len());
-        let back = decode_response(&envelope_from_bytes(&bytes, b"k").unwrap()).unwrap();
+        let back = decode_response(&envelope_from_bytes(&bytes, &key).unwrap().0).unwrap();
         assert_eq!(back.result, Ok(vec![b'x'; 512]));
     }
 
@@ -881,19 +974,34 @@ mod tests {
 
     #[test]
     fn test_line_protocol_sign_verify_and_replies() {
-        let token = b"pandagen-dev";
-        let request = line::sign(token, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210, "cpus");
-        assert!(request.starts_with("0123456789abcdeffedcba9876543210 "));
+        let master = b"pandagen-dev";
+        let key = CallerKey::derived(master, "ops");
+        let request = line::sign(&key, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210, "cpus");
+        assert!(request.starts_with("0123456789abcdeffedcba9876543210 ops "));
         assert!(request.ends_with(" cpus"));
         let with_newline = format!("{request}\n");
-        let (nonce, command) = line::verify(token, &with_newline).unwrap();
+        let (nonce, caller, command) = line::verify(&MasterKey(master), &with_newline).unwrap();
         assert_eq!(nonce, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+        assert_eq!(caller, "ops");
         assert_eq!(command, "cpus");
-        assert!(line::verify(b"other", &request).is_none(), "wrong token");
+        assert!(
+            line::verify(&MasterKey(b"other"), &request).is_none(),
+            "wrong master"
+        );
+        let renamed = request.replace(" ops ", " dev ");
+        assert!(
+            line::verify(&MasterKey(master), &renamed).is_none(),
+            "caller not in tag"
+        );
         let tampered = request.replace("cpus", "halt");
-        assert!(line::verify(token, &tampered).is_none(), "tampered command");
-        assert!(line::verify(token, "nonce tag").is_none(), "malformed");
-        assert!(line::verify(token, "zz tag cpus").is_none(), "bad nonce");
+        assert!(
+            line::verify(&MasterKey(master), &tampered).is_none(),
+            "tampered command"
+        );
+        assert!(
+            line::verify(&MasterKey(master), "nonce ops tag").is_none(),
+            "malformed"
+        );
         let ok = line::reply(&Ok(b"cpus: online=4".to_vec()));
         assert_eq!(line::parse_reply(&ok), Some(Ok(b"cpus: online=4".to_vec())));
         let err = line::reply(&Err("unauthorized".to_string()));
@@ -903,5 +1011,12 @@ mod tests {
         let mut guard = ReplayGuard::<4>::new();
         assert!(guard.accept_key(nonce));
         assert!(!guard.accept_key(nonce));
+        // Derived keys differ per caller and match on both sides.
+        assert_ne!(
+            derive_caller_key(master, "ops"),
+            derive_caller_key(master, "dev")
+        );
+        assert_eq!(MasterKey(master).key_for("ops"), Some(key.key));
+        assert_eq!(MasterKey(master).key_for("bad name"), None);
     }
 }

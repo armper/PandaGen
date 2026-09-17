@@ -344,12 +344,11 @@ cargo test --all
 - [x] Persistent virtio-blk storage over PCI, mounted across reboots (252-253)
 - [x] SMP bring-up: spinlocks, CPU registry, LAPIC, IPIs, job queue, parallel present, per-CPU timers, GDT/TSS, exception diagnostics, tasks on any CPU (254-256, 261-263)
 - [x] virtio-net, ARP/IPv4/ICMP/UDP, DHCP, TCP (257-258, 268, 272)
-- [x] Authenticated, replay-protected remote commands over UDP and TCP (259-260, 267, 273)
+- [x] Authenticated, replay-protected remote commands over UDP and TCP with per-caller keys (259-260, 267, 273, 277)
 - [x] Model-based checkers for capabilities, scheduling (round-robin and EDF), IPC access, message budgets, and the kernel heap; nine `sim_kernel` defects found and fixed (264-271)
 
 ### 🔄 Open Work (see `docs/next_steps.md`)
 - [x] Parallel task execution across CPUs (Phase 275); preemptive tasks with context switching remain open
-- [ ] Per-caller keys for remote commands
 - [ ] Out-of-order TCP reassembly and congestion control
 
 Each phase is recorded in a `PHASE<n>_SUMMARY.md` at the repository root.

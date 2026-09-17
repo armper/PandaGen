@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("qemu-script") => cmd_qemu_script(args),
         Some("remote") => cmd_remote(args),
         Some("remote-tcp") => cmd_remote_tcp(args),
+        Some("remote-key") => cmd_remote_key(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
@@ -38,6 +39,9 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("                          [--after secs] [--out prefix] [--expect-serial text]");
     println!("  cargo xtask remote <command...>   (read-only kernel command over UDP remote IPC)");
     println!("  cargo xtask remote-tcp <command...>   (same, over the signed TCP line protocol)");
+    println!(
+        "  cargo xtask remote-key <caller>       (derive a caller's key from the master token)"
+    );
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::other("unknown xtask command").into())
@@ -78,18 +82,52 @@ const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 /// UDP datagram transport for `remote_ipc` against the kernel's port.
 struct UdpTransport {
     socket: std::net::UdpSocket,
-    token: String,
+    key: remote_ipc::CallerKey,
 }
 
-/// Shared secret for remote calls: `PANDAGEN_REMOTE_TOKEN` or the dev default.
+/// Master secret for remote calls: `PANDAGEN_REMOTE_TOKEN` or the dev default.
 fn remote_token() -> String {
     env::var("PANDAGEN_REMOTE_TOKEN")
         .unwrap_or_else(|_| remote_ipc::DEFAULT_REMOTE_TOKEN.to_string())
 }
 
+/// Caller name for remote calls: `PANDAGEN_REMOTE_CALLER` or `xtask`.
+fn remote_caller() -> String {
+    env::var("PANDAGEN_REMOTE_CALLER").unwrap_or_else(|_| "xtask".to_string())
+}
+
+/// This caller's key: `PANDAGEN_REMOTE_KEY` (base64, handed out by an
+/// operator with the master) or derived from `master`.
+fn caller_key(master: &str) -> remote_ipc::CallerKey {
+    let caller = remote_caller();
+    if let Ok(encoded) = env::var("PANDAGEN_REMOTE_KEY") {
+        if let Some(bytes) = remote_ipc::b64::decode(&encoded) {
+            if bytes.len() == 32 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                return remote_ipc::CallerKey { caller, key };
+            }
+        }
+    }
+    remote_ipc::CallerKey::derived(master.as_bytes(), &caller)
+}
+
+/// `cargo xtask remote-key <caller>`: derive a caller's key from the master.
+fn cmd_remote_key(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let caller = args
+        .next()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "remote-key expects a caller"))?;
+    let key = remote_ipc::derive_caller_key(remote_token().as_bytes(), &caller);
+    println!("PANDAGEN_REMOTE_CALLER={caller}");
+    println!("PANDAGEN_REMOTE_KEY={}", remote_ipc::b64::encode(&key));
+    Ok(())
+}
+
 impl remote_ipc::RemoteTransport for UdpTransport {
     fn send(&mut self, message: ipc::MessageEnvelope) -> Result<(), remote_ipc::RemoteIpcError> {
-        let bytes = remote_ipc::envelope_to_bytes(&message, self.token.as_bytes())?;
+        let bytes = remote_ipc::envelope_to_bytes(&message, &self.key.caller, &self.key.key)?;
         self.socket
             .send_to(&bytes, ("127.0.0.1", REMOTE_PORT))
             .map(|_| ())
@@ -107,7 +145,7 @@ impl remote_ipc::RemoteTransport for UdpTransport {
                 remote_ipc::RemoteIpcError::Codec(err.to_string())
             }
         })?;
-        remote_ipc::envelope_from_bytes(&buf[..n], self.token.as_bytes())
+        remote_ipc::envelope_from_bytes(&buf[..n], &self.key).map(|(envelope, _)| envelope)
     }
 }
 
@@ -119,12 +157,12 @@ fn remote_call(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
-    let token = token.to_string();
+    let key = caller_key(token);
     let authority = remote_ipc::CapabilityAuthority {
-        caller: "xtask".to_string(),
+        caller: key.caller.clone(),
         allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
     };
-    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket, token }, authority);
+    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket, key }, authority);
     let reply = client.call(
         remote_ipc::CAP_KERNEL_COMMAND,
         remote_ipc::ACTION_KERNEL_COMMAND_RUN,
@@ -160,22 +198,23 @@ fn tcp_echo_check(text: &str, timeout: Duration) -> Result<(), Box<dyn std::erro
 fn remote_replay_check(command: &str, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
-    let token = remote_token();
+    let key = caller_key(&remote_token());
     let call = remote_ipc::RemoteCall {
         request_id: ipc::MessageId::new(),
         cap_id: remote_ipc::CAP_KERNEL_COMMAND,
         action: remote_ipc::ACTION_KERNEL_COMMAND_RUN.to_string(),
         payload: command.as_bytes().to_vec(),
         authority: remote_ipc::CapabilityAuthority {
-            caller: "xtask".to_string(),
+            caller: key.caller.clone(),
             allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
         },
     };
-    let bytes = remote_ipc::envelope_to_bytes(&remote_ipc::encode_call(call)?, token.as_bytes())?;
+    let bytes =
+        remote_ipc::envelope_to_bytes(&remote_ipc::encode_call(call)?, &key.caller, &key.key)?;
     let mut buf = [0u8; 4096];
     socket.send_to(&bytes, ("127.0.0.1", REMOTE_PORT))?;
     let (n, _) = socket.recv_from(&mut buf)?;
-    let reply = remote_ipc::envelope_from_bytes(&buf[..n], token.as_bytes())?;
+    let (reply, _) = remote_ipc::envelope_from_bytes(&buf[..n], &key)?;
     remote_ipc::decode_response(&reply)?
         .result
         .map_err(|err| io::Error::other(format!("first call failed: {err}")))?;
@@ -211,7 +250,7 @@ fn remote_tcp_call(
     let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let line = remote_ipc::line::sign(token.as_bytes(), fresh_nonce(), command);
+    let line = remote_ipc::line::sign(&caller_key(token), fresh_nonce(), command);
     stream.write_all(format!("{line}\n").as_bytes())?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut reply = String::new();

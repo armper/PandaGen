@@ -3042,12 +3042,13 @@ fn remote_command_allowed(command: &str) -> bool {
 /// Where a remote reply goes.
 #[derive(Clone, Copy)]
 enum ReplyTarget {
-    /// A `remote_ipc` envelope answered by datagram.
+    /// A `remote_ipc` envelope answered by datagram, signed for `caller`.
     Udp {
         src: net_stack::Ipv4,
         src_port: u16,
         envelope_id: ipc::MessageId,
         request_id: ipc::MessageId,
+        caller: RemoteToken,
     },
     /// A signed line answered on the same TCP connection.
     Tcp { conn: usize },
@@ -3133,17 +3134,24 @@ impl RemoteCommandServer {
             return;
         };
         let token = *REMOTE_TOKEN.lock();
+        let keys = remote_ipc::MasterKey(token.as_bytes());
         let (target, command): (ReplyTarget, alloc::string::String) = match request {
             bare_metal_net::RemoteRequest::Udp(datagram) => {
-                let envelope =
-                    match remote_ipc::envelope_from_bytes(&datagram.bytes, token.as_bytes()) {
-                        Ok(envelope) => envelope,
+                let (envelope, caller) =
+                    match remote_ipc::envelope_from_bytes(&datagram.bytes, &keys) {
+                        Ok(verified) => verified,
                         Err(err) => {
                             self.denied += 1;
                             klog!(serial, "remote: bad envelope ({err})\r\n");
                             return;
                         }
                     };
+                if !REMOTE_CALLERS.lock().allows(&caller) {
+                    self.denied += 1;
+                    klog!(serial, "remote: caller {:?} not allowed\r\n", caller);
+                    return;
+                }
+                let caller = RemoteToken::from_str(&caller);
                 if !REMOTE_REPLAY.lock().accept(envelope.id) {
                     self.denied += 1;
                     klog!(serial, "remote: replayed message dropped\r\n");
@@ -3163,6 +3171,7 @@ impl RemoteCommandServer {
                                 src_port: datagram.src_port,
                                 envelope_id: envelope.id,
                                 request_id: call.request_id,
+                                caller,
                             };
                             self.respond(target, Err(alloc::string::String::from("unauthorized")));
                         }
@@ -3174,6 +3183,7 @@ impl RemoteCommandServer {
                     src_port: datagram.src_port,
                     envelope_id: envelope.id,
                     request_id: call.request_id,
+                    caller,
                 };
                 if call.action != remote_ipc::ACTION_KERNEL_COMMAND_RUN {
                     self.denied += 1;
@@ -3189,13 +3199,18 @@ impl RemoteCommandServer {
             bare_metal_net::RemoteRequest::TcpLine { conn, line } => {
                 let target = ReplyTarget::Tcp { conn };
                 let text = core::str::from_utf8(&line).unwrap_or("");
-                let Some((nonce, command)) = remote_ipc::line::verify(token.as_bytes(), text)
-                else {
+                let Some((nonce, caller, command)) = remote_ipc::line::verify(&keys, text) else {
                     self.denied += 1;
                     klog!(serial, "remote: tcp line rejected (bad signature)\r\n");
                     self.respond(target, Err(alloc::string::String::from("unauthorized")));
                     return;
                 };
+                if !REMOTE_CALLERS.lock().allows(caller) {
+                    self.denied += 1;
+                    klog!(serial, "remote: caller {:?} not allowed\r\n", caller);
+                    self.respond(target, Err(alloc::string::String::from("unauthorized")));
+                    return;
+                }
                 if !REMOTE_REPLAY.lock().accept_key(nonce) {
                     self.denied += 1;
                     klog!(serial, "remote: tcp line rejected (replay)\r\n");
@@ -3250,13 +3265,16 @@ impl RemoteCommandServer {
                 src_port,
                 envelope_id,
                 request_id,
+                caller,
             } => {
                 let response = remote_ipc::RemoteResponse { request_id, result };
                 let Ok(envelope) = remote_ipc::encode_response(response, envelope_id) else {
                     return;
                 };
                 let token = *REMOTE_TOKEN.lock();
-                let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope, token.as_bytes()) else {
+                let caller_name = core::str::from_utf8(caller.as_bytes()).unwrap_or("");
+                let key = remote_ipc::derive_caller_key(token.as_bytes(), caller_name);
+                let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope, caller_name, &key) else {
                     return;
                 };
                 if let Some(net) = NET.lock().as_mut() {
@@ -4121,6 +4139,10 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
             *REMOTE_TOKEN.lock() = token;
             kprintln!(serial, "remote: token set from command line");
         }
+        if let Some(callers) = RemoteCallers::from_cmdline(bytes) {
+            kprintln!(serial, "remote: {} caller(s) allowed", callers.len);
+            *REMOTE_CALLERS.lock() = callers;
+        }
         kprintln!(
             serial,
             "cmdline: {:?} display_mode={:?}",
@@ -4335,6 +4357,46 @@ static NET: hal_x86_64::SpinLock<Option<bare_metal_net::NetStack>> =
 /// replayed.
 static REMOTE_REPLAY: hal_x86_64::SpinLock<remote_ipc::ReplayGuard<256>> =
     hal_x86_64::SpinLock::new(remote_ipc::ReplayGuard::new());
+
+/// Callers admitted to the remote command ports (`remote_callers=a,b` on the
+/// command line); empty means any caller with a valid key.
+static REMOTE_CALLERS: hal_x86_64::SpinLock<RemoteCallers> =
+    hal_x86_64::SpinLock::new(RemoteCallers::ANY);
+
+#[derive(Clone, Copy)]
+struct RemoteCallers {
+    names: [RemoteToken; 4],
+    len: usize,
+}
+
+impl RemoteCallers {
+    const ANY: Self = Self {
+        names: [RemoteToken::DEFAULT; 4],
+        len: 0,
+    };
+
+    fn allows(&self, caller: &str) -> bool {
+        self.len == 0
+            || self.names[..self.len]
+                .iter()
+                .any(|name| name.as_bytes() == caller.as_bytes())
+    }
+
+    /// `remote_callers=<name>[,<name>...]` from the kernel command line.
+    fn from_cmdline(cmdline: &[u8]) -> Option<Self> {
+        let text = core::str::from_utf8(cmdline).ok()?;
+        let list = text
+            .split_ascii_whitespace()
+            .filter_map(|token| token.strip_prefix("remote_callers="))
+            .last()?;
+        let mut callers = Self::ANY;
+        for name in list.split(',').filter(|n| !n.is_empty()).take(4) {
+            callers.names[callers.len] = RemoteToken::from_str(name);
+            callers.len += 1;
+        }
+        Some(callers)
+    }
+}
 
 /// Shared secret for remote IPC tags (`remote_token=` on the command line).
 static REMOTE_TOKEN: hal_x86_64::SpinLock<RemoteToken> =
