@@ -1568,17 +1568,13 @@ impl SimulatedKernel {
             None => return Ok(()), // No identity - backward compat
         };
 
-        // Check if identity has a budget
-        let budget = match &identity.budget {
-            Some(b) => b,
-            None => return Ok(()), // No budget - unlimited
-        };
-
-        // Check current usage
+        // Usage is metered whether or not a budget is attached, so a budget
+        // set later applies to the real count; only the limit is optional.
         let current_usage = identity.usage.message_count.0;
+        let limit = identity.budget.as_ref().and_then(|b| b.message_count);
 
         // Check if we would exceed the limit
-        if let Some(limit) = budget.message_count {
+        if let Some(limit) = limit {
             if current_usage >= limit.0 {
                 // Budget exhausted - cancel identity and fail
                 self.resource_audit.record_event(
@@ -2092,6 +2088,17 @@ impl KernelApi for SimulatedKernel {
             }
         }
 
+        // A full channel refuses the message before any budget is charged:
+        // only messages that are actually queued count against the sender
+        // (formal_verification/tests/message_budget_model.rs, B2).
+        match self.channels.get(&channel) {
+            None => return Err(KernelError::ChannelError("Channel not found".to_string())),
+            Some(channel_obj) if channel_obj.queue.remaining_capacity() == 0 => {
+                return Err(KernelError::SendFailed("Channel queue full".to_string()));
+            }
+            Some(_) => {}
+        }
+
         // Phase 12: Try to enforce message budget if source task is known
         if let Some(source_task) = message.source {
             self.try_consume_message(source_task, resource_audit::MessageOperation::Send)?;
@@ -2159,6 +2166,15 @@ impl KernelApi for SimulatedKernel {
                     ));
                 }
             }
+        }
+
+        // Nothing to receive means nothing to charge: check before the budget.
+        match self.channels.get(&channel) {
+            None => return Err(KernelError::ChannelError("Channel not found".to_string())),
+            Some(channel_obj) if channel_obj.queue.is_empty() => {
+                return Err(KernelError::Timeout);
+            }
+            Some(_) => {}
         }
 
         // Phase 12: Try to enforce message budget if receive context is set

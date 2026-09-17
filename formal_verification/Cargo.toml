@@ -14,3 +14,5 @@ thiserror = { workspace = true }
 sim_kernel = { workspace = true }
 kernel_api = { workspace = true }
 ipc = { workspace = true }
+resources = { workspace = true }
+identity = { workspace = true }
