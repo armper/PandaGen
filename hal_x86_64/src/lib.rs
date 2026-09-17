@@ -21,11 +21,13 @@ pub mod interrupts;
 pub mod keyboard;
 pub mod mouse;
 pub mod paging;
+pub mod pci;
 pub mod port_io;
 pub mod tick;
 pub mod timer;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_pci;
 
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
@@ -36,11 +38,13 @@ pub use paging::{
     PhysAddr, VirtAddr, ENTRIES_PER_TABLE, KERNEL_SPACE_START, PAGE_SIZE, PAGE_TABLE_LEVELS,
     USER_SPACE_END,
 };
+pub use pci::{PciAddress, PciDeviceInfo};
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
 pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
 pub use virtio::{VirtioMmioDevice, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue};
 pub use virtio_blk::VirtioBlkDevice;
+pub use virtio_pci::{LegacyQueueLayout, VirtioPciLegacy};
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;

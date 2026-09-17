@@ -45,6 +45,31 @@ pub trait PortIo {
     /// * `port` - The port address to write to
     /// * `value` - The byte value to write
     fn outb(&mut self, port: u16, value: u8);
+
+    /// 16-bit read. The default composes two byte reads (little-endian);
+    /// real hardware overrides with a native `in ax, dx`.
+    fn inw(&mut self, port: u16) -> u16 {
+        let lo = self.inb(port) as u16;
+        let hi = self.inb(port + 1) as u16;
+        lo | (hi << 8)
+    }
+
+    fn outw(&mut self, port: u16, value: u16) {
+        self.outb(port, value as u8);
+        self.outb(port + 1, (value >> 8) as u8);
+    }
+
+    /// 32-bit read; default composes four byte reads (little-endian).
+    fn inl(&mut self, port: u16) -> u32 {
+        let lo = self.inw(port) as u32;
+        let hi = self.inw(port + 2) as u32;
+        lo | (hi << 16)
+    }
+
+    fn outl(&mut self, port: u16, value: u32) {
+        self.outw(port, value as u16);
+        self.outw(port + 2, (value >> 16) as u16);
+    }
 }
 
 /// Real hardware port I/O implementation
@@ -122,6 +147,62 @@ impl PortIo for RealPortIo {
             );
         }
     }
+
+    #[inline]
+    fn inw(&mut self, port: u16) -> u16 {
+        // SAFETY: ring-0 port read, same contract as `inb`.
+        unsafe {
+            let value: u16;
+            core::arch::asm!(
+                "in ax, dx",
+                in("dx") port,
+                out("ax") value,
+                options(nomem, nostack, preserves_flags)
+            );
+            value
+        }
+    }
+
+    #[inline]
+    fn outw(&mut self, port: u16, value: u16) {
+        // SAFETY: ring-0 port write, same contract as `outb`.
+        unsafe {
+            core::arch::asm!(
+                "out dx, ax",
+                in("dx") port,
+                in("ax") value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+
+    #[inline]
+    fn inl(&mut self, port: u16) -> u32 {
+        // SAFETY: ring-0 port read, same contract as `inb`.
+        unsafe {
+            let value: u32;
+            core::arch::asm!(
+                "in eax, dx",
+                in("dx") port,
+                out("eax") value,
+                options(nomem, nostack, preserves_flags)
+            );
+            value
+        }
+    }
+
+    #[inline]
+    fn outl(&mut self, port: u16, value: u32) {
+        // SAFETY: ring-0 port write, same contract as `outb`.
+        unsafe {
+            core::arch::asm!(
+                "out dx, eax",
+                in("dx") port,
+                in("eax") value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
 }
 
 /// Fake port I/O implementation for testing
@@ -173,6 +254,31 @@ impl FakePortIo {
     /// Scripts multiple read operations
     pub fn script_reads(&mut self, reads: &[(u16, u8)]) {
         self.read_script.extend_from_slice(reads);
+    }
+
+    /// Script a 16-bit read as its two little-endian byte reads.
+    pub fn script_read16(&mut self, port: u16, value: u16) {
+        self.script_read(port, value as u8);
+        self.script_read(port + 1, (value >> 8) as u8);
+    }
+
+    /// Script a 32-bit read as its four little-endian byte reads.
+    pub fn script_read32(&mut self, port: u16, value: u32) {
+        self.script_read16(port, value as u16);
+        self.script_read16(port + 2, (value >> 16) as u16);
+    }
+
+    /// Reassemble the little-endian bytes of the last `outl` to `port`.
+    pub fn last_write32(&self, port: u16) -> Option<u32> {
+        let n = self.writes.len();
+        if n < 4 {
+            return None;
+        }
+        let w = &self.writes[n - 4..];
+        if w[0].0 != port || w[1].0 != port + 1 || w[2].0 != port + 2 || w[3].0 != port + 3 {
+            return None;
+        }
+        Some(w[0].1 as u32 | (w[1].1 as u32) << 8 | (w[2].1 as u32) << 16 | (w[3].1 as u32) << 24)
     }
 
     /// Returns the number of scripted reads remaining
