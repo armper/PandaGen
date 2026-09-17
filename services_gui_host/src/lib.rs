@@ -34,7 +34,9 @@ pub mod telemetry;
 pub mod theme;
 pub mod transport;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
-pub use backend::{BackendCapabilities, BackendError, RenderBackend, SoftwareBackend};
+pub use backend::{
+    BackendCapabilities, BackendError, CompositionStage, RenderBackend, SoftwareBackend,
+};
 pub use degrade::{Degradation, MemoryPressure, PressureMonitor, PressureThresholds};
 pub use host::{HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};

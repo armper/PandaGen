@@ -144,8 +144,8 @@ User-space services should provide policy:
 ### Epic 11: Hardware Acceleration Later
 
 - [x] `GFX-050` Define a renderer backend trait so software and GPU renderers can share the same desktop contract.
-- [ ] `GFX-051` Add a GPU HAL exploration phase only after the software renderer path is stable and test-covered.
-- [ ] `GFX-052` Define which parts of composition remain CPU-side and which parts may move to GPU execution.
+- [x] `GFX-051` Add a GPU HAL exploration phase only after the software renderer path is stable and test-covered.
+- [x] `GFX-052` Define which parts of composition remain CPU-side and which parts may move to GPU execution.
 
 ## Milestones
 
@@ -209,12 +209,10 @@ If we want the shortest path to a visible graphical desktop, the implementation 
 
 The reason is simple: PandaGen already has enough layout and framebuffer foundation to get a software-rendered desktop visible before it has a complete app scene toolkit.
 
+## Status
+
+Every story in this roadmap is implemented (Phases 203 to 251). Milestones A to D are reached with the software renderer authoritative and the GPU seam defined (`CompositionStage`, `RenderBackend`, `hal::GpuSurfaceDevice`). A real virtio-gpu driver is future work that plugs into that seam without changing desktop semantics.
+
 ## Immediate Next Story
 
-Epic 1 is closed: `docs/desktop_contract.md` records the canonical contract (retained windows, immediate `DrawOp` content, damage, revision, pacing), `view_types` has first-class graphical content with serialisation tests, and the colour/brush/text-style model is `Color`, `PixelRect`, `TextStyle`, and `Theme`.
-
-Every story except `GFX-051` and `GFX-052` (GPU exploration and CPU/GPU split, gated on the now-stable software path) is done. The best next implementation step is:
-
-- `GFX-052` Define which parts of composition remain CPU-side and which parts may move to GPU execution.
-
-It is a design note against the `RenderBackend` seam: window sorting, hit testing, damage, and text layout stay CPU-side; fills, blits, and glyph runs are the candidates for acceleration. Writing it down (with the capability flags a GPU backend would advertise) completes the roadmap's design work before any GPU HAL exploration (`GFX-051`).
+The graphics track is complete. The next high-value item from `docs/next_steps.md` is persistent bare-metal storage: `cargo xtask qemu` attaches `virtio-blk-pci`, but the kernel probes only virtio MMIO and falls back to a RAM disk, so `:w` in the editor does not survive a reboot. A PCI probe for virtio-blk would make the editor's saves durable and is verifiable with the existing scripted QEMU harness.

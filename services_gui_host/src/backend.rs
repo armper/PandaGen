@@ -17,6 +17,62 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Compositor, DesktopScene, RasterRenderStats, Theme};
 
+/// The stages of composing a `DesktopScene` (GFX-052).
+///
+/// The split is fixed by the contract: stages that decide *what* is drawn
+/// stay on the CPU in the compositor, because they are the semantics the
+/// software backend is authoritative for and that hit testing, deltas, and
+/// replay depend on. Stages that only move pixels may be executed by an
+/// accelerated backend that advertises them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum CompositionStage {
+    /// Sorting windows by layer, z-index, and id.
+    WindowOrdering,
+    /// Which window a pixel belongs to.
+    HitTesting,
+    /// Computing damage rectangles between scenes.
+    DamageTracking,
+    /// Laying out text into glyph runs and caret positions.
+    TextLayout,
+    /// Solid and rounded fills, borders, lines.
+    ShapeFills,
+    /// Painting glyph runs.
+    GlyphRuns,
+    /// Blitting images and the cursor sprite.
+    ImageBlits,
+    /// Copying the composed surface to the framebuffer.
+    Present,
+}
+
+impl CompositionStage {
+    pub const ALL: [CompositionStage; 8] = [
+        CompositionStage::WindowOrdering,
+        CompositionStage::HitTesting,
+        CompositionStage::DamageTracking,
+        CompositionStage::TextLayout,
+        CompositionStage::ShapeFills,
+        CompositionStage::GlyphRuns,
+        CompositionStage::ImageBlits,
+        CompositionStage::Present,
+    ];
+
+    /// True for stages the contract keeps on the CPU regardless of backend.
+    pub const fn is_cpu_side(self) -> bool {
+        matches!(
+            self,
+            CompositionStage::WindowOrdering
+                | CompositionStage::HitTesting
+                | CompositionStage::DamageTracking
+                | CompositionStage::TextLayout
+        )
+    }
+
+    /// True for stages an accelerated backend may take over.
+    pub const fn may_accelerate(self) -> bool {
+        !self.is_cpu_side()
+    }
+}
+
 /// What a backend can do; lets the desktop pick features safely.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackendCapabilities {
@@ -27,6 +83,19 @@ pub struct BackendCapabilities {
     pub accelerated: bool,
     /// Largest surface the backend will allocate, in pixels.
     pub max_surface_pixels: usize,
+    /// Stages this backend executes on its own hardware; always a subset of
+    /// the stages that `may_accelerate`. Empty for the software backend.
+    #[serde(default)]
+    pub accelerated_stages: alloc::vec::Vec<CompositionStage>,
+}
+
+impl BackendCapabilities {
+    /// A capability claim is valid only if it accelerates nothing the
+    /// contract reserves for the CPU.
+    pub fn is_valid(&self) -> bool {
+        self.accelerated_stages.iter().all(|s| s.may_accelerate())
+            && (self.accelerated || self.accelerated_stages.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +185,7 @@ impl RenderBackend for SoftwareBackend {
             damage_repaint: true,
             accelerated: false,
             max_surface_pixels: Self::MAX_SURFACE_PIXELS,
+            accelerated_stages: alloc::vec::Vec::new(),
         }
     }
 
@@ -230,6 +300,56 @@ mod tests {
                 255
             ]
         );
+    }
+
+    #[test]
+    fn test_composition_split_keeps_semantics_on_the_cpu() {
+        let cpu: alloc::vec::Vec<_> = CompositionStage::ALL
+            .iter()
+            .filter(|s| s.is_cpu_side())
+            .collect();
+        assert_eq!(
+            cpu,
+            vec![
+                &CompositionStage::WindowOrdering,
+                &CompositionStage::HitTesting,
+                &CompositionStage::DamageTracking,
+                &CompositionStage::TextLayout
+            ]
+        );
+        for stage in CompositionStage::ALL {
+            assert_ne!(stage.is_cpu_side(), stage.may_accelerate());
+        }
+        let software = SoftwareBackend::new(8, 8, Theme::DEFAULT)
+            .unwrap()
+            .capabilities();
+        assert!(software.is_valid());
+        assert!(software.accelerated_stages.is_empty());
+
+        // A hypothetical GPU backend may claim pixel stages only.
+        let gpu = BackendCapabilities {
+            name: "gpu".to_string(),
+            damage_repaint: true,
+            accelerated: true,
+            max_surface_pixels: usize::MAX,
+            accelerated_stages: vec![
+                CompositionStage::ShapeFills,
+                CompositionStage::GlyphRuns,
+                CompositionStage::ImageBlits,
+                CompositionStage::Present,
+            ],
+        };
+        assert!(gpu.is_valid());
+        let overreach = BackendCapabilities {
+            accelerated_stages: vec![CompositionStage::HitTesting],
+            ..gpu.clone()
+        };
+        assert!(!overreach.is_valid(), "hit testing is CPU-side by contract");
+        let inconsistent = BackendCapabilities {
+            accelerated: false,
+            ..gpu
+        };
+        assert!(!inconsistent.is_valid());
     }
 
     #[test]
