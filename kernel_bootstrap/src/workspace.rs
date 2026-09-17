@@ -208,6 +208,9 @@ pub struct WorkspaceSession {
     editor_path: Option<String>,
     /// File picker, when open (GFX-037).
     file_picker: Option<FilePickerState>,
+    /// Lines the graphical workspace view is scrolled up from the tail
+    /// (GFX-038). Reset whenever new output arrives.
+    scrollback_offset: usize,
 }
 
 /// File picker state: a flat listing of the root with a selection.
@@ -446,6 +449,7 @@ impl WorkspaceSession {
             notices: Vec::new(),
             editor_path: None,
             file_picker: None,
+            scrollback_offset: 0,
         }
     }
 
@@ -1774,7 +1778,30 @@ impl WorkspaceSession {
         self.push_notice(NoticeLevel::Warning, line);
     }
 
+    /// Scroll the graphical view of the scrollback: positive notches move
+    /// toward older lines. `visible` is how many lines fit on screen.
+    pub fn scroll_view(&mut self, notches: i32, visible: usize) -> bool {
+        let total = self.output_line_count();
+        let max = total.saturating_sub(visible);
+        let before = self.scrollback_offset;
+        self.scrollback_offset = if notches > 0 {
+            self.scrollback_offset
+                .saturating_add(notches as usize)
+                .min(max)
+        } else {
+            self.scrollback_offset
+                .saturating_sub(notches.unsigned_abs() as usize)
+        };
+        before != self.scrollback_offset
+    }
+
+    pub fn scrollback_offset(&self) -> usize {
+        self.scrollback_offset
+    }
+
     fn push_output_bytes(&mut self, bytes: &[u8]) {
+        // New output snaps the view back to the live tail.
+        self.scrollback_offset = 0;
         if bytes.is_empty() {
             self.push_output_line(&[]);
             return;

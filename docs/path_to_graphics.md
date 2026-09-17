@@ -122,7 +122,7 @@ User-space services should provide policy:
 
 - [x] `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
 - [x] `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
-- [ ] `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface.
+- [x] `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface. Decision: text-native inside the host surface, which gained wheel scrollback.
 - [ ] `GFX-039` Add a graphical runtime for pipeline execution and status reporting.
 - [ ] `GFX-040` Add a custom-component graphical host contract so future apps are not locked to text frames.
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-037` is in place: `open file` (or the Open File launcher/palette entry) shows the root listing in the workspace window with a breadcrumb, a highlighted selection driven by Up/Down, j/k, pointer hover, and wheel, and Enter or a click opens the entry in the graphical editor.
+`GFX-038` is decided: the CLI stays text-native inside the graphical host surface. The host surface itself now scrolls history with the wheel (title shows the offset, new output snaps back to the tail), which serves the CLI and the workspace shell equally.
 
 The best next implementation step is:
 
-- `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface.
+- `GFX-039` Add a graphical runtime for pipeline execution and status reporting.
 
-The CLI already runs inside the workspace window in graphics mode as text lines with a prompt; the decision to make is whether it needs anything beyond that (a distinct title, prompt styling, scrollback via a scroll region) or whether text-native inside the host surface is the right end state.
+The bare-metal kernel has no pipeline surface yet; the question for this story is what pipeline execution means on bare metal (the kernel has channels and a command request path) and what a status surface for it should show.

@@ -109,6 +109,8 @@ pub struct DesktopModel {
     pub palette: Option<PaletteModel>,
     /// File picker shown in the workspace window when no editor is open.
     pub picker: Option<PickerModel>,
+    /// Lines the scrollback view is scrolled up from the tail.
+    pub scrollback_offset: usize,
     /// Pointer position in surface pixels; `None` hides the cursor.
     pub pointer: Option<(usize, usize)>,
     /// Whether the text caret is drawn this frame (blink phase).
@@ -268,9 +270,19 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
             (frame, String::from("Files"))
         }
         None => {
+            // Text-native host surface (GFX-038): the tail of the scrollback,
+            // optionally scrolled up, with the prompt pinned below it.
             let visible_output = content_rows.saturating_sub(1);
-            let skip = model.output_lines.len().saturating_sub(visible_output);
-            let mut lines: Vec<String> = model.output_lines.iter().skip(skip).cloned().collect();
+            let max_offset = model.output_lines.len().saturating_sub(visible_output);
+            let offset = model.scrollback_offset.min(max_offset);
+            let skip = max_offset - offset;
+            let mut lines: Vec<String> = model
+                .output_lines
+                .iter()
+                .skip(skip)
+                .take(visible_output)
+                .cloned()
+                .collect();
             let prompt_line = lines.len();
             lines.push(model.prompt.clone());
             let frame = ViewFrame::new(
@@ -281,7 +293,11 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
                 0,
             )
             .with_cursor(CursorPosition::new(prompt_line, model.prompt_cursor));
-            (frame, model.main_title.clone())
+            let mut title = model.main_title.clone();
+            if offset > 0 {
+                title.push_str(&alloc::format!(" (scrolled {} lines)", offset));
+            }
+            (frame, title)
         }
     };
     if !model.caret_visible {
@@ -486,6 +502,7 @@ mod tests {
             editor: None,
             palette: None,
             picker: None,
+            scrollback_offset: 0,
             pointer: None,
             caret_visible: true,
             launcher: vec![
@@ -693,6 +710,39 @@ mod tests {
                 .as_deref(),
             Some("a.txt")
         );
+    }
+
+    #[test]
+    fn test_scrollback_offset_shows_older_lines_and_marks_title() {
+        let layout = DesktopLayout::for_pixels(RASTER_CELL_WIDTH * 60, RASTER_CELL_HEIGHT * 12);
+        let rows = layout.main_content_rows();
+        let visible = rows - 1;
+        let mut model = sample_model();
+        model.output_lines = (0..50).map(|i| i.to_string()).collect();
+        model.scrollback_offset = 3;
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        let main = find(&windows, DesktopWindowRole::Main);
+        let ViewContent::TextBuffer { lines } = &main.frame.content else {
+            panic!()
+        };
+        assert_eq!(lines.len(), rows);
+        assert_eq!(lines[0], (50 - visible - 3).to_string());
+        assert_eq!(lines[visible - 1], (50 - 1 - 3).to_string());
+        assert_eq!(lines.last().unwrap(), "WS > ls", "prompt stays pinned");
+        assert_eq!(
+            main.frame.title.as_deref(),
+            Some("Workspace (scrolled 3 lines)")
+        );
+
+        // Offsets past the top clamp.
+        model.scrollback_offset = 1000;
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        let ViewContent::TextBuffer { lines } =
+            &find(&windows, DesktopWindowRole::Main).frame.content
+        else {
+            panic!()
+        };
+        assert_eq!(lines[0], "0");
     }
 
     #[test]

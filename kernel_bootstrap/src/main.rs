@@ -1296,6 +1296,22 @@ fn workspace_loop(
                                 continue;
                             }
 
+                            // Wheel over the text-native workspace/CLI surface scrolls history.
+                            if *target == renderer.view_ids().main()
+                                && !workspace.is_editor_active()
+                                && !workspace.is_palette_open()
+                            {
+                                if let input_types::PointerEventKind::Wheel { dy, .. } = routed.kind
+                                {
+                                    let visible =
+                                        renderer.layout().main_content_rows().saturating_sub(1);
+                                    if workspace.scroll_view(dy, visible) {
+                                        input_dirty = true;
+                                    }
+                                    continue;
+                                }
+                            }
+
                             if primary_press && workspace.is_palette_open() {
                                 // Clicking anywhere else dismisses the palette.
                                 if workspace.palette_dismiss() {
@@ -2547,6 +2563,8 @@ fn build_desktop_model(
             .truncate(services_gui_host::shell::MAX_NOTICES);
     }
     model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
+
+    model.scrollback_offset = workspace.scrollback_offset();
 
     if let Some(picker) = workspace.file_picker() {
         model.picker = Some(desktop_frame::PickerModel {
