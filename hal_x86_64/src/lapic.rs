@@ -15,6 +15,13 @@ pub const REG_EOI: usize = 0x0B0;
 pub const REG_SPURIOUS: usize = 0x0F0;
 pub const REG_ICR_LOW: usize = 0x300;
 pub const REG_ICR_HIGH: usize = 0x310;
+pub const REG_LVT_TIMER: usize = 0x320;
+pub const REG_TIMER_INITIAL: usize = 0x380;
+pub const REG_TIMER_CURRENT: usize = 0x390;
+pub const REG_TIMER_DIVIDE: usize = 0x3E0;
+
+const LVT_MASKED: u32 = 1 << 16;
+const LVT_TIMER_PERIODIC: u32 = 1 << 17;
 
 const SVR_ENABLE: u32 = 1 << 8;
 const ICR_DELIVERY_PENDING: u32 = 1 << 12;
@@ -90,6 +97,44 @@ impl<M: ApicMmio> LocalApic<M> {
             core::hint::spin_loop();
         }
         false
+    }
+
+    /// Set the timer divide configuration (1, 2, 4, ..., 128).
+    pub fn set_timer_divide(&mut self, divide: u32) {
+        let bits = match divide {
+            1 => 0b1011,
+            2 => 0b0000,
+            4 => 0b0001,
+            8 => 0b0010,
+            16 => 0b0011,
+            32 => 0b1000,
+            64 => 0b1001,
+            _ => 0b1010,
+        };
+        self.mmio.write32(REG_TIMER_DIVIDE, bits);
+    }
+
+    /// Run the timer once from `initial` with interrupts masked, so the
+    /// current-count register can be sampled for calibration.
+    pub fn start_timer_masked(&mut self, initial: u32) {
+        self.mmio.write32(REG_LVT_TIMER, LVT_MASKED);
+        self.mmio.write32(REG_TIMER_INITIAL, initial);
+    }
+
+    /// Periodic timer delivering `vector` every `initial` divided ticks.
+    pub fn start_timer_periodic(&mut self, vector: u8, initial: u32) {
+        self.mmio
+            .write32(REG_LVT_TIMER, LVT_TIMER_PERIODIC | vector as u32);
+        self.mmio.write32(REG_TIMER_INITIAL, initial);
+    }
+
+    pub fn stop_timer(&mut self) {
+        self.mmio.write32(REG_TIMER_INITIAL, 0);
+        self.mmio.write32(REG_LVT_TIMER, LVT_MASKED);
+    }
+
+    pub fn timer_current(&self) -> u32 {
+        self.mmio.read32(REG_TIMER_CURRENT)
     }
 
     /// Fixed IPI to one physical APIC id. Returns false if the previous
@@ -247,6 +292,26 @@ mod tests {
         let mut apic = LocalApic::new(FakeMmio::default());
         apic.end_of_interrupt();
         assert_eq!(apic.mmio.writes, alloc::vec![(REG_EOI, 0)]);
+    }
+
+    #[test]
+    fn timer_programming() {
+        let mut apic = LocalApic::new(FakeMmio::default());
+        apic.set_timer_divide(16);
+        assert_eq!(apic.mmio.regs[REG_TIMER_DIVIDE / 4], 0b0011);
+        apic.set_timer_divide(1);
+        assert_eq!(apic.mmio.regs[REG_TIMER_DIVIDE / 4], 0b1011);
+        apic.start_timer_masked(u32::MAX);
+        assert_eq!(apic.mmio.regs[REG_LVT_TIMER / 4], LVT_MASKED);
+        assert_eq!(apic.mmio.regs[REG_TIMER_INITIAL / 4], u32::MAX);
+        apic.mmio.regs[REG_TIMER_CURRENT / 4] = 1234;
+        assert_eq!(apic.timer_current(), 1234);
+        apic.start_timer_periodic(0xF1, 50_000);
+        assert_eq!(apic.mmio.regs[REG_LVT_TIMER / 4], LVT_TIMER_PERIODIC | 0xF1);
+        assert_eq!(apic.mmio.regs[REG_TIMER_INITIAL / 4], 50_000);
+        apic.stop_timer();
+        assert_eq!(apic.mmio.regs[REG_TIMER_INITIAL / 4], 0);
+        assert_eq!(apic.mmio.regs[REG_LVT_TIMER / 4], LVT_MASKED);
     }
 
     #[test]

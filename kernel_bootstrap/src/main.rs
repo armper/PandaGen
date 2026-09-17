@@ -328,6 +328,41 @@ irq_ipi_entry:
 .global irq_spurious_entry
 irq_spurious_entry:
     iretq
+
+.global irq_lapic_timer_entry
+irq_lapic_timer_entry:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call lapic_timer_handler
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 "#
 );
 
@@ -338,6 +373,7 @@ extern "C" {
     fn irq_mouse_entry();
     fn irq_ipi_entry();
     fn irq_spurious_entry();
+    fn irq_lapic_timer_entry();
 }
 
 /// Vector used to wake application processors.
@@ -346,6 +382,78 @@ const IPI_WAKE_VECTOR: u8 = 0xF0;
 /// LAPIC spurious vector (no EOI required).
 #[cfg(not(test))]
 const SPURIOUS_VECTOR: u8 = 0xFF;
+/// Per-CPU LAPIC timer vector.
+#[cfg(not(test))]
+const LAPIC_TIMER_VECTOR: u8 = 0xF1;
+/// LAPIC timer rate on application processors.
+const LAPIC_TIMER_HZ: u64 = 100;
+
+/// Ticks delivered by each CPU's own LAPIC timer, by registry index.
+static CPU_TICKS: [core::sync::atomic::AtomicU64; hal_x86_64::MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [ZERO; hal_x86_64::MAX_CPUS]
+};
+
+/// LAPIC timer initial count for one `LAPIC_TIMER_HZ` period at divide 16
+/// (0 until calibrated against the PIT on the boot CPU).
+static LAPIC_TIMER_INITIAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Registry index of the CPU running this code, via its LAPIC id.
+#[cfg(all(not(test), target_os = "none"))]
+fn current_cpu_index() -> Option<usize> {
+    let id = LAPIC.get()?.id();
+    (0..CPUS.online()).find(|&i| CPUS.lapic_id(i) == Some(id))
+}
+
+/// Per-CPU timer tick: count it and acknowledge.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn lapic_timer_handler() {
+    #[cfg(target_os = "none")]
+    if let Some(index) = current_cpu_index() {
+        CPU_TICKS[index].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(mut apic) = LAPIC.get() {
+        apic.end_of_interrupt();
+    }
+}
+
+/// Measure LAPIC timer counts per PIT tick on the boot CPU (interrupts must
+/// be enabled) and publish the periodic initial count for the APs.
+#[cfg(all(not(test), target_os = "none"))]
+fn calibrate_lapic_timer(serial: &mut serial::SerialPort) {
+    let Some(mut apic) = LAPIC.get() else {
+        return;
+    };
+    const SAMPLE_TICKS: u64 = 10;
+    apic.set_timer_divide(16);
+    apic.start_timer_masked(u32::MAX);
+    // Align to a tick edge, then count over SAMPLE_TICKS ticks.
+    let start_tick = get_tick_count();
+    while get_tick_count() == start_tick {
+        core::hint::spin_loop();
+    }
+    let begin = apic.timer_current();
+    let edge = get_tick_count();
+    while get_tick_count() < edge + SAMPLE_TICKS {
+        core::hint::spin_loop();
+    }
+    let end = apic.timer_current();
+    apic.stop_timer();
+    let counts = begin.wrapping_sub(end) as u64;
+    // PIT ticks are 100 Hz, so one LAPIC period at LAPIC_TIMER_HZ is:
+    let per_period = counts * 100 / SAMPLE_TICKS / LAPIC_TIMER_HZ;
+    let initial = per_period.clamp(1, u32::MAX as u64) as u32;
+    LAPIC_TIMER_INITIAL.store(initial, core::sync::atomic::Ordering::Release);
+    let _ = writeln!(
+        serial,
+        "LAPIC timer: {} counts per {} ticks, initial={} for {} Hz",
+        counts, SAMPLE_TICKS, initial, LAPIC_TIMER_HZ
+    );
+    // Wake the APs so they pick the value up and start their timers.
+    apic.send_ipi_all_excluding_self(IPI_WAKE_VECTOR);
+}
 
 /// Wake-up IPI: nothing to do beyond acknowledging; the idle loop on the
 /// target CPU re-checks the work queue after `hlt` returns.
@@ -446,6 +554,7 @@ fn install_idt() {
         // Inter-processor wake-up and LAPIC spurious vectors
         IDT[IPI_WAKE_VECTOR as usize].set_handler(irq_ipi_entry, code_segment);
         IDT[SPURIOUS_VECTOR as usize].set_handler(irq_spurious_entry, code_segment);
+        IDT[LAPIC_TIMER_VECTOR as usize].set_handler(irq_lapic_timer_entry, code_segment);
 
         load_idt();
     }
@@ -830,6 +939,7 @@ pub extern "C" fn rust_main() -> ! {
         unmask_mouse_irq();
     }
     enable_interrupts();
+    calibrate_lapic_timer(&mut serial);
     if KBD_DEBUG_LOG {
         log_pic_masks(&mut serial);
         log_interrupt_state(&mut serial);
@@ -4140,7 +4250,19 @@ fn run_job(job: hal_x86_64::Job) -> u64 {
 /// it close the lost-wake-up window.
 #[cfg(all(not(test), target_os = "none"))]
 fn ap_idle_loop(lapic_id: u32) -> ! {
+    let mut timer_started = false;
     loop {
+        // Start this CPU's timer once the boot CPU has calibrated it.
+        if !timer_started {
+            let initial = LAPIC_TIMER_INITIAL.load(core::sync::atomic::Ordering::Acquire);
+            if initial != 0 {
+                if let Some(mut apic) = LAPIC.get() {
+                    apic.set_timer_divide(16);
+                    apic.start_timer_periodic(LAPIC_TIMER_VECTOR, initial);
+                    timer_started = true;
+                }
+            }
+        }
         unsafe { asm!("cli", options(nomem, nostack)) };
         match WORK.take() {
             Some(job) => {
@@ -5272,9 +5394,24 @@ impl CommandService {
                     total,
                     BSP_LAPIC_ID.load(core::sync::atomic::Ordering::Acquire)
                 );
+                #[cfg(not(test))]
+                let bsp_ticks = get_tick_count();
+                #[cfg(test)]
+                let bsp_ticks = 0u64;
+                let _ = writeln!(
+                    output,
+                    "lapic timer: initial={} ({} Hz), bsp ticks={}",
+                    LAPIC_TIMER_INITIAL.load(core::sync::atomic::Ordering::Relaxed),
+                    LAPIC_TIMER_HZ,
+                    bsp_ticks
+                );
                 for index in 0..CPUS.online() {
                     if let Some(lapic) = CPUS.lapic_id(index) {
-                        let _ = writeln!(output, "  cpu{index}: lapic={lapic}");
+                        let _ = writeln!(
+                            output,
+                            "  cpu{index}: lapic={lapic} ticks={}",
+                            CPU_TICKS[index].load(core::sync::atomic::Ordering::Relaxed)
+                        );
                     }
                 }
             }
