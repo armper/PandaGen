@@ -608,6 +608,19 @@ mod tests {
         assert_eq!(lines[0], " 10 # PandaGen");
         assert_eq!(lines[1], " 11 ");
 
+        let ViewContent::StatusLine { text } =
+            &find(&windows, DesktopWindowRole::Status).frame.content
+        else {
+            panic!("status must be a status line");
+        };
+        assert!(
+            text.starts_with("-- NORMAL --  readme.md [+]  Ln 11, Col 3  (42 lines)"),
+            "{text}"
+        );
+        assert_eq!(gutter_width(9), 4);
+        assert_eq!(gutter_width(12345), 6);
+        assert_eq!(gutter_line(7, 4, "x"), "  7 x");
+
         // Rows past the end of a short document get a blank gutter.
         let mut short = sample_model();
         short.editor = Some(EditorModel {
@@ -634,18 +647,6 @@ mod tests {
                 .as_deref(),
             Some("a.txt")
         );
-        let ViewContent::StatusLine { text } =
-            &find(&windows, DesktopWindowRole::Status).frame.content
-        else {
-            panic!("status must be a status line");
-        };
-        assert!(
-            text.starts_with("-- NORMAL --  readme.md [+]  Ln 11, Col 3  (42 lines)"),
-            "{text}"
-        );
-        assert_eq!(gutter_width(9), 4);
-        assert_eq!(gutter_width(12345), 6);
-        assert_eq!(gutter_line(7, 4, "x"), "  7 x");
     }
 
     #[test]
