@@ -2905,9 +2905,11 @@ impl RemoteCommandServer {
         let Some(datagram) = datagram else {
             return;
         };
-        let envelope = match remote_ipc::envelope_from_bytes(&datagram.bytes) {
+        let token = *REMOTE_TOKEN.lock();
+        let envelope = match remote_ipc::envelope_from_bytes(&datagram.bytes, token.as_bytes()) {
             Ok(envelope) => envelope,
             Err(err) => {
+                self.denied += 1;
                 klog!(serial, "remote: bad envelope ({err})\r\n");
                 return;
             }
@@ -2995,7 +2997,8 @@ impl RemoteCommandServer {
         let Ok(envelope) = remote_ipc::encode_response(response, pending.envelope_id) else {
             return;
         };
-        let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope) else {
+        let token = *REMOTE_TOKEN.lock();
+        let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope, token.as_bytes()) else {
             return;
         };
         if let Some(net) = NET.lock().as_mut() {
@@ -3844,6 +3847,10 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     if let Some(cmdline) = EXECUTABLE_CMDLINE_REQUEST.get_response() {
         let bytes = cmdline.cmdline().to_bytes();
         info.display_mode = display_mode::DisplayMode::from_cmdline(bytes);
+        if let Some(token) = RemoteToken::from_cmdline(bytes) {
+            *REMOTE_TOKEN.lock() = token;
+            kprintln!(serial, "remote: token set from command line");
+        }
         kprintln!(
             serial,
             "cmdline: {:?} display_mode={:?}",
@@ -4053,6 +4060,46 @@ static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
 #[cfg(all(not(test), target_os = "none"))]
 static NET: hal_x86_64::SpinLock<Option<bare_metal_net::NetStack>> =
     hal_x86_64::SpinLock::new(None);
+
+/// Shared secret for remote IPC tags (`remote_token=` on the command line).
+static REMOTE_TOKEN: hal_x86_64::SpinLock<RemoteToken> =
+    hal_x86_64::SpinLock::new(RemoteToken::DEFAULT);
+
+#[derive(Clone, Copy)]
+struct RemoteToken {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl RemoteToken {
+    const DEFAULT: Self = Self::from_str(remote_ipc::DEFAULT_REMOTE_TOKEN);
+
+    const fn from_str(text: &str) -> Self {
+        let src = text.as_bytes();
+        let len = if src.len() > 64 { 64 } else { src.len() };
+        let mut bytes = [0u8; 64];
+        let mut i = 0;
+        while i < len {
+            bytes[i] = src[i];
+            i += 1;
+        }
+        Self { bytes, len }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    /// `remote_token=<value>` from the kernel command line, if present.
+    fn from_cmdline(cmdline: &[u8]) -> Option<Self> {
+        let text = core::str::from_utf8(cmdline).ok()?;
+        text.split_ascii_whitespace()
+            .filter_map(|token| token.strip_prefix("remote_token="))
+            .filter(|value| !value.is_empty())
+            .last()
+            .map(Self::from_str)
+    }
+}
 
 /// Jobs for application processors (`smp run <n>`).
 static WORK: hal_x86_64::WorkQueue<32> = hal_x86_64::WorkQueue::new();

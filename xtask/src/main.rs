@@ -72,11 +72,18 @@ const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 /// UDP datagram transport for `remote_ipc` against the kernel's port.
 struct UdpTransport {
     socket: std::net::UdpSocket,
+    token: String,
+}
+
+/// Shared secret for remote calls: `PANDAGEN_REMOTE_TOKEN` or the dev default.
+fn remote_token() -> String {
+    env::var("PANDAGEN_REMOTE_TOKEN")
+        .unwrap_or_else(|_| remote_ipc::DEFAULT_REMOTE_TOKEN.to_string())
 }
 
 impl remote_ipc::RemoteTransport for UdpTransport {
     fn send(&mut self, message: ipc::MessageEnvelope) -> Result<(), remote_ipc::RemoteIpcError> {
-        let bytes = remote_ipc::envelope_to_bytes(&message)?;
+        let bytes = remote_ipc::envelope_to_bytes(&message, self.token.as_bytes())?;
         self.socket
             .send_to(&bytes, ("127.0.0.1", REMOTE_PORT))
             .map(|_| ())
@@ -85,23 +92,33 @@ impl remote_ipc::RemoteTransport for UdpTransport {
 
     fn receive(&mut self) -> Result<ipc::MessageEnvelope, remote_ipc::RemoteIpcError> {
         let mut buf = [0u8; 4096];
-        let (n, _) = self
-            .socket
-            .recv_from(&mut buf)
-            .map_err(|err| remote_ipc::RemoteIpcError::Codec(err.to_string()))?;
-        remote_ipc::envelope_from_bytes(&buf[..n])
+        // The kernel drops unauthenticated calls silently, so a timeout is
+        // the expected symptom of a bad token; report it stably.
+        let (n, _) = self.socket.recv_from(&mut buf).map_err(|err| {
+            if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                remote_ipc::RemoteIpcError::Codec("no reply (timeout)".to_string())
+            } else {
+                remote_ipc::RemoteIpcError::Codec(err.to_string())
+            }
+        })?;
+        remote_ipc::envelope_from_bytes(&buf[..n], self.token.as_bytes())
     }
 }
 
 /// Run one read-only kernel command through remote IPC and return its output.
-fn remote_call(command: &str, timeout: Duration) -> Result<String, Box<dyn std::error::Error>> {
+fn remote_call(
+    command: &str,
+    timeout: Duration,
+    token: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
+    let token = token.to_string();
     let authority = remote_ipc::CapabilityAuthority {
         caller: "xtask".to_string(),
         allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
     };
-    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket }, authority);
+    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket, token }, authority);
     let reply = client.call(
         remote_ipc::CAP_KERNEL_COMMAND,
         remote_ipc::ACTION_KERNEL_COMMAND_RUN,
@@ -116,7 +133,7 @@ fn cmd_remote(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::err
     if command.is_empty() {
         return Err(io::Error::new(ErrorKind::InvalidInput, "remote expects a command").into());
     }
-    let reply = remote_call(&command.join(" "), Duration::from_secs(3))?;
+    let reply = remote_call(&command.join(" "), Duration::from_secs(3), &remote_token())?;
     print!("{reply}");
     if !reply.ends_with('\n') {
         println!();
@@ -433,9 +450,14 @@ fn cmd_qemu_script(
             // the host; the reply must contain the expected text.
             // An expectation starting with '!' means the call must be
             // rejected with that error text.
-            let (command, expected) = spec.split_once(';').unwrap_or((spec, ""));
+            // A third field overrides the token (to test rejection).
+            let (command, rest) = spec.split_once(';').unwrap_or((spec, ""));
+            let (expected, token) = match rest.split_once(';') {
+                Some((expected, token)) => (expected, token.to_string()),
+                None => (rest, remote_token()),
+            };
             match (
-                remote_call(command, Duration::from_secs(3)),
+                remote_call(command, Duration::from_secs(3), &token),
                 expected.strip_prefix('!'),
             ) {
                 (Ok(reply), None) if reply.contains(expected) => {
