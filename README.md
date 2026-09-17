@@ -349,7 +349,7 @@ cargo test --all
 
 ### 🔄 Open Work (see `docs/next_steps.md`)
 - [x] Parallel task execution across CPUs (Phase 275); preemptive tasks with context switching remain open
-- [ ] Per-caller keys for remote commands; DHCP lease renewal
+- [ ] Per-caller keys for remote commands
 - [ ] Out-of-order TCP reassembly and congestion control
 
 Each phase is recorded in a `PHASE<n>_SUMMARY.md` at the repository root.

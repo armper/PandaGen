@@ -80,6 +80,9 @@ pub struct NetStack {
     address_source: &'static str,
     lease_seconds: u32,
     dns: Option<Ipv4>,
+    dhcp_server: Ipv4,
+    lease_started_tick: u64,
+    renewals: u32,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -129,6 +132,9 @@ impl NetStack {
             tcp_accepted_seen: 0,
             address_source: "none",
             lease_seconds: 0,
+            dhcp_server: [0; 4],
+            lease_started_tick: 0,
+            renewals: 0,
             dns: None,
         })
     }
@@ -141,16 +147,62 @@ impl NetStack {
     /// `REPLY_TIMEOUT_TICKS`; on failure fall back to the QEMU user-network
     /// static configuration. Returns true when bound by DHCP.
     pub fn dhcp(&mut self, now: &dyn Fn() -> u64, log: &mut impl Write) -> bool {
+        self.dhcp_exchange(false, now, log)
+    }
+
+    /// Renew the current lease with the server that granted it; on failure
+    /// start over with a fresh DISCOVER. Returns true when bound.
+    pub fn dhcp_renew(&mut self, now: &dyn Fn() -> u64, log: &mut impl Write) -> bool {
+        if self.address_source != "dhcp" {
+            return self.dhcp_exchange(false, now, log);
+        }
+        if self.dhcp_exchange(true, now, log) {
+            return true;
+        }
+        let _ = writeln!(log, "net: dhcp renewal failed; rediscovering");
+        self.dhcp_exchange(false, now, log)
+    }
+
+    /// Renew automatically once half the lease has elapsed (100 Hz ticks).
+    /// The exchange uses the tick passed in, so it cannot wait for replies
+    /// here; `dhcp_renew` from the command path does.
+    fn maybe_renew(&mut self, now: u64, log: &mut impl Write) {
+        if self.address_source != "dhcp" || self.lease_seconds == 0 {
+            return;
+        }
+        let half_lease_ticks = (self.lease_seconds as u64) * 100 / 2;
+        if now.saturating_sub(self.lease_started_tick) >= half_lease_ticks {
+            // Move the mark first so a failed attempt retries after another
+            // half-lease rather than on every pass.
+            self.lease_started_tick = now;
+            let clock = move || now;
+            let _ = self.dhcp_renew(&clock, log);
+        }
+    }
+
+    fn dhcp_exchange(&mut self, renew: bool, now: &dyn Fn() -> u64, log: &mut impl Write) -> bool {
         let mac = self.device.mac();
         let xid =
             (hal_x86_64::rdtsc() as u32) ^ u32::from_le_bytes([mac[2], mac[3], mac[4], mac[5]]);
         let mut client = dhcp::Client::new(mac, xid);
         let mut payload = [0u8; 400];
-        let Some(len) = client.discover(&mut payload) else {
-            return self.dhcp_fallback(log, "discover build failed");
-        };
-        if !self.broadcast(&payload[..len]) {
-            return self.dhcp_fallback(log, "discover transmit failed");
+        if renew {
+            let ip = self.iface.config().ip;
+            let server = self.dhcp_server;
+            let Some(len) = client.renew(ip, server, &mut payload) else {
+                return false;
+            };
+            let request = payload;
+            if !self.unicast_dhcp(server, &request[..len]) {
+                return false;
+            }
+        } else {
+            let Some(len) = client.discover(&mut payload) else {
+                return self.dhcp_fallback(log, "discover build failed");
+            };
+            if !self.broadcast(&payload[..len]) {
+                return self.dhcp_fallback(log, "discover transmit failed");
+            }
         }
         let start = now();
         while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS {
@@ -180,18 +232,26 @@ impl NetStack {
                                 config,
                                 lease_seconds,
                                 dns,
+                                server,
                             } => {
                                 self.iface.set_config(config);
                                 self.address_source = "dhcp";
                                 self.lease_seconds = lease_seconds;
                                 self.dns = dns;
+                                self.dhcp_server = server;
+                                self.lease_started_tick = now();
+                                if renew {
+                                    self.renewals += 1;
+                                }
                                 let _ = writeln!(
                                     log,
-                                    "net: dhcp bound ip={} mask={} gw={} lease={}s",
+                                    "net: dhcp {} ip={} mask={} gw={} lease={}s server={}",
+                                    if renew { "renewed" } else { "bound" },
                                     fmt_ipv4(config.ip),
                                     fmt_ipv4(config.netmask),
                                     fmt_ipv4(config.gateway),
-                                    lease_seconds
+                                    lease_seconds,
+                                    fmt_ipv4(server)
                                 );
                                 return true;
                             }
@@ -203,7 +263,30 @@ impl NetStack {
             }
             core::hint::spin_loop();
         }
+        if renew {
+            let _ = writeln!(log, "net: dhcp renew: no reply");
+            return false;
+        }
         self.dhcp_fallback(log, "no reply")
+    }
+
+    /// Unicast a DHCP payload to the server (RENEWING).
+    fn unicast_dhcp(&mut self, server: Ipv4, payload: &[u8]) -> bool {
+        match self.iface.udp_send(
+            server,
+            DHCP_SERVER_PORT,
+            DHCP_CLIENT_PORT,
+            payload,
+            &mut self.tx_frame,
+        ) {
+            Ok(len) => self.device.transmit(&self.tx_frame[..len]).is_ok(),
+            Err(SendError::NeedArp) => {
+                let len = self.iface.pending_frame_len();
+                let _ = self.device.transmit(&self.tx_frame[..len]);
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     fn broadcast(&mut self, payload: &[u8]) -> bool {
@@ -250,8 +333,10 @@ impl NetStack {
         if self.address_source == "dhcp" {
             let _ = writeln!(
                 out,
-                "net: lease={}s dns={}",
+                "net: lease={}s renewals={} server={} dns={}",
                 self.lease_seconds,
+                self.renewals,
+                fmt_ipv4(self.dhcp_server),
                 self.dns.map(fmt_ipv4).map_or_else(
                     || alloc::string::String::from("none"),
                     |d| alloc::format!("{d}")
@@ -299,6 +384,7 @@ impl NetStack {
     /// for `REMOTE_PORT` seen (later ones wait in the receive queue).
     pub fn service(&mut self, now: u64, log: &mut impl Write) -> Option<RemoteRequest> {
         self.iface.tcp_tick(now);
+        self.maybe_renew(now, log);
         let mut remote = None;
         while remote.is_none() {
             let Some(len) = self.device.poll_receive(&mut self.rx_frame) else {

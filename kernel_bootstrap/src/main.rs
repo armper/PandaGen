@@ -5590,6 +5590,9 @@ impl CommandService {
                     (Some("dhcp"), _) => {
                         let _ = net.dhcp(&get_tick_count, &mut output);
                     }
+                    (Some("renew"), _) => {
+                        let _ = net.dhcp_renew(&get_tick_count, &mut output);
+                    }
                     (Some("udp"), Some(ip)) => {
                         let port = parts.next().and_then(|p| p.parse::<u16>().ok());
                         let text = parts.next().unwrap_or("hello");

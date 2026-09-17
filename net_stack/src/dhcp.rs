@@ -109,6 +109,19 @@ pub fn build_request(
     message_type: u8,
     request: Option<(Ipv4, Ipv4)>,
 ) -> Option<usize> {
+    build_request_with_ciaddr(out, xid, mac, message_type, request, None)
+}
+
+/// `build_request` with an optional client address (`ciaddr`), which a
+/// renewing client sets instead of the requested-address option.
+pub fn build_request_with_ciaddr(
+    out: &mut [u8],
+    xid: u32,
+    mac: Mac,
+    message_type: u8,
+    request: Option<(Ipv4, Ipv4)>,
+    ciaddr: Option<Ipv4>,
+) -> Option<usize> {
     if out.len() < MIN_PAYLOAD {
         return None;
     }
@@ -118,6 +131,9 @@ pub fn build_request(
     out[2] = 6;
     out[4..8].copy_from_slice(&xid.to_be_bytes());
     out[10..12].copy_from_slice(&0x8000u16.to_be_bytes()); // ask for broadcast replies
+    if let Some(ip) = ciaddr {
+        out[12..16].copy_from_slice(&ip);
+    }
     out[28..34].copy_from_slice(&mac);
     out[236..240].copy_from_slice(&MAGIC_COOKIE);
     let mut i = 240;
@@ -159,6 +175,8 @@ pub enum Step {
         config: Config,
         lease_seconds: u32,
         dns: Option<Ipv4>,
+        /// Server to renew with later.
+        server: Ipv4,
     },
 }
 
@@ -192,6 +210,19 @@ impl Client {
         Some(len)
     }
 
+    /// Start a renewal of `ip` with `server` (RFC 2131 RENEWING): a REQUEST
+    /// carrying `ciaddr`, to be sent unicast to the server. The ACK is
+    /// handled like the initial one and yields `Step::Bound`.
+    pub fn renew(&mut self, ip: Ipv4, server: Ipv4, out: &mut [u8]) -> Option<usize> {
+        self.xid = self.xid.wrapping_add(1);
+        let len = build_request_with_ciaddr(out, self.xid, self.mac, MSG_REQUEST, None, Some(ip))?;
+        self.state = State::Requesting {
+            offered: ip,
+            server,
+        };
+        Some(len)
+    }
+
     /// Feed a datagram received on port 68.
     pub fn handle(&mut self, payload: &[u8], out: &mut [u8]) -> Step {
         let Some(reply) = parse_reply(payload) else {
@@ -222,9 +253,10 @@ impl Client {
                     None => Step::None,
                 }
             }
-            (State::Requesting { offered, .. }, MSG_ACK) if reply.your_ip == offered => {
+            (State::Requesting { offered, server }, MSG_ACK) if reply.your_ip == offered => {
                 self.state = State::Bound;
                 Step::Bound {
+                    server: reply.server_id.unwrap_or(server),
                     config: Config {
                         mac: self.mac,
                         ip: reply.your_ip,
@@ -389,9 +421,51 @@ mod tests {
                 },
                 lease_seconds: 86400,
                 dns: Some([10, 0, 2, 3]),
+                server: [10, 0, 2, 2],
             }
         );
         assert_eq!(client.state(), State::Bound);
+    }
+
+    #[test]
+    fn renewal_requests_with_ciaddr_and_rebinds_on_ack() {
+        let mut client = Client::new(MAC, 9);
+        let mut buf = [0u8; 400];
+        let len = client
+            .renew([10, 0, 2, 15], [10, 0, 2, 2], &mut buf)
+            .unwrap();
+        assert_eq!(len, MIN_PAYLOAD);
+        assert_eq!(
+            &buf[12..16],
+            &[10, 0, 2, 15],
+            "ciaddr carries the current address"
+        );
+        assert_eq!(&buf[240..243], &[OPT_MESSAGE_TYPE, 1, MSG_REQUEST]);
+        let opts = &buf[243..len];
+        assert!(!opts.windows(2).any(|w| w == [OPT_REQUESTED_IP, 4]));
+        assert!(!opts.windows(2).any(|w| w == [OPT_SERVER_ID, 4]));
+        let xid = client.xid();
+        assert_eq!(
+            client.state(),
+            State::Requesting {
+                offered: [10, 0, 2, 15],
+                server: [10, 0, 2, 2]
+            }
+        );
+        let ack = reply(MSG_ACK, xid, [10, 0, 2, 15], SERVER_OPTS);
+        match client.handle(&ack, &mut buf) {
+            Step::Bound {
+                config,
+                lease_seconds,
+                server,
+                ..
+            } => {
+                assert_eq!(config.ip, [10, 0, 2, 15]);
+                assert_eq!(lease_seconds, 86400);
+                assert_eq!(server, [10, 0, 2, 2]);
+            }
+            other => panic!("expected bound, got {other:?}"),
+        }
     }
 
     #[test]
