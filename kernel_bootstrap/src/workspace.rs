@@ -1006,6 +1006,12 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "smp" {
+            self.emit_command_line(serial, command.as_bytes());
+            self.delegate_to_command_service(ctx, serial, command);
+            return;
+        }
+
         if cmd == "heap" {
             self.emit_command_line(serial, command.as_bytes());
             let sub = parts.next();
@@ -1049,6 +1055,8 @@ impl WorkspaceSession {
                     serial,
                     "heap stress <KiB> | release - Hold or free test allocations",
                 );
+                self.emit_line(serial, "cpus           - Show online CPUs");
+                self.emit_line(serial, "smp run <n>    - Run n jobs on the other CPUs");
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");

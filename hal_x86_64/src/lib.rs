@@ -19,6 +19,8 @@ use hal::{CpuHal, InterruptHal, MemoryHal};
 pub mod idt;
 pub mod interrupts;
 pub mod keyboard;
+pub mod lapic;
+pub mod mmio_map;
 pub mod mouse;
 pub mod paging;
 pub mod pci;
@@ -30,10 +32,13 @@ pub mod timer;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_pci;
+pub mod work_queue;
 
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;
+pub use lapic::{ApicMmio, LocalApic, RealApicMmio, SharedLapic};
+pub use mmio_map::{HhdmMemory, MapError, PhysMemory};
 pub use mouse::{MouseInitError, MouseInitReport, Ps2MouseInit, Ps2MousePacketParser, X86Ps2Mouse};
 pub use paging::{
     AddressSpaceHandle, PageTable, PageTableEntry, PageTableFlags, PageTableManager, Permissions,
@@ -51,6 +56,7 @@ pub use virtio::{
 };
 pub use virtio_blk::{DmaBuffers, QueueMemory, VirtioBlkDevice};
 pub use virtio_pci::{LegacyQueueLayout, VirtioPciLegacy};
+pub use work_queue::{Job, JobResult, WorkQueue};
 
 /// x86_64 CPU implementation (skeleton)
 pub struct X86_64Cpu;

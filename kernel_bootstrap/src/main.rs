@@ -284,11 +284,76 @@ irq_mouse_entry:
 "#
 );
 
+#[cfg(all(not(test), target_os = "none"))]
+global_asm!(
+    r#"
+.section .text
+.global irq_ipi_entry
+irq_ipi_entry:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call ipi_handler
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+.global irq_spurious_entry
+irq_spurious_entry:
+    iretq
+"#
+);
+
 #[cfg(not(test))]
 extern "C" {
     fn irq_timer_entry();
     fn irq_keyboard_entry();
     fn irq_mouse_entry();
+    fn irq_ipi_entry();
+    fn irq_spurious_entry();
+}
+
+/// Vector used to wake application processors.
+#[cfg(not(test))]
+const IPI_WAKE_VECTOR: u8 = 0xF0;
+/// LAPIC spurious vector (no EOI required).
+#[cfg(not(test))]
+const SPURIOUS_VECTOR: u8 = 0xFF;
+
+/// Wake-up IPI: nothing to do beyond acknowledging; the idle loop on the
+/// target CPU re-checks the work queue after `hlt` returns.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn ipi_handler() {
+    hal_x86_64::lapic::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
+    if let Some(mut apic) = LAPIC.get() {
+        apic.end_of_interrupt();
+    }
 }
 
 #[cfg(not(test))]
@@ -375,6 +440,10 @@ fn install_idt() {
 
         // Set up PS/2 mouse interrupt (IRQ 12 = vector 44, via slave PIC)
         IDT[44].set_handler(irq_mouse_entry, code_segment);
+
+        // Inter-processor wake-up and LAPIC spurious vectors
+        IDT[IPI_WAKE_VECTOR as usize].set_handler(irq_ipi_entry, code_segment);
+        IDT[SPURIOUS_VECTOR as usize].set_handler(irq_spurious_entry, code_segment);
 
         load_idt();
     }
@@ -694,7 +763,7 @@ pub extern "C" fn rust_main() -> ! {
     serial.init();
     kprintln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
-    let (allocator, heap) = init_memory(&mut serial, &boot);
+    let (mut allocator, heap) = init_memory(&mut serial, &boot);
 
     kprintln!(serial, "Initializing interrupts...");
     install_idt();
@@ -719,7 +788,7 @@ pub extern "C" fn rust_main() -> ! {
             .map(|r| r.bsp_lapic_id())
             .unwrap_or(0),
     );
-    start_application_processors(&mut serial);
+    start_application_processors(&mut serial, allocator.as_mut());
 
     init_pic();
     kprintln!(serial, "PIC remapped to IRQ base 32");
@@ -3699,6 +3768,42 @@ static CPU_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 /// LAPIC id of the boot processor.
 static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Local APIC register window shared by every CPU (set once the HHDM is known).
+static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
+
+/// Jobs for application processors (`smp run <n>`).
+static WORK: hal_x86_64::WorkQueue<32> = hal_x86_64::WorkQueue::new();
+
+/// Job kind understood by `run_job`: wrapping sum of squares 1..=arg.
+const JOB_SUM_OF_SQUARES: u32 = 1;
+
+fn run_job(job: hal_x86_64::Job) -> u64 {
+    match job.kind {
+        JOB_SUM_OF_SQUARES => {
+            (1..=job.arg).fold(0u64, |acc, i| acc.wrapping_add(i.wrapping_mul(i)))
+        }
+        _ => 0,
+    }
+}
+
+/// Idle loop for an application processor: drain the work queue, then
+/// sleep until a wake-up IPI. `cli` before the check and `sti; hlt` after
+/// it close the lost-wake-up window.
+#[cfg(all(not(test), target_os = "none"))]
+fn ap_idle_loop(lapic_id: u32) -> ! {
+    loop {
+        unsafe { asm!("cli", options(nomem, nostack)) };
+        match WORK.take() {
+            Some(job) => {
+                unsafe { asm!("sti", options(nomem, nostack)) };
+                let value = run_job(job);
+                WORK.complete(job.id, lapic_id, value);
+            }
+            None => unsafe { asm!("sti", "hlt", options(nomem, nostack)) },
+        }
+    }
+}
+
 /// Entry point for application processors released by Limine.
 ///
 /// Each AP arrives with interrupts disabled on its own 64 KiB stack. It
@@ -3707,13 +3812,50 @@ static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 #[cfg(all(not(test), target_os = "none"))]
 unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
     load_idt();
+    if let Some(mut apic) = LAPIC.get() {
+        apic.enable(SPURIOUS_VECTOR);
+    }
     let _ = CPUS.register(cpu.lapic_id);
-    halt_loop()
+    ap_idle_loop(cpu.lapic_id)
+}
+
+/// Map the xAPIC register page uncached in the live page tables (the
+/// bootloader's direct map does not cover MMIO holes) and return its
+/// virtual address.
+#[cfg(all(not(test), target_os = "none"))]
+fn map_lapic_window(
+    hhdm: u64,
+    allocator: &mut FrameAllocator,
+) -> Result<u64, hal_x86_64::MapError> {
+    use hal_x86_64::paging::PageTableFlags;
+    let phys = hal_x86_64::lapic::LAPIC_DEFAULT_PHYS;
+    let virt = hhdm + phys;
+    let cr3: u64;
+    unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: frames come from the boot frame allocator, which only hands
+    // out usable memory covered by the direct map.
+    let mut mem = unsafe { hal_x86_64::HhdmMemory::new(hhdm, || allocator.allocate_frame()) };
+    if hal_x86_64::mmio_map::translate(&mem, cr3, virt).is_none() {
+        hal_x86_64::mmio_map::map_4k(
+            &mut mem,
+            cr3,
+            virt,
+            phys,
+            PageTableFlags::WRITABLE
+                | PageTableFlags::CACHE_DISABLE
+                | PageTableFlags::WRITE_THROUGH,
+        )?;
+        unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+    }
+    Ok(virt)
 }
 
 /// Release the application processors and wait for them to register.
 #[cfg(all(not(test), target_os = "none"))]
-fn start_application_processors(serial: &mut serial::SerialPort) {
+fn start_application_processors(
+    serial: &mut serial::SerialPort,
+    allocator: Option<&mut FrameAllocator>,
+) {
     let Some(resp) = MP_REQUEST.get_response() else {
         CPU_TOTAL.store(1, Ordering::Release);
         kprintln!(serial, "SMP: no MP response, running on 1 CPU");
@@ -3721,6 +3863,28 @@ fn start_application_processors(serial: &mut serial::SerialPort) {
     };
     let bsp = resp.bsp_lapic_id();
     BSP_LAPIC_ID.store(bsp, Ordering::Release);
+    if let (Some(hhdm), Some(allocator)) =
+        (HHDM_REQUEST.get_response().map(|r| r.offset()), allocator)
+    {
+        match map_lapic_window(hhdm, allocator) {
+            Ok(virt) => {
+                // SAFETY: the window was just mapped uncached at `virt`.
+                unsafe { LAPIC.set_base(virt as usize) };
+                if let Some(mut apic) = LAPIC.get() {
+                    apic.enable(SPURIOUS_VECTOR);
+                    klog!(
+                        serial,
+                        "LAPIC: bsp id {} enabled at 0x{:x}\r\n",
+                        apic.id(),
+                        virt
+                    );
+                }
+            }
+            Err(err) => {
+                klog!(serial, "LAPIC: map failed ({:?}); IPIs disabled\r\n", err);
+            }
+        }
+    }
     let cpus = resp.cpus();
     CPU_TOTAL.store(cpus.len() as u32, Ordering::Release);
     for cpu in cpus {
@@ -4545,6 +4709,63 @@ impl CommandService {
         progressed
     }
 
+    /// `smp run <n>`: queue `n` jobs, wake the other CPUs, report who ran what.
+    fn run_smp_jobs(&mut self, output: &mut FixedBuffer<RESPONSE_MAX>, jobs: u32) {
+        if CPUS.online() < 2 {
+            let _ = writeln!(output, "smp: no application processors online");
+            return;
+        }
+        WORK.reset();
+        let before = hal_x86_64::lapic::IPI_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let mut ids = [0u32; 32];
+        for (i, slot) in ids.iter_mut().enumerate().take(jobs as usize) {
+            let arg = 1_000 * (i as u64 + 1);
+            *slot = WORK.submit(JOB_SUM_OF_SQUARES, arg).unwrap_or(u32::MAX);
+        }
+        #[cfg(not(test))]
+        let woke = LAPIC
+            .get()
+            .map(|mut apic| apic.send_ipi_all_excluding_self(IPI_WAKE_VECTOR))
+            .unwrap_or(false);
+        #[cfg(test)]
+        let woke = false;
+        // Summary first: the response buffer is small, so the per-job lines
+        // are the part that may be cut off.
+        let mut done = 0;
+        let mut lines = FixedBuffer::<RESPONSE_MAX>::new();
+        for (i, id) in ids.iter().enumerate().take(jobs as usize) {
+            match WORK.wait(*id, 200_000_000) {
+                Some(r) => {
+                    done += 1;
+                    let expected = run_job(hal_x86_64::Job {
+                        id: *id,
+                        kind: JOB_SUM_OF_SQUARES,
+                        arg: 1_000 * (i as u64 + 1),
+                    });
+                    let _ = writeln!(
+                        lines,
+                        "  job{} cpu={} v={}{}",
+                        i,
+                        r.cpu,
+                        r.value,
+                        if r.value == expected { "" } else { " MISMATCH" }
+                    );
+                }
+                None => {
+                    let _ = writeln!(lines, "  job{} timeout", i);
+                }
+            }
+        }
+        let ipis =
+            hal_x86_64::lapic::IPI_COUNT.load(core::sync::atomic::Ordering::Relaxed) - before;
+        let _ = writeln!(
+            output,
+            "smp: {}/{} jobs done, ipi_sent={}, ipis_received={}",
+            done, jobs, woke, ipis
+        );
+        let _ = output.write_str(core::str::from_utf8(lines.as_bytes()).unwrap_or(""));
+    }
+
     fn handle_command(
         &mut self,
         ctx: &mut KernelContext,
@@ -4604,6 +4825,21 @@ impl CommandService {
                     }
                     _ => {
                         let _ = writeln!(output, "kernel: address unavailable");
+                    }
+                }
+            }
+            cmd if cmd.starts_with("smp") => {
+                let mut parts = cmd.split_whitespace();
+                let _ = parts.next();
+                match (
+                    parts.next(),
+                    parts.next().and_then(|n| n.parse::<u32>().ok()),
+                ) {
+                    (Some("run"), Some(n)) if n > 0 => {
+                        self.run_smp_jobs(&mut output, n.min(32));
+                    }
+                    _ => {
+                        let _ = writeln!(output, "usage: smp run <jobs>");
                     }
                 }
             }
