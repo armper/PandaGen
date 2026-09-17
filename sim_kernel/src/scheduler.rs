@@ -540,6 +540,8 @@ impl Scheduler {
             return;
         }
         task_info.state = TaskState::Exited;
+        // Release the real-time reservation so admission control frees up.
+        task_info.realtime = None;
         // Remove from run queue if present
         self.run_queue.remove(task_id);
         // Clear current task if it's exiting
@@ -566,6 +568,7 @@ impl Scheduler {
             return;
         }
         task_info.state = TaskState::Cancelled;
+        task_info.realtime = None;
         // Remove from run queue if present
         self.run_queue.remove(task_id);
         // Clear current task if it's being cancelled
@@ -648,7 +651,23 @@ impl Scheduler {
 
     fn refresh_deadlines(&mut self) {
         let current_ticks = self.current_ticks;
-        for (task_id, info) in self.tasks.iter_mut() {
+        // Visit tasks in a fixed order so the audit log is deterministic
+        // (`tasks` is a HashMap).
+        let mut ordered: Vec<TaskId> = self
+            .tasks
+            .iter()
+            .filter(|(_, info)| info.realtime.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        ordered.sort_by_key(|id| id.as_uuid().as_u128());
+        for task_id in ordered {
+            let Some(info) = self.tasks.get_mut(&task_id) else {
+                continue;
+            };
+            // Finished tasks hold no reservation and miss no deadlines.
+            if info.is_finished() {
+                continue;
+            }
             if let Some(realtime) = info.realtime.as_mut() {
                 if realtime.params.period_ticks == 0 {
                     continue;
@@ -657,7 +676,7 @@ impl Scheduler {
                     if realtime.remaining_budget > 0 {
                         realtime.deadline_misses += 1;
                         self.audit_log.push(ScheduleEvent::DeadlineMissed {
-                            task_id: *task_id,
+                            task_id,
                             deadline_tick: realtime.next_deadline,
                             timestamp_ticks: current_ticks,
                         });
