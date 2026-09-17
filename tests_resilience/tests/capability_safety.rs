@@ -58,16 +58,23 @@ fn test_explicit_capability_grant() {
         .grant_capability(task1.task_id, cap)
         .expect("Failed to grant to task1");
 
-    // Task2 should NOT have the capability unless explicitly granted
-    // In a real system with capability tracking, this would be enforced
-    // For now, we verify the grant operation succeeds for valid tasks
+    // Task2 does not have the capability unless explicitly granted.
+    assert!(kernel.is_capability_valid(123, task1.task_id));
+    assert!(!kernel.is_capability_valid(123, task2.task_id));
 
-    // Explicit grant to task2
+    // A capability has one holder: granting the same id to task2 while
+    // task1 still holds it is rejected (Phase 264), so authority cannot be
+    // duplicated or silently moved without a delegation.
+    assert!(kernel.grant_capability(task2.task_id, cap).is_err());
+    assert!(kernel.is_capability_valid(123, task1.task_id));
+    assert!(!kernel.is_capability_valid(123, task2.task_id));
+
+    // Delegation is the explicit way to move it.
     kernel
-        .grant_capability(task2.task_id, cap)
-        .expect("Failed to grant to task2");
-
-    // Both tasks now have the capability (explicit grants)
+        .delegate_capability(123, task1.task_id, task2.task_id)
+        .expect("delegate to task2");
+    assert!(!kernel.is_capability_valid(123, task1.task_id));
+    assert!(kernel.is_capability_valid(123, task2.task_id));
     assert_eq!(kernel.task_count(), 2);
 }
 

@@ -1225,6 +1225,23 @@ impl SimulatedKernel {
     }
 
     /// Records a capability grant in the authority table
+    /// A capability id may be re-issued only once nobody can use it any
+    /// more (revoked, dropped, expired, or its owner is dead). Granting an id
+    /// that is still live would overwrite the owner without a delegation
+    /// check, which the capability model checker
+    /// (formal_verification/tests/capability_model.rs) flags as theft.
+    fn reject_existing_capability(&self, cap_id: u64) -> Result<(), KernelError> {
+        if let Some(meta) = self.capability_table.get(&cap_id) {
+            if self.validate_capability(cap_id, meta.owner).is_ok() {
+                return Err(KernelError::InvalidCapability(format!(
+                    "capability {cap_id} is still held by {:?}",
+                    meta.owner
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn record_capability_grant(
         &mut self,
         cap_id: u64,
@@ -1295,6 +1312,7 @@ impl SimulatedKernel {
         if !self.tasks.contains_key(&task) {
             return Err(KernelError::SendFailed("Target task not found".to_string()));
         }
+        self.reject_existing_capability(capability.id())?;
 
         let expires_at = self
             .current_time
@@ -2186,6 +2204,7 @@ impl KernelApi for SimulatedKernel {
         if !self.tasks.contains_key(&task) {
             return Err(KernelError::SendFailed("Task not found".to_string()));
         }
+        self.reject_existing_capability(capability.id())?;
 
         // Record the capability grant in the authority table
         // For now, we use a generic type name since Cap<()> is type-erased
