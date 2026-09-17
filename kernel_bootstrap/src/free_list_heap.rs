@@ -5,8 +5,8 @@
 //! frame (about 58 KiB and a thousand allocations per pointer move). This
 //! heap frees. It is intentionally simple: an address-ordered singly linked
 //! free list, first fit, split on allocate, coalesce with both neighbours on
-//! free, 16-byte granularity. Single-CPU only (no SMP yet), like the rest of
-//! `kernel_bootstrap`.
+//! free, 16-byte granularity. The free list sits behind a `SpinLock` so
+//! application processors can allocate too.
 //!
 //! Layout of an allocated block: `[Header][pad?][payload]`, where the header
 //! sits immediately before the payload and records the whole block's size
@@ -14,8 +14,8 @@
 //! recover the block from the payload pointer alone.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::ptr;
+use hal_x86_64::SpinLock;
 
 /// Allocation granularity; every block boundary is a multiple of this.
 pub const GRANULE: usize = 16;
@@ -60,12 +60,12 @@ struct Inner {
 
 /// Global-allocator-capable free-list heap.
 pub struct FreeListHeap {
-    inner: UnsafeCell<Inner>,
+    inner: SpinLock<Inner>,
 }
 
-// SAFETY: kernel_bootstrap runs on a single CPU with no preemption inside
-// allocator calls (interrupt handlers do not allocate).
-unsafe impl Sync for FreeListHeap {}
+// SAFETY: raw pointers inside `Inner` only ever point into the heap region,
+// which is owned by the lock.
+unsafe impl Send for Inner {}
 
 const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
@@ -75,7 +75,7 @@ impl FreeListHeap {
     /// An uninitialised heap; every allocation fails until `init`.
     pub const fn empty() -> Self {
         Self {
-            inner: UnsafeCell::new(Inner {
+            inner: SpinLock::new(Inner {
                 start: 0,
                 end: 0,
                 head: ptr::null_mut(),
@@ -92,7 +92,8 @@ impl FreeListHeap {
     /// # Safety
     /// Caller guarantees exclusive ownership of the memory range.
     pub unsafe fn init(&self, start: usize, size: usize) {
-        let inner = &mut *self.inner.get();
+        let mut inner = self.inner.lock();
+        let inner = &mut *inner;
         let start = align_up(start, GRANULE);
         let end = (start + size) & !(GRANULE - 1);
         inner.start = start;
@@ -113,7 +114,7 @@ impl FreeListHeap {
     pub fn stats(&self) -> HeapStats {
         // SAFETY: single-CPU read of the free list.
         unsafe {
-            let inner = &*self.inner.get();
+            let inner = self.inner.lock();
             let mut free = 0;
             let mut largest = 0;
             let mut blocks = 0;
@@ -138,7 +139,8 @@ impl FreeListHeap {
     }
 
     unsafe fn alloc_inner(&self, layout: Layout) -> *mut u8 {
-        let inner = &mut *self.inner.get();
+        let mut inner = self.inner.lock();
+        let inner = &mut *inner;
         let align = layout.align().max(GRANULE);
         let size = align_up(layout.size().max(1), GRANULE);
 
@@ -198,7 +200,8 @@ impl FreeListHeap {
     }
 
     unsafe fn dealloc_inner(&self, payload: *mut u8) {
-        let inner = &mut *self.inner.get();
+        let mut inner = self.inner.lock();
+        let inner = &mut *inner;
         let header = (payload as usize - HEADER) as *mut Header;
         let block_start = payload as usize - HEADER - (*header).pad;
         let block_size = (*header).size;

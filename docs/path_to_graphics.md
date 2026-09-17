@@ -215,4 +215,4 @@ Every story in this roadmap is implemented (Phases 203 to 251). Milestones A to 
 
 ## Immediate Next Story
 
-The graphics track is complete, and persistent bare-metal storage landed in Phases 252-253 (virtio-blk over PCI, existing disks are mounted rather than reformatted). The next high-value items from `docs/next_steps.md` are SMP bring-up and networking.
+The graphics track is complete, and persistent bare-metal storage landed in Phases 252-253 (virtio-blk over PCI, existing disks are mounted rather than reformatted). SMP bring-up started in Phase 254 (all CPUs online and parked). The next high-value items from `docs/next_steps.md` are per-CPU scheduling and networking.

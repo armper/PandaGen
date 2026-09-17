@@ -182,7 +182,7 @@ let audit = kernel.scheduler_audit();
 
 **What We DON'T Have (Intentionally)**:
 - ❌ Priorities or fairness policies
-- ❌ SMP / multi-core scheduling
+- 🟡 SMP: application processors are brought online and parked (Phase 254); no multi-core scheduling yet
 - ❌ Blocking syscalls or user/kernel mode
 - ❌ Real interrupt controller integration (yet)
 - ❌ Starvation prevention

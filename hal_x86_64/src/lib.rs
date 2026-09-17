@@ -23,6 +23,8 @@ pub mod mouse;
 pub mod paging;
 pub mod pci;
 pub mod port_io;
+pub mod smp;
+pub mod spin;
 pub mod tick;
 pub mod timer;
 pub mod virtio;
@@ -40,6 +42,8 @@ pub use paging::{
 };
 pub use pci::{PciAddress, PciDeviceInfo};
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
+pub use smp::{CpuRegistry, MAX_CPUS};
+pub use spin::{SpinGuard, SpinLock};
 pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
 pub use virtio::{

@@ -451,6 +451,17 @@ impl WorkspaceSession {
 
         command_palette.register_command(
             CommandDescriptor::new(
+                "cpus",
+                "Show CPUs",
+                "Display online CPUs and LAPIC ids",
+                vec!["cpus".to_string(), "smp".to_string()],
+            )
+            .with_category("System"),
+            Box::new(|_| Ok("CPU info".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
                 "ticks",
                 "Show System Ticks",
                 "Display system tick count",
@@ -1128,6 +1139,9 @@ impl WorkspaceSession {
                 // Delegate to existing mem command
                 self.delegate_to_command_service(ctx, serial, "mem");
             }
+            "cpus" => {
+                self.delegate_to_command_service(ctx, serial, "cpus");
+            }
             "ticks" => {
                 // Delegate to existing ticks command
                 self.delegate_to_command_service(ctx, serial, "ticks");
@@ -1616,7 +1630,7 @@ impl WorkspaceSession {
         }
 
         match cmd_id.as_str() {
-            "help" | "list" | "halt" | "boot" | "mem" | "ticks" | "ls" | "clear" => {
+            "help" | "list" | "halt" | "boot" | "mem" | "cpus" | "ticks" | "ls" | "clear" => {
                 self.set_command_text(cmd_id.as_str());
                 self.execute_command(ctx, serial);
             }

@@ -59,6 +59,9 @@ fn cmd_iso() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// vCPUs given to QEMU; the kernel brings the extra ones online at boot.
+const QEMU_SMP: &str = "4";
+
 fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let iso = root.join(ISO_OUTPUT);
@@ -98,7 +101,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -112,6 +115,8 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .current_dir(&root)
         .arg("-machine")
         .arg("pc")
+        .arg("-smp")
+        .arg(QEMU_SMP)
         .arg("-m")
         .arg("512M")
         .arg("-cdrom")
@@ -166,6 +171,8 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .current_dir(&root)
         .arg("-machine")
         .arg("pc")
+        .arg("-smp")
+        .arg(QEMU_SMP)
         .arg("-m")
         .arg("512M")
         .arg("-vga")
@@ -269,6 +276,8 @@ fn cmd_qemu_script(
         .current_dir(&root)
         .arg("-machine")
         .arg("pc")
+        .arg("-smp")
+        .arg(QEMU_SMP)
         .arg("-m")
         .arg("512M")
         .arg("-cdrom")

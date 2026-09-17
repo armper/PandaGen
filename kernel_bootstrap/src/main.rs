@@ -52,7 +52,7 @@ use limine::memory_map::EntryType;
 #[cfg(all(not(test), target_os = "none"))]
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest,
+    MemoryMapRequest, MpRequest,
 };
 #[cfg(all(not(test), target_os = "none"))]
 use limine::BaseRevision;
@@ -376,11 +376,18 @@ fn install_idt() {
         // Set up PS/2 mouse interrupt (IRQ 12 = vector 44, via slave PIC)
         IDT[44].set_handler(irq_mouse_entry, code_segment);
 
-        let idtr = IdtPointer {
-            limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
-            base: core::ptr::addr_of!(IDT) as *const _ as u64,
-        };
+        load_idt();
+    }
+}
 
+/// Point this CPU at the shared IDT (used by the BSP and every AP).
+#[cfg(not(test))]
+fn load_idt() {
+    let idtr = IdtPointer {
+        limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
+        base: core::ptr::addr_of!(IDT) as *const _ as u64,
+    };
+    unsafe {
         asm!(
             "lidt [{}]",
             in(reg) &idtr,
@@ -705,6 +712,14 @@ pub extern "C" fn rust_main() -> ! {
             idt_flags, idt_selector
         );
     }
+
+    let _ = CPUS.register(
+        MP_REQUEST
+            .get_response()
+            .map(|r| r.bsp_lapic_id())
+            .unwrap_or(0),
+    );
+    start_application_processors(&mut serial);
 
     init_pic();
     kprintln!(serial, "PIC remapped to IRQ base 32");
@@ -3668,7 +3683,61 @@ static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
 #[cfg(all(not(test), target_os = "none"))]
+#[used]
+#[link_section = ".limine_requests"]
+static MP_REQUEST: MpRequest = MpRequest::new();
+
+#[cfg(all(not(test), target_os = "none"))]
 static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
+
+/// Every CPU that has entered kernel code, BSP first.
+static CPUS: hal_x86_64::CpuRegistry = hal_x86_64::CpuRegistry::new();
+
+/// Number of CPUs the bootloader reported (0 before bring-up).
+static CPU_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// LAPIC id of the boot processor.
+static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Entry point for application processors released by Limine.
+///
+/// Each AP arrives with interrupts disabled on its own 64 KiB stack. It
+/// loads the shared IDT, registers itself, and parks in `hlt` until the
+/// kernel has work to schedule on it.
+#[cfg(all(not(test), target_os = "none"))]
+unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
+    load_idt();
+    let _ = CPUS.register(cpu.lapic_id);
+    halt_loop()
+}
+
+/// Release the application processors and wait for them to register.
+#[cfg(all(not(test), target_os = "none"))]
+fn start_application_processors(serial: &mut serial::SerialPort) {
+    let Some(resp) = MP_REQUEST.get_response() else {
+        CPU_TOTAL.store(1, Ordering::Release);
+        kprintln!(serial, "SMP: no MP response, running on 1 CPU");
+        return;
+    };
+    let bsp = resp.bsp_lapic_id();
+    BSP_LAPIC_ID.store(bsp, Ordering::Release);
+    let cpus = resp.cpus();
+    CPU_TOTAL.store(cpus.len() as u32, Ordering::Release);
+    for cpu in cpus {
+        if cpu.lapic_id != bsp {
+            cpu.goto_address.write(ap_entry);
+        }
+    }
+    let all_up = CPUS.wait_for(cpus.len(), 50_000_000);
+    klog!(
+        serial,
+        "SMP: {} of {} CPUs online (bsp lapic {}){}\r\n",
+        CPUS.online(),
+        cpus.len(),
+        bsp,
+        if all_up { "" } else { " [timeout]" }
+    );
+}
 
 #[cfg(all(not(test), target_os = "none"))]
 #[global_allocator]
@@ -4500,7 +4569,7 @@ impl CommandService {
             "help" => {
                 let _ = writeln!(
                     output,
-                    "commands: help, halt, boot, mem, alloc, heap, heap-alloc, ticks"
+                    "commands: help, halt, boot, mem, cpus, alloc, heap, heap-alloc, ticks"
                 );
             }
             "halt" => {
@@ -4535,6 +4604,21 @@ impl CommandService {
                     }
                     _ => {
                         let _ = writeln!(output, "kernel: address unavailable");
+                    }
+                }
+            }
+            "cpus" => {
+                let total = CPU_TOTAL.load(core::sync::atomic::Ordering::Acquire);
+                let _ = writeln!(
+                    output,
+                    "cpus: online={} total={} bsp_lapic={}",
+                    CPUS.online(),
+                    total,
+                    BSP_LAPIC_ID.load(core::sync::atomic::Ordering::Acquire)
+                );
+                for index in 0..CPUS.online() {
+                    if let Some(lapic) = CPUS.lapic_id(index) {
+                        let _ = writeln!(output, "  cpu{index}: lapic={lapic}");
                     }
                 }
             }
