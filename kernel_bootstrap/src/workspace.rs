@@ -17,14 +17,21 @@ use alloc::string::{String, ToString};
 use std::string::{String, ToString};
 
 #[cfg(not(test))]
+use alloc::format;
+#[cfg(not(test))]
 use alloc::vec;
 #[cfg(not(test))]
 use alloc::vec::Vec;
 #[cfg(test)]
+use std::format;
+#[cfg(test)]
 use std::vec::Vec;
 
 use crate::serial::SerialPort;
-use crate::{ChannelId, CommandRequest, KernelApiV0, KernelContext, KernelMessage, COMMAND_MAX};
+use crate::{
+    ChannelId, CommandRequest, CommandStatus, KernelApiV0, KernelContext, KernelMessage, MessageId,
+    COMMAND_MAX,
+};
 
 #[cfg(all(debug_assertions, not(test)))]
 use crate::minimal_editor::EditorMode;
@@ -211,6 +218,65 @@ pub struct WorkspaceSession {
     /// Lines the graphical workspace view is scrolled up from the tail
     /// (GFX-038). Reset whenever new output arrives.
     scrollback_offset: usize,
+    /// Pipeline run in progress or last finished (GFX-039).
+    pipeline_run: Option<PipelineRun>,
+    /// Dedicated reply channel for pipeline stages, so the console task
+    /// polling the shared response channel cannot consume stage replies.
+    pipeline_channel: Option<ChannelId>,
+}
+
+/// Lifecycle of one pipeline stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageState {
+    Pending,
+    Running { request_id: MessageId, started: u64 },
+    Succeeded { ticks: u64, summary: String },
+    Failed { ticks: u64, error: String },
+}
+
+/// One stage: a command routed through the kernel command service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageRun {
+    pub command: String,
+    pub state: StageState,
+}
+
+/// A sequential pipeline of kernel commands with a per-stage trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineRun {
+    pub stages: Vec<StageRun>,
+    pub started: u64,
+    pub finished: Option<u64>,
+}
+
+impl PipelineRun {
+    pub fn running_index(&self) -> Option<usize> {
+        self.stages
+            .iter()
+            .position(|s| matches!(s.state, StageState::Running { .. }))
+    }
+
+    pub fn done_count(&self) -> usize {
+        self.stages
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.state,
+                    StageState::Succeeded { .. } | StageState::Failed { .. }
+                )
+            })
+            .count()
+    }
+
+    pub fn failed(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|s| matches!(s.state, StageState::Failed { .. }))
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.is_some()
+    }
 }
 
 /// File picker state: a flat listing of the root with a selection.
@@ -450,6 +516,8 @@ impl WorkspaceSession {
             editor_path: None,
             file_picker: None,
             scrollback_offset: 0,
+            pipeline_run: None,
+            pipeline_channel: None,
         }
     }
 
@@ -873,6 +941,14 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "pipeline" {
+            self.emit_command_line(serial, command.as_bytes());
+            let sub = parts.next();
+            let rest = parts.next();
+            self.run_pipeline_command(serial, sub, rest);
+            return;
+        }
+
         // Parse command
         self.emit_command_line(serial, command.as_bytes());
 
@@ -892,6 +968,10 @@ impl WorkspaceSession {
                 self.emit_line(serial, "clear | cls    - Clear the screen");
                 self.emit_line(serial, "display <mode> - Switch text | graphics display");
                 self.emit_line(serial, "pointer        - Show pointer position and buttons");
+                self.emit_line(
+                    serial,
+                    "pipeline run a,b,c | status | clear - Run kernel commands as stages",
+                );
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
@@ -1029,7 +1109,7 @@ impl WorkspaceSession {
                                 Err(_) => {
                                     self.emit_line(
                                         serial,
-                                        &alloc::format!("Error: file not found: {}", path),
+                                        &format!("Error: file not found: {}", path),
                                     );
                                 }
                             }
@@ -1051,7 +1131,7 @@ impl WorkspaceSession {
                         if let Some(ref mut fs) = self.filesystem {
                             match fs.write_file_by_name(path, text.as_bytes()) {
                                 Ok(_) => {
-                                    self.emit_line(serial, &alloc::format!("Wrote to {}", path));
+                                    self.emit_line(serial, &format!("Wrote to {}", path));
                                 }
                                 Err(_) => {
                                     self.emit_line(serial, "Error: failed to write file");
@@ -1473,6 +1553,215 @@ impl WorkspaceSession {
         return true;
     }
 
+    fn run_pipeline_command(
+        &mut self,
+        serial: &mut SerialPort,
+        sub: Option<&str>,
+        rest: Option<&str>,
+    ) {
+        match sub {
+            Some("run") => {
+                let Some(spec) = rest else {
+                    self.emit_line(serial, "Usage: pipeline run <cmd>[,<cmd>...]");
+                    return;
+                };
+                if self
+                    .pipeline_run
+                    .as_ref()
+                    .is_some_and(|run| !run.is_finished())
+                {
+                    self.emit_line(serial, "A pipeline is already running.");
+                    return;
+                }
+                let stages: Vec<StageRun> = spec
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(|c| StageRun {
+                        command: c.to_string(),
+                        state: StageState::Pending,
+                    })
+                    .collect();
+                if stages.is_empty() {
+                    self.emit_line(serial, "Usage: pipeline run <cmd>[,<cmd>...]");
+                    return;
+                }
+                if self.pipeline_channel.is_none() {
+                    self.emit_line(serial, "Pipeline runtime unavailable (no reply channel).");
+                    return;
+                }
+                let count = stages.len();
+                self.pipeline_run = Some(PipelineRun {
+                    stages,
+                    started: 0,
+                    finished: None,
+                });
+                let mut line = String::from("Pipeline started: ");
+                line.push_str(&format!("{} stage(s)", count));
+                self.emit_line(serial, &line);
+            }
+            None | Some("status") => match &self.pipeline_run {
+                None => self.emit_line(serial, "No pipeline run."),
+                Some(run) => {
+                    let lines = pipeline_trace_lines(run);
+                    let header = format!(
+                        "Pipeline: {}/{} stages done{}",
+                        run.done_count(),
+                        run.stages.len(),
+                        if run.failed() { " (failed)" } else { "" }
+                    );
+                    self.emit_line(serial, &header);
+                    for line in lines {
+                        self.emit_line(serial, &line);
+                    }
+                }
+            },
+            Some("clear") => {
+                self.pipeline_run = None;
+                self.emit_line(serial, "Pipeline cleared.");
+            }
+            Some(_) => self.emit_line(
+                serial,
+                "Usage: pipeline run <cmd>[,<cmd>...] | status | clear",
+            ),
+        }
+    }
+
+    /// Install the reply channel pipeline stages use.
+    pub fn set_pipeline_channel(&mut self, channel: ChannelId) {
+        self.pipeline_channel = Some(channel);
+    }
+
+    pub fn pipeline_run(&self) -> Option<&PipelineRun> {
+        self.pipeline_run.as_ref()
+    }
+
+    /// Advance the pipeline: submit the next pending stage to the kernel
+    /// command service when nothing is running, and consume the response of
+    /// the running stage. Returns true when the trace changed.
+    pub fn pipeline_poll(
+        &mut self,
+        ctx: &mut KernelContext,
+        serial: &mut SerialPort,
+        now: u64,
+    ) -> bool {
+        let Some(reply_channel) = self.pipeline_channel else {
+            return false;
+        };
+        let Some(run) = self.pipeline_run.as_mut() else {
+            return false;
+        };
+        if run.is_finished() {
+            return false;
+        }
+        if run.started == 0 {
+            run.started = now;
+        }
+        let mut changed = false;
+
+        // Consume responses for the running stage.
+        if let Some(index) = run.running_index() {
+            let StageState::Running {
+                request_id,
+                started,
+            } = run.stages[index].state.clone()
+            else {
+                unreachable!()
+            };
+            while let Some(message) = ctx.try_recv(reply_channel) {
+                let KernelMessage::CommandResponse(response) = message else {
+                    continue;
+                };
+                if response.correlation_id != request_id {
+                    continue;
+                }
+                let ticks = now.saturating_sub(started);
+                let state = match &response.status {
+                    CommandStatus::Ok => StageState::Succeeded {
+                        ticks,
+                        summary: response
+                            .output_str()
+                            .and_then(|o| o.lines().next())
+                            .unwrap_or("")
+                            .to_string(),
+                    },
+                    CommandStatus::Error(err) => StageState::Failed {
+                        ticks,
+                        error: err.as_str().unwrap_or("error").to_string(),
+                    },
+                };
+                let ok = matches!(state, StageState::Succeeded { .. });
+                let _ = writeln!(
+                    serial,
+                    "pipeline: stage {} {} ({} ticks)",
+                    index + 1,
+                    if ok { "ok" } else { "failed" },
+                    ticks
+                );
+                run.stages[index].state = state;
+                changed = true;
+                if !ok {
+                    run.finished = Some(now);
+                }
+                break;
+            }
+        }
+
+        // Submit the next pending stage.
+        if run.running_index().is_none() && !run.is_finished() {
+            match run
+                .stages
+                .iter()
+                .position(|s| matches!(s.state, StageState::Pending))
+            {
+                Some(index) => {
+                    let request_id = ctx.next_message_id();
+                    let command = run.stages[index].command.clone();
+                    let bytes = command.as_bytes();
+                    let len = bytes.len().min(COMMAND_MAX);
+                    match CommandRequest::from_bytes(&bytes[..len], request_id, reply_channel) {
+                        Some(request)
+                            if ctx
+                                .send(self.command_channel, KernelMessage::CommandRequest(request))
+                                .is_ok() =>
+                        {
+                            run.stages[index].state = StageState::Running {
+                                request_id,
+                                started: now,
+                            };
+                        }
+                        _ => {
+                            run.stages[index].state = StageState::Failed {
+                                ticks: 0,
+                                error: "could not submit".to_string(),
+                            };
+                            run.finished = Some(now);
+                        }
+                    }
+                    changed = true;
+                }
+                None => {
+                    run.finished = Some(now);
+                    changed = true;
+                    let total = now.saturating_sub(run.started);
+                    let _ = writeln!(serial, "pipeline: finished in {} ticks", total);
+                    let summary = format!(
+                        "Pipeline finished: {} stage(s) in {} ticks",
+                        run.stages.len(),
+                        total
+                    );
+                    self.push_output_bytes(summary.as_bytes());
+                    self.push_notice(NoticeLevel::Success, &summary);
+                }
+            }
+        } else if changed && run.is_finished() && run.failed() {
+            let text = format!("Pipeline failed at stage {}", run.done_count());
+            self.push_output_bytes(text.as_bytes());
+            self.push_notice(NoticeLevel::Error, &text);
+        }
+        changed
+    }
+
     /// Open the file picker over the root listing.
     pub fn open_file_picker(&mut self, serial: &mut SerialPort) {
         if self.is_editor_active() {
@@ -1886,6 +2175,23 @@ impl OutputLine {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+}
+
+/// One text line per stage: `[state] command  detail`.
+pub fn pipeline_trace_lines(run: &PipelineRun) -> Vec<String> {
+    run.stages
+        .iter()
+        .map(|stage| match &stage.state {
+            StageState::Pending => format!("[ .. ] {}", stage.command),
+            StageState::Running { .. } => format!("[ >> ] {}", stage.command),
+            StageState::Succeeded { ticks, summary } => {
+                format!("[ ok ] {}  {} ticks  {}", stage.command, ticks, summary)
+            }
+            StageState::Failed { ticks, error } => {
+                format!("[FAIL] {}  {} ticks  {}", stage.command, ticks, error)
+            }
+        })
+        .collect()
 }
 
 /// Append a signed decimal without allocating.

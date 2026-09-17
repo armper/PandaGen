@@ -925,6 +925,11 @@ fn workspace_loop(
     let response_channel = ChannelId(1);
 
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
+    // GFX-039: pipeline stages reply on their own channel.
+    match kernel.create_channel() {
+        Ok(channel) => workspace.set_pipeline_channel(channel),
+        Err(_) => kprintln!(serial, "pipeline: no reply channel available"),
+    }
 
     // Install filesystem if available
     if let Some(fs) = filesystem {
@@ -1357,6 +1362,29 @@ fn workspace_loop(
                     // The cursor is a desktop surface: moving it is a redraw.
                     input_dirty = true;
                 }
+            }
+        }
+
+        // Advance any pipeline run through the kernel command service.
+        {
+            let Kernel {
+                boot,
+                allocator,
+                heap,
+                channels,
+                next_message_id,
+                ..
+            } = kernel;
+            let mut ctx = KernelContext {
+                boot,
+                allocator,
+                heap,
+                channels,
+                next_message_id,
+            };
+            if workspace.pipeline_poll(&mut ctx, serial, get_tick_count()) {
+                input_dirty = true;
+                output_dirty = true;
             }
         }
 
@@ -2565,6 +2593,16 @@ fn build_desktop_model(
     model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
 
     model.scrollback_offset = workspace.scrollback_offset();
+    if let Some(run) = workspace.pipeline_run() {
+        model.pipeline = Some(desktop_frame::PipelineModel {
+            lines: workspace::pipeline_trace_lines(run),
+            running: run.running_index(),
+            done: run.done_count(),
+            total: run.stages.len(),
+            failed: run.failed(),
+            finished: run.is_finished(),
+        });
+    }
 
     if let Some(picker) = workspace.file_picker() {
         model.picker = Some(desktop_frame::PickerModel {

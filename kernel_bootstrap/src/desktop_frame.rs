@@ -90,6 +90,19 @@ pub fn picker_entry_at_line(line: usize) -> Option<usize> {
     line.checked_sub(PICKER_ENTRIES_FIRST_LINE)
 }
 
+/// Pipeline status surface content (GFX-039).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PipelineModel {
+    /// One line per stage, already formatted.
+    pub lines: Vec<String>,
+    /// Index of the running stage, if any.
+    pub running: Option<usize>,
+    pub done: usize,
+    pub total: usize,
+    pub failed: bool,
+    pub finished: bool,
+}
+
 /// Everything the desktop needs to know about the workspace for one frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DesktopModel {
@@ -111,6 +124,8 @@ pub struct DesktopModel {
     pub picker: Option<PickerModel>,
     /// Lines the scrollback view is scrolled up from the tail.
     pub scrollback_offset: usize,
+    /// Pipeline run shown in the workspace window (no editor or picker).
+    pub pipeline: Option<PipelineModel>,
     /// Pointer position in surface pixels; `None` hides the cursor.
     pub pointer: Option<(usize, usize)>,
     /// Whether the text caret is drawn this frame (blink phase).
@@ -253,6 +268,31 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
             }
             (frame, title)
         }
+        None if model.pipeline.is_some() && model.picker.is_none() => {
+            // Pipeline status surface: the trace on top, prompt pinned below.
+            let pipeline = model.pipeline.as_ref().expect("checked");
+            let mut lines: Vec<String> = pipeline
+                .lines
+                .iter()
+                .take(content_rows.saturating_sub(2))
+                .cloned()
+                .collect();
+            lines.push(String::new());
+            let prompt_line = lines.len();
+            lines.push(model.prompt.clone());
+            let frame = ViewFrame::new(id, ViewKind::Panel, 0, ViewContent::text_buffer(lines), 0)
+                .with_cursor(CursorPosition::new(prompt_line, model.prompt_cursor));
+            let title = if pipeline.finished {
+                if pipeline.failed {
+                    String::from("Pipeline (failed)")
+                } else {
+                    String::from("Pipeline (done)")
+                }
+            } else {
+                String::from("Pipeline (running)")
+            };
+            (frame, title)
+        }
         None if model.picker.is_some() => {
             let picker = model.picker.as_ref().expect("checked");
             let mut lines = Vec::with_capacity(picker.entries.len() + 1);
@@ -336,18 +376,25 @@ pub fn build_desktop_windows(
             )
         })
         .unwrap_or_else(|| model.status.clone());
-    let status_left = match (&model.editor, &model.picker) {
-        (None, Some(picker)) => alloc::format!(
+    let status_left = match (&model.editor, &model.picker, &model.pipeline) {
+        (None, Some(picker), _) => alloc::format!(
             "Files: {} entries  Up/Down select  Enter open  Esc close",
             picker.entries.len()
         ),
+        (None, None, Some(pipeline)) => alloc::format!(
+            "Pipeline: {}/{} stages done{}  (pipeline clear to dismiss)",
+            pipeline.done,
+            pipeline.total,
+            if pipeline.failed { ", failed" } else { "" }
+        ),
         _ => status_left,
     };
-    let workspace_highlight = match (&model.editor, &model.picker) {
-        (Some(editor), _) => editor.cursor.map(|(line, _)| line),
-        (None, Some(picker)) if !picker.entries.is_empty() => {
+    let workspace_highlight = match (&model.editor, &model.picker, &model.pipeline) {
+        (Some(editor), _, _) => editor.cursor.map(|(line, _)| line),
+        (None, Some(picker), _) if !picker.entries.is_empty() => {
             Some(PICKER_ENTRIES_FIRST_LINE + picker.selection)
         }
+        (None, None, Some(pipeline)) => pipeline.running,
         _ => None,
     };
 
@@ -503,6 +550,7 @@ mod tests {
             palette: None,
             picker: None,
             scrollback_offset: 0,
+            pipeline: None,
             pointer: None,
             caret_visible: true,
             launcher: vec![
@@ -743,6 +791,50 @@ mod tests {
             panic!()
         };
         assert_eq!(lines[0], "0");
+    }
+
+    #[test]
+    fn test_pipeline_model_renders_trace_with_running_stage_highlighted() {
+        let layout = DesktopLayout::for_pixels(1280, 800);
+        let mut model = sample_model();
+        model.pipeline = Some(PipelineModel {
+            lines: vec![
+                "[ ok ] help  1 ticks  commands: help".to_string(),
+                "[ >> ] ticks".to_string(),
+                "[ .. ] mem".to_string(),
+            ],
+            running: Some(1),
+            done: 1,
+            total: 3,
+            failed: false,
+            finished: false,
+        });
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        let main = find(&windows, DesktopWindowRole::Main);
+        assert_eq!(main.frame.title.as_deref(), Some("Pipeline (running)"));
+        assert_eq!(main.highlight_line, Some(1));
+        let ViewContent::TextBuffer { lines } = &main.frame.content else {
+            panic!()
+        };
+        assert_eq!(lines[1], "[ >> ] ticks");
+        assert_eq!(lines.last().unwrap(), "WS > ls", "prompt pinned");
+        assert_eq!(main.frame.cursor, Some(CursorPosition::new(4, 7)));
+        let ViewContent::StatusLine { text } =
+            &find(&windows, DesktopWindowRole::Status).frame.content
+        else {
+            panic!()
+        };
+        assert!(text.starts_with("Pipeline: 1/3 stages done"), "{text}");
+
+        let mut failed = model.clone();
+        let p = failed.pipeline.as_mut().unwrap();
+        p.running = None;
+        p.failed = true;
+        p.finished = true;
+        let windows = build_desktop_windows(&layout, &failed, &DesktopViewIds::new());
+        let main = find(&windows, DesktopWindowRole::Main);
+        assert_eq!(main.frame.title.as_deref(), Some("Pipeline (failed)"));
+        assert_eq!(main.highlight_line, None);
     }
 
     #[test]
