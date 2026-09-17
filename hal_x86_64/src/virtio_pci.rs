@@ -117,6 +117,55 @@ impl<P: PortIo> VirtioPciLegacy<P> {
     }
 }
 
+impl<P: PortIo> crate::virtio::VirtioTransport for VirtioPciLegacy<P> {
+    fn begin(&mut self) {
+        self.set_status(0);
+        self.add_status(crate::virtio::VIRTIO_STATUS_ACKNOWLEDGE as u8);
+        self.add_status(crate::virtio::VIRTIO_STATUS_DRIVER as u8);
+    }
+
+    fn negotiate_no_features(&mut self) -> bool {
+        // Legacy has no FEATURES_OK handshake; writing zero guest features
+        // simply declines everything optional.
+        let _ = self.host_features();
+        self.set_guest_features(0);
+        true
+    }
+
+    fn setup_queue(
+        &mut self,
+        index: u16,
+        _size: u16,
+        placement: crate::virtio::QueuePlacement,
+    ) -> Option<u16> {
+        self.select_queue(index);
+        let size = self.queue_size();
+        if size == 0 {
+            return None;
+        }
+        // Legacy: the device derives avail/used from the descriptor page.
+        self.set_queue_pfn(placement.desc_phys);
+        Some(size)
+    }
+
+    fn queue_max_size(&mut self, index: u16) -> u16 {
+        self.select_queue(index);
+        self.queue_size()
+    }
+
+    fn driver_ok(&mut self) {
+        self.add_status(crate::virtio::VIRTIO_STATUS_DRIVER_OK as u8);
+    }
+
+    fn notify(&mut self, queue: u16) {
+        VirtioPciLegacy::notify(self, queue);
+    }
+
+    fn read_config_u64(&mut self, offset: usize) -> u64 {
+        VirtioPciLegacy::read_config_u64(self, offset as u16)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

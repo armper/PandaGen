@@ -42,8 +42,10 @@ pub use pci::{PciAddress, PciDeviceInfo};
 pub use port_io::{FakePortIo, PortIo, RealPortIo};
 pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
-pub use virtio::{VirtioMmioDevice, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue};
-pub use virtio_blk::VirtioBlkDevice;
+pub use virtio::{
+    QueuePlacement, VirtioMmioDevice, VirtioTransport, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue,
+};
+pub use virtio_blk::{DmaBuffers, QueueMemory, VirtioBlkDevice};
 pub use virtio_pci::{LegacyQueueLayout, VirtioPciLegacy};
 
 /// x86_64 CPU implementation (skeleton)

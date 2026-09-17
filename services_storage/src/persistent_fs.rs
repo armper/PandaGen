@@ -109,6 +109,17 @@ pub struct PersistentFilesystem<D: BlockDevice> {
 impl<D: BlockDevice> PersistentFilesystem<D> {
     /// Create a new filesystem with an empty root directory
     pub fn format(device: D, owner: impl Into<String>) -> Result<Self, TransactionError> {
+        Self::format_with_root(device, owner, ObjectId::new())
+    }
+
+    /// Format with a caller-chosen root directory id, so the filesystem can
+    /// be reopened later with `open(device, root_dir_id)` without the id
+    /// having been stored anywhere else.
+    pub fn format_with_root(
+        device: D,
+        owner: impl Into<String>,
+        root_dir_id: ObjectId,
+    ) -> Result<Self, TransactionError> {
         let mut storage = BlockStorage::format(device)
             .map_err(|e| TransactionError::StorageError(format!("format failed: {:?}", e)))?;
 
@@ -118,7 +129,6 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
             .map_err(|e| TransactionError::StorageError(format!("serialize failed: {:?}", e)))?;
 
         // Write root directory to storage
-        let root_dir_id = ObjectId::new();
         let mut tx = storage.begin_transaction()?;
         storage.write(&mut tx, root_dir_id, &root_json)?;
         storage.commit(&mut tx)?;

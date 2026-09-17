@@ -8,10 +8,39 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use hal::{BlockDevice, RamDisk};
 #[cfg(all(not(test), target_os = "none"))]
-use hal_x86_64::virtio::VIRTQ_MAX_SIZE;
+use hal_x86_64::virtio::{QueuePlacement, VIRTQ_MAX_SIZE};
 #[cfg(all(not(test), target_os = "none"))]
-use hal_x86_64::{VirtioBlkDevice, VirtqAvail, VirtqDesc, VirtqUsed};
-use services_storage::{ObjectId, PersistentFilesystem, TransactionError};
+use hal_x86_64::{
+    DmaBuffers, LegacyQueueLayout, QueueMemory, RealPortIo, VirtioBlkDevice, VirtioMmioDevice,
+    VirtioPciLegacy, VirtqAvail, VirtqDesc, VirtqUsed,
+};
+use services_storage::{BlockStorage, ObjectId, PersistentFilesystem, TransactionError};
+
+/// Well-known root directory id for the bare-metal filesystem, so a disk
+/// formatted on one boot can be mounted on the next.
+const ROOT_DIR_ID: ObjectId = ObjectId::from_bytes(*b"PANDAGEN-ROOT-01");
+
+/// Addresses the storage probe needs from the bootloader.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StorageBootInfo {
+    pub hhdm_offset: Option<u64>,
+    /// Physical and virtual base of the kernel image, for translating the
+    /// addresses of static DMA buffers.
+    pub kernel_phys: Option<u64>,
+    pub kernel_virt: Option<u64>,
+}
+
+impl StorageBootInfo {
+    /// Physical address of a kernel-image virtual address.
+    #[allow(dead_code)]
+    fn image_phys(&self, virt: usize) -> Option<u64> {
+        Some(
+            (virt as u64)
+                .wrapping_sub(self.kernel_virt?)
+                .wrapping_add(self.kernel_phys?),
+        )
+    }
+}
 
 const RAM_DISK_BLOCKS: usize = 32;
 
@@ -29,18 +58,45 @@ static mut VIRTQ_AVAIL: VirtqAvail = VirtqAvail::new();
 #[cfg(all(not(test), target_os = "none"))]
 static mut VIRTQ_USED: VirtqUsed = VirtqUsed::new();
 
+/// One page-aligned region holding a legacy-layout virtqueue (desc, avail,
+/// then used on the next page) for up to 256 entries.
+#[cfg(all(not(test), target_os = "none"))]
+#[repr(C, align(4096))]
+struct LegacyQueueArea([u8; 12288]);
+#[cfg(all(not(test), target_os = "none"))]
+static mut LEGACY_QUEUE: LegacyQueueArea = LegacyQueueArea([0; 12288]);
+
+/// DMA scratch: one block of data, request header, status byte.
+#[cfg(all(not(test), target_os = "none"))]
+#[repr(C, align(4096))]
+struct DmaArea {
+    data: [u8; hal::BLOCK_SIZE],
+    header: [u8; 16],
+    status: [u8; 1],
+}
+#[cfg(all(not(test), target_os = "none"))]
+static mut DMA_AREA: DmaArea = DmaArea {
+    data: [0; hal::BLOCK_SIZE],
+    header: [0; 16],
+    status: [0; 1],
+};
+
 /// Boot storage backend choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageBackendKind {
     RamDisk,
     #[cfg(all(not(test), target_os = "none"))]
     VirtioBlkMmio,
+    #[cfg(all(not(test), target_os = "none"))]
+    VirtioBlkPci,
 }
 
 pub(crate) enum StorageBackend {
     RamDisk(RamDisk),
     #[cfg(all(not(test), target_os = "none"))]
-    VirtioBlk(VirtioBlkDevice),
+    VirtioBlk(VirtioBlkDevice<VirtioMmioDevice>),
+    #[cfg(all(not(test), target_os = "none"))]
+    VirtioBlkPci(VirtioBlkDevice<VirtioPciLegacy<RealPortIo>>),
 }
 
 impl StorageBackend {
@@ -49,6 +105,8 @@ impl StorageBackend {
             Self::RamDisk(_) => StorageBackendKind::RamDisk,
             #[cfg(all(not(test), target_os = "none"))]
             Self::VirtioBlk(_) => StorageBackendKind::VirtioBlkMmio,
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(_) => StorageBackendKind::VirtioBlkPci,
         }
     }
 }
@@ -59,6 +117,8 @@ impl BlockDevice for StorageBackend {
             Self::RamDisk(device) => device.block_count(),
             #[cfg(all(not(test), target_os = "none"))]
             Self::VirtioBlk(device) => device.block_count(),
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(device) => device.block_count(),
         }
     }
 
@@ -67,6 +127,8 @@ impl BlockDevice for StorageBackend {
             Self::RamDisk(device) => device.read_block(block_idx, buffer),
             #[cfg(all(not(test), target_os = "none"))]
             Self::VirtioBlk(device) => device.read_block(block_idx, buffer),
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(device) => device.read_block(block_idx, buffer),
         }
     }
 
@@ -75,6 +137,8 @@ impl BlockDevice for StorageBackend {
             Self::RamDisk(device) => device.write_block(block_idx, buffer),
             #[cfg(all(not(test), target_os = "none"))]
             Self::VirtioBlk(device) => device.write_block(block_idx, buffer),
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(device) => device.write_block(block_idx, buffer),
         }
     }
 
@@ -83,6 +147,8 @@ impl BlockDevice for StorageBackend {
             Self::RamDisk(device) => device.flush(),
             #[cfg(all(not(test), target_os = "none"))]
             Self::VirtioBlk(device) => device.flush(),
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(device) => device.flush(),
         }
     }
 }
@@ -92,32 +158,53 @@ pub struct BareMetalFilesystem {
     pub(crate) fs: PersistentFilesystem<StorageBackend>,
     root_id: ObjectId,
     backend_kind: StorageBackendKind,
+    /// True when this boot formatted the disk (no valid superblock found).
+    freshly_formatted: bool,
 }
 
 impl BareMetalFilesystem {
-    /// Create a new filesystem with the best available boot storage backend.
+    /// Create a filesystem with the best available boot storage backend.
     pub fn new() -> Result<Self, TransactionError> {
-        Self::new_with_hhdm(None)
+        Self::new_with_boot(StorageBootInfo::default())
     }
 
     /// Create a filesystem with optional HHDM info for MMIO backend discovery.
-    ///
-    /// On bare-metal (`target_os = "none"`), this attempts virtio-blk MMIO first and
-    /// falls back to RamDisk if no supported device is found.
     pub fn new_with_hhdm(hhdm_offset: Option<u64>) -> Result<Self, TransactionError> {
-        let disk = create_storage_backend(hhdm_offset);
+        Self::new_with_boot(StorageBootInfo {
+            hhdm_offset,
+            ..StorageBootInfo::default()
+        })
+    }
+
+    /// Probe storage (virtio-blk over PCI, then MMIO, then a RAM disk) and
+    /// mount the existing filesystem if the disk carries one; otherwise
+    /// format it with the well-known root id so later boots can mount it.
+    pub fn new_with_boot(boot: StorageBootInfo) -> Result<Self, TransactionError> {
+        let mut disk = create_storage_backend(boot);
         let backend_kind = disk.kind();
-        let fs = PersistentFilesystem::format(disk, "system")?;
+        let formatted = BlockStorage::has_valid_superblock(&mut disk);
+        let (fs, freshly_formatted) = if formatted {
+            (PersistentFilesystem::open(disk, ROOT_DIR_ID)?, false)
+        } else {
+            (
+                PersistentFilesystem::format_with_root(disk, "system", ROOT_DIR_ID)?,
+                true,
+            )
+        };
         let root_id = fs.root_dir_id();
 
         Ok(Self {
             fs,
             root_id,
             backend_kind,
+            freshly_formatted,
         })
     }
 
-    /// Get the root directory ID
+    pub fn was_freshly_formatted(&self) -> bool {
+        self.freshly_formatted
+    }
+
     pub fn root_id(&self) -> ObjectId {
         self.root_id
     }
@@ -133,6 +220,8 @@ impl BareMetalFilesystem {
             StorageBackendKind::RamDisk => "ramdisk",
             #[cfg(all(not(test), target_os = "none"))]
             StorageBackendKind::VirtioBlkMmio => "virtio-blk-mmio",
+            #[cfg(all(not(test), target_os = "none"))]
+            StorageBackendKind::VirtioBlkPci => "virtio-blk-pci",
         }
     }
 
@@ -212,20 +301,81 @@ impl Default for BareMetalFilesystem {
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-fn create_storage_backend(_hhdm_offset: Option<u64>) -> StorageBackend {
+fn create_storage_backend(_boot: StorageBootInfo) -> StorageBackend {
     StorageBackend::RamDisk(RamDisk::new(RAM_DISK_BLOCKS))
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-fn create_storage_backend(hhdm_offset: Option<u64>) -> StorageBackend {
-    unsafe { try_create_virtio_backend(hhdm_offset) }
+fn create_storage_backend(boot: StorageBootInfo) -> StorageBackend {
+    if let Some(device) = unsafe { try_create_virtio_pci_backend(boot) } {
+        return StorageBackend::VirtioBlkPci(device);
+    }
+    unsafe { try_create_virtio_mmio_backend(boot) }
         .map(StorageBackend::VirtioBlk)
         .unwrap_or_else(|| StorageBackend::RamDisk(RamDisk::new(RAM_DISK_BLOCKS)))
 }
 
+/// DMA scratch buffers with physical addresses derived from the kernel image.
 #[cfg(all(not(test), target_os = "none"))]
-unsafe fn try_create_virtio_backend(hhdm_offset: Option<u64>) -> Option<VirtioBlkDevice> {
-    let hhdm_offset = hhdm_offset?;
+unsafe fn dma_buffers(boot: StorageBootInfo) -> Option<DmaBuffers> {
+    let data = core::ptr::addr_of_mut!(DMA_AREA.data) as *mut u8;
+    let header = core::ptr::addr_of_mut!(DMA_AREA.header);
+    let status = core::ptr::addr_of_mut!(DMA_AREA.status) as *mut u8;
+    Some(DmaBuffers {
+        header,
+        header_phys: boot.image_phys(header as usize)?,
+        status,
+        status_phys: boot.image_phys(status as usize)?,
+        data,
+        data_phys: boot.image_phys(data as usize)?,
+    })
+}
+
+/// virtio-blk over PCI (what `cargo xtask qemu` attaches).
+#[cfg(all(not(test), target_os = "none"))]
+unsafe fn try_create_virtio_pci_backend(
+    boot: StorageBootInfo,
+) -> Option<VirtioBlkDevice<VirtioPciLegacy<RealPortIo>>> {
+    let mut io = RealPortIo::new();
+    let info = hal_x86_64::pci::find_virtio_blk(&mut io)?;
+    let base = info.io_base()?;
+    hal_x86_64::pci::enable_io_and_bus_master(&mut io, info.address);
+
+    // Legacy layout inside one page-aligned static area.
+    let area = core::ptr::addr_of_mut!(LEGACY_QUEUE.0) as *mut u8;
+    core::ptr::write_bytes(area, 0, 12288);
+    let layout = LegacyQueueLayout::for_size(VIRTQ_MAX_SIZE as u16);
+    let desc = area.add(layout.desc_offset) as *mut VirtqDesc;
+    let avail = area.add(layout.avail_offset) as *mut VirtqAvail;
+    let used = area.add(layout.used_offset) as *mut VirtqUsed;
+    let area_phys = boot.image_phys(area as usize)?;
+    let placement = QueuePlacement {
+        desc_phys: area_phys + layout.desc_offset as u64,
+        avail_phys: area_phys + layout.avail_offset as u64,
+        used_phys: area_phys + layout.used_offset as u64,
+    };
+    let queue = QueueMemory {
+        desc,
+        avail,
+        used,
+        placement,
+    };
+    let dma = dma_buffers(boot)?;
+    let transport = VirtioPciLegacy::new(RealPortIo::new(), base);
+    let device = VirtioBlkDevice::new(transport, queue, dma).ok()?;
+    if device.block_count() == 0 {
+        return None;
+    }
+    Some(device)
+}
+
+/// virtio-blk over MMIO windows (microvm-style machines).
+#[cfg(all(not(test), target_os = "none"))]
+unsafe fn try_create_virtio_mmio_backend(
+    boot: StorageBootInfo,
+) -> Option<VirtioBlkDevice<VirtioMmioDevice>> {
+    let hhdm_offset = boot.hhdm_offset?;
+    let dma = dma_buffers(boot)?;
 
     for region in VIRTIO_MMIO_REGIONS {
         for slot in 0..VIRTIO_MMIO_SLOTS_PER_REGION {
@@ -233,12 +383,28 @@ unsafe fn try_create_virtio_backend(hhdm_offset: Option<u64>) -> Option<VirtioBl
 
             let phys_base = region + (slot as u64 * VIRTIO_MMIO_SLOT_STRIDE);
             let virt_base = hhdm_offset.wrapping_add(phys_base) as usize;
+            let Some(transport) = VirtioMmioDevice::new(virt_base) else {
+                continue;
+            };
+            if transport.device_id() != hal_x86_64::virtio::VIRTIO_DEVICE_ID_BLOCK {
+                continue;
+            }
 
             let desc_ptr = core::ptr::addr_of_mut!(VIRTQ_DESC).cast::<VirtqDesc>();
             let avail_ptr = core::ptr::addr_of_mut!(VIRTQ_AVAIL);
             let used_ptr = core::ptr::addr_of_mut!(VIRTQ_USED);
-
-            if let Ok(device) = VirtioBlkDevice::new(virt_base, desc_ptr, avail_ptr, used_ptr) {
+            let placement = QueuePlacement {
+                desc_phys: boot.image_phys(desc_ptr as usize)?,
+                avail_phys: boot.image_phys(avail_ptr as usize)?,
+                used_phys: boot.image_phys(used_ptr as usize)?,
+            };
+            let queue = QueueMemory {
+                desc: desc_ptr,
+                avail: avail_ptr,
+                used: used_ptr,
+                placement,
+            };
+            if let Ok(device) = VirtioBlkDevice::new(transport, queue, dma) {
                 if device.block_count() > 0 {
                     return Some(device);
                 }

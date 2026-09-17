@@ -229,6 +229,19 @@ impl<D: BlockDevice> BlockStorage<D> {
     }
 
     /// Open existing block storage with crash recovery
+    /// Whether block 0 holds a superblock with our magic, without taking
+    /// ownership of the device. Lets a caller choose `open` over `format`.
+    pub fn has_valid_superblock(device: &mut D) -> bool {
+        let mut block = [0u8; BLOCK_SIZE];
+        if device.read_block(0, &mut block).is_err() {
+            return false;
+        }
+        let json_end = block.iter().position(|&b| b == 0).unwrap_or(BLOCK_SIZE);
+        serde_json::from_slice::<Superblock>(&block[..json_end])
+            .map(|sb| sb.magic == SUPERBLOCK_MAGIC)
+            .unwrap_or(false)
+    }
+
     pub fn open(mut device: D) -> Result<Self, BlockStorageError> {
         // Read superblock from block 0
         let mut block = [0u8; BLOCK_SIZE];

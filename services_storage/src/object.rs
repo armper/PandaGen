@@ -24,6 +24,12 @@ impl ObjectId {
         Self(uuid)
     }
 
+    /// A fixed identity from raw bytes, for well-known objects such as a
+    /// filesystem root that must be the same across boots.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
+    }
+
     /// Returns the inner UUID
     pub fn as_uuid(&self) -> Uuid {
         self.0

@@ -809,9 +809,24 @@ pub extern "C" fn rust_main() -> ! {
 
     // Initialize filesystem with example files
     kprintln!(serial, "Initializing filesystem...");
-    let mut filesystem = match bare_metal_storage::BareMetalFilesystem::new() {
+    let storage_boot = bare_metal_storage::StorageBootInfo {
+        hhdm_offset: kernel.boot.hhdm_offset,
+        kernel_phys: kernel.boot.kernel_phys,
+        kernel_virt: kernel.boot.kernel_virt,
+    };
+    let mut filesystem = match bare_metal_storage::BareMetalFilesystem::new_with_boot(storage_boot)
+    {
         Ok(fs) => {
-            kprintln!(serial, "Filesystem ready");
+            kprintln!(
+                serial,
+                "Filesystem ready (backend: {}, {})",
+                fs.backend_name(),
+                if fs.was_freshly_formatted() {
+                    "formatted"
+                } else {
+                    "mounted existing"
+                }
+            );
             fs
         }
         Err(_) => {
@@ -828,8 +843,9 @@ pub extern "C" fn rust_main() -> ! {
         }
     };
 
-    // Create some example files
-    {
+    // Create some example files on a fresh disk only; a mounted disk keeps
+    // whatever the user saved on previous boots.
+    if filesystem.was_freshly_formatted() {
         let _ = filesystem.create_file(
             "welcome.txt",
             b"Welcome to PandaGen!\nThis is a bare-metal operating system.",

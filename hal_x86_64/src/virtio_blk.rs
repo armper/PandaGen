@@ -1,43 +1,53 @@
-//! # Virtio Block Device
+//! virtio-blk driver over any `VirtioTransport`.
 //!
-//! Implements the `BlockDevice` trait for virtio-blk devices.
-//! Provides persistent storage via QEMU's virtio-blk backend.
-//!
-//! ## Architecture
-//! - virtio-blk sector size: 512 bytes
-//! - PandaGen block size: 4096 bytes (8 sectors)
-//! - Single virtqueue for requests
-//! - Polling-based completion (no interrupts required)
+//! The driver never hands the device a virtual address. The caller supplies
+//! `QueueMemory` (virtqueue pointers plus their physical addresses) and
+//! `DmaBuffers` (a request header, a status byte, and one block-sized data
+//! buffer, all physically addressed). Reads and writes bounce through the
+//! data buffer, so any caller slice works regardless of where it lives.
+//! I/O is polled: the kernel has no virtio interrupt path yet, and a block
+//! request on QEMU completes in microseconds.
 
 use core::prelude::v1::*;
 
 use super::virtio::{
-    VirtioMmioDevice, VirtqDesc, Virtqueue, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_STATUS_ACKNOWLEDGE,
-    VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK, VIRTQ_DESC_F_NEXT,
-    VIRTQ_DESC_F_WRITE, VIRTQ_MAX_SIZE,
+    QueuePlacement, VirtioTransport, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue,
+    VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VIRTQ_MAX_SIZE,
 };
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
 
-/// Virtio-blk request types
-const VIRTIO_BLK_T_IN: u32 = 0; // Read
-const VIRTIO_BLK_T_OUT: u32 = 1; // Write
-const VIRTIO_BLK_T_FLUSH: u32 = 4; // Flush
+const VIRTIO_BLK_T_IN: u32 = 0;
+const VIRTIO_BLK_T_OUT: u32 = 1;
+const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
-/// Virtio-blk status codes
 const VIRTIO_BLK_S_OK: u8 = 0;
-const VIRTIO_BLK_S_IOERR: u8 = 1;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-/// Virtio-blk sector size (standard)
 const SECTOR_SIZE: usize = 512;
-
-/// Sectors per PandaGen block
 const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
+const MAX_POLL_ITERATIONS: u32 = 4_000_000;
 
-/// Maximum operations before considering timeout
-const MAX_POLL_ITERATIONS: u32 = 1_000_000;
+/// Virtqueue memory with its physical addresses.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueMemory {
+    pub desc: *mut VirtqDesc,
+    pub avail: *mut VirtqAvail,
+    pub used: *mut VirtqUsed,
+    pub placement: QueuePlacement,
+}
 
-/// Virtio-blk request header
+/// DMA-visible scratch buffers with their physical addresses.
+#[derive(Debug, Clone, Copy)]
+pub struct DmaBuffers {
+    pub header: *mut [u8; 16],
+    pub header_phys: u64,
+    pub status: *mut u8,
+    pub status_phys: u64,
+    /// At least `BLOCK_SIZE` bytes.
+    pub data: *mut u8,
+    pub data_phys: u64,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct VirtioBlkReqHeader {
@@ -46,176 +56,122 @@ struct VirtioBlkReqHeader {
     sector: u64,
 }
 
-/// Virtio-blk device
-pub struct VirtioBlkDevice {
-    device: VirtioMmioDevice,
+pub struct VirtioBlkDevice<T: VirtioTransport> {
+    transport: T,
     queue: Virtqueue,
+    dma: DmaBuffers,
     capacity_sectors: u64,
-    /// Pre-allocated request header buffer
-    req_header: [u8; 16],
-    /// Pre-allocated status byte buffer
-    status_byte: [u8; 1],
 }
 
-impl VirtioBlkDevice {
-    /// Create a new virtio-blk device
+impl<T: VirtioTransport> VirtioBlkDevice<T> {
+    /// Bring the device up on queue 0.
     ///
     /// # Safety
-    /// The caller must ensure:
-    /// - `base_addr` points to a valid virtio-blk MMIO device
-    /// - Memory regions for virtqueue structures are valid and exclusive
-    ///
-    /// # Arguments
-    /// * `base_addr` - Base address of virtio MMIO device
-    /// * `desc_ptr` - Descriptor table pointer
-    /// * `avail_ptr` - Available ring pointer
-    /// * `used_ptr` - Used ring pointer
+    /// `queue` and `dma` must point at memory that stays valid and mapped
+    /// for the life of the device, with correct physical addresses.
     pub unsafe fn new(
-        base_addr: usize,
-        desc_ptr: *mut VirtqDesc,
-        avail_ptr: *mut super::virtio::VirtqAvail,
-        used_ptr: *mut super::virtio::VirtqUsed,
+        mut transport: T,
+        queue: QueueMemory,
+        dma: DmaBuffers,
     ) -> Result<Self, BlockError> {
-        // Create and validate device
-        let device = VirtioMmioDevice::new(base_addr).ok_or(BlockError::NotReady)?;
-
-        if device.device_id() != VIRTIO_DEVICE_ID_BLOCK {
+        transport.begin();
+        if !transport.negotiate_no_features() {
             return Err(BlockError::NotReady);
         }
-
-        // Initialize device
-        device.set_status(0); // Reset
-        device.add_status(VIRTIO_STATUS_ACKNOWLEDGE);
-        device.add_status(VIRTIO_STATUS_DRIVER);
-
-        // Feature negotiation (minimal - accept defaults)
-        device.set_driver_features(0, 0);
-        device.add_status(VIRTIO_STATUS_FEATURES_OK);
-
-        // Check if features are accepted
-        if (device.status() & VIRTIO_STATUS_FEATURES_OK) == 0 {
+        let wanted = transport.queue_max_size(0).min(VIRTQ_MAX_SIZE as u16);
+        if wanted == 0 {
             return Err(BlockError::NotReady);
         }
-
-        // Setup virtqueue
-        device.select_queue(0);
-        let queue_size = device.queue_max_size().min(VIRTQ_MAX_SIZE as u32) as u16;
-        device.set_queue_size(queue_size as u32);
-
-        let queue = Virtqueue::new(queue_size, desc_ptr, avail_ptr, used_ptr);
-
-        // Set queue addresses (physical addresses)
-        let desc_addr = desc_ptr as u64;
-        let avail_addr = avail_ptr as u64;
-        let used_addr = used_ptr as u64;
-
-        device.set_queue_desc(desc_addr);
-        device.set_queue_avail(avail_addr);
-        device.set_queue_used(used_addr);
-        device.set_queue_ready(true);
-
-        // Mark driver as ready
-        device.add_status(VIRTIO_STATUS_DRIVER_OK);
-
-        // Read capacity from config space
-        let capacity_sectors = device.read_config_u64(0);
-
+        let size = transport
+            .setup_queue(0, wanted, queue.placement)
+            .ok_or(BlockError::NotReady)?;
+        if size as usize > VIRTQ_MAX_SIZE {
+            return Err(BlockError::NotReady);
+        }
+        let queue = Virtqueue::new(size, queue.desc, queue.avail, queue.used);
+        transport.driver_ok();
+        let capacity_sectors = transport.read_config_u64(0);
         Ok(Self {
-            device,
+            transport,
             queue,
+            dma,
             capacity_sectors,
-            req_header: [0; 16],
-            status_byte: [0; 1],
         })
     }
 
-    /// Perform a block I/O operation
-    fn do_io(
-        &mut self,
-        req_type: u32,
-        sector: u64,
-        buffer: &mut [u8],
-        buffer_len: usize,
-        is_write: bool,
-    ) -> Result<(), BlockError> {
-        // Allocate descriptor chain: header + data + status
-        let desc_head = self.queue.alloc_desc(3).ok_or(BlockError::IoError)?;
+    pub fn capacity_sectors(&self) -> u64 {
+        self.capacity_sectors
+    }
 
-        // Setup request header
+    fn write_header(&mut self, req_type: u32, sector: u64) {
         let header = VirtioBlkReqHeader {
             req_type,
             _reserved: 0,
             sector,
         };
-
-        // Copy header to buffer
+        // SAFETY: header buffer is 16 bytes of DMA memory owned by the caller.
         unsafe {
-            let header_ptr = &header as *const VirtioBlkReqHeader as *const u8;
-            core::ptr::copy_nonoverlapping(header_ptr, self.req_header.as_mut_ptr(), 16);
+            core::ptr::copy_nonoverlapping(
+                &header as *const VirtioBlkReqHeader as *const u8,
+                self.dma.header as *mut u8,
+                16,
+            );
+            *self.dma.status = 0xFF;
         }
+    }
 
-        // Setup descriptor chain
-        let desc_data = desc_head + 1;
-        let desc_status = desc_head + 2;
-
-        // Header descriptor (device reads)
-        self.queue.desc[desc_head as usize] = VirtqDesc {
-            addr: self.req_header.as_ptr() as u64,
-            len: 16,
-            flags: VIRTQ_DESC_F_NEXT,
-            next: desc_data,
-        };
-
-        // Data descriptor
-        self.queue.desc[desc_data as usize] = VirtqDesc {
-            addr: buffer.as_ptr() as u64,
-            len: buffer_len as u32,
-            flags: VIRTQ_DESC_F_NEXT | if is_write { 0 } else { VIRTQ_DESC_F_WRITE },
-            next: desc_status,
-        };
-
-        // Status descriptor (device writes)
-        self.queue.desc[desc_status as usize] = VirtqDesc {
-            addr: self.status_byte.as_ptr() as u64,
-            len: 1,
-            flags: VIRTQ_DESC_F_WRITE,
-            next: 0,
-        };
-
-        // Add to available ring and notify
+    fn submit_and_wait(&mut self, desc_head: u16) -> Result<u8, BlockError> {
         self.queue.add_to_avail(desc_head);
-        self.device.notify_queue(0);
-
-        // Poll for completion with timeout
+        self.transport.notify(0);
         let mut iterations = 0;
         while !self.queue.has_used() {
             iterations += 1;
             if iterations > MAX_POLL_ITERATIONS {
+                self.queue.free_desc(desc_head);
                 return Err(BlockError::IoError);
             }
             core::hint::spin_loop();
         }
-
-        // Get result
-        let (used_id, _used_len) = self.queue.get_used().ok_or(BlockError::IoError)?;
+        let (used_id, _) = self.queue.get_used().ok_or(BlockError::IoError)?;
+        self.queue.free_desc(desc_head);
         if used_id != desc_head as u32 {
             return Err(BlockError::IoError);
         }
+        // SAFETY: status byte is DMA memory written by the device.
+        Ok(unsafe { core::ptr::read_volatile(self.dma.status) })
+    }
 
-        // Free descriptor chain
-        self.queue.free_desc(desc_head);
-
-        // Check status
-        match self.status_byte[0] {
+    fn block_io(&mut self, req_type: u32, sector: u64, write: bool) -> Result<(), BlockError> {
+        let desc_head = self.queue.alloc_desc(3).ok_or(BlockError::IoError)?;
+        let desc_data = desc_head + 1;
+        let desc_status = desc_head + 2;
+        self.write_header(req_type, sector);
+        self.queue.desc[desc_head as usize] = VirtqDesc {
+            addr: self.dma.header_phys,
+            len: 16,
+            flags: VIRTQ_DESC_F_NEXT,
+            next: desc_data,
+        };
+        self.queue.desc[desc_data as usize] = VirtqDesc {
+            addr: self.dma.data_phys,
+            len: BLOCK_SIZE as u32,
+            flags: VIRTQ_DESC_F_NEXT | if write { 0 } else { VIRTQ_DESC_F_WRITE },
+            next: desc_status,
+        };
+        self.queue.desc[desc_status as usize] = VirtqDesc {
+            addr: self.dma.status_phys,
+            len: 1,
+            flags: VIRTQ_DESC_F_WRITE,
+            next: 0,
+        };
+        match self.submit_and_wait(desc_head)? {
             VIRTIO_BLK_S_OK => Ok(()),
-            VIRTIO_BLK_S_IOERR => Err(BlockError::IoError),
-            VIRTIO_BLK_S_UNSUPP => Err(BlockError::IoError),
             _ => Err(BlockError::IoError),
         }
     }
 }
 
-impl BlockDevice for VirtioBlkDevice {
+impl<T: VirtioTransport> BlockDevice for VirtioBlkDevice<T> {
     fn block_count(&self) -> u64 {
         self.capacity_sectors / SECTORS_PER_BLOCK
     }
@@ -227,9 +183,12 @@ impl BlockDevice for VirtioBlkDevice {
         if buffer.len() < BLOCK_SIZE {
             return Err(BlockError::InvalidSize);
         }
-
-        let sector = block_idx * SECTORS_PER_BLOCK;
-        self.do_io(VIRTIO_BLK_T_IN, sector, buffer, BLOCK_SIZE, false)
+        self.block_io(VIRTIO_BLK_T_IN, block_idx * SECTORS_PER_BLOCK, false)?;
+        // SAFETY: the device has finished writing the bounce buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.dma.data, buffer.as_mut_ptr(), BLOCK_SIZE);
+        }
+        Ok(())
     }
 
     fn write_block(&mut self, block_idx: u64, buffer: &[u8]) -> Result<(), BlockError> {
@@ -239,76 +198,33 @@ impl BlockDevice for VirtioBlkDevice {
         if buffer.len() < BLOCK_SIZE {
             return Err(BlockError::InvalidSize);
         }
-
-        let sector = block_idx * SECTORS_PER_BLOCK;
-
-        // Need to cast to mutable for do_io, but we won't actually modify for writes
-        let buffer_mut =
-            unsafe { core::slice::from_raw_parts_mut(buffer.as_ptr() as *mut u8, buffer.len()) };
-
-        self.do_io(VIRTIO_BLK_T_OUT, sector, buffer_mut, BLOCK_SIZE, true)
+        // SAFETY: bounce buffer is at least BLOCK_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), self.dma.data, BLOCK_SIZE);
+        }
+        self.block_io(VIRTIO_BLK_T_OUT, block_idx * SECTORS_PER_BLOCK, true)
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
-        // Allocate descriptor chain: header + status
         let desc_head = self.queue.alloc_desc(2).ok_or(BlockError::IoError)?;
-
-        // Setup flush request header
-        let header = VirtioBlkReqHeader {
-            req_type: VIRTIO_BLK_T_FLUSH,
-            _reserved: 0,
-            sector: 0,
-        };
-
-        unsafe {
-            let header_ptr = &header as *const VirtioBlkReqHeader as *const u8;
-            core::ptr::copy_nonoverlapping(header_ptr, self.req_header.as_mut_ptr(), 16);
-        }
-
         let desc_status = desc_head + 1;
-
-        // Header descriptor
+        self.write_header(VIRTIO_BLK_T_FLUSH, 0);
         self.queue.desc[desc_head as usize] = VirtqDesc {
-            addr: self.req_header.as_ptr() as u64,
+            addr: self.dma.header_phys,
             len: 16,
             flags: VIRTQ_DESC_F_NEXT,
             next: desc_status,
         };
-
-        // Status descriptor
         self.queue.desc[desc_status as usize] = VirtqDesc {
-            addr: self.status_byte.as_ptr() as u64,
+            addr: self.dma.status_phys,
             len: 1,
             flags: VIRTQ_DESC_F_WRITE,
             next: 0,
         };
-
-        // Add to available ring and notify
-        self.queue.add_to_avail(desc_head);
-        self.device.notify_queue(0);
-
-        // Poll for completion
-        let mut iterations = 0;
-        while !self.queue.has_used() {
-            iterations += 1;
-            if iterations > MAX_POLL_ITERATIONS {
-                return Err(BlockError::IoError);
-            }
-            core::hint::spin_loop();
-        }
-
-        // Get result
-        let (used_id, _) = self.queue.get_used().ok_or(BlockError::IoError)?;
-        if used_id != desc_head as u32 {
-            return Err(BlockError::IoError);
-        }
-
-        // Free descriptor chain
-        self.queue.free_desc(desc_head);
-
-        // Check status
-        match self.status_byte[0] {
-            VIRTIO_BLK_S_OK => Ok(()),
+        match self.submit_and_wait(desc_head)? {
+            // Without VIRTIO_BLK_F_FLUSH negotiated the device answers UNSUPP;
+            // writes are already durable on the host side in that case.
+            VIRTIO_BLK_S_OK | VIRTIO_BLK_S_UNSUPP => Ok(()),
             _ => Err(BlockError::IoError),
         }
     }
@@ -317,25 +233,228 @@ impl BlockDevice for VirtioBlkDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::virtio::{VirtqUsedElem, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::sync::atomic::Ordering;
 
-    #[test]
-    fn test_sector_calculation() {
-        assert_eq!(SECTORS_PER_BLOCK, 8);
-        assert_eq!(SECTOR_SIZE * SECTORS_PER_BLOCK as usize, BLOCK_SIZE);
+    extern crate alloc;
+
+    /// A device model that processes one request per `notify`, following the
+    /// descriptor chain by (identity-mapped) physical address, against an
+    /// in-memory disk of `sectors` sectors.
+    struct FakeTransport {
+        queue: QueueMemory,
+        disk: Vec<u8>,
+        sectors: u64,
+        queue_size: u16,
+        status: u8,
+        began: bool,
+        driver_ok: bool,
+        last_used: u16,
+        requests: Vec<u32>,
+    }
+
+    impl FakeTransport {
+        fn new(queue: QueueMemory, sectors: u64) -> Self {
+            Self {
+                queue,
+                disk: vec![0; sectors as usize * SECTOR_SIZE],
+                sectors,
+                queue_size: 8,
+                status: 0,
+                began: false,
+                driver_ok: false,
+                last_used: 0,
+                requests: Vec::new(),
+            }
+        }
+
+        unsafe fn process(&mut self) {
+            let avail = &*self.queue.avail;
+            let idx = avail.idx.load(Ordering::Acquire);
+            while self.last_used != idx {
+                let slot = (self.last_used as usize) % self.queue_size as usize;
+                let head = avail.ring[slot];
+                let mut cur = head;
+                let mut chain = Vec::new();
+                loop {
+                    let d = *self.queue.desc.add(cur as usize);
+                    chain.push(d);
+                    if d.flags & VIRTQ_DESC_F_NEXT == 0 {
+                        break;
+                    }
+                    cur = d.next;
+                }
+                // Header first, status byte last, optional data in between.
+                let last = chain.len() - 1;
+                assert!(
+                    chain.len() == 2 || chain.len() == 3,
+                    "header[, data], status"
+                );
+                assert_eq!(chain[0].len, 16);
+                assert_eq!(chain[0].flags & VIRTQ_DESC_F_WRITE, 0);
+                assert_eq!(chain[last].len, 1);
+                assert_ne!(chain[last].flags & VIRTQ_DESC_F_WRITE, 0);
+                let hdr = &*(chain[0].addr as usize as *const VirtioBlkReqHeader);
+                let status = chain[last].addr as usize as *mut u8;
+                self.requests.push(hdr.req_type);
+                let off = hdr.sector as usize * SECTOR_SIZE;
+                let code = match hdr.req_type {
+                    VIRTIO_BLK_T_IN => {
+                        assert_ne!(chain[1].flags & VIRTQ_DESC_F_WRITE, 0);
+                        let data = chain[1].addr as usize as *mut u8;
+                        let len = chain[1].len as usize;
+                        core::ptr::copy_nonoverlapping(self.disk[off..].as_ptr(), data, len);
+                        VIRTIO_BLK_S_OK
+                    }
+                    VIRTIO_BLK_T_OUT => {
+                        assert_eq!(chain[1].flags & VIRTQ_DESC_F_WRITE, 0);
+                        let data = chain[1].addr as usize as *const u8;
+                        let len = chain[1].len as usize;
+                        core::ptr::copy_nonoverlapping(data, self.disk[off..].as_mut_ptr(), len);
+                        VIRTIO_BLK_S_OK
+                    }
+                    VIRTIO_BLK_T_FLUSH => {
+                        assert_eq!(chain.len(), 2);
+                        VIRTIO_BLK_S_UNSUPP
+                    }
+                    _ => 1,
+                };
+                *status = code;
+                let used = &mut *self.queue.used;
+                let uidx = used.idx.load(Ordering::Acquire);
+                used.ring[(uidx as usize) % self.queue_size as usize] = VirtqUsedElem {
+                    id: head as u32,
+                    len: 1,
+                };
+                used.idx.store(uidx.wrapping_add(1), Ordering::Release);
+                self.last_used = self.last_used.wrapping_add(1);
+            }
+        }
+    }
+
+    impl VirtioTransport for FakeTransport {
+        fn begin(&mut self) {
+            self.began = true;
+        }
+        fn negotiate_no_features(&mut self) -> bool {
+            true
+        }
+        fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16> {
+            assert_eq!(index, 0);
+            assert_eq!(size, self.queue_size);
+            assert_eq!(placement.desc_phys, self.queue.desc as u64);
+            Some(self.queue_size)
+        }
+        fn queue_max_size(&mut self, _index: u16) -> u16 {
+            self.queue_size
+        }
+        fn driver_ok(&mut self) {
+            self.driver_ok = true;
+            self.status = 4;
+        }
+        fn notify(&mut self, queue: u16) {
+            assert_eq!(queue, 0);
+            assert!(self.driver_ok);
+            unsafe { self.process() }
+        }
+        fn read_config_u64(&mut self, offset: usize) -> u64 {
+            assert_eq!(offset, 0);
+            self.sectors
+        }
+    }
+
+    fn leak_queue() -> QueueMemory {
+        let desc = Box::leak(Box::new([VirtqDesc::new(); VIRTQ_MAX_SIZE])).as_mut_ptr();
+        let avail: *mut VirtqAvail = Box::leak(Box::new(VirtqAvail::new()));
+        let used: *mut VirtqUsed = Box::leak(Box::new(VirtqUsed::new()));
+        QueueMemory {
+            desc,
+            avail,
+            used,
+            placement: QueuePlacement {
+                desc_phys: desc as u64,
+                avail_phys: avail as u64,
+                used_phys: used as u64,
+            },
+        }
+    }
+
+    fn leak_dma() -> DmaBuffers {
+        let header: *mut [u8; 16] = Box::leak(Box::new([0u8; 16]));
+        let status: *mut u8 = Box::leak(Box::new(0u8));
+        let data = Box::leak(vec![0u8; BLOCK_SIZE].into_boxed_slice()).as_mut_ptr();
+        DmaBuffers {
+            header,
+            header_phys: header as u64,
+            status,
+            status_phys: status as u64,
+            data,
+            data_phys: data as u64,
+        }
+    }
+
+    fn device(sectors: u64) -> VirtioBlkDevice<FakeTransport> {
+        let queue = leak_queue();
+        let transport = FakeTransport::new(queue, sectors);
+        unsafe { VirtioBlkDevice::new(transport, queue, leak_dma()) }.expect("device")
     }
 
     #[test]
-    fn test_request_header_size() {
-        assert_eq!(core::mem::size_of::<VirtioBlkReqHeader>(), 16);
+    fn init_reports_capacity_in_blocks() {
+        let dev = device(64);
+        assert!(dev.transport.began && dev.transport.driver_ok);
+        assert_eq!(dev.capacity_sectors(), 64);
+        assert_eq!(dev.block_count(), 64 / SECTORS_PER_BLOCK);
     }
 
     #[test]
-    fn test_constants() {
-        assert_eq!(VIRTIO_BLK_T_IN, 0);
-        assert_eq!(VIRTIO_BLK_T_OUT, 1);
-        assert_eq!(VIRTIO_BLK_T_FLUSH, 4);
-        assert_eq!(VIRTIO_BLK_S_OK, 0);
-        assert_eq!(VIRTIO_BLK_S_IOERR, 1);
-        assert_eq!(VIRTIO_BLK_S_UNSUPP, 2);
+    fn write_then_read_round_trips_through_bounce_buffer() {
+        let mut dev = device(64);
+        let mut block = vec![0u8; BLOCK_SIZE];
+        for (i, b) in block.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        dev.write_block(3, &block).unwrap();
+        let mut back = vec![0u8; BLOCK_SIZE];
+        dev.read_block(3, &mut back).unwrap();
+        assert_eq!(back, block);
+        let mut other = vec![1u8; BLOCK_SIZE];
+        dev.read_block(2, &mut other).unwrap();
+        assert!(other.iter().all(|&b| b == 0));
+        assert_eq!(
+            dev.transport.requests,
+            vec![VIRTIO_BLK_T_OUT, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_IN]
+        );
+    }
+
+    #[test]
+    fn descriptors_are_recycled_across_many_requests() {
+        let mut dev = device(64);
+        let block = vec![7u8; BLOCK_SIZE];
+        for i in 0..40 {
+            dev.write_block(i % 4, &block).unwrap();
+        }
+        assert_eq!(dev.queue.num_free, dev.queue.size);
+    }
+
+    #[test]
+    fn bounds_and_size_errors() {
+        let mut dev = device(64);
+        let mut small = [0u8; 16];
+        assert_eq!(dev.read_block(0, &mut small), Err(BlockError::InvalidSize));
+        let mut block = vec![0u8; BLOCK_SIZE];
+        assert_eq!(
+            dev.read_block(dev.block_count(), &mut block),
+            Err(BlockError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn unsupported_flush_is_not_an_error() {
+        let mut dev = device(64);
+        assert_eq!(dev.flush(), Ok(()));
     }
 }

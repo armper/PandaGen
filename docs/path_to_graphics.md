@@ -215,4 +215,4 @@ Every story in this roadmap is implemented (Phases 203 to 251). Milestones A to 
 
 ## Immediate Next Story
 
-The graphics track is complete. The next high-value item from `docs/next_steps.md` is persistent bare-metal storage: `cargo xtask qemu` attaches `virtio-blk-pci`, but the kernel probes only virtio MMIO and falls back to a RAM disk, so `:w` in the editor does not survive a reboot. A PCI probe for virtio-blk would make the editor's saves durable and is verifiable with the existing scripted QEMU harness.
+The graphics track is complete, and persistent bare-metal storage landed in Phases 252-253 (virtio-blk over PCI, existing disks are mounted rather than reformatted). The next high-value items from `docs/next_steps.md` are SMP bring-up and networking.

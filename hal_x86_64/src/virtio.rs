@@ -447,3 +447,77 @@ mod tests {
         assert_eq!(VIRTIO_STATUS_FAILED, 128);
     }
 }
+
+/// Physical placement of one virtqueue's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuePlacement {
+    pub desc_phys: u64,
+    pub avail_phys: u64,
+    pub used_phys: u64,
+}
+
+/// What a virtio device driver needs from its transport (MMIO or PCI).
+///
+/// Addresses handed to `setup_queue` are *physical*; translating from the
+/// kernel's virtual pointers is the caller's job, not the transport's.
+pub trait VirtioTransport {
+    /// Reset the device and acknowledge it (status 0, then ACKNOWLEDGE|DRIVER).
+    fn begin(&mut self);
+    /// Negotiate features: the driver accepts none beyond the baseline.
+    /// Returns false if the device rejected the negotiation.
+    fn negotiate_no_features(&mut self) -> bool;
+    /// Configure queue `index` with `size` entries at `placement`; returns
+    /// the size actually in effect (legacy transports fix the size).
+    fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16>;
+    /// Largest queue size the device supports for `index`.
+    fn queue_max_size(&mut self, index: u16) -> u16;
+    fn driver_ok(&mut self);
+    fn notify(&mut self, queue: u16);
+    fn read_config_u64(&mut self, offset: usize) -> u64;
+}
+
+impl VirtioTransport for VirtioMmioDevice {
+    fn begin(&mut self) {
+        self.set_status(0);
+        self.add_status(VIRTIO_STATUS_ACKNOWLEDGE);
+        self.add_status(VIRTIO_STATUS_DRIVER);
+    }
+
+    fn negotiate_no_features(&mut self) -> bool {
+        self.set_driver_features(0, 0);
+        self.add_status(VIRTIO_STATUS_FEATURES_OK);
+        (self.status() & VIRTIO_STATUS_FEATURES_OK) != 0
+    }
+
+    fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16> {
+        self.select_queue(index as u32);
+        let max = VirtioMmioDevice::queue_max_size(self);
+        if max == 0 {
+            return None;
+        }
+        let size = size.min(max as u16);
+        self.set_queue_size(size as u32);
+        self.set_queue_desc(placement.desc_phys);
+        self.set_queue_avail(placement.avail_phys);
+        self.set_queue_used(placement.used_phys);
+        self.set_queue_ready(true);
+        Some(size)
+    }
+
+    fn queue_max_size(&mut self, index: u16) -> u16 {
+        self.select_queue(index as u32);
+        VirtioMmioDevice::queue_max_size(self).min(VIRTQ_MAX_SIZE as u32) as u16
+    }
+
+    fn driver_ok(&mut self) {
+        self.add_status(VIRTIO_STATUS_DRIVER_OK);
+    }
+
+    fn notify(&mut self, queue: u16) {
+        self.notify_queue(queue as u32);
+    }
+
+    fn read_config_u64(&mut self, offset: usize) -> u64 {
+        VirtioMmioDevice::read_config_u64(self, offset)
+    }
+}
