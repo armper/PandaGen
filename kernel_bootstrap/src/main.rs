@@ -4625,6 +4625,12 @@ fn start_application_processors(
 #[global_allocator]
 static GLOBAL_HEAP: free_list_heap::FreeListHeap = free_list_heap::FreeListHeap::empty();
 
+/// Host builds of the binary (integration tests build it) get a plain heap
+/// object so the `mem`/telemetry paths compile; it is never installed as
+/// the allocator there.
+#[cfg(all(not(test), not(target_os = "none")))]
+static GLOBAL_HEAP: free_list_heap::FreeListHeap = free_list_heap::FreeListHeap::empty();
+
 #[cfg(all(not(test), target_os = "none"))]
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {

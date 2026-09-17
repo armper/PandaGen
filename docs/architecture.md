@@ -183,7 +183,7 @@ let audit = kernel.scheduler_audit();
 **What We DON'T Have (Intentionally)**:
 - ❌ Priorities or fairness policies
 - 🟡 SMP: application processors online, LAPIC IPIs wake them to run queued jobs, desktop presents are split across CPUs, each AP has a calibrated LAPIC timer and its own GDT/TSS, CPU exceptions print diagnostics, idle APs poll kernel tasks under a kernel lock (Phases 254-256, 261-263); no parallel task execution yet
-- ✅ Formal verification (bounded model checking): capability lifecycle, round-robin and EDF scheduling, IPC channel access, and message budgets checked against `sim_kernel` in `formal_verification/tests/` (Phases 264-270)
+- ✅ Formal verification (bounded model checking): capability lifecycle, round-robin and EDF scheduling, IPC channel access, and message budgets checked against `sim_kernel` in `formal_verification/tests/` (Phases 264-270); the bare-metal free-list heap is checked the same way in `kernel_bootstrap/tests/heap_model.rs` (Phase 271)
 - 🟡 Networking: virtio-net over PCI with ARP/IPv4/ICMP/UDP in `net_stack`, DHCP-configured, HMAC-authenticated remote IPC served over UDP (Phases 257-260, 267-268); no TCP yet
 - ❌ Blocking syscalls or user/kernel mode
 - ❌ Real interrupt controller integration (yet)
