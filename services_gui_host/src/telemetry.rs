@@ -27,6 +27,10 @@ pub struct GfxTelemetry {
     pub present_ticks_max: u64,
     /// Presents that took more than one tick (a frame that missed its slot).
     pub slow_presents: u64,
+    /// Sum of present latencies in TSC cycles (finer than ticks).
+    pub present_cycles_total: u64,
+    /// CPUs that shared the most recent present (1 = boot CPU alone).
+    pub present_workers: u32,
     /// Redraws requested by the animation clock.
     pub animation_wakes: u64,
     /// Pointer events routed to the desktop.
@@ -42,6 +46,8 @@ impl GfxTelemetry {
             present_ticks_total: 0,
             present_ticks_max: 0,
             slow_presents: 0,
+            present_cycles_total: 0,
+            present_workers: 1,
             animation_wakes: 0,
             pointer_events: 0,
         }
@@ -58,6 +64,22 @@ impl GfxTelemetry {
         self.present_ticks_max = self.present_ticks_max.max(ticks);
         if ticks > 1 {
             self.slow_presents += 1;
+        }
+    }
+
+    /// Cycle-level timing for the present just recorded and how many CPUs
+    /// shared it.
+    pub fn record_present_cycles(&mut self, cycles: u64, workers: u32) {
+        self.present_cycles_total += cycles;
+        self.present_workers = workers.max(1);
+    }
+
+    /// Average present latency in cycles.
+    pub fn present_cycles_avg(&self) -> u64 {
+        if self.presents == 0 {
+            0
+        } else {
+            self.present_cycles_total / self.presents
         }
     }
 
@@ -133,6 +155,11 @@ impl GfxSnapshot {
                 t.pointer_events
             ),
             format!(
+                "present: workers={} avg_cycles={}",
+                t.present_workers,
+                t.present_cycles_avg()
+            ),
+            format!(
                 "memory: pressure={:?} transitions={} heap {}/{} KiB used, budget {}/{} KiB, tick={}",
                 self.pressure,
                 self.pressure_transitions,
@@ -186,16 +213,38 @@ mod tests {
         snapshot.budget_limit = 24 * 1024 * 1024;
         snapshot.tick = 1234;
         let lines = snapshot.lines();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert!(
             lines[0].starts_with("gfx: frames=0 presents=1 rejected=0 slow=1 avg_present=2.00"),
             "{}",
             lines[0]
         );
         assert!(lines[1].contains("deferred=7"));
-        assert!(lines[2].contains("pressure=Low"));
-        assert!(lines[2].contains("heap 8192/32768 KiB"));
-        assert!(lines[2].contains("budget 0/24576 KiB"));
-        assert!(lines[2].ends_with("tick=1234"));
+        assert!(lines[2].starts_with("present: workers="));
+        assert!(lines[3].contains("pressure=Low"));
+        assert!(lines[3].contains("heap 8192/32768 KiB"));
+        assert!(lines[3].contains("budget 0/24576 KiB"));
+        assert!(lines[3].ends_with("tick=1234"));
+    }
+
+    #[test]
+    fn present_cycles_average_and_workers() {
+        let mut t = GfxTelemetry::new();
+        assert_eq!(t.present_workers, 1);
+        assert_eq!(t.present_cycles_avg(), 0);
+        t.record_present(0);
+        t.record_present_cycles(1_000, 4);
+        t.record_present(1);
+        t.record_present_cycles(3_000, 4);
+        assert_eq!(t.present_cycles_avg(), 2_000);
+        assert_eq!(t.present_workers, 4);
+        let snapshot = GfxSnapshot {
+            telemetry: t,
+            ..GfxSnapshot::default()
+        };
+        assert!(snapshot
+            .lines()
+            .iter()
+            .any(|l| l == "present: workers=4 avg_cycles=2000"));
     }
 }

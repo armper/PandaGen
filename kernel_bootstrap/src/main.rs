@@ -1197,6 +1197,7 @@ fn workspace_loop(
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
             if let Some(fb) = fb_console.as_mut() {
                 let started = get_tick_count();
+                let started_cycles = hal_x86_64::rdtsc();
                 let outcome = if display_mode.is_graphics() {
                     desktop_renderer
                         .as_ref()
@@ -1208,7 +1209,11 @@ fn workspace_loop(
                 };
                 match outcome {
                     Some(true) => {
-                        gfx_telemetry.record_present(get_tick_count().saturating_sub(started))
+                        gfx_telemetry.record_present(get_tick_count().saturating_sub(started));
+                        gfx_telemetry.record_present_cycles(
+                            hal_x86_64::rdtsc().saturating_sub(started_cycles),
+                            present_workers() as u32,
+                        );
                     }
                     Some(false) => gfx_telemetry.record_present_rejected(),
                     None => {}
@@ -2777,6 +2782,50 @@ fn present_framebuffer_shadow(
 }
 
 /// Present the composed desktop RGBA frame (graphics display mode).
+/// CPUs a present may be split across right now.
+fn present_workers() -> usize {
+    if PARALLEL_PRESENT.load(core::sync::atomic::Ordering::Relaxed) {
+        CPUS.online().clamp(1, framebuffer::MAX_PRESENT_BANDS)
+    } else {
+        1
+    }
+}
+
+/// Run band 0 here and the rest on application processors, falling back
+/// to local conversion for any band whose CPU does not answer in time.
+fn run_present_bands(bands: &[framebuffer::PresentBand]) {
+    if bands.len() <= 1 {
+        for band in bands {
+            // SAFETY: see `present_rgba8888_bands`.
+            unsafe { framebuffer::convert_rgba_rows(band) };
+        }
+        return;
+    }
+    {
+        let mut slots = PRESENT_BANDS.lock();
+        slots[..bands.len()].copy_from_slice(bands);
+    }
+    WORK.reset();
+    let mut ids = [u32::MAX; framebuffer::MAX_PRESENT_BANDS];
+    for (i, slot) in ids.iter_mut().enumerate().take(bands.len()).skip(1) {
+        *slot = WORK.submit(JOB_PRESENT_BAND, i as u64).unwrap_or(u32::MAX);
+    }
+    #[cfg(not(test))]
+    if let Some(mut apic) = LAPIC.get() {
+        apic.send_ipi_all_excluding_self(IPI_WAKE_VECTOR);
+    }
+    // SAFETY: see `present_rgba8888_bands`.
+    unsafe { framebuffer::convert_rgba_rows(&bands[0]) };
+    for (i, id) in ids.iter().enumerate().take(bands.len()).skip(1) {
+        if *id == u32::MAX || WORK.wait(*id, 100_000_000).is_none() {
+            // Nobody picked it up (or it is still running: the queue slot is
+            // consumed, so redoing the rows here is only redundant work).
+            // SAFETY: as above.
+            unsafe { framebuffer::convert_rgba_rows(&bands[i]) };
+        }
+    }
+}
+
 fn present_desktop_frame(
     serial: &mut serial::SerialPort,
     fb: &mut framebuffer::BareMetalFramebuffer,
@@ -2787,7 +2836,7 @@ fn present_desktop_frame(
         renderer.height(),
         renderer.pixels(),
     );
-    match fb.present_desktop_surface(surface) {
+    match fb.present_desktop_surface_with(surface, present_workers(), run_present_bands) {
         Ok(stats) => {
             render_stats::record_desktop_present(stats.copied_pixels as u64);
             true
@@ -3776,11 +3825,30 @@ static WORK: hal_x86_64::WorkQueue<32> = hal_x86_64::WorkQueue::new();
 
 /// Job kind understood by `run_job`: wrapping sum of squares 1..=arg.
 const JOB_SUM_OF_SQUARES: u32 = 1;
+/// Job kind: convert present band `arg` from `PRESENT_BANDS`.
+const JOB_PRESENT_BAND: u32 = 2;
+
+/// Bands of the present in flight, indexed by job argument.
+static PRESENT_BANDS: hal_x86_64::SpinLock<
+    [framebuffer::PresentBand; framebuffer::MAX_PRESENT_BANDS],
+> = hal_x86_64::SpinLock::new([framebuffer::PresentBand::EMPTY; framebuffer::MAX_PRESENT_BANDS]);
+
+/// Whether desktop presents are spread across the application processors.
+static PARALLEL_PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 fn run_job(job: hal_x86_64::Job) -> u64 {
     match job.kind {
         JOB_SUM_OF_SQUARES => {
             (1..=job.arg).fold(0u64, |acc, i| acc.wrapping_add(i.wrapping_mul(i)))
+        }
+        JOB_PRESENT_BAND => {
+            let band = PRESENT_BANDS.lock()[job.arg as usize % framebuffer::MAX_PRESENT_BANDS];
+            if band.rows() > 0 {
+                // SAFETY: the boot CPU keeps both buffers alive until every
+                // band job of this present has completed.
+                unsafe { framebuffer::convert_rgba_rows(&band) };
+            }
+            band.rows() as u64
         }
         _ => 0,
     }
@@ -4831,15 +4899,38 @@ impl CommandService {
             cmd if cmd.starts_with("smp") => {
                 let mut parts = cmd.split_whitespace();
                 let _ = parts.next();
-                match (
-                    parts.next(),
-                    parts.next().and_then(|n| n.parse::<u32>().ok()),
-                ) {
-                    (Some("run"), Some(n)) if n > 0 => {
-                        self.run_smp_jobs(&mut output, n.min(32));
+                let sub = parts.next();
+                let arg = parts.next();
+                match (sub, arg) {
+                    (Some("run"), Some(n)) => match n.parse::<u32>() {
+                        Ok(n) if n > 0 => self.run_smp_jobs(&mut output, n.min(32)),
+                        _ => {
+                            let _ = writeln!(output, "usage: smp run <jobs>");
+                        }
+                    },
+                    (Some("present"), Some("on")) => {
+                        PARALLEL_PRESENT.store(true, core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(
+                            output,
+                            "smp: parallel present on ({} workers)",
+                            present_workers()
+                        );
+                    }
+                    (Some("present"), Some("off")) => {
+                        PARALLEL_PRESENT.store(false, core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(output, "smp: parallel present off");
+                    }
+                    (Some("present"), _) => {
+                        let on = PARALLEL_PRESENT.load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = writeln!(
+                            output,
+                            "smp: parallel present {} ({} workers)",
+                            if on { "on" } else { "off" },
+                            present_workers()
+                        );
                     }
                     _ => {
-                        let _ = writeln!(output, "usage: smp run <jobs>");
+                        let _ = writeln!(output, "usage: smp run <jobs> | smp present [on|off]");
                     }
                 }
             }

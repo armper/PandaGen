@@ -1021,23 +1021,81 @@ impl BareMetalFramebuffer {
     }
 
     fn present_rgba8888(&mut self, pixels: &[u8], stride_pixels: usize) {
+        self.present_rgba8888_bands(pixels, stride_pixels, 1, |bands| {
+            for band in bands {
+                // SAFETY: bands were built from live buffers by `split_bands`.
+                unsafe { convert_rgba_rows(band) };
+            }
+        });
+    }
+
+    /// Convert and copy an RGBA surface in up to `workers` row bands. The
+    /// caller's `run` must convert every band (on whichever CPUs it likes)
+    /// before returning; the buffers stay valid for that call only.
+    fn present_rgba8888_bands(
+        &mut self,
+        pixels: &[u8],
+        stride_pixels: usize,
+        workers: usize,
+        run: impl FnOnce(&[PresentBand]),
+    ) {
         let info = self.info();
-        let bpp = info.format.bytes_per_pixel();
-        for y in 0..info.height {
-            let src_row = y * stride_pixels * 4;
-            let dst_row = y * info.stride_pixels * bpp;
-            for x in 0..info.width {
-                let src_offset = src_row + x * 4;
-                let dst_offset = dst_row + x * bpp;
-                let pixel = info.format.to_bytes(
-                    pixels[src_offset],
-                    pixels[src_offset + 1],
-                    pixels[src_offset + 2],
-                );
-                write_pixel(self.buffer, dst_offset, pixel);
+        let mut bands = [PresentBand::EMPTY; MAX_PRESENT_BANDS];
+        let count = split_bands(
+            &mut bands,
+            pixels.as_ptr(),
+            stride_pixels,
+            self.buffer.as_mut_ptr(),
+            info,
+            workers,
+        );
+        run(&bands[..count]);
+        self.mark_all_damaged();
+    }
+
+    /// Present a desktop surface, letting the caller spread the pixel
+    /// conversion over up to `workers` CPUs. Same contract as
+    /// `present_desktop_surface`; native-format surfaces ignore `workers`.
+    pub fn present_desktop_surface_with(
+        &mut self,
+        surface: DesktopSurface<'_>,
+        workers: usize,
+        run: impl FnOnce(&[PresentBand]),
+    ) -> Result<DesktopPresentStats, DesktopPresentError> {
+        let info = self.info();
+        if surface.width != info.width || surface.height != info.height {
+            return Err(DesktopPresentError::DimensionMismatch {
+                expected_width: info.width,
+                expected_height: info.height,
+                actual_width: surface.width,
+                actual_height: surface.height,
+            });
+        }
+        let expected = surface.required_bytes();
+        if surface.pixels.len() != expected {
+            return Err(DesktopPresentError::BufferLengthMismatch {
+                expected,
+                actual: surface.pixels.len(),
+            });
+        }
+        match surface.format {
+            DesktopSurfaceFormat::Rgba8888 => {
+                self.present_rgba8888_bands(surface.pixels, surface.stride_pixels, workers, run)
+            }
+            DesktopSurfaceFormat::NativeRgb32 => {
+                if surface.stride_pixels != info.stride_pixels {
+                    return Err(DesktopPresentError::StrideMismatch {
+                        expected_stride_pixels: info.stride_pixels,
+                        actual_stride_pixels: surface.stride_pixels,
+                    });
+                }
+                self.present_native_rgb32(surface.pixels);
             }
         }
-        self.mark_all_damaged();
+        Ok(DesktopPresentStats {
+            copied_pixels: surface.width * surface.height,
+            source_bytes: surface.pixels.len(),
+        })
     }
 
     fn present_native_rgb32(&mut self, pixels: &[u8]) {
@@ -1088,6 +1146,99 @@ fn get_char_bitmap(ch: u8) -> &'static [u8; 16] {
         &graphics_rasterizer::FONT_8X16[index]
     } else {
         &graphics_rasterizer::FONT_8X16[0x3F] // '?' for unknown characters
+    }
+}
+
+/// Most CPUs a present is split across.
+pub const MAX_PRESENT_BANDS: usize = 8;
+
+/// A horizontal band of an RGBA -> framebuffer conversion, self-contained
+/// so another CPU can run it from raw pointers.
+#[derive(Debug, Clone, Copy)]
+pub struct PresentBand {
+    pub src: *const u8,
+    pub src_stride_pixels: usize,
+    pub dst: *mut u8,
+    pub dst_stride_bytes: usize,
+    pub width: usize,
+    pub y0: usize,
+    pub y1: usize,
+    pub format: PixelFormat,
+}
+
+// SAFETY: a band is only handed to another CPU for the duration of one
+// present, during which both buffers are exclusively borrowed by the caller.
+unsafe impl Send for PresentBand {}
+
+impl PresentBand {
+    pub const EMPTY: Self = Self {
+        src: core::ptr::null(),
+        src_stride_pixels: 0,
+        dst: core::ptr::null_mut(),
+        dst_stride_bytes: 0,
+        width: 0,
+        y0: 0,
+        y1: 0,
+        format: PixelFormat::Rgb32,
+    };
+
+    pub fn rows(&self) -> usize {
+        self.y1.saturating_sub(self.y0)
+    }
+}
+
+/// Split the frame into up to `workers` bands of roughly equal height.
+/// Returns how many bands were written (0 when the frame is empty).
+fn split_bands(
+    bands: &mut [PresentBand; MAX_PRESENT_BANDS],
+    src: *const u8,
+    src_stride_pixels: usize,
+    dst: *mut u8,
+    info: FramebufferInfo,
+    workers: usize,
+) -> usize {
+    let workers = workers.clamp(1, MAX_PRESENT_BANDS).min(info.height.max(1));
+    if info.height == 0 || info.width == 0 {
+        return 0;
+    }
+    let rows_per = info.height.div_ceil(workers);
+    let mut count = 0;
+    let mut y = 0;
+    while y < info.height && count < workers {
+        let y1 = (y + rows_per).min(info.height);
+        bands[count] = PresentBand {
+            src,
+            src_stride_pixels,
+            dst,
+            dst_stride_bytes: info.stride_pixels * info.format.bytes_per_pixel(),
+            width: info.width,
+            y0: y,
+            y1,
+            format: info.format,
+        };
+        count += 1;
+        y = y1;
+    }
+    count
+}
+
+/// Convert one band of RGBA8888 rows into the framebuffer's format.
+///
+/// # Safety
+/// `band.src` must cover rows `y0..y1` at `src_stride_pixels`, and
+/// `band.dst` rows `y0..y1` at `dst_stride_bytes`, for the whole call.
+pub unsafe fn convert_rgba_rows(band: &PresentBand) {
+    let PixelFormat::Rgb32 = band.format;
+    for y in band.y0..band.y1 {
+        let src_row = band.src.add(y * band.src_stride_pixels * 4);
+        let dst_row = band.dst.add(y * band.dst_stride_bytes) as *mut u32;
+        for x in 0..band.width {
+            let px = src_row.add(x * 4);
+            let r = *px as u32;
+            let g = *px.add(1) as u32;
+            let b = *px.add(2) as u32;
+            core::ptr::write_volatile(dst_row.add(x), (r << 16) | (g << 8) | b);
+        }
     }
 }
 
@@ -1533,5 +1684,98 @@ mod tests {
                 actual_stride_pixels: 2,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+    extern crate alloc;
+    use alloc::vec;
+
+    fn info(width: usize, height: usize, stride: usize) -> FramebufferInfo {
+        FramebufferInfo {
+            width,
+            height,
+            stride_pixels: stride,
+            format: PixelFormat::Rgb32,
+        }
+    }
+
+    #[test]
+    fn bands_cover_all_rows_without_overlap() {
+        let mut bands = [PresentBand::EMPTY; MAX_PRESENT_BANDS];
+        for (height, workers) in [(800, 4), (800, 3), (5, 8), (1, 4), (7, 1)] {
+            let n = split_bands(
+                &mut bands,
+                core::ptr::null(),
+                1,
+                core::ptr::null_mut(),
+                info(4, height, 4),
+                workers,
+            );
+            assert!(n >= 1 && n <= workers.min(height));
+            assert_eq!(bands[0].y0, 0);
+            for i in 1..n {
+                assert_eq!(bands[i].y0, bands[i - 1].y1);
+            }
+            assert_eq!(bands[n - 1].y1, height);
+            assert_eq!(bands[..n].iter().map(|b| b.rows()).sum::<usize>(), height);
+        }
+    }
+
+    #[test]
+    fn empty_frame_yields_no_bands() {
+        let mut bands = [PresentBand::EMPTY; MAX_PRESENT_BANDS];
+        let n = split_bands(
+            &mut bands,
+            core::ptr::null(),
+            1,
+            core::ptr::null_mut(),
+            info(0, 0, 0),
+            4,
+        );
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn convert_matches_pixel_format_and_respects_strides() {
+        let width = 3;
+        let height = 4;
+        let src_stride = 5;
+        let dst_stride_bytes = 6 * 4;
+        let mut src = vec![0u8; src_stride * 4 * height];
+        for y in 0..height {
+            for x in 0..width {
+                let o = (y * src_stride + x) * 4;
+                src[o] = (x * 10) as u8;
+                src[o + 1] = (y * 10) as u8;
+                src[o + 2] = 7;
+                src[o + 3] = 255;
+            }
+        }
+        let mut dst = vec![0xAAu8; dst_stride_bytes * height];
+        let mut bands = [PresentBand::EMPTY; MAX_PRESENT_BANDS];
+        let n = split_bands(
+            &mut bands,
+            src.as_ptr(),
+            src_stride,
+            dst.as_mut_ptr(),
+            info(width, height, 6),
+            2,
+        );
+        assert_eq!(n, 2);
+        for band in &bands[..n] {
+            unsafe { convert_rgba_rows(band) };
+        }
+        for y in 0..height {
+            for x in 0..width {
+                let o = y * dst_stride_bytes + x * 4;
+                let expected = PixelFormat::Rgb32.to_bytes((x * 10) as u8, (y * 10) as u8, 7);
+                assert_eq!(&dst[o..o + 4], &expected, "pixel ({x},{y})");
+            }
+            // padding pixels untouched
+            assert_eq!(dst[y * dst_stride_bytes + width * 4], 0xAA);
+        }
     }
 }

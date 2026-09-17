@@ -29,6 +29,7 @@ pub mod smp;
 pub mod spin;
 pub mod tick;
 pub mod timer;
+pub mod tsc;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_pci;
@@ -51,6 +52,7 @@ pub use smp::{CpuRegistry, MAX_CPUS};
 pub use spin::{SpinGuard, SpinLock};
 pub use tick::{KernelTickCounter, TickSource};
 pub use timer::{FakeTimerDevice, HpetTimer, PitTimer};
+pub use tsc::rdtsc;
 pub use virtio::{
     QueuePlacement, VirtioMmioDevice, VirtioTransport, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue,
 };
