@@ -808,11 +808,12 @@ mod tests {
         assert_eq!(b64::encode(b"Ma"), "TWE=");
         assert_eq!(b64::decode("TWE"), None);
         assert_eq!(b64::decode("TW!="), None);
-        // A maximal 256-byte command output must fit one UDP payload.
+        // A maximal 512-byte command output (kernel RESPONSE_MAX) must fit
+        // one UDP payload.
         let response = encode_response(
             RemoteResponse {
                 request_id: MessageId::new(),
-                result: Ok(vec![b'x'; 256]),
+                result: Ok(vec![b'x'; 512]),
             },
             MessageId::new(),
         )
@@ -820,7 +821,7 @@ mod tests {
         let bytes = envelope_to_bytes(&response, b"k").unwrap();
         assert!(bytes.len() <= 1472, "datagram is {} bytes", bytes.len());
         let back = decode_response(&envelope_from_bytes(&bytes, b"k").unwrap()).unwrap();
-        assert_eq!(back.result, Ok(vec![b'x'; 256]));
+        assert_eq!(back.result, Ok(vec![b'x'; 512]));
     }
 
     fn hex(bytes: &[u8]) -> String {

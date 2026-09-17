@@ -4699,7 +4699,9 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 const PAGE_SIZE: u64 = 4096;
 const CHANNEL_CAPACITY: usize = 8;
 const COMMAND_MAX: usize = 64;
-const RESPONSE_MAX: usize = 256;
+/// Command output capacity; `net`/`cpus` status fits, and a full response
+/// still fits one UDP datagram once base64-wrapped in a remote_ipc envelope.
+const RESPONSE_MAX: usize = 512;
 const ERROR_MAX: usize = 96;
 const MAX_TASKS: usize = 8;
 const MAX_CHANNELS: usize = 16;

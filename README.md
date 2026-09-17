@@ -10,9 +10,12 @@ This is a **research prototype** and **advanced foundation**. It is:
 - ✅ Designed for testability and clarity
 - ✅ Modular and evolvable
 - ✅ Fully functional under `cargo test`
-- ✅ Boots on x86_64 bare metal (via QEMU)
+- ✅ Boots on x86_64 bare metal (via QEMU), on all CPUs
+- ✅ Graphical desktop (own rasterizer and compositor) plus a text console
 - ✅ Interactive text editor with workspace management
-- ✅ Capability-based storage with permissions
+- ✅ Capability-based storage with permissions, persistent across reboots (virtio-blk)
+- ✅ Networking: DHCP, ping, UDP, TCP, and an authenticated remote command channel
+- ✅ Critical paths checked against executable models (bounded model checking)
 - ❌ Not a replacement for Linux/BSD/Windows
 - ❌ Not production-ready
 - ❌ Not POSIX-compatible (by design)
@@ -64,6 +67,8 @@ Legacy operating systems optimize for backward compatibility, not clarity. We be
 ```
 PandaGen/
 ├── core_types/                 # Fundamental types (Cap<T>, IDs)
+├── graphics_rasterizer/        # no_std RGBA rasterizer, fonts, images
+├── net_stack/                  # no_std Ethernet/ARP/IPv4/ICMP/UDP/TCP/DHCP
 ├── ipc/                        # Message passing primitives
 ├── kernel_api/                 # Kernel interface trait
 ├── sim_kernel/                 # Simulated kernel (for testing)
@@ -181,14 +186,32 @@ cargo clippy -- -D warnings
 
 ### Bare-Metal Track
 
-PandaGen can boot on x86_64 hardware:
-- ✅ Bootable ISO via Limine bootloader
-- ✅ QEMU-tested kernel bootstrap
-- ✅ VGA text mode and framebuffer support
-- ✅ PS/2 keyboard input handling
-- ✅ Interactive workspace with editor
+PandaGen boots on x86_64 hardware (QEMU is the reference machine):
+- ✅ Bootable ISO via Limine; `cargo xtask iso` then `cargo xtask qemu`
+- ✅ Framebuffer text console and a graphical desktop (`display graphics`)
+- ✅ PS/2 keyboard and mouse
+- ✅ Persistent storage on virtio-blk over PCI; files survive reboots
+- ✅ SMP: every CPU online with its own GDT/TSS and LAPIC timer; idle CPUs poll kernel tasks and share the desktop present (3x faster)
+- ✅ CPU exceptions print a register dump instead of triple-faulting
+- ✅ virtio-net over PCI with DHCP, ARP, ICMP ping, UDP echo, and a TCP server
+- ✅ Remote read-only commands over UDP (`remote_ipc` envelopes) and TCP (signed lines), HMAC-authenticated with replay protection
 
-See `docs/qemu_boot.md` for build and boot instructions.
+See `docs/qemu_boot.md` for build and boot instructions and `docs/next_steps.md` for what is in progress.
+
+### Talking To A Running Kernel
+
+With `cargo xtask qemu` running (it forwards the kernel's ports to localhost):
+
+```bash
+cargo xtask remote cpus          # remote_ipc over UDP 7778
+cargo xtask remote-tcp net       # signed line protocol over TCP 7780
+```
+
+Scripted, headless verification drives keystrokes, mouse, screenshots, and host-side network steps in one run:
+
+```bash
+cargo xtask qemu-script --keys "sleep:4,udp:hello,remote-tcp:cpus;online=4,tcp:echo,shot:desk" --expect-serial "SMP: 4 of 4 CPUs online"
+```
 
 ## 📖 Documentation
 
@@ -311,23 +334,25 @@ cargo test --all
 - [x] Bare-metal workspace platform adapter (Phase 115)
 - [x] High-impact performance optimizations (Phase 117)
 
-### 🔄 Current Status
-The system now includes:
-- **Bare-metal capable**: Can boot on x86_64 hardware via QEMU
-- **Interactive editor**: Full vi-style text editor with rendering
-- **Workspace management**: Multi-component workspace with command palette
-- **Storage with permissions**: Capability-based file ownership
-- **Remote capabilities**: IPC over network with explicit authority
-- **Package system**: Application package registry and management
-- **Comprehensive testing**: Unit tests, integration tests, and resilience tests
+### ✅ Phase 213-251: Graphics (Complete)
+- [x] `graphics_rasterizer`: no_std RGBA rasterizer, 8x16 font, clipping, images
+- [x] `services_gui_host`: compositor, damage tracking, theme, animation, telemetry
+- [x] Graphical shell: launcher, command palette, editor, file picker, notifications
+- [x] Bare-metal desktop mode with pointer, present pacing, memory pressure policy
 
-### Phase 118+: Future Work
-- [x] Multi-core support
-- [x] Graphics/UI framework beyond text mode
-- [x] Advanced network protocols
-- [x] Distributed consensus algorithms
-- [x] Real-time scheduling guarantees
-- [x] Formal verification of critical paths
+### ✅ Phase 252-273: Storage, SMP, Networking, Verification (Complete)
+- [x] Persistent virtio-blk storage over PCI, mounted across reboots (252-253)
+- [x] SMP bring-up: spinlocks, CPU registry, LAPIC, IPIs, job queue, parallel present, per-CPU timers, GDT/TSS, exception diagnostics, tasks on any CPU (254-256, 261-263)
+- [x] virtio-net, ARP/IPv4/ICMP/UDP, DHCP, TCP (257-258, 268, 272)
+- [x] Authenticated, replay-protected remote commands over UDP and TCP (259-260, 267, 273)
+- [x] Model-based checkers for capabilities, scheduling (round-robin and EDF), IPC access, message budgets, and the kernel heap; nine `sim_kernel` defects found and fixed (264-271)
+
+### 🔄 Open Work (see `docs/next_steps.md`)
+- [ ] True parallel task execution (tasks still run under one kernel lock)
+- [ ] Per-caller keys for remote commands; DHCP lease renewal
+- [ ] Out-of-order TCP reassembly and congestion control
+
+Each phase is recorded in a `PHASE<n>_SUMMARY.md` at the repository root.
 
 ## 🤝 Contributing
 
