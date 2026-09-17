@@ -29,6 +29,7 @@ pub mod layout;
 pub mod memory;
 pub mod scene;
 pub mod shell;
+pub mod telemetry;
 pub mod theme;
 pub mod transport;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
@@ -42,6 +43,7 @@ pub use shell::{
     compose_shell, shell_layout, LauncherItem, NoticeLevel, ShellModel, ShellNotice, ShellRects,
     ShellViewIds,
 };
+pub use telemetry::{GfxSnapshot, GfxTelemetry};
 pub use theme::Theme;
 pub use transport::{
     apply_delta, diff_scenes, DecodeError, SceneDecoder, SceneDelta, SceneEncoder, SceneReplay,

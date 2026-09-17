@@ -52,8 +52,8 @@ use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
 
 use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
 use services_gui_host::{
-    HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent, NoticeLevel,
-    ShellNotice,
+    GfxSnapshot, HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent,
+    NoticeLevel, ShellNotice,
 };
 
 /// Component type in the workspace
@@ -231,6 +231,10 @@ pub struct WorkspaceSession {
     /// Deliberately held allocations from `heap stress`, for testing the
     /// low-memory degradation path (GFX-048).
     stress_blocks: Vec<Vec<u8>>,
+    /// Latest graphics telemetry snapshot pushed by the loop (GFX-049).
+    gfx_snapshot: Option<GfxSnapshot>,
+    /// Set by `gfx reset`; consumed by the loop.
+    gfx_reset_requested: bool,
 }
 
 /// Lifecycle of one pipeline stage.
@@ -539,6 +543,8 @@ impl WorkspaceSession {
             pipeline_channel: None,
             hosted: None,
             stress_blocks: Vec::new(),
+            gfx_snapshot: None,
+            gfx_reset_requested: false,
         }
     }
 
@@ -969,6 +975,26 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "gfx" {
+            self.emit_command_line(serial, command.as_bytes());
+            match parts.next() {
+                Some("reset") => {
+                    self.gfx_reset_requested = true;
+                    self.emit_line(serial, "gfx: counters reset");
+                }
+                None | Some("stats") => match self.gfx_snapshot {
+                    Some(snapshot) => {
+                        for line in snapshot.lines() {
+                            self.emit_line(serial, &line);
+                        }
+                    }
+                    None => self.emit_line(serial, "gfx: no telemetry yet"),
+                },
+                Some(_) => self.emit_line(serial, "Usage: gfx [stats | reset]"),
+            }
+            return;
+        }
+
         if cmd == "heap" {
             self.emit_command_line(serial, command.as_bytes());
             let sub = parts.next();
@@ -1012,6 +1038,7 @@ impl WorkspaceSession {
                     serial,
                     "heap stress <KiB> | release - Hold or free test allocations",
                 );
+                self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
                 self.emit_line(serial, "");
@@ -1599,6 +1626,15 @@ impl WorkspaceSession {
         // Close palette after execution
         self.palette_overlay.close();
         return true;
+    }
+
+    /// Store the latest telemetry snapshot (called by the loop each frame).
+    pub fn set_gfx_snapshot(&mut self, snapshot: GfxSnapshot) {
+        self.gfx_snapshot = Some(snapshot);
+    }
+
+    pub fn consume_gfx_reset(&mut self) -> bool {
+        core::mem::take(&mut self.gfx_reset_requested)
     }
 
     fn run_heap_command(&mut self, serial: &mut SerialPort, sub: Option<&str>, arg: Option<&str>) {

@@ -139,7 +139,7 @@ User-space services should provide policy:
 - [x] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
 - [x] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
 - [x] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
-- [ ] `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
+- [x] `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
 
 ### Epic 11: Hardware Acceleration Later
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-048` is in place: a pure pressure classifier with hysteresis (critical adopted immediately) drives a fixed degradation order: low pressure sheds notices and the pointer sprite, critical pressure leaves graphics mode for the allocation-free text console with a notice, and recovery restores normal behaviour. `heap stress`/`heap release` exercise the path on the real image.
+Epic 10 (performance and correctness) is complete: work benchmarks, property tests, memory budgeting, a freeing allocator, clean degradation, and `gfx stats` telemetry (frames, presents, rejected and slow presents, present latency, pacer decisions, animation wakes, pointer events, pressure, heap, budget).
 
-The best next implementation step is:
+Milestones A, B, and C are reached. The best next implementation step is the first story of Milestone D:
 
-- `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
+- `GFX-050` Define a renderer backend trait so software and GPU renderers can share the same desktop contract.
 
-The pacer, animation clock, present path, and pressure monitor each keep counters; a single `gfx stats` surface (and a serial line on demand) that reports presents, deferred/coalesced frames, render counts, present ticks, pressure transitions, and heap numbers closes Epic 10.
+The compositor already paints into any `RenderTarget`; a backend trait one level up (compose a `DesktopScene` and present it, report capabilities and stats) lets the software path stay authoritative while a GPU backend becomes an optional implementation of the same contract.

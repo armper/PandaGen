@@ -1015,6 +1015,8 @@ fn workspace_loop(
         services_gui_host::PressureThresholds::DEFAULT,
         PRESSURE_HYSTERESIS_SAMPLES,
     );
+    // GFX-049: display path telemetry, read by `gfx stats`.
+    let mut gfx_telemetry = services_gui_host::GfxTelemetry::new();
     if display_mode.is_graphics() {
         if let Some(fb) = fb_console.as_ref() {
             let info = fb.info();
@@ -1094,12 +1096,22 @@ fn workspace_loop(
         // is the single hardware present point of the loop.
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
             if let Some(fb) = fb_console.as_mut() {
-                if display_mode.is_graphics() {
-                    if let Some(renderer) = desktop_renderer.as_ref() {
-                        present_desktop_frame(serial, fb, renderer);
+                let started = get_tick_count();
+                let outcome = if display_mode.is_graphics() {
+                    desktop_renderer
+                        .as_ref()
+                        .map(|renderer| present_desktop_frame(serial, fb, renderer))
+                } else {
+                    fb_shadow
+                        .as_mut()
+                        .map(|backbuffer| present_framebuffer_shadow(serial, fb, backbuffer))
+                };
+                match outcome {
+                    Some(true) => {
+                        gfx_telemetry.record_present(get_tick_count().saturating_sub(started))
                     }
-                } else if let Some(backbuffer) = fb_shadow.as_mut() {
-                    present_framebuffer_shadow(serial, fb, backbuffer);
+                    Some(false) => gfx_telemetry.record_present_rejected(),
+                    None => {}
                 }
             }
         }
@@ -1237,6 +1249,7 @@ fn workspace_loop(
                     event.position.y,
                     event.buttons.bits(),
                 );
+                gfx_telemetry.record_pointer_event();
                 // Route against the desktop the user currently sees.
                 if display_mode.is_graphics() {
                     if let Some(renderer) = desktop_renderer.as_ref() {
@@ -1457,9 +1470,34 @@ fn workspace_loop(
             }
         }
 
+        // Publish telemetry for `gfx stats` (GFX-049).
+        if workspace.consume_gfx_reset() {
+            gfx_telemetry.reset();
+        }
+        {
+            let heap = GLOBAL_HEAP.stats();
+            let pacer = present_pacer.stats();
+            workspace.set_gfx_snapshot(services_gui_host::GfxSnapshot {
+                telemetry: gfx_telemetry,
+                pacer_presents: pacer.presents,
+                pacer_deferred: pacer.deferred_polls,
+                pacer_coalesced: pacer.coalesced_marks,
+                pacer_forced: pacer.forced_presents,
+                pressure: pressure_monitor.pressure(),
+                pressure_transitions: pressure_monitor.transitions(),
+                heap_used: heap.used,
+                heap_free: heap.free,
+                heap_total: heap.total,
+                budget_used: surface_budget.used(),
+                budget_limit: surface_budget.limit(),
+                tick: get_tick_count(),
+            });
+        }
+
         // Animation wakes are redraw requests scheduled by the previous frame.
         if display_mode.is_graphics() && animation_clock.poll(get_tick_count()) {
             input_dirty = true;
+            gfx_telemetry.record_animation_wake();
         }
         // Typing restarts the blink so the caret is visible right after input.
         if input_progressed {
@@ -1619,6 +1657,7 @@ fn workspace_loop(
                 input_router.apply_focus(&mut windows);
                 renderer.render_windows(windows, model.pointer);
                 present_pacer.mark_dirty();
+                gfx_telemetry.record_frame();
                 // The text renderer's caches no longer describe the screen.
                 editor_render_cache.invalidate();
                 input_dirty = false;
@@ -2258,6 +2297,7 @@ fn workspace_loop(
 
                     if fb_shadow.is_some() {
                         present_pacer.mark_dirty();
+                        gfx_telemetry.record_frame();
                     }
                 }
             } // End !rendered_editor
@@ -2621,13 +2661,17 @@ fn present_framebuffer_shadow(
     serial: &mut serial::SerialPort,
     fb: &mut framebuffer::BareMetalFramebuffer,
     backbuffer: &mut framebuffer::BareMetalFramebuffer,
-) {
+) -> bool {
     // GFX-019: copy only the shadow's damage bounding box, not the full frame.
     match fb.present_shadow_damage(backbuffer) {
-        Ok(stats) => render_stats::record_desktop_present(stats.copied_pixels as u64),
+        Ok(stats) => {
+            render_stats::record_desktop_present(stats.copied_pixels as u64);
+            true
+        }
         Err(err) => {
             render_stats::record_desktop_present_error();
             let _ = writeln!(serial, "framebuffer present rejected: {:?}", err);
+            false
         }
     }
 }
@@ -2637,17 +2681,21 @@ fn present_desktop_frame(
     serial: &mut serial::SerialPort,
     fb: &mut framebuffer::BareMetalFramebuffer,
     renderer: &desktop_frame::DesktopFrameRenderer,
-) {
+) -> bool {
     let surface = framebuffer::DesktopSurface::rgba8888(
         renderer.width(),
         renderer.height(),
         renderer.pixels(),
     );
     match fb.present_desktop_surface(surface) {
-        Ok(stats) => render_stats::record_desktop_present(stats.copied_pixels as u64),
+        Ok(stats) => {
+            render_stats::record_desktop_present(stats.copied_pixels as u64);
+            true
+        }
         Err(err) => {
             render_stats::record_desktop_present_error();
             let _ = writeln!(serial, "framebuffer present rejected: {:?}", err);
+            false
         }
     }
 }
