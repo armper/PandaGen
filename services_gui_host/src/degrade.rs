@@ -151,7 +151,8 @@ mod tests {
     #[test]
     fn test_classification_by_ratio_and_reserve() {
         let t = PressureThresholds::DEFAULT;
-        assert_eq!(t.classify(500, 1000), MemoryPressure::Normal);
+        // Tiny heaps are always below the frame reserve.
+        assert_eq!(t.classify(500, 1000), MemoryPressure::Critical);
         assert_eq!(
             t.classify(200 * 1024 * 1024, 1000 * 1024 * 1024),
             MemoryPressure::Normal
