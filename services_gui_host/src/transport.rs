@@ -236,10 +236,65 @@ impl SceneDecoder {
     }
 }
 
+/// Deterministic replay of a recorded update stream (GFX-043).
+///
+/// Feeding the same updates in the same order always yields the same scenes,
+/// and rendering those scenes with the same compositor yields the same
+/// pixels as the live session did. `SceneReplay` is a thin cursor over a
+/// decoder so a viewer, a test, or a debugger can step frame by frame.
+#[derive(Debug, Clone, Default)]
+pub struct SceneReplay {
+    updates: Vec<SceneUpdate>,
+    position: usize,
+    decoder: SceneDecoder,
+}
+
+impl SceneReplay {
+    pub fn new(updates: Vec<SceneUpdate>) -> Self {
+        Self {
+            updates,
+            position: 0,
+            decoder: SceneDecoder::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.updates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Apply the next update; `None` at the end of the stream.
+    pub fn step(&mut self) -> Option<Result<DesktopScene, DecodeError>> {
+        let update = self.updates.get(self.position)?;
+        self.position += 1;
+        Some(self.decoder.apply(update).map(|scene| scene.clone()))
+    }
+
+    /// Replay everything from the start, collecting each reconstructed scene.
+    pub fn replay_all(&mut self) -> Result<Vec<DesktopScene>, DecodeError> {
+        self.position = 0;
+        self.decoder = SceneDecoder::new();
+        let mut scenes = Vec::with_capacity(self.updates.len());
+        while let Some(result) = self.step() {
+            scenes.push(result?);
+        }
+        Ok(scenes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DesktopWindowRole, SurfaceRect, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH};
+    use crate::{
+        Compositor, DesktopWindowRole, SurfaceRect, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
+    };
     use alloc::string::ToString;
     use alloc::vec;
     use view_types::{CursorPosition, ViewContent, ViewFrame, ViewKind};
@@ -394,5 +449,97 @@ mod tests {
             fresh.apply(&SceneUpdate::Delta(diff_scenes(&first, &second))),
             Err(DecodeError::MissingKeyframe)
         );
+    }
+
+    #[test]
+    fn test_replay_reconstructs_every_scene_and_every_pixel() {
+        let ids = [ViewId::new(), ViewId::new(), ViewId::new()];
+        // A short "session": caret moves, a notice appears, the theme flips,
+        // the notice goes away, the pointer moves.
+        let mut live = Vec::new();
+        let base = scene(&ids);
+        live.push(base.clone());
+        let mut s2 = base.clone();
+        s2.windows[0].frame.cursor = Some(CursorPosition::new(0, 2));
+        live.push(s2.clone());
+        let mut s3 = s2.clone();
+        s3.windows.push(
+            window(ids[2], "note", SurfaceRect::new(25, 0, 15, 3))
+                .with_role(DesktopWindowRole::Notification),
+        );
+        live.push(s3.clone());
+        let s4 = s3.clone().with_theme(Theme::LIGHT);
+        live.push(s4.clone());
+        let mut s5 = s4.clone();
+        s5.windows.retain(|w| w.frame.view_id != ids[2]);
+        live.push(s5.clone());
+        let mut s6 = s5.clone();
+        s6.cursor = Some(DesktopCursor::new(50, 60));
+        live.push(s6.clone());
+
+        // Record with a small keyframe interval so both kinds appear.
+        let mut encoder = SceneEncoder::new(2);
+        let updates: Vec<SceneUpdate> = live.iter().map(|s| encoder.encode(s)).collect();
+        assert!(updates.iter().any(|u| matches!(u, SceneUpdate::Delta(_))));
+        assert!(
+            updates
+                .iter()
+                .filter(|u| matches!(u, SceneUpdate::Keyframe(_)))
+                .count()
+                >= 2
+        );
+
+        // Serialise the stream as a viewer would receive it and replay it.
+        let wire: Vec<Vec<u8>> = updates
+            .iter()
+            .map(|u| serde_json::to_vec(u).unwrap())
+            .collect();
+        let received: Vec<SceneUpdate> = wire
+            .iter()
+            .map(|b| serde_json::from_slice(b).unwrap())
+            .collect();
+        let mut replay = SceneReplay::new(received);
+        assert_eq!(replay.len(), live.len());
+        let scenes = replay.replay_all().unwrap();
+        assert_eq!(scenes.len(), live.len());
+
+        let compositor = Compositor::new();
+        // Incremental viewer: one persistent buffer repainted by damage only.
+        let (w, h) = base.pixel_size();
+        let mut incremental = graphics_rasterizer::RgbaBuffer::new(w, h, Theme::DEFAULT.background);
+        for (index, (expected, got)) in live.iter().zip(&scenes).enumerate() {
+            compositor.render_scene(&mut incremental, got);
+            let full = compositor.render_scene_rgba(expected);
+            assert_eq!(
+                incremental.as_bytes(),
+                full.pixels.as_slice(),
+                "incremental repaint diverged at frame {index}"
+            );
+            let mut got_scene = got.clone();
+            got_scene.damage = None;
+            let mut expected_scene = expected.clone();
+            expected_scene.damage = None;
+            // Windows may be reordered by delta application; compare as sets.
+            assert_eq!(
+                got_scene.windows.len(),
+                expected_scene.windows.len(),
+                "frame {index}"
+            );
+            for w in &expected_scene.windows {
+                assert!(got_scene.windows.contains(w), "frame {index}");
+            }
+            assert_eq!(got_scene.cursor, expected_scene.cursor, "frame {index}");
+            assert_eq!(got_scene.theme, expected_scene.theme, "frame {index}");
+            // And the pixels are identical.
+            let live_pixels = compositor.render_scene_rgba(expected);
+            let replay_pixels = compositor.render_scene_rgba(got);
+            assert_eq!(live_pixels.pixels, replay_pixels.pixels, "frame {index}");
+        }
+
+        // Stepping is resumable and stable across a second replay.
+        let again = replay.replay_all().unwrap();
+        assert_eq!(again, scenes);
+        assert_eq!(replay.position(), live.len());
+        assert!(replay.step().is_none());
     }
 }

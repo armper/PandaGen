@@ -130,8 +130,8 @@ User-space services should provide policy:
 
 - [x] `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
 - [x] `GFX-042` Define a compact transport format for graphical updates and damage regions.
-- [ ] `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
-- [ ] `GFX-044` Add round-trip tests for graphical snapshot serialization and remote transport.
+- [x] `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
+- [x] `GFX-044` Add round-trip tests for graphical snapshot serialization and remote transport.
 
 ### Epic 10: Performance And Correctness
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-042` is in place: `SceneUpdate::{Keyframe, Delta}`, `diff_scenes`/`apply_delta` keyed by view id with computed damage, and `SceneEncoder`/`SceneDecoder` with forced keyframes on first frame, size change, interval, or viewer join. The remote UI host now streams keyframes and deltas.
+Epic 9 (remote and replayability) is complete: `SceneReplay` reconstructs every scene of a recorded stream, and tests prove pixel identity between live full renders and both replayed full renders and damage-limited incremental repaints, through JSON serialisation and the remote host's JSON-line sink.
 
 The best next implementation step is:
 
-- `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
+- `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
 
-A recorded stream of desktop frames should reconstruct every scene and every pixel exactly; a replay type over the decoder plus a pixel-identity check against live rendering makes that a tested guarantee.
+With correctness pinned down, Epic 10 starts by measuring: a benchmark harness under `cargo test`/`cargo bench` that reports compose time and pixels touched for representative desktops, so later optimisations (damage-aware cursor repaint, present-only-damage in graphics mode) have a baseline.

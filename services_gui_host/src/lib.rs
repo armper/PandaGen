@@ -39,7 +39,8 @@ pub use shell::{
 };
 pub use theme::Theme;
 pub use transport::{
-    apply_delta, diff_scenes, DecodeError, SceneDecoder, SceneDelta, SceneEncoder, SceneUpdate,
+    apply_delta, diff_scenes, DecodeError, SceneDecoder, SceneDelta, SceneEncoder, SceneReplay,
+    SceneUpdate,
 };
 
 const DESKTOP_BACKGROUND: char = '.';
@@ -672,13 +673,32 @@ impl DesktopScene {
 }
 
 impl Compositor {
-    /// Render a scene into `target`. The scene's theme, when present,
-    /// overrides the compositor's own so a remote viewer paints what the
-    /// sender saw.
+    /// Repaint a scene into a persistent `target` that already shows the
+    /// previous scene, touching only `scene.damage` when it is set. The
+    /// scene's theme, when present, overrides the compositor's own so a
+    /// remote viewer paints what the sender saw.
     pub fn render_scene(
         &self,
         target: &mut impl RenderTarget,
         scene: &DesktopScene,
+    ) -> RasterRenderStats {
+        self.render_scene_with_damage(target, scene, scene.damage)
+    }
+
+    /// Paint a scene in full into `target`, ignoring any damage hint.
+    pub fn render_scene_full(
+        &self,
+        target: &mut impl RenderTarget,
+        scene: &DesktopScene,
+    ) -> RasterRenderStats {
+        self.render_scene_with_damage(target, scene, None)
+    }
+
+    fn render_scene_with_damage(
+        &self,
+        target: &mut impl RenderTarget,
+        scene: &DesktopScene,
+        damage: Option<RasterRect>,
     ) -> RasterRenderStats {
         let painter = match scene.theme {
             Some(theme) => Compositor::with_theme(theme),
@@ -687,17 +707,17 @@ impl Compositor {
         painter.render_desktop_to_target_with_cursor(
             target,
             scene.windows.clone(),
-            scene.damage,
+            damage,
             scene.cursor,
         )
     }
 
-    /// Render a scene into a fresh RGBA surface of the scene's pixel size.
+    /// Render a scene in full into a fresh RGBA surface of its pixel size.
     pub fn render_scene_rgba(&self, scene: &DesktopScene) -> RasterSurfaceFrame {
         let (width, height) = scene.pixel_size();
         let theme = scene.theme.unwrap_or(self.theme);
         let mut buffer = RgbaBuffer::new(width, height, theme.background);
-        let stats = self.render_scene(&mut buffer, scene);
+        let stats = self.render_scene_full(&mut buffer, scene);
         RasterSurfaceFrame::new(buffer, stats.frame_count, stats.timestamp_ns)
     }
 }

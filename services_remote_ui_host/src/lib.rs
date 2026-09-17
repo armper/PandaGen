@@ -543,4 +543,50 @@ mod tests {
         assert!(matches!(third.update, SceneUpdate::Keyframe(_)));
         assert_eq!(third.revision, 3);
     }
+
+    #[test]
+    fn test_json_line_session_replays_to_identical_scenes() {
+        use services_gui_host::{DesktopCursor, SceneReplay};
+        #[derive(Clone, Default)]
+        struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = SharedBuffer::default();
+        let mut host = RemoteUiHost::new();
+        host.add_sink(Box::new(JsonLineSink::new(buffer.clone())));
+
+        let mut live = Vec::new();
+        for i in 0..5u64 {
+            let mut scene = sample_scene();
+            scene.cursor = Some(DesktopCursor::new(3 + i as usize, 4));
+            host.push_desktop(scene.clone(), i).unwrap();
+            live.push(scene);
+        }
+        // Interleaved text snapshots must not disturb the desktop stream.
+        host.push_snapshot(sample_snapshot(), 99).unwrap();
+
+        let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        let mut updates = Vec::new();
+        let mut revisions = Vec::new();
+        for line in text.lines() {
+            if let JsonLineRecord::Desktop(frame) = serde_json::from_str(line).unwrap() {
+                revisions.push(frame.revision);
+                updates.push(frame.update);
+            }
+        }
+        assert_eq!(revisions, vec![1, 2, 3, 4, 5]);
+        let scenes = SceneReplay::new(updates).replay_all().unwrap();
+        assert_eq!(scenes.len(), live.len());
+        for (got, expected) in scenes.iter().zip(&live) {
+            assert_eq!(got.cursor, expected.cursor);
+            assert_eq!(got.windows, expected.windows);
+        }
+    }
 }
