@@ -313,6 +313,12 @@ impl MessagePayload {
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
     }
+
+    /// Wraps already-serialized payload bytes (for transports that carry
+    /// the payload in their own encoding).
+    pub fn from_raw(data: Vec<u8>) -> Self {
+        Self { data }
+    }
 }
 
 /// A complete message with typed payload

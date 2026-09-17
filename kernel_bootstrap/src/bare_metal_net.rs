@@ -4,6 +4,8 @@
 //! network interrupt yet. Buffers live in page-aligned statics whose
 //! physical addresses come from the kernel image mapping.
 
+extern crate alloc;
+
 use core::fmt::Write;
 
 use crate::bare_metal_storage::StorageBootInfo;
@@ -18,6 +20,16 @@ use net_stack::{Config, Event, Interface, Ipv4, SendError};
 
 /// UDP port the kernel echoes datagrams on.
 pub const UDP_ECHO_PORT: u16 = 7777;
+/// UDP port for remote IPC calls (see `remote_ipc`).
+pub const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
+
+/// A datagram received on `REMOTE_PORT`, handed to the kernel's remote
+/// command server.
+pub struct RemoteDatagram {
+    pub src: Ipv4,
+    pub src_port: u16,
+    pub bytes: alloc::vec::Vec<u8>,
+}
 
 const RX_BUFFERS: usize = 8;
 const QUEUE_AREA_BYTES: usize = 12288;
@@ -81,6 +93,7 @@ impl NetStack {
         let mac = device.mac();
         let mut iface = Interface::new(Config::qemu_user(mac));
         iface.bind(UDP_ECHO_PORT);
+        iface.bind(REMOTE_PORT);
         Some(Self {
             device,
             iface,
@@ -133,17 +146,30 @@ impl NetStack {
     }
 
     /// Background servicing from the main loop: answer ARP, ping, and
-    /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns frames handled.
-    pub fn service(&mut self, log: &mut impl Write) -> usize {
-        let mut handled = 0;
+    /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns the first datagram
+    /// for `REMOTE_PORT` seen (later ones wait in the receive queue).
+    pub fn service(&mut self, log: &mut impl Write) -> Option<RemoteDatagram> {
         while let Some(len) = self.device.poll_receive(&mut self.rx_frame) {
-            handled += 1;
             match self
                 .iface
                 .receive(&self.rx_frame[..len], &mut self.tx_frame)
             {
                 Event::Transmit(n) => {
                     let _ = self.device.transmit(&self.tx_frame[..n]);
+                }
+                Event::Udp {
+                    src,
+                    src_port,
+                    dst_port,
+                    payload_offset,
+                    payload_len,
+                } if dst_port == REMOTE_PORT => {
+                    let payload = &self.rx_frame[payload_offset..payload_offset + payload_len];
+                    return Some(RemoteDatagram {
+                        src,
+                        src_port,
+                        bytes: payload.to_vec(),
+                    });
                 }
                 Event::Udp {
                     src,
@@ -179,7 +205,19 @@ impl NetStack {
                 _ => {}
             }
         }
-        handled
+        None
+    }
+
+    /// Reply to a remote caller from `REMOTE_PORT` (next hop already known
+    /// since the request just arrived from it).
+    pub fn udp_reply(&mut self, dst: Ipv4, port: u16, payload: &[u8]) -> bool {
+        match self
+            .iface
+            .udp_send(dst, port, REMOTE_PORT, payload, &mut self.tx_frame)
+        {
+            Ok(len) => self.device.transmit(&self.tx_frame[..len]).is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Send one UDP datagram from the echo port, resolving the next hop

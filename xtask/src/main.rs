@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const TARGET: &str = "x86_64-unknown-none";
 const KERNEL_CRATE: &str = "kernel_bootstrap";
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("qemu") => cmd_qemu(),
         Some("qemu-smoke") => cmd_qemu_smoke(),
         Some("qemu-script") => cmd_qemu_script(args),
+        Some("remote") => cmd_remote(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
@@ -33,6 +35,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask qemu-smoke");
     println!("  cargo xtask qemu-script [--keys k1,k2,sleep:0.5,shot:name,...] [--boot-wait secs]");
     println!("                          [--after secs] [--out prefix] [--expect-serial text]");
+    println!("  cargo xtask remote <command...>   (read-only kernel command over UDP remote IPC)");
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::other("unknown xtask command").into())
@@ -63,6 +66,63 @@ fn cmd_iso() -> Result<(), Box<dyn std::error::Error>> {
 const QEMU_SMP: &str = "4";
 /// Kernel UDP echo port, forwarded from the host loopback by QEMU.
 const UDP_ECHO_PORT: u16 = 7777;
+/// Kernel remote IPC port, forwarded from the host loopback by QEMU.
+const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
+
+/// UDP datagram transport for `remote_ipc` against the kernel's port.
+struct UdpTransport {
+    socket: std::net::UdpSocket,
+}
+
+impl remote_ipc::RemoteTransport for UdpTransport {
+    fn send(&mut self, message: ipc::MessageEnvelope) -> Result<(), remote_ipc::RemoteIpcError> {
+        let bytes = remote_ipc::envelope_to_bytes(&message)?;
+        self.socket
+            .send_to(&bytes, ("127.0.0.1", REMOTE_PORT))
+            .map(|_| ())
+            .map_err(|err| remote_ipc::RemoteIpcError::Codec(err.to_string()))
+    }
+
+    fn receive(&mut self) -> Result<ipc::MessageEnvelope, remote_ipc::RemoteIpcError> {
+        let mut buf = [0u8; 4096];
+        let (n, _) = self
+            .socket
+            .recv_from(&mut buf)
+            .map_err(|err| remote_ipc::RemoteIpcError::Codec(err.to_string()))?;
+        remote_ipc::envelope_from_bytes(&buf[..n])
+    }
+}
+
+/// Run one read-only kernel command through remote IPC and return its output.
+fn remote_call(command: &str, timeout: Duration) -> Result<String, Box<dyn std::error::Error>> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    socket.set_read_timeout(Some(timeout))?;
+    let authority = remote_ipc::CapabilityAuthority {
+        caller: "xtask".to_string(),
+        allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
+    };
+    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket }, authority);
+    let reply = client.call(
+        remote_ipc::CAP_KERNEL_COMMAND,
+        remote_ipc::ACTION_KERNEL_COMMAND_RUN,
+        command.as_bytes().to_vec(),
+    )?;
+    Ok(String::from_utf8_lossy(&reply).into_owned())
+}
+
+/// `cargo xtask remote <command...>`: call a running kernel over UDP.
+fn cmd_remote(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let command: Vec<String> = args.collect();
+    if command.is_empty() {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "remote expects a command").into());
+    }
+    let reply = remote_call(&command.join(" "), Duration::from_secs(3))?;
+    print!("{reply}");
+    if !reply.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
 
 fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
@@ -103,7 +163,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -129,7 +189,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -193,7 +253,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -302,7 +362,7 @@ fn cmd_qemu_script(
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -367,6 +427,27 @@ fn cmd_qemu_script(
                     ));
                 }
                 Err(err) => udp_failures.push(format!("<udp echo of {spec:?}: {err}>")),
+            }
+        } else if let Some(spec) = key.strip_prefix("remote:") {
+            // remote:<command>;<expected substring> -> remote IPC call from
+            // the host; the reply must contain the expected text.
+            // An expectation starting with '!' means the call must be
+            // rejected with that error text.
+            let (command, expected) = spec.split_once(';').unwrap_or((spec, ""));
+            match (
+                remote_call(command, Duration::from_secs(3)),
+                expected.strip_prefix('!'),
+            ) {
+                (Ok(reply), None) if reply.contains(expected) => {
+                    println!("remote ok: {command} -> {}", reply.trim_end());
+                }
+                (Err(err), Some(want)) if err.to_string().contains(want) => {
+                    println!("remote rejected as expected: {command} -> {err}");
+                }
+                (Ok(reply), _) => udp_failures.push(format!(
+                    "<remote {command:?} reply {reply:?} vs {expected:?}>"
+                )),
+                (Err(err), _) => udp_failures.push(format!("<remote {command:?}: {err}>")),
             }
         } else if let Some(mask) = key.strip_prefix("mbtn:") {
             // mbtn:<mask> -> button state bitmask (1 left, 2 right, 4 middle)

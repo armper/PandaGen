@@ -1059,6 +1059,11 @@ fn workspace_loop(
         heap_total / 1024
     );
 
+    // Remote IPC over UDP: calls arrive on the network, run through the
+    // command service, and answer on this channel.
+    let remote_channel = kernel.create_channel().ok();
+    let mut remote_server = RemoteCommandServer::new(remote_channel);
+
     // GFX-039: pipeline stages reply on their own channel.
     match kernel.create_channel() {
         Ok(channel) => workspace.set_pipeline_channel(channel),
@@ -1207,14 +1212,6 @@ fn workspace_loop(
         // Run kernel tasks
         let kernel_progressed = kernel.run_once(serial);
 
-        // Service the network (ARP, ping, UDP echo) while nothing else holds it.
-        #[cfg(all(not(test), target_os = "none"))]
-        if let Some(mut guard) = NET.try_lock() {
-            if let Some(net) = guard.as_mut() {
-                net.service(serial);
-            }
-        }
-
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
@@ -1331,6 +1328,10 @@ fn workspace_loop(
             channels,
             next_message_id,
         };
+
+        // Service the network (ARP, ping, UDP echo, remote calls).
+        #[cfg(all(not(test), target_os = "none"))]
+        remote_server.poll(&mut ctx, serial, command_channel, get_tick_count());
 
         // Try to receive response
         if let Some(message) = ctx.try_recv(response_channel) {
@@ -2805,6 +2806,211 @@ fn present_framebuffer_shadow(
 }
 
 /// Present the composed desktop RGBA frame (graphics display mode).
+/// Read-only commands a remote caller may run.
+const REMOTE_ALLOWED_COMMANDS: [&str; 7] = ["help", "boot", "mem", "cpus", "heap", "ticks", "net"];
+
+/// Whether a remote command line is on the read-only allowlist. `net`
+/// is allowed only without arguments (status).
+fn remote_command_allowed(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    let Some(head) = parts.next() else {
+        return false;
+    };
+    if !REMOTE_ALLOWED_COMMANDS.contains(&head) {
+        return false;
+    }
+    head != "net" || parts.next().is_none()
+}
+
+/// One remote call in flight: who asked, and which envelope to answer.
+struct RemoteInFlight {
+    src: net_stack::Ipv4,
+    src_port: u16,
+    envelope_id: ipc::MessageId,
+    request_id: ipc::MessageId,
+    local_id: MessageId,
+    started_tick: u64,
+}
+
+/// Serves `remote_ipc` calls arriving over UDP by running them through
+/// the command service, one at a time.
+struct RemoteCommandServer {
+    channel: Option<ChannelId>,
+    in_flight: Option<RemoteInFlight>,
+    served: u64,
+    denied: u64,
+}
+
+impl RemoteCommandServer {
+    const TIMEOUT_TICKS: u64 = 300;
+
+    fn new(channel: Option<ChannelId>) -> Self {
+        Self {
+            channel,
+            in_flight: None,
+            served: 0,
+            denied: 0,
+        }
+    }
+
+    #[cfg(all(not(test), target_os = "none"))]
+    fn poll(
+        &mut self,
+        ctx: &mut KernelContext,
+        serial: &mut serial::SerialPort,
+        command_channel: ChannelId,
+        now: u64,
+    ) {
+        let Some(channel) = self.channel else {
+            return;
+        };
+        // Deliver a finished command back to its caller.
+        if let Some(pending) = self.in_flight.as_ref() {
+            let reply = match ctx.try_recv(channel) {
+                Some(KernelMessage::CommandResponse(response))
+                    if response.correlation_id == pending.local_id =>
+                {
+                    Some(match response.status {
+                        CommandStatus::Ok => Ok(response.output[..response.len].to_vec()),
+                        CommandStatus::Error(err) => {
+                            Err(alloc::string::String::from(err.as_str().unwrap_or("error")))
+                        }
+                    })
+                }
+                Some(_) => None,
+                None if now.saturating_sub(pending.started_tick) > Self::TIMEOUT_TICKS => {
+                    Some(Err(alloc::string::String::from("timeout")))
+                }
+                None => None,
+            };
+            if let Some(result) = reply {
+                let pending = self.in_flight.take().unwrap();
+                self.respond(&pending, result);
+                self.served += 1;
+            }
+        }
+        // Pick up the next call once idle.
+        if self.in_flight.is_some() {
+            return;
+        }
+        let datagram = {
+            let Some(mut guard) = NET.try_lock() else {
+                return;
+            };
+            let Some(net) = guard.as_mut() else {
+                return;
+            };
+            net.service(serial)
+        };
+        let Some(datagram) = datagram else {
+            return;
+        };
+        let envelope = match remote_ipc::envelope_from_bytes(&datagram.bytes) {
+            Ok(envelope) => envelope,
+            Err(err) => {
+                klog!(serial, "remote: bad envelope ({err})\r\n");
+                return;
+            }
+        };
+        let call = match remote_ipc::authorize_call(&envelope, &[remote_ipc::CAP_KERNEL_COMMAND]) {
+            Ok(call) => call,
+            Err(err) => {
+                self.denied += 1;
+                klog!(serial, "remote: denied ({err})\r\n");
+                if let Ok(call) = remote_ipc::decode_call(&envelope) {
+                    let pending = RemoteInFlight {
+                        src: datagram.src,
+                        src_port: datagram.src_port,
+                        envelope_id: envelope.id,
+                        request_id: call.request_id,
+                        local_id: MessageId(0),
+                        started_tick: now,
+                    };
+                    self.respond(&pending, Err(alloc::string::String::from("unauthorized")));
+                }
+                return;
+            }
+        };
+        let command = core::str::from_utf8(&call.payload).unwrap_or("").trim();
+        let pending = RemoteInFlight {
+            src: datagram.src,
+            src_port: datagram.src_port,
+            envelope_id: envelope.id,
+            request_id: call.request_id,
+            local_id: MessageId(0),
+            started_tick: now,
+        };
+        if call.action != remote_ipc::ACTION_KERNEL_COMMAND_RUN || !remote_command_allowed(command)
+        {
+            self.denied += 1;
+            klog!(serial, "remote: refused command {:?}\r\n", command);
+            self.respond(
+                &pending,
+                Err(alloc::string::String::from("command not allowed")),
+            );
+            return;
+        }
+        let local_id = ctx.next_message_id();
+        let Some(request) = CommandRequest::from_bytes(command.as_bytes(), local_id, channel)
+        else {
+            self.respond(
+                &pending,
+                Err(alloc::string::String::from("command too long")),
+            );
+            return;
+        };
+        if ctx
+            .send(command_channel, KernelMessage::CommandRequest(request))
+            .is_err()
+        {
+            self.respond(
+                &pending,
+                Err(alloc::string::String::from("command queue full")),
+            );
+            return;
+        }
+        klog!(
+            serial,
+            "remote: running {:?} for {}:{}\r\n",
+            command,
+            net_stack::wire::fmt_ipv4(datagram.src),
+            datagram.src_port
+        );
+        self.in_flight = Some(RemoteInFlight {
+            local_id,
+            ..pending
+        });
+    }
+
+    #[cfg(all(not(test), target_os = "none"))]
+    fn respond(
+        &mut self,
+        pending: &RemoteInFlight,
+        result: Result<alloc::vec::Vec<u8>, alloc::string::String>,
+    ) {
+        let response = remote_ipc::RemoteResponse {
+            request_id: pending.request_id,
+            result,
+        };
+        let Ok(envelope) = remote_ipc::encode_response(response, pending.envelope_id) else {
+            return;
+        };
+        let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope) else {
+            return;
+        };
+        if let Some(net) = NET.lock().as_mut() {
+            if !net.udp_reply(pending.src, pending.src_port, &bytes) {
+                let mut serial = serial::SerialPort::new(serial::COM1);
+                klog!(
+                    serial,
+                    "remote: reply of {} bytes not sent\r\n",
+                    bytes.len()
+                );
+            }
+        }
+    }
+}
+
 /// CPUs a present may be split across right now.
 fn present_workers() -> usize {
     if PARALLEL_PRESENT.load(core::sync::atomic::Ordering::Relaxed) {

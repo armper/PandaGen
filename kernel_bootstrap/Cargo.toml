@@ -18,6 +18,8 @@ identity = { workspace = true }
 hal = { path = "../hal", features = ["alloc"] }
 hal_x86_64 = { path = "../hal_x86_64" }
 net_stack = { workspace = true }
+remote_ipc = { workspace = true }
+ipc = { workspace = true }
 serde = { workspace = true, default-features = false, features = ["alloc"] }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 services_command_palette = { path = "../services_command_palette", default-features = false }

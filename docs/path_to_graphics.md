@@ -215,4 +215,4 @@ Every story in this roadmap is implemented (Phases 203 to 251). Milestones A to 
 
 ## Immediate Next Story
 
-The graphics track is complete, and persistent bare-metal storage landed in Phases 252-253 (virtio-blk over PCI, existing disks are mounted rather than reformatted). SMP bring-up started in Phase 254 (all CPUs online and parked). Networking started in Phases 257-258 (virtio-net, ARP, ICMP ping, UDP echo reachable from the host). The next high-value items from `docs/next_steps.md` are remote IPC over UDP and per-CPU scheduling.
+The graphics track is complete, and persistent bare-metal storage landed in Phases 252-253 (virtio-blk over PCI, existing disks are mounted rather than reformatted). SMP bring-up started in Phase 254 (all CPUs online and parked). Networking started in Phases 257-258 (virtio-net, ARP, ICMP ping, UDP echo reachable from the host). Remote IPC over UDP landed in Phase 259. The next high-value items from `docs/next_steps.md` are per-CPU scheduling and formal verification of the capability model.

@@ -8,6 +8,5 @@ license.workspace = true
 [dependencies]
 ipc = { workspace = true }
 core_types = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
