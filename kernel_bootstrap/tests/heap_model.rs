@@ -92,7 +92,11 @@ impl Arena {
         );
         for other in &self.live {
             let disjoint = addr + size <= other.ptr || other.ptr + other.size <= addr;
-            assert!(disjoint, "H3 overlap with live block\ntrace: {:?}", self.trace);
+            assert!(
+                disjoint,
+                "H3 overlap with live block\ntrace: {:?}",
+                self.trace
+            );
         }
         unsafe { core::ptr::write_bytes(ptr, fill, size) };
         self.live.push(Live {
@@ -108,7 +112,8 @@ impl Arena {
 
     fn free(&mut self, index: usize) {
         let block = self.live.swap_remove(index);
-        self.trace.push(format!("free({}, {})", block.size, block.align));
+        self.trace
+            .push(format!("free({}, {})", block.size, block.align));
         // The block must still hold its pattern right before release.
         self.verify(&block);
         let layout = Layout::from_size_align(block.size, block.align).unwrap();
@@ -133,7 +138,12 @@ impl Arena {
             self.verify(block);
         }
         let stats = self.heap.stats();
-        assert_eq!(stats.total, self.total(), "H5 total\ntrace: {:?}", self.trace);
+        assert_eq!(
+            stats.total,
+            self.total(),
+            "H5 total\ntrace: {:?}",
+            self.trace
+        );
         assert_eq!(
             stats.used + stats.free,
             stats.total,
@@ -151,7 +161,11 @@ impl Arena {
             "H5 free_blocks vs free\ntrace: {:?}",
             self.trace
         );
-        assert_eq!(stats.allocations, self.allocations, "H5 allocations\ntrace: {:?}", self.trace);
+        assert_eq!(
+            stats.allocations, self.allocations,
+            "H5 allocations\ntrace: {:?}",
+            self.trace
+        );
         assert_eq!(stats.frees, self.frees, "H5 frees\ntrace: {:?}", self.trace);
         let live_bytes: usize = self.live.iter().map(|b| b.size).sum();
         assert!(
@@ -161,9 +175,21 @@ impl Arena {
             self.trace
         );
         if self.live.is_empty() {
-            assert_eq!(stats.used, 0, "H6 used after freeing all\ntrace: {:?}", self.trace);
-            assert_eq!(stats.free_blocks, 1, "H6 coalesced to one block\ntrace: {:?}", self.trace);
-            assert_eq!(stats.largest_free, stats.total, "H6 largest_free\ntrace: {:?}", self.trace);
+            assert_eq!(
+                stats.used, 0,
+                "H6 used after freeing all\ntrace: {:?}",
+                self.trace
+            );
+            assert_eq!(
+                stats.free_blocks, 1,
+                "H6 coalesced to one block\ntrace: {:?}",
+                self.trace
+            );
+            assert_eq!(
+                stats.largest_free, stats.total,
+                "H6 largest_free\ntrace: {:?}",
+                self.trace
+            );
         }
     }
 }

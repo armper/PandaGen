@@ -5,6 +5,7 @@
 //! caller-provided buffer so the kernel can DMA it directly.
 
 pub mod dhcp;
+pub mod tcp;
 pub mod wire;
 
 #[cfg(test)]
@@ -12,7 +13,8 @@ mod tests;
 
 use wire::{
     ArpPacket, EthernetHeader, Icmp, Ipv4Header, Udp, ARP_OP_REPLY, ARP_OP_REQUEST, ETHERTYPE_ARP,
-    ETHERTYPE_IPV4, ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, IP_PROTO_ICMP, IP_PROTO_UDP, MAC_BROADCAST,
+    ETHERTYPE_IPV4, ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO_UDP,
+    MAC_BROADCAST,
 };
 
 /// Ports an interface can listen on at once.
@@ -88,6 +90,9 @@ pub enum Event {
         payload_offset: usize,
         payload_len: usize,
     },
+    /// A TCP connection gained readable data or changed state. Any reply
+    /// segments are fetched with `tcp_next_frame`.
+    TcpReady { conn: usize },
 }
 
 /// Outstanding ping, if any.
@@ -179,6 +184,7 @@ pub struct Interface {
     counters: Counters,
     pending_len: usize,
     bound: [Option<u16>; MAX_BOUND_PORTS],
+    tcp: tcp::Tcp,
 }
 
 impl Interface {
@@ -203,7 +209,64 @@ impl Interface {
             },
             pending_len: 0,
             bound: [None; MAX_BOUND_PORTS],
+            tcp: tcp::Tcp::new(),
         }
+    }
+
+    /// Accept TCP connections on `port`.
+    pub fn tcp_listen(&mut self, port: u16) {
+        self.tcp.listen(port);
+    }
+
+    pub fn tcp(&self) -> &tcp::Tcp {
+        &self.tcp
+    }
+
+    pub fn tcp_mut(&mut self) -> &mut tcp::Tcp {
+        &mut self.tcp
+    }
+
+    /// Advance TCP's clock (ticks) for retransmission timers.
+    pub fn tcp_tick(&mut self, now: u64) {
+        self.tcp.set_now(now);
+    }
+
+    /// Frame the next TCP segment to send (immediate replies first, then
+    /// data, FINs, and retransmissions). `None` when nothing is pending or
+    /// the peer's MAC is unknown.
+    pub fn tcp_next_frame(&mut self, out: &mut [u8]) -> Option<usize> {
+        let (outgoing, payload_index) = match self.tcp.take_reply() {
+            Some(reply) => (reply, None),
+            None => {
+                let seg = self.tcp.poll()?;
+                let index = self.tcp.index_of(&seg);
+                (seg, index)
+            }
+        };
+        let hop = self.config.next_hop(outgoing.peer);
+        let dst_mac = self.arp.lookup(hop)?;
+        let payload: &[u8] = match payload_index {
+            Some(index) if outgoing.payload.1 > 0 => self.tcp.payload(index, outgoing.payload),
+            _ => &[],
+        };
+        let segment = wire::Tcp {
+            src_port: outgoing.local_port,
+            dst_port: outgoing.peer_port,
+            seq: outgoing.seq,
+            ack: outgoing.ack,
+            flags: outgoing.flags,
+            window: outgoing.window,
+            payload,
+        };
+        wire::build_tcp(
+            out,
+            self.config.mac,
+            dst_mac,
+            self.config.ip,
+            outgoing.peer,
+            &segment,
+            outgoing.mss,
+        )
     }
 
     /// Listen on a UDP port. Returns false when all slots are taken.
@@ -390,6 +453,25 @@ impl Interface {
         }
         match ip.protocol {
             IP_PROTO_ICMP => self.receive_icmp(ip, body, out),
+            IP_PROTO_TCP => {
+                let Some(seg) = wire::Tcp::parse(body, ip.src, ip.dst) else {
+                    self.counters.dropped += 1;
+                    return Event::None;
+                };
+                match self.tcp.receive(tcp::Segment {
+                    src: ip.src,
+                    src_port: seg.src_port,
+                    dst_port: seg.dst_port,
+                    seq: seg.seq,
+                    ack: seg.ack,
+                    flags: seg.flags,
+                    window: seg.window,
+                    payload: seg.payload,
+                }) {
+                    Some(conn) => Event::TcpReady { conn },
+                    None => Event::None,
+                }
+            }
             IP_PROTO_UDP => {
                 let Some(udp) = Udp::parse(body, ip.src, ip.dst) else {
                     self.counters.dropped += 1;

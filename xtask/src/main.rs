@@ -66,6 +66,8 @@ fn cmd_iso() -> Result<(), Box<dyn std::error::Error>> {
 const QEMU_SMP: &str = "4";
 /// Kernel UDP echo port, forwarded from the host loopback by QEMU.
 const UDP_ECHO_PORT: u16 = 7777;
+/// Kernel TCP echo port, forwarded from the host loopback by QEMU.
+const TCP_ECHO_PORT: u16 = 7779;
 /// Kernel remote IPC port, forwarded from the host loopback by QEMU.
 const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 
@@ -125,6 +127,29 @@ fn remote_call(
         command.as_bytes().to_vec(),
     )?;
     Ok(String::from_utf8_lossy(&reply).into_owned())
+}
+
+/// Round-trip one line over the kernel's TCP echo port and expect a clean close.
+fn tcp_echo_check(text: &str, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write as _};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], TCP_ECHO_PORT));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(format!("{text}\n").as_bytes())?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if line.trim_end() != text {
+        return Err(io::Error::other(format!("echoed {line:?}")).into());
+    }
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut rest = String::new();
+    let n = reader.read_line(&mut rest)?;
+    if n != 0 {
+        return Err(io::Error::other(format!("unexpected data after close: {rest:?}")).into());
+    }
+    Ok(())
 }
 
 /// Send a signed call twice: the first must be answered, the replay must not.
@@ -211,7 +236,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -237,7 +262,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -301,7 +326,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -412,7 +437,7 @@ fn cmd_qemu_script(
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -477,6 +502,13 @@ fn cmd_qemu_script(
                     ));
                 }
                 Err(err) => udp_failures.push(format!("<udp echo of {spec:?}: {err}>")),
+            }
+        } else if let Some(text) = key.strip_prefix("tcp:") {
+            // tcp:<text> -> connect to the kernel's TCP echo port, send the
+            // line, require it back, then close and require EOF.
+            match tcp_echo_check(text, Duration::from_secs(3)) {
+                Ok(()) => println!("tcp echo ok: {text}"),
+                Err(err) => udp_failures.push(format!("<tcp echo of {text:?}: {err}>")),
             }
         } else if let Some(command) = key.strip_prefix("replay:") {
             // replay:<command> -> send one signed call, expect a reply, then

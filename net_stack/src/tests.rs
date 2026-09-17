@@ -463,3 +463,110 @@ fn unconfigured_interface_accepts_unicast_and_broadcast_dhcp_replies() {
         Event::Udp { .. }
     ));
 }
+
+#[test]
+fn tcp_frames_are_built_and_parsed_through_the_interface() {
+    use crate::wire::{Tcp, TCP_ACK, TCP_PSH, TCP_SYN};
+    let mut a = iface();
+    a.tcp_listen(7779);
+    let mut out = [0u8; 1514];
+    let mut frame = [0u8; 1514];
+    // SYN from the gateway MAC/IP; the interface learns the neighbour and
+    // answers SYN|ACK through tcp_next_frame.
+    let syn = Tcp {
+        src_port: 40000,
+        dst_port: 7779,
+        seq: 100,
+        ack: 0,
+        flags: TCP_SYN,
+        window: 1000,
+        payload: &[],
+    };
+    let flen = build_tcp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &syn,
+        Some(1460),
+    )
+    .unwrap();
+    assert_eq!(
+        a.receive(&frame[..flen], &mut out),
+        Event::TcpReady { conn: 0 }
+    );
+    let n = a.tcp_next_frame(&mut out).unwrap();
+    let iss = {
+        let (eth, ipp) = EthernetHeader::parse(&out[..n]).unwrap();
+        assert_eq!(eth.dst, GW_MAC);
+        let (ip, body) = Ipv4Header::parse(ipp).unwrap();
+        assert_eq!(ip.protocol, IP_PROTO_TCP);
+        let synack = Tcp::parse(body, ip.src, ip.dst).unwrap();
+        assert_eq!(synack.flags, TCP_SYN | TCP_ACK);
+        assert_eq!(synack.ack, 101);
+        synack.seq
+    };
+    assert!(a.tcp_next_frame(&mut out).is_none());
+    // Complete the handshake and send a line; the echo goes back framed.
+    let ack = Tcp {
+        seq: 101,
+        ack: iss + 1,
+        flags: TCP_ACK,
+        ..syn
+    };
+    let flen = build_tcp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &ack,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        a.receive(&frame[..flen], &mut out),
+        Event::TcpReady { conn: 0 }
+    );
+    let data = Tcp {
+        seq: 101,
+        ack: iss + 1,
+        flags: TCP_ACK | TCP_PSH,
+        payload: b"ping\n",
+        ..syn
+    };
+    let flen = build_tcp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &data,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        a.receive(&frame[..flen], &mut out),
+        Event::TcpReady { conn: 0 }
+    );
+    let mut line = [0u8; 16];
+    assert_eq!(a.tcp_mut().read(0, &mut line), 5);
+    assert_eq!(a.tcp_mut().write(0, b"pong\n"), 5);
+    // First the ACK for the data, then our data segment.
+    let n = a.tcp_next_frame(&mut out).unwrap();
+    {
+        let (_, ipp) = EthernetHeader::parse(&out[..n]).unwrap();
+        let (ip, body) = Ipv4Header::parse(ipp).unwrap();
+        assert_eq!(Tcp::parse(body, ip.src, ip.dst).unwrap().ack, 106);
+    }
+    let n = a.tcp_next_frame(&mut out).unwrap();
+    {
+        let (_, ipp) = EthernetHeader::parse(&out[..n]).unwrap();
+        let (ip, body) = Ipv4Header::parse(ipp).unwrap();
+        let echo = Tcp::parse(body, ip.src, ip.dst).unwrap();
+        assert_eq!(echo.payload, b"pong\n");
+        assert_eq!(echo.seq, iss + 1);
+    }
+    assert!(a.tcp_next_frame(&mut out).is_none());
+}

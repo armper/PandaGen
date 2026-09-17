@@ -79,7 +79,9 @@ _start:
 .section .bss.stack, "aw", @nobits
 .align 16
 stack_bottom:
-    .skip 65536
+    # 256 KiB: the network stack (TCP buffers) and desktop state are built
+    # as stack temporaries in rust_main before moving into statics.
+    .skip 262144
 stack_top:
 "#
 );
@@ -3192,7 +3194,7 @@ impl RemoteCommandServer {
             let Some(net) = guard.as_mut() else {
                 return;
             };
-            net.service(serial)
+            net.service(now, serial)
         };
         let Some(datagram) = datagram else {
             return;

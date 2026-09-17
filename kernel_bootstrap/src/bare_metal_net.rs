@@ -23,6 +23,8 @@ use net_stack::{Config, Event, Interface, Ipv4, SendError};
 pub const UDP_ECHO_PORT: u16 = 7777;
 /// UDP port for remote IPC calls (see `remote_ipc`).
 pub const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
+/// TCP port that echoes lines back to the peer.
+pub const TCP_ECHO_PORT: u16 = 7779;
 
 /// A datagram received on `REMOTE_PORT`, handed to the kernel's remote
 /// command server.
@@ -59,6 +61,8 @@ pub struct NetStack {
     rx_frame: [u8; MAX_FRAME_LEN],
     tx_frame: [u8; MAX_FRAME_LEN],
     udp_echoed: u64,
+    tcp_echoed_bytes: u64,
+    tcp_accepted_seen: u64,
     /// How the address was obtained: "dhcp", "static", or "none".
     address_source: &'static str,
     lease_seconds: u32,
@@ -100,12 +104,15 @@ impl NetStack {
         iface.bind(UDP_ECHO_PORT);
         iface.bind(REMOTE_PORT);
         iface.bind(DHCP_CLIENT_PORT);
+        iface.tcp_listen(TCP_ECHO_PORT);
         Some(Self {
             device,
             iface,
             rx_frame: [0; MAX_FRAME_LEN],
             tx_frame: [0; MAX_FRAME_LEN],
             udp_echoed: 0,
+            tcp_echoed_bytes: 0,
+            tcp_accepted_seen: 0,
             address_source: "none",
             lease_seconds: 0,
             dns: None,
@@ -252,6 +259,19 @@ impl NetStack {
             "net: udp port {} recv={} sent={} echoed={} unbound={}",
             UDP_ECHO_PORT, c.udp_received, c.udp_sent, self.udp_echoed, c.udp_unbound
         );
+        let t = self.iface.tcp();
+        let _ = writeln!(
+            out,
+            "net: tcp port {} conns={} accepted={} in={} out={} rexmit={} rst={} echoed={}B",
+            TCP_ECHO_PORT,
+            t.connections().count(),
+            t.accepted,
+            t.segments_in,
+            t.segments_out,
+            t.retransmits,
+            t.resets_sent,
+            self.tcp_echoed_bytes
+        );
     }
 
     /// Pull in every pending frame, letting the interface answer ARP and
@@ -263,8 +283,13 @@ impl NetStack {
     /// Background servicing from the main loop: answer ARP, ping, and
     /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns the first datagram
     /// for `REMOTE_PORT` seen (later ones wait in the receive queue).
-    pub fn service(&mut self, log: &mut impl Write) -> Option<RemoteDatagram> {
-        while let Some(len) = self.device.poll_receive(&mut self.rx_frame) {
+    pub fn service(&mut self, now: u64, log: &mut impl Write) -> Option<RemoteDatagram> {
+        self.iface.tcp_tick(now);
+        let mut remote = None;
+        while remote.is_none() {
+            let Some(len) = self.device.poll_receive(&mut self.rx_frame) else {
+                break;
+            };
             match self
                 .iface
                 .receive(&self.rx_frame[..len], &mut self.tx_frame)
@@ -272,6 +297,7 @@ impl NetStack {
                 Event::Transmit(n) => {
                     let _ = self.device.transmit(&self.tx_frame[..n]);
                 }
+                Event::TcpReady { conn } => self.tcp_echo_service(conn, log),
                 Event::Udp {
                     src,
                     src_port,
@@ -280,7 +306,7 @@ impl NetStack {
                     payload_len,
                 } if dst_port == REMOTE_PORT => {
                     let payload = &self.rx_frame[payload_offset..payload_offset + payload_len];
-                    return Some(RemoteDatagram {
+                    remote = Some(RemoteDatagram {
                         src,
                         src_port,
                         bytes: payload.to_vec(),
@@ -320,7 +346,52 @@ impl NetStack {
                 _ => {}
             }
         }
-        None
+        self.flush_tcp();
+        remote
+    }
+
+    /// Echo service on `TCP_ECHO_PORT`: whatever arrives is sent back; when
+    /// the peer closes, so do we.
+    fn tcp_echo_service(&mut self, conn: usize, log: &mut impl Write) {
+        let accepted = self.iface.tcp().accepted;
+        if accepted != self.tcp_accepted_seen {
+            self.tcp_accepted_seen = accepted;
+            if let Some(c) = self.iface.tcp().connection(conn) {
+                let _ = writeln!(
+                    log,
+                    "net: tcp conn{conn} from {}:{} ({:?})",
+                    fmt_ipv4(c.peer),
+                    c.peer_port,
+                    c.state
+                );
+            }
+        }
+        let mut chunk = [0u8; 512];
+        loop {
+            let n = self.iface.tcp_mut().read(conn, &mut chunk);
+            if n == 0 {
+                break;
+            }
+            let written = self.iface.tcp_mut().write(conn, &chunk[..n]);
+            self.tcp_echoed_bytes += written as u64;
+        }
+        if self
+            .iface
+            .tcp()
+            .connection(conn)
+            .is_some_and(|c| c.peer_closed())
+        {
+            self.iface.tcp_mut().close(conn);
+        }
+    }
+
+    /// Transmit every pending TCP segment.
+    fn flush_tcp(&mut self) {
+        while let Some(n) = self.iface.tcp_next_frame(&mut self.tx_frame) {
+            if self.device.transmit(&self.tx_frame[..n]).is_err() {
+                break;
+            }
+        }
     }
 
     /// Reply to a remote caller from `REMOTE_PORT` (next hop already known
@@ -488,7 +559,7 @@ impl NetStack {
                 }
                 // Datagrams arriving mid-ping are dropped; the main loop's
                 // `service` handles UDP when no command holds the stack.
-                Event::Udp { .. } | Event::None => {}
+                Event::Udp { .. } | Event::TcpReady { .. } | Event::None => {}
             }
         }
         found

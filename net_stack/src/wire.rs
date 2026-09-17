@@ -12,6 +12,13 @@ pub const ARP_OP_REPLY: u16 = 2;
 pub const IPV4_HDR_LEN: usize = 20;
 pub const IP_PROTO_ICMP: u8 = 1;
 pub const IP_PROTO_UDP: u8 = 17;
+pub const IP_PROTO_TCP: u8 = 6;
+pub const TCP_HDR_LEN: usize = 20;
+pub const TCP_FIN: u8 = 0x01;
+pub const TCP_SYN: u8 = 0x02;
+pub const TCP_RST: u8 = 0x04;
+pub const TCP_PSH: u8 = 0x08;
+pub const TCP_ACK: u8 = 0x10;
 pub const UDP_HDR_LEN: usize = 8;
 pub const ICMP_HDR_LEN: usize = 8;
 pub const ICMP_ECHO_REPLY: u8 = 0;
@@ -257,14 +264,116 @@ pub struct Udp<'a> {
 
 /// One's-complement sum of the IPv4 pseudo-header for UDP.
 fn pseudo_header_sum(src: Ipv4, dst: Ipv4, udp_len: u16) -> u32 {
+    pseudo_sum(src, dst, IP_PROTO_UDP, udp_len)
+}
+
+fn pseudo_sum(src: Ipv4, dst: Ipv4, protocol: u8, len: u16) -> u32 {
     let mut sum = 0u32;
     sum += u16::from_be_bytes([src[0], src[1]]) as u32;
     sum += u16::from_be_bytes([src[2], src[3]]) as u32;
     sum += u16::from_be_bytes([dst[0], dst[1]]) as u32;
     sum += u16::from_be_bytes([dst[2], dst[3]]) as u32;
-    sum += IP_PROTO_UDP as u32;
-    sum += udp_len as u32;
+    sum += protocol as u32;
+    sum += len as u32;
     sum
+}
+
+/// TCP segment header plus payload view (options skipped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tcp<'a> {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub flags: u8,
+    pub window: u16,
+    pub payload: &'a [u8],
+}
+
+impl<'a> Tcp<'a> {
+    /// Parse a segment carried between `src` and `dst`, verifying the
+    /// checksum and honouring the data offset.
+    pub fn parse(p: &'a [u8], src: Ipv4, dst: Ipv4) -> Option<Self> {
+        if p.len() < TCP_HDR_LEN || p.len() > u16::MAX as usize {
+            return None;
+        }
+        let offset = (p[12] >> 4) as usize * 4;
+        if offset < TCP_HDR_LEN || offset > p.len() {
+            return None;
+        }
+        if checksum_with(pseudo_sum(src, dst, IP_PROTO_TCP, p.len() as u16), p) != 0 {
+            return None;
+        }
+        Some(Self {
+            src_port: be16(&p[0..2]),
+            dst_port: be16(&p[2..4]),
+            seq: u32::from_be_bytes([p[4], p[5], p[6], p[7]]),
+            ack: u32::from_be_bytes([p[8], p[9], p[10], p[11]]),
+            flags: p[13],
+            window: be16(&p[14..16]),
+            payload: &p[offset..],
+        })
+    }
+
+    /// Write a 20-byte header (plus an MSS option when `mss` is given)
+    /// and the payload, with the checksum computed.
+    pub fn write(&self, out: &mut [u8], src: Ipv4, dst: Ipv4, mss: Option<u16>) -> Option<usize> {
+        let opt_len = if mss.is_some() { 4 } else { 0 };
+        let hdr_len = TCP_HDR_LEN + opt_len;
+        let len = hdr_len + self.payload.len();
+        if out.len() < len || len > u16::MAX as usize {
+            return None;
+        }
+        let m = &mut out[..len];
+        put16(&mut m[0..2], self.src_port);
+        put16(&mut m[2..4], self.dst_port);
+        m[4..8].copy_from_slice(&self.seq.to_be_bytes());
+        m[8..12].copy_from_slice(&self.ack.to_be_bytes());
+        m[12] = ((hdr_len / 4) as u8) << 4;
+        m[13] = self.flags;
+        put16(&mut m[14..16], self.window);
+        put16(&mut m[16..18], 0);
+        put16(&mut m[18..20], 0);
+        if let Some(mss) = mss {
+            m[20] = 2;
+            m[21] = 4;
+            put16(&mut m[22..24], mss);
+        }
+        m[hdr_len..].copy_from_slice(self.payload);
+        let sum = checksum_with(pseudo_sum(src, dst, IP_PROTO_TCP, len as u16), m);
+        put16(&mut m[16..18], sum);
+        Some(len)
+    }
+}
+
+/// Build a complete Ethernet/IPv4/TCP frame.
+pub fn build_tcp(
+    out: &mut [u8],
+    src_mac: Mac,
+    dst_mac: Mac,
+    src_ip: Ipv4,
+    dst_ip: Ipv4,
+    tcp: &Tcp,
+    mss: Option<u16>,
+) -> Option<usize> {
+    EthernetHeader {
+        dst: dst_mac,
+        src: src_mac,
+        ethertype: ETHERTYPE_IPV4,
+    }
+    .write(out)?;
+    let ip_start = ETH_HDR_LEN;
+    let tcp_start = ip_start + IPV4_HDR_LEN;
+    let tcp_len = tcp.write(out.get_mut(tcp_start..)?, src_ip, dst_ip, mss)?;
+    Ipv4Header {
+        src: src_ip,
+        dst: dst_ip,
+        protocol: IP_PROTO_TCP,
+        ttl: DEFAULT_TTL,
+        total_len: 0,
+    }
+    .write(&mut out[ip_start..], tcp_len)?;
+    finish_frame(out, tcp_start + tcp_len)
 }
 
 /// Checksum of `data` folded together with a pseudo-header sum.
