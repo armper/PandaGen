@@ -127,6 +127,37 @@ fn remote_call(
     Ok(String::from_utf8_lossy(&reply).into_owned())
 }
 
+/// Send a signed call twice: the first must be answered, the replay must not.
+fn remote_replay_check(command: &str, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    socket.set_read_timeout(Some(timeout))?;
+    let token = remote_token();
+    let call = remote_ipc::RemoteCall {
+        request_id: ipc::MessageId::new(),
+        cap_id: remote_ipc::CAP_KERNEL_COMMAND,
+        action: remote_ipc::ACTION_KERNEL_COMMAND_RUN.to_string(),
+        payload: command.as_bytes().to_vec(),
+        authority: remote_ipc::CapabilityAuthority {
+            caller: "xtask".to_string(),
+            allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
+        },
+    };
+    let bytes = remote_ipc::envelope_to_bytes(&remote_ipc::encode_call(call)?, token.as_bytes())?;
+    let mut buf = [0u8; 4096];
+    socket.send_to(&bytes, ("127.0.0.1", REMOTE_PORT))?;
+    let (n, _) = socket.recv_from(&mut buf)?;
+    let reply = remote_ipc::envelope_from_bytes(&buf[..n], token.as_bytes())?;
+    remote_ipc::decode_response(&reply)?
+        .result
+        .map_err(|err| io::Error::other(format!("first call failed: {err}")))?;
+    socket.send_to(&bytes, ("127.0.0.1", REMOTE_PORT))?;
+    match socket.recv_from(&mut buf) {
+        Ok((n, _)) => Err(io::Error::other(format!("replay was answered with {} bytes", n)).into()),
+        Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// `cargo xtask remote <command...>`: call a running kernel over UDP.
 fn cmd_remote(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let command: Vec<String> = args.collect();
@@ -446,6 +477,13 @@ fn cmd_qemu_script(
                     ));
                 }
                 Err(err) => udp_failures.push(format!("<udp echo of {spec:?}: {err}>")),
+            }
+        } else if let Some(command) = key.strip_prefix("replay:") {
+            // replay:<command> -> send one signed call, expect a reply, then
+            // resend the identical datagram and expect silence.
+            match remote_replay_check(command, Duration::from_secs(3)) {
+                Ok(()) => println!("replay refused as expected: {command}"),
+                Err(err) => udp_failures.push(format!("<replay {command:?}: {err}>")),
             }
         } else if let Some(spec) = key.strip_prefix("remote:") {
             // remote:<command>;<expected substring> -> remote IPC call from

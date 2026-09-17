@@ -251,6 +251,63 @@ pub mod sha256 {
     }
 }
 
+/// Remembers the last `N` accepted message ids so a captured, correctly
+/// signed datagram cannot simply be sent again. The window is bounded;
+/// a replay older than `N` accepted messages would be accepted.
+pub struct ReplayGuard<const N: usize> {
+    seen: [u128; N],
+    next: usize,
+    len: usize,
+}
+
+impl<const N: usize> ReplayGuard<N> {
+    pub const fn new() -> Self {
+        Self {
+            seen: [0; N],
+            next: 0,
+            len: 0,
+        }
+    }
+
+    fn key(id: MessageId) -> u128 {
+        id.as_uuid().as_u128()
+    }
+
+    /// Whether `id` was accepted recently.
+    pub fn is_replay(&self, id: MessageId) -> bool {
+        let key = Self::key(id);
+        self.seen[..self.len].contains(&key)
+    }
+
+    /// Record `id` as accepted; returns false (and records nothing) if it
+    /// was already in the window.
+    pub fn accept(&mut self, id: MessageId) -> bool {
+        if self.is_replay(id) {
+            return false;
+        }
+        self.seen[self.next] = Self::key(id);
+        self.next = (self.next + 1) % N;
+        if self.len < N {
+            self.len += 1;
+        }
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<const N: usize> Default for ReplayGuard<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Shared secret used when no `remote_token=` is configured.
 pub const DEFAULT_REMOTE_TOKEN: &str = "pandagen-dev";
 
@@ -696,5 +753,25 @@ mod tests {
         assert!(sha256::tags_equal(b"ab", b"ab"));
         assert!(!sha256::tags_equal(b"ab", b"ac"));
         assert!(!sha256::tags_equal(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn test_replay_guard_window() {
+        let mut guard = ReplayGuard::<3>::new();
+        assert!(guard.is_empty());
+        let ids: Vec<MessageId> = (0..5).map(|_| MessageId::new()).collect();
+        assert!(guard.accept(ids[0]));
+        assert!(!guard.accept(ids[0]), "immediate replay refused");
+        assert!(guard.is_replay(ids[0]));
+        assert!(guard.accept(ids[1]));
+        assert!(guard.accept(ids[2]));
+        assert_eq!(guard.len(), 3);
+        // Window is full; the oldest id falls out after the next accept.
+        assert!(guard.accept(ids[3]));
+        assert!(!guard.is_replay(ids[0]));
+        assert!(guard.is_replay(ids[1]));
+        assert!(!guard.accept(ids[3]));
+        assert!(guard.accept(ids[4]));
+        assert_eq!(guard.len(), 3);
     }
 }

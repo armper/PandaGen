@@ -3205,6 +3205,11 @@ impl RemoteCommandServer {
                 return;
             }
         };
+        if !REMOTE_REPLAY.lock().accept(envelope.id) {
+            self.denied += 1;
+            klog!(serial, "remote: replayed message dropped\r\n");
+            return;
+        }
         let call = match remote_ipc::authorize_call(&envelope, &[remote_ipc::CAP_KERNEL_COMMAND]) {
             Ok(call) => call,
             Err(err) => {
@@ -4352,6 +4357,11 @@ static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
 #[cfg(all(not(test), target_os = "none"))]
 static NET: hal_x86_64::SpinLock<Option<bare_metal_net::NetStack>> =
     hal_x86_64::SpinLock::new(None);
+
+/// Recently accepted remote message ids, so a captured datagram cannot be
+/// replayed.
+static REMOTE_REPLAY: hal_x86_64::SpinLock<remote_ipc::ReplayGuard<256>> =
+    hal_x86_64::SpinLock::new(remote_ipc::ReplayGuard::new());
 
 /// Shared secret for remote IPC tags (`remote_token=` on the command line).
 static REMOTE_TOKEN: hal_x86_64::SpinLock<RemoteToken> =
