@@ -150,6 +150,9 @@ const CARET_BLINK_PERIOD_TICKS: u64 = 100;
 const NOTICE_TTL_TICKS: u64 = 800;
 /// Editor viewport rows used by the text console renderer.
 const TEXT_EDITOR_VIEWPORT_ROWS: usize = 23;
+/// Share of the kernel heap the desktop may reserve for pixel buffers, in
+/// quarters (3 = 75%), leaving the rest for everything else.
+const GRAPHICS_HEAP_SHARE_QUARTERS: usize = 3;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -925,6 +928,18 @@ fn workspace_loop(
     let response_channel = ChannelId(1);
 
     let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
+    // GFX-047: pixel buffers are budgeted against a fixed share of the heap
+    // and refused with a typed error rather than failing inside `alloc`.
+    let heap_total = GLOBAL_HEAP.stats().total;
+    let mut surface_budget =
+        services_gui_host::SurfaceBudget::new(heap_total / 4 * GRAPHICS_HEAP_SHARE_QUARTERS);
+    kprintln!(
+        serial,
+        "gfx budget: {} KiB of {} KiB heap",
+        surface_budget.limit() / 1024,
+        heap_total / 1024
+    );
+
     // GFX-039: pipeline stages reply on their own channel.
     match kernel.create_channel() {
         Ok(channel) => workspace.set_pipeline_channel(channel),
@@ -990,6 +1005,21 @@ fn workspace_loop(
     workspace.set_graphics_available(graphics_available);
     workspace.set_display_mode(display_mode);
     let mut desktop_renderer: Option<desktop_frame::DesktopFrameRenderer> = None;
+    if display_mode.is_graphics() {
+        if let Some(fb) = fb_console.as_ref() {
+            let info = fb.info();
+            let bytes = services_gui_host::memory::rgba_surface_bytes(info.width, info.height);
+            if let Err(err) = surface_budget.reserve("desktop target", bytes) {
+                kprintln!(
+                    serial,
+                    "gfx budget: desktop target refused at boot: {:?}; using text",
+                    err
+                );
+                display_mode = display_mode::DisplayMode::TextConsole;
+                workspace.set_display_mode(display_mode);
+            }
+        }
+    }
 
     // GFX-022: pointer path. IRQ 12 queues raw bytes; the loop frames packets
     // and translates them into absolute pointer events confined to the display.
@@ -1021,8 +1051,12 @@ fn workspace_loop(
     if FB_SHADOW_ENABLED {
         if let Some(ref fb) = fb_console {
             let info = fb.info();
+            let shadow_bytes = info.buffer_size();
+            if let Err(err) = surface_budget.reserve("text shadow", shadow_bytes) {
+                kprintln!(serial, "gfx budget: text shadow refused: {:?}", err);
+            }
             #[cfg(not(test))]
-            {
+            if surface_budget.has("text shadow") {
                 use alloc::boxed::Box;
                 use alloc::vec;
 
@@ -1457,7 +1491,30 @@ fn workspace_loop(
         }
 
         if let Some(requested) = workspace.consume_display_mode_request() {
-            if requested != display_mode && (graphics_available || !requested.is_graphics()) {
+            let mut budget_ok = true;
+            if requested.is_graphics() && graphics_available && desktop_renderer.is_none() {
+                let bytes = fb_console
+                    .as_ref()
+                    .map(|fb| {
+                        let info = fb.info();
+                        services_gui_host::memory::rgba_surface_bytes(info.width, info.height)
+                    })
+                    .unwrap_or(0);
+                if !surface_budget.has("desktop target") {
+                    if let Err(err) = surface_budget.reserve("desktop target", bytes) {
+                        kprintln!(serial, "gfx budget: desktop target refused: {:?}", err);
+                        workspace.push_notice(
+                            services_gui_host::NoticeLevel::Error,
+                            "Graphics refused: pixel memory budget exceeded",
+                        );
+                        budget_ok = false;
+                    }
+                }
+            }
+            if budget_ok
+                && requested != display_mode
+                && (graphics_available || !requested.is_graphics())
+            {
                 display_mode = requested;
                 workspace.set_display_mode(requested);
                 kprintln!(serial, "display: switched to {} mode", requested.label());
@@ -4375,6 +4432,18 @@ impl CommandService {
                     "memory: entries={} total={} KiB usable={} KiB",
                     boot.mem_entries, boot.mem_total_kib, boot.mem_usable_kib
                 );
+                #[cfg(not(test))]
+                {
+                    let heap = GLOBAL_HEAP.stats();
+                    let _ = writeln!(
+                        output,
+                        "heap: used={} KiB free={} KiB total={} KiB allocations={}",
+                        heap.used / 1024,
+                        heap.free / 1024,
+                        heap.total / 1024,
+                        heap.allocations
+                    );
+                }
                 if let Some(allocator) = ctx.allocator.as_ref() {
                     let _ = writeln!(
                         output,

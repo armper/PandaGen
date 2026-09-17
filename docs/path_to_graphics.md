@@ -137,7 +137,7 @@ User-space services should provide policy:
 
 - [x] `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
 - [x] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
-- [ ] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
+- [x] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
 - [ ] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
 - [ ] `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
 
@@ -211,10 +211,8 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-046` is in place: property tests over random scenes prove render order-independence, background outside every window and the cursor, hit testing agreeing with paint order, damage-limited repaints matching full renders inside the damage rectangle, delta damage being sufficient for arbitrary scene pairs, and scissor/container targets never writing outside their bounds. They caught and fixed a real bug: the title-bar separator could be dropped by an incremental repaint whose damage missed the chrome row.
+`GFX-047` is in place: `SurfaceBudget` reserves labelled pixel buffers against a share of the kernel heap, refuses over-budget reservations with a typed error (graphics mode is declined with a notice instead of a panic inside `alloc`), and the `mem` command reports heap usage.
 
-The best next implementation step is:
+Measuring that usage on the real image showed the desktop leaks about 58 KiB and 1,000 allocations per pointer-motion frame because the kernel's global allocator is a bump allocator that never frees. That makes the allocator the next correctness item, ahead of `GFX-048`:
 
-- `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
-
-The kernel heap is a bump allocator holding a 4 MiB text shadow and a 4 MiB desktop target, and per-frame model allocations are never returned. A budget that accounts these up front, refuses over-budget allocations with a typed error, and reports usage is the next correctness item before larger surfaces or atlases arrive.
+- Replace the bump global allocator with a free-list allocator that returns memory, keeping the budget and stats.

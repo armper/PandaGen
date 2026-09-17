@@ -25,6 +25,7 @@ pub mod bench;
 pub mod host;
 pub mod input_routing;
 pub mod layout;
+pub mod memory;
 pub mod scene;
 pub mod shell;
 pub mod theme;
@@ -33,6 +34,7 @@ pub use animation::{AnimationClock, Blink, Easing, Transition};
 pub use host::{HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
 pub use layout::{Anchor, Axis, Insets, LayoutId, LayoutNode, Length};
+pub use memory::{BudgetError, Reservation, SurfaceBudget};
 pub use scene::ScrollRegion;
 pub use shell::{
     compose_shell, shell_layout, LauncherItem, NoticeLevel, ShellModel, ShellNotice, ShellRects,
