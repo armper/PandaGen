@@ -4,6 +4,7 @@
 //! its own echo requests. No allocation; every frame is built into a
 //! caller-provided buffer so the kernel can DMA it directly.
 
+pub mod dhcp;
 pub mod wire;
 
 #[cfg(test)]
@@ -38,6 +39,21 @@ impl Config {
             netmask: [255, 255, 255, 0],
             gateway: [10, 0, 2, 2],
         }
+    }
+
+    /// No address yet (before DHCP): only broadcasts and frames sent to our
+    /// MAC are accepted.
+    pub const fn unconfigured(mac: Mac) -> Self {
+        Self {
+            mac,
+            ip: [0; 4],
+            netmask: [0; 4],
+            gateway: [0; 4],
+        }
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.ip != [0; 4]
     }
 
     fn same_subnet(&self, ip: Ipv4) -> bool {
@@ -252,6 +268,41 @@ impl Interface {
         &self.config
     }
 
+    /// Replace the address configuration (DHCP bind); the ARP cache is kept
+    /// only if the MAC is unchanged, which it always is in practice.
+    pub fn set_config(&mut self, config: Config) {
+        if config.mac != self.config.mac {
+            self.arp = ArpCache::new();
+        }
+        self.config = config;
+    }
+
+    /// Build a UDP datagram to the limited broadcast address (no ARP).
+    pub fn udp_broadcast(
+        &mut self,
+        dst_port: u16,
+        src_port: u16,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, SendError> {
+        let udp = Udp {
+            src_port,
+            dst_port,
+            payload,
+        };
+        let len = wire::build_udp(
+            out,
+            self.config.mac,
+            MAC_BROADCAST,
+            self.config.ip,
+            [255, 255, 255, 255],
+            &udp,
+        )
+        .ok_or(SendError::BufferTooSmall)?;
+        self.counters.udp_sent += 1;
+        Ok(len)
+    }
+
     pub fn counters(&self) -> Counters {
         self.counters
     }
@@ -273,7 +324,13 @@ impl Interface {
         }
         match eth.ethertype {
             ETHERTYPE_ARP => self.receive_arp(payload, out),
-            ETHERTYPE_IPV4 => self.receive_ipv4(eth.src, frame.as_ptr() as usize, payload, out),
+            ETHERTYPE_IPV4 => self.receive_ipv4(
+                eth.src,
+                eth.dst == self.config.mac,
+                frame.as_ptr() as usize,
+                payload,
+                out,
+            ),
             _ => Event::None,
         }
     }
@@ -308,6 +365,7 @@ impl Interface {
     fn receive_ipv4(
         &mut self,
         src_mac: Mac,
+        eth_dst_is_ours: bool,
         frame_start: usize,
         payload: &[u8],
         out: &mut [u8],
@@ -316,7 +374,12 @@ impl Interface {
             self.counters.dropped += 1;
             return Event::None;
         };
-        if ip.dst != self.config.ip {
+        // Ours: our address, the limited broadcast, or (while unconfigured)
+        // anything unicast to our MAC, which is how DHCP replies arrive.
+        let for_us = ip.dst == self.config.ip
+            || ip.dst == [255, 255, 255, 255]
+            || (!self.config.is_configured() && eth_dst_is_ours);
+        if !for_us {
             return Event::None;
         }
         // Neighbour learning: whoever sends us IPv4 directly is reachable at

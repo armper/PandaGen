@@ -378,3 +378,88 @@ fn bind_slots_are_limited() {
     a.unbind(1);
     assert!(a.bind(99));
 }
+
+#[test]
+fn unconfigured_interface_accepts_unicast_and_broadcast_dhcp_replies() {
+    let mut a = Interface::new(Config::unconfigured(OUR_MAC));
+    assert!(!a.config().is_configured());
+    assert!(a.bind(crate::dhcp::DHCP_CLIENT_PORT));
+    let mut out = [0u8; 1514];
+    // Broadcast DISCOVER from 0.0.0.0 to 255.255.255.255 without ARP.
+    let len = a
+        .udp_broadcast(
+            crate::dhcp::DHCP_SERVER_PORT,
+            crate::dhcp::DHCP_CLIENT_PORT,
+            b"disc",
+            &mut out,
+        )
+        .unwrap();
+    let (eth, ipp) = EthernetHeader::parse(&out[..len]).unwrap();
+    assert_eq!(eth.dst, MAC_BROADCAST);
+    let (ip, body) = Ipv4Header::parse(ipp).unwrap();
+    assert_eq!(ip.src, [0, 0, 0, 0]);
+    assert_eq!(ip.dst, [255, 255, 255, 255]);
+    let udp = Udp::parse(body, ip.src, ip.dst).unwrap();
+    assert_eq!((udp.src_port, udp.dst_port), (68, 67));
+
+    // Replies arrive unicast to our MAC at the offered address, or broadcast.
+    let mut frame = [0u8; 1514];
+    let reply = Udp {
+        src_port: 67,
+        dst_port: 68,
+        payload: b"offer",
+    };
+    let flen = build_udp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &reply,
+    )
+    .unwrap();
+    assert!(matches!(
+        a.receive(&frame[..flen], &mut out),
+        Event::Udp { dst_port: 68, .. }
+    ));
+    let flen = build_udp(
+        &mut frame,
+        GW_MAC,
+        MAC_BROADCAST,
+        [10, 0, 2, 2],
+        [255, 255, 255, 255],
+        &reply,
+    )
+    .unwrap();
+    assert!(matches!(
+        a.receive(&frame[..flen], &mut out),
+        Event::Udp { dst_port: 68, .. }
+    ));
+
+    // Once configured, unicast to a different address is no longer ours.
+    a.set_config(Config::qemu_user(OUR_MAC));
+    assert!(a.config().is_configured());
+    let flen = build_udp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 16],
+        &reply,
+    )
+    .unwrap();
+    assert_eq!(a.receive(&frame[..flen], &mut out), Event::None);
+    let flen = build_udp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &reply,
+    )
+    .unwrap();
+    assert!(matches!(
+        a.receive(&frame[..flen], &mut out),
+        Event::Udp { .. }
+    ));
+}

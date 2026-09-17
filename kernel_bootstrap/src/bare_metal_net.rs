@@ -15,6 +15,7 @@ use hal_x86_64::{
     LegacyQueueLayout, NetDma, QueueMemory, RealPortIo, VirtioNetDevice, VirtioPciLegacy,
     VirtqAvail, VirtqDesc, VirtqUsed,
 };
+use net_stack::dhcp::{self, DHCP_CLIENT_PORT, DHCP_SERVER_PORT};
 use net_stack::wire::{fmt_ipv4, fmt_mac};
 use net_stack::{Config, Event, Interface, Ipv4, SendError};
 
@@ -58,6 +59,10 @@ pub struct NetStack {
     rx_frame: [u8; MAX_FRAME_LEN],
     tx_frame: [u8; MAX_FRAME_LEN],
     udp_echoed: u64,
+    /// How the address was obtained: "dhcp", "static", or "none".
+    address_source: &'static str,
+    lease_seconds: u32,
+    dns: Option<Ipv4>,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -91,20 +96,118 @@ impl NetStack {
             VirtioNetDevice::new(transport, rx_queue, tx_queue, dma).ok()?
         };
         let mac = device.mac();
-        let mut iface = Interface::new(Config::qemu_user(mac));
+        let mut iface = Interface::new(Config::unconfigured(mac));
         iface.bind(UDP_ECHO_PORT);
         iface.bind(REMOTE_PORT);
+        iface.bind(DHCP_CLIENT_PORT);
         Some(Self {
             device,
             iface,
             rx_frame: [0; MAX_FRAME_LEN],
             tx_frame: [0; MAX_FRAME_LEN],
             udp_echoed: 0,
+            address_source: "none",
+            lease_seconds: 0,
+            dns: None,
         })
     }
 
     pub fn mac(&self) -> [u8; 6] {
         self.device.mac()
+    }
+
+    /// Obtain an address by DHCP (DISCOVER/OFFER/REQUEST/ACK) within
+    /// `REPLY_TIMEOUT_TICKS`; on failure fall back to the QEMU user-network
+    /// static configuration. Returns true when bound by DHCP.
+    pub fn dhcp(&mut self, now: &dyn Fn() -> u64, log: &mut impl Write) -> bool {
+        let mac = self.device.mac();
+        let xid =
+            (hal_x86_64::rdtsc() as u32) ^ u32::from_le_bytes([mac[2], mac[3], mac[4], mac[5]]);
+        let mut client = dhcp::Client::new(mac, xid);
+        let mut payload = [0u8; 400];
+        let Some(len) = client.discover(&mut payload) else {
+            return self.dhcp_fallback(log, "discover build failed");
+        };
+        if !self.broadcast(&payload[..len]) {
+            return self.dhcp_fallback(log, "discover transmit failed");
+        }
+        let start = now();
+        while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS {
+            while let Some(rx_len) = self.device.poll_receive(&mut self.rx_frame) {
+                match self
+                    .iface
+                    .receive(&self.rx_frame[..rx_len], &mut self.tx_frame)
+                {
+                    Event::Transmit(n) => {
+                        let _ = self.device.transmit(&self.tx_frame[..n]);
+                    }
+                    Event::Udp {
+                        dst_port,
+                        payload_offset,
+                        payload_len,
+                        ..
+                    } if dst_port == DHCP_CLIENT_PORT => {
+                        let reply = &self.rx_frame[payload_offset..payload_offset + payload_len];
+                        match client.handle(reply, &mut payload) {
+                            dhcp::Step::Send(n) => {
+                                let request = payload;
+                                if !self.broadcast(&request[..n]) {
+                                    return self.dhcp_fallback(log, "request transmit failed");
+                                }
+                            }
+                            dhcp::Step::Bound {
+                                config,
+                                lease_seconds,
+                                dns,
+                            } => {
+                                self.iface.set_config(config);
+                                self.address_source = "dhcp";
+                                self.lease_seconds = lease_seconds;
+                                self.dns = dns;
+                                let _ = writeln!(
+                                    log,
+                                    "net: dhcp bound ip={} mask={} gw={} lease={}s",
+                                    fmt_ipv4(config.ip),
+                                    fmt_ipv4(config.netmask),
+                                    fmt_ipv4(config.gateway),
+                                    lease_seconds
+                                );
+                                return true;
+                            }
+                            dhcp::Step::None => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            core::hint::spin_loop();
+        }
+        self.dhcp_fallback(log, "no reply")
+    }
+
+    fn broadcast(&mut self, payload: &[u8]) -> bool {
+        match self.iface.udp_broadcast(
+            DHCP_SERVER_PORT,
+            DHCP_CLIENT_PORT,
+            payload,
+            &mut self.tx_frame,
+        ) {
+            Ok(len) => self.device.transmit(&self.tx_frame[..len]).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    fn dhcp_fallback(&mut self, log: &mut impl Write, why: &str) -> bool {
+        let config = Config::qemu_user(self.device.mac());
+        self.iface.set_config(config);
+        self.address_source = "static";
+        let _ = writeln!(
+            log,
+            "net: dhcp failed ({why}); using static ip={} gw={}",
+            fmt_ipv4(config.ip),
+            fmt_ipv4(config.gateway)
+        );
+        false
     }
 
     pub fn ip(&self) -> Ipv4 {
@@ -117,11 +220,23 @@ impl NetStack {
         let c = self.iface.counters();
         let _ = writeln!(
             out,
-            "net: virtio-net-pci mac={} ip={} gw={}",
+            "net: virtio-net-pci mac={} ip={} gw={} via {}",
             fmt_mac(cfg.mac),
             fmt_ipv4(cfg.ip),
-            fmt_ipv4(cfg.gateway)
+            fmt_ipv4(cfg.gateway),
+            self.address_source
         );
+        if self.address_source == "dhcp" {
+            let _ = writeln!(
+                out,
+                "net: lease={}s dns={}",
+                self.lease_seconds,
+                self.dns.map(fmt_ipv4).map_or_else(
+                    || alloc::string::String::from("none"),
+                    |d| alloc::format!("{d}")
+                )
+            );
+        }
         let _ = writeln!(
             out,
             "net: rx={} tx={} arp_cache={} echo_sent={} echo_recv={} dropped={}",
@@ -177,7 +292,7 @@ impl NetStack {
                     dst_port,
                     payload_offset,
                     payload_len,
-                } => {
+                } if dst_port == UDP_ECHO_PORT => {
                     let payload = &self.rx_frame[payload_offset..payload_offset + payload_len];
                     match self
                         .iface

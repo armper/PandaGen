@@ -1178,7 +1178,8 @@ pub extern "C" fn rust_main() -> ! {
         kernel_virt: kernel.boot.kernel_virt,
     };
     match bare_metal_net::NetStack::probe(storage_boot) {
-        Some(net) => {
+        Some(mut net) => {
+            net.dhcp(&get_tick_count, &mut serial);
             klog!(
                 serial,
                 "net: virtio-net-pci mac={} ip={}\r\n",
@@ -5595,6 +5596,9 @@ impl CommandService {
                     (Some("poll"), _) => {
                         let event = net.poll();
                         let _ = writeln!(output, "net: polled ({event:?})");
+                    }
+                    (Some("dhcp"), _) => {
+                        let _ = net.dhcp(&get_tick_count, &mut output);
                     }
                     (Some("udp"), Some(ip)) => {
                         let port = parts.next().and_then(|p| p.parse::<u16>().ok());
