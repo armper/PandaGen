@@ -138,10 +138,6 @@ impl ChannelAccess {
     fn allows_receive(&self, task_id: TaskId) -> bool {
         self.receivers.contains(&task_id)
     }
-
-    fn is_empty(&self) -> bool {
-        self.senders.is_empty() && self.receivers.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,12 +261,12 @@ impl SimulatedKernel {
         channel: ChannelId,
         task_id: TaskId,
     ) -> Result<(), KernelError> {
+        // The access list stays even when it becomes empty: a channel whose
+        // last holder was revoked is closed, not open to everyone again
+        // (formal_verification/tests/ipc_channel_model.rs, C3).
         if let Some(entry) = self.channel_access.get_mut(&channel) {
             entry.senders.remove(&task_id);
             entry.receivers.remove(&task_id);
-            if entry.is_empty() {
-                self.channel_access.remove(&channel);
-            }
         }
         Ok(())
     }
@@ -2054,13 +2050,22 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         message: MessageEnvelope,
     ) -> Result<(), KernelError> {
-        if let Some(source_task) = message.source {
-            if let Some(access) = self.channel_access.get(&channel) {
-                if !access.allows_send(source_task) {
+        // A channel with an access list admits only listed senders; an
+        // anonymous message (no source) cannot be checked, so it is refused
+        // there. Channels without a list stay open for compatibility.
+        if let Some(access) = self.channel_access.get(&channel) {
+            match message.source {
+                Some(source_task) if access.allows_send(source_task) => {}
+                Some(source_task) => {
                     return Err(KernelError::SendFailed(format!(
                         "Channel send denied for task {}",
                         source_task
                     )));
+                }
+                None => {
+                    return Err(KernelError::SendFailed(
+                        "Channel send denied for anonymous sender".to_string(),
+                    ));
                 }
             }
         }
@@ -2139,13 +2144,19 @@ impl KernelApi for SimulatedKernel {
         channel: ChannelId,
         _timeout: Option<Duration>,
     ) -> Result<MessageEnvelope, KernelError> {
-        if let Some(task_id) = self.current_receive_task {
-            if let Some(access) = self.channel_access.get(&channel) {
-                if !access.allows_receive(task_id) {
+        if let Some(access) = self.channel_access.get(&channel) {
+            match self.current_receive_task {
+                Some(task_id) if access.allows_receive(task_id) => {}
+                Some(task_id) => {
                     return Err(KernelError::ReceiveFailed(format!(
                         "Channel receive denied for task {}",
                         task_id
                     )));
+                }
+                None => {
+                    return Err(KernelError::ReceiveFailed(
+                        "Channel receive denied without a receive context".to_string(),
+                    ));
                 }
             }
         }
@@ -2475,12 +2486,14 @@ mod tests {
             .unwrap();
 
         let payload = ipc::MessagePayload::new(&"msg").unwrap();
-        let message = ipc::MessageEnvelope::new(
+        let mut message = ipc::MessageEnvelope::new(
             ServiceId::new(),
             "msg".to_string(),
             ipc::SchemaVersion::new(1, 0),
             payload,
         );
+        // The channel has an access list, so the sender must identify itself.
+        message.source = Some(task_id);
 
         kernel.send_message(channel, message).unwrap();
 
