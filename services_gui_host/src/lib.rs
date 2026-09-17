@@ -1117,6 +1117,22 @@ fn raster_title_bar(
     border_color: RgbaColor,
     theme: &Theme,
 ) {
+    // Separator between the title bar and the content; for the focused
+    // window this carries the accent so the ring reads as one shape. It is
+    // painted first and on its own clip because it lies just below the
+    // chrome rectangle: a damage region that misses the chrome row must
+    // still restore it.
+    let separator_y = rect.y + RASTER_CELL_HEIGHT;
+    if separator_y < rect.y + rect.height {
+        let mut line_target = ScissorTarget::new(target, clipped_rect);
+        line_target.draw_hline(
+            rect.x + RASTER_BORDER_THICKNESS,
+            separator_y,
+            rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
+            border_color,
+        );
+    }
+
     let Some(chrome_rect) = window_chrome_rect(rect).intersect(clipped_rect) else {
         return;
     };
@@ -1159,19 +1175,6 @@ fn raster_title_bar(
             );
             x += width + 2;
         }
-    }
-
-    // Separator between the title bar and the content; for the focused
-    // window this carries the accent so the ring reads as one shape.
-    let separator_y = rect.y + RASTER_CELL_HEIGHT;
-    if separator_y < rect.y + rect.height {
-        let mut line_target = ScissorTarget::new(target, clipped_rect);
-        line_target.draw_hline(
-            rect.x + RASTER_BORDER_THICKNESS,
-            separator_y,
-            rect.width.saturating_sub(RASTER_BORDER_THICKNESS * 2),
-            border_color,
-        );
     }
 }
 

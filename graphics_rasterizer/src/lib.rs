@@ -1705,6 +1705,79 @@ mod tests {
     }
 
     #[test]
+    fn property_scissor_and_container_never_write_outside_their_bounds() {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..300 {
+            let w = 4 + (next() % 40) as usize;
+            let h = 4 + (next() % 30) as usize;
+            let mut buffer = RgbaBuffer::new(w, h, CLEAR);
+            let rx = (next() % w as u64) as usize;
+            let ry = (next() % h as u64) as usize;
+            let rw = 1 + (next() % (w as u64)) as usize;
+            let rh = 1 + (next() % (h as u64)) as usize;
+            let region = RasterRect::new(rx, ry, rw, rh);
+            let use_container = next() % 2 == 0;
+            {
+                let ops = next() % 6;
+                let a = (next() % 60) as i64 - 10;
+                let b = (next() % 60) as i64 - 10;
+                let c = (next() % 60) as i64 - 10;
+                let d = (next() % 60) as i64 - 10;
+                let mut draw = |t: &mut dyn RenderTarget| match ops {
+                    0 => t.fill_rect(
+                        RasterRect::new(a.max(0) as usize, b.max(0) as usize, 30, 30),
+                        ACCENT,
+                    ),
+                    1 => t.draw_line(a, b, c, d, ACCENT),
+                    2 => t.fill_rounded_rect(
+                        RasterRect::new(a.max(0) as usize, b.max(0) as usize, 25, 20),
+                        5,
+                        ACCENT,
+                    ),
+                    3 => t.draw_rounded_border(
+                        RasterRect::new(a.max(0) as usize, b.max(0) as usize, 25, 20),
+                        4,
+                        2,
+                        ACCENT,
+                    ),
+                    4 => t.draw_text_with_font(
+                        a.max(0) as usize,
+                        b.max(0) as usize,
+                        "Panda!",
+                        &DESKTOP_FONT,
+                        ACCENT,
+                    ),
+                    _ => t.draw_border(RasterRect::new(0, 0, 100, 100), 3, ACCENT),
+                };
+                if use_container {
+                    let mut target = ContainerTarget::new(&mut buffer, region);
+                    draw(&mut target);
+                } else {
+                    let mut target = ScissorTarget::new(&mut buffer, region);
+                    draw(&mut target);
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    if !region.contains(x, y) {
+                        assert_eq!(
+                            buffer.pixel(x, y),
+                            Some(CLEAR),
+                            "leak at ({x},{y}) outside {region:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_desktop_font_reports_readable_metrics() {
         assert_eq!(DESKTOP_FONT.measure_text("Ab"), (16, 16));
         assert_eq!(DESKTOP_FONT.source(), GlyphSource::Ascii8x16);

@@ -136,7 +136,7 @@ User-space services should provide policy:
 ### Epic 10: Performance And Correctness
 
 - [x] `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
-- [ ] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
+- [x] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
 - [ ] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
 - [ ] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
 - [ ] `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-045` is in place: `services_gui_host::bench` measures pixels written, windows painted, and damage area for full composes (8 and 64 cascaded windows, an 8x6 tile grid) and damage-limited frames (pointer move, caret blink, palette open), with regression bounds under `cargo test` and a wall-clock example. The first run exposed a caret blink repainting a third of the screen; caret-only changes now damage only the caret cells.
+`GFX-046` is in place: property tests over random scenes prove render order-independence, background outside every window and the cursor, hit testing agreeing with paint order, damage-limited repaints matching full renders inside the damage rectangle, delta damage being sufficient for arbitrary scene pairs, and scissor/container targets never writing outside their bounds. They caught and fixed a real bug: the title-bar separator could be dropped by an incremental repaint whose damage missed the chrome row.
 
 The best next implementation step is:
 
-- `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
+- `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
 
-The benchmark gives bounds on typical desktops; property tests give guarantees on arbitrary ones: a pixel outside every window is background, the top-most window at a pixel is the one hit testing reports, and rendering with a damage rectangle never differs from a full render inside that rectangle.
+The kernel heap is a bump allocator holding a 4 MiB text shadow and a 4 MiB desktop target, and per-frame model allocations are never returned. A budget that accounts these up front, refuses over-budget allocations with a typed error, and reports usage is the next correctness item before larger surfaces or atlases arrive.
