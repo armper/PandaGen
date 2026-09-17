@@ -22,6 +22,7 @@ mod desktop_frame;
 mod display_mode;
 mod display_sink;
 mod framebuffer;
+mod free_list_heap;
 mod minimal_editor;
 mod optimized_render;
 mod output;
@@ -3506,17 +3507,11 @@ fn init_heap(
     let virt_base = (hhdm_offset + phys_base) as usize;
     let size = (HEAP_PAGES * PAGE_SIZE) as usize;
 
-    // Initialize the global allocator (bare-metal only)
+    // Initialize the global allocator (bare-metal only): a freeing
+    // free-list heap, so per-frame desktop allocations are returned.
     #[cfg(all(not(test), target_os = "none"))]
     unsafe {
-        let heap_ptr = &GLOBAL_HEAP as *const BumpHeap as *mut BumpHeap;
-        core::ptr::write((*heap_ptr).next.get(), virt_base);
-        core::ptr::write((*heap_ptr).allocations.get(), 0);
-        core::ptr::write(&mut (*heap_ptr).start as *mut usize, virt_base);
-        core::ptr::write(
-            &mut (*heap_ptr).end as *mut usize,
-            virt_base.saturating_add(size),
-        );
+        GLOBAL_HEAP.init(virt_base, size);
     }
 
     let heap = BumpHeap::new(virt_base, size);
@@ -3559,7 +3554,7 @@ static mut KERNEL_STORAGE: MaybeUninit<Kernel> = MaybeUninit::uninit();
 
 #[cfg(all(not(test), target_os = "none"))]
 #[global_allocator]
-static GLOBAL_HEAP: BumpHeap = BumpHeap::new(0, 0);
+static GLOBAL_HEAP: free_list_heap::FreeListHeap = free_list_heap::FreeListHeap::empty();
 
 #[cfg(all(not(test), target_os = "none"))]
 #[alloc_error_handler]
@@ -4437,11 +4432,14 @@ impl CommandService {
                     let heap = GLOBAL_HEAP.stats();
                     let _ = writeln!(
                         output,
-                        "heap: used={} KiB free={} KiB total={} KiB allocations={}",
+                        "heap: used={} KiB free={} KiB total={} KiB allocs={} frees={} largest_free={} KiB blocks={}",
                         heap.used / 1024,
                         heap.free / 1024,
                         heap.total / 1024,
-                        heap.allocations
+                        heap.allocations,
+                        heap.frees,
+                        heap.largest_free / 1024,
+                        heap.free_blocks
                     );
                 }
                 if let Some(allocator) = ctx.allocator.as_ref() {
@@ -4868,27 +4866,6 @@ impl KernelAllocator for BumpHeap {
                 allocations,
             }
         }
-    }
-}
-
-#[cfg(not(test))]
-unsafe impl core::alloc::GlobalAlloc for BumpHeap {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let next = *self.next.get();
-        let aligned = align_up_usize(next, layout.align());
-        let end = aligned.saturating_add(layout.size());
-
-        if end > self.end {
-            return core::ptr::null_mut();
-        }
-
-        *self.next.get() = end;
-        *self.allocations.get() += 1;
-        aligned as *mut u8
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        // Bump allocator doesn't support deallocation
     }
 }
 

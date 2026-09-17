@@ -14,6 +14,7 @@ extern crate std;
 pub mod desktop_frame;
 pub mod display_mode;
 pub mod display_sink;
+pub mod free_list_heap;
 pub mod minimal_editor;
 pub mod optimized_render;
 pub mod palette_overlay;

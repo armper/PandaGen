@@ -211,8 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-047` is in place: `SurfaceBudget` reserves labelled pixel buffers against a share of the kernel heap, refuses over-budget reservations with a typed error (graphics mode is declined with a notice instead of a panic inside `alloc`), and the `mem` command reports heap usage.
+The kernel's global allocator is now a coalescing free-list heap (Phase 246). Heap usage on the real image is flat across pointer motion and app switching, so the per-frame desktop model is no longer a leak.
 
-Measuring that usage on the real image showed the desktop leaks about 58 KiB and 1,000 allocations per pointer-motion frame because the kernel's global allocator is a bump allocator that never frees. That makes the allocator the next correctness item, ahead of `GFX-048`:
+The best next implementation step is:
 
-- Replace the bump global allocator with a free-list allocator that returns memory, keeping the budget and stats.
+- `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
+
+The budget refuses over-limit surfaces and VGA-only boots already fall back to text; what remains is a deliberate low-memory policy for the running desktop (shed notices, drop the cursor sprite, fall back to text) driven by heap stats, with tests.
