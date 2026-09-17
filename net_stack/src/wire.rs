@@ -11,6 +11,8 @@ pub const ARP_OP_REQUEST: u16 = 1;
 pub const ARP_OP_REPLY: u16 = 2;
 pub const IPV4_HDR_LEN: usize = 20;
 pub const IP_PROTO_ICMP: u8 = 1;
+pub const IP_PROTO_UDP: u8 = 17;
+pub const UDP_HDR_LEN: usize = 8;
 pub const ICMP_HDR_LEN: usize = 8;
 pub const ICMP_ECHO_REPLY: u8 = 0;
 pub const ICMP_ECHO_REQUEST: u8 = 8;
@@ -243,6 +245,115 @@ impl<'a> Icmp<'a> {
         put16(&mut m[2..4], sum);
         Some(len)
     }
+}
+
+/// UDP header plus payload view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Udp<'a> {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub payload: &'a [u8],
+}
+
+/// One's-complement sum of the IPv4 pseudo-header for UDP.
+fn pseudo_header_sum(src: Ipv4, dst: Ipv4, udp_len: u16) -> u32 {
+    let mut sum = 0u32;
+    sum += u16::from_be_bytes([src[0], src[1]]) as u32;
+    sum += u16::from_be_bytes([src[2], src[3]]) as u32;
+    sum += u16::from_be_bytes([dst[0], dst[1]]) as u32;
+    sum += u16::from_be_bytes([dst[2], dst[3]]) as u32;
+    sum += IP_PROTO_UDP as u32;
+    sum += udp_len as u32;
+    sum
+}
+
+/// Checksum of `data` folded together with a pseudo-header sum.
+fn checksum_with(prefix: u32, data: &[u8]) -> u16 {
+    let mut sum = prefix + !checksum(data) as u32;
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+impl<'a> Udp<'a> {
+    /// Parse a datagram carried between `src` and `dst`; a zero checksum
+    /// means "not computed" and is accepted.
+    pub fn parse(p: &'a [u8], src: Ipv4, dst: Ipv4) -> Option<Self> {
+        if p.len() < UDP_HDR_LEN {
+            return None;
+        }
+        let len = be16(&p[4..6]) as usize;
+        if len < UDP_HDR_LEN || len > p.len() {
+            return None;
+        }
+        let p = &p[..len];
+        if be16(&p[6..8]) != 0 && checksum_with(pseudo_header_sum(src, dst, len as u16), p) != 0 {
+            return None;
+        }
+        Some(Self {
+            src_port: be16(&p[0..2]),
+            dst_port: be16(&p[2..4]),
+            payload: &p[UDP_HDR_LEN..],
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        UDP_HDR_LEN + self.payload.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Write header and payload with a checksum over the pseudo-header.
+    pub fn write(&self, out: &mut [u8], src: Ipv4, dst: Ipv4) -> Option<usize> {
+        let len = self.len();
+        if out.len() < len || len > u16::MAX as usize {
+            return None;
+        }
+        let m = &mut out[..len];
+        put16(&mut m[0..2], self.src_port);
+        put16(&mut m[2..4], self.dst_port);
+        put16(&mut m[4..6], len as u16);
+        put16(&mut m[6..8], 0);
+        m[UDP_HDR_LEN..].copy_from_slice(self.payload);
+        let mut sum = checksum_with(pseudo_header_sum(src, dst, len as u16), m);
+        if sum == 0 {
+            sum = 0xFFFF;
+        }
+        put16(&mut m[6..8], sum);
+        Some(len)
+    }
+}
+
+/// Build a complete Ethernet/IPv4/UDP frame.
+pub fn build_udp(
+    out: &mut [u8],
+    src_mac: Mac,
+    dst_mac: Mac,
+    src_ip: Ipv4,
+    dst_ip: Ipv4,
+    udp: &Udp,
+) -> Option<usize> {
+    EthernetHeader {
+        dst: dst_mac,
+        src: src_mac,
+        ethertype: ETHERTYPE_IPV4,
+    }
+    .write(out)?;
+    let ip_start = ETH_HDR_LEN;
+    let udp_start = ip_start + IPV4_HDR_LEN;
+    let udp_len = udp.write(out.get_mut(udp_start..)?, src_ip, dst_ip)?;
+    Ipv4Header {
+        src: src_ip,
+        dst: dst_ip,
+        protocol: IP_PROTO_UDP,
+        ttl: DEFAULT_TTL,
+        total_len: 0,
+    }
+    .write(&mut out[ip_start..], udp_len)?;
+    finish_frame(out, udp_start + udp_len)
 }
 
 /// Pad a frame to the Ethernet minimum and return the final length.

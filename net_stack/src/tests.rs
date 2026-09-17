@@ -269,3 +269,112 @@ fn answers_echo_requests_addressed_to_us() {
     // Truncated frame.
     assert_eq!(a.receive(&frame[..10], &mut out), Event::None);
 }
+
+#[test]
+fn udp_checksum_round_trip_and_zero_checksum_accepted() {
+    let src = [10, 0, 2, 2];
+    let dst = [10, 0, 2, 15];
+    let udp = Udp {
+        src_port: 4000,
+        dst_port: 7777,
+        payload: b"hello udp",
+    };
+    let mut buf = [0u8; 64];
+    let len = udp.write(&mut buf, src, dst).unwrap();
+    assert_eq!(len, UDP_HDR_LEN + 9);
+    let parsed = Udp::parse(&buf[..len], src, dst).unwrap();
+    assert_eq!(parsed, udp);
+    // Wrong addresses break the pseudo-header checksum.
+    assert_eq!(Udp::parse(&buf[..len], src, [10, 0, 2, 16]), None);
+    // Zero checksum means "none": accepted.
+    buf[6] = 0;
+    buf[7] = 0;
+    assert!(Udp::parse(&buf[..len], src, [1, 2, 3, 4]).is_some());
+    // Length field larger than the buffer: rejected.
+    buf[4] = 0xFF;
+    assert_eq!(Udp::parse(&buf[..len], src, dst), None);
+}
+
+#[test]
+fn udp_delivery_only_to_bound_ports_and_learns_neighbour() {
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+    let mut frame = [0u8; 1514];
+    let udp = Udp {
+        src_port: 5555,
+        dst_port: 7777,
+        payload: b"ping?",
+    };
+    let flen = build_udp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &udp,
+    )
+    .unwrap();
+    // Not bound yet: counted, not delivered, but the neighbour is learned.
+    assert_eq!(a.receive(&frame[..flen], &mut out), Event::None);
+    assert_eq!(a.counters().udp_unbound, 1);
+    assert_eq!(a.arp_cache().lookup([10, 0, 2, 2]), Some(GW_MAC));
+
+    assert!(a.bind(7777));
+    assert!(a.bind(7777), "rebinding is idempotent");
+    match a.receive(&frame[..flen], &mut out) {
+        Event::Udp {
+            src,
+            src_port,
+            dst_port,
+            payload_offset,
+            payload_len,
+        } => {
+            assert_eq!(src, [10, 0, 2, 2]);
+            assert_eq!(src_port, 5555);
+            assert_eq!(dst_port, 7777);
+            assert_eq!(
+                &frame[payload_offset..payload_offset + payload_len],
+                b"ping?"
+            );
+        }
+        other => panic!("expected udp, got {other:?}"),
+    }
+    assert_eq!(a.counters().udp_received, 1);
+
+    // Reply goes straight out using the learned MAC.
+    let len = a
+        .udp_send([10, 0, 2, 2], 5555, 7777, b"pong!", &mut out)
+        .unwrap();
+    let (eth, ipp) = EthernetHeader::parse(&out[..len]).unwrap();
+    assert_eq!(eth.dst, GW_MAC);
+    let (ip, body) = Ipv4Header::parse(ipp).unwrap();
+    assert_eq!(ip.protocol, IP_PROTO_UDP);
+    let reply = Udp::parse(body, ip.src, ip.dst).unwrap();
+    assert_eq!(reply.src_port, 7777);
+    assert_eq!(reply.dst_port, 5555);
+    assert_eq!(reply.payload, b"pong!");
+    assert_eq!(a.counters().udp_sent, 1);
+
+    a.unbind(7777);
+    assert!(!a.is_bound(7777));
+    assert_eq!(a.receive(&frame[..flen], &mut out), Event::None);
+
+    // Sending to an unknown host on the subnet needs ARP first.
+    let mut b = iface();
+    assert_eq!(
+        b.udp_send([10, 0, 2, 9], 1, 2, b"x", &mut out),
+        Err(SendError::NeedArp)
+    );
+    assert_eq!(b.pending_frame_len(), MIN_FRAME_LEN);
+}
+
+#[test]
+fn bind_slots_are_limited() {
+    let mut a = iface();
+    for port in 1..=MAX_BOUND_PORTS as u16 {
+        assert!(a.bind(port));
+    }
+    assert!(!a.bind(99));
+    a.unbind(1);
+    assert!(a.bind(99));
+}

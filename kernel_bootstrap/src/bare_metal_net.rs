@@ -16,6 +16,9 @@ use hal_x86_64::{
 use net_stack::wire::{fmt_ipv4, fmt_mac};
 use net_stack::{Config, Event, Interface, Ipv4, SendError};
 
+/// UDP port the kernel echoes datagrams on.
+pub const UDP_ECHO_PORT: u16 = 7777;
+
 const RX_BUFFERS: usize = 8;
 const QUEUE_AREA_BYTES: usize = 12288;
 
@@ -42,6 +45,7 @@ pub struct NetStack {
     iface: Interface,
     rx_frame: [u8; MAX_FRAME_LEN],
     tx_frame: [u8; MAX_FRAME_LEN],
+    udp_echoed: u64,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -75,11 +79,14 @@ impl NetStack {
             VirtioNetDevice::new(transport, rx_queue, tx_queue, dma).ok()?
         };
         let mac = device.mac();
+        let mut iface = Interface::new(Config::qemu_user(mac));
+        iface.bind(UDP_ECHO_PORT);
         Some(Self {
             device,
-            iface: Interface::new(Config::qemu_user(mac)),
+            iface,
             rx_frame: [0; MAX_FRAME_LEN],
             tx_frame: [0; MAX_FRAME_LEN],
+            udp_echoed: 0,
         })
     }
 
@@ -112,12 +119,126 @@ impl NetStack {
             c.echo_replies_received,
             c.dropped
         );
+        let _ = writeln!(
+            out,
+            "net: udp port {} recv={} sent={} echoed={} unbound={}",
+            UDP_ECHO_PORT, c.udp_received, c.udp_sent, self.udp_echoed, c.udp_unbound
+        );
     }
 
     /// Pull in every pending frame, letting the interface answer ARP and
     /// echo requests. Returns the first `EchoReply` seen, if any.
     pub fn poll(&mut self) -> Option<Event> {
         self.poll_for_echo()
+    }
+
+    /// Background servicing from the main loop: answer ARP, ping, and
+    /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns frames handled.
+    pub fn service(&mut self, log: &mut impl Write) -> usize {
+        let mut handled = 0;
+        while let Some(len) = self.device.poll_receive(&mut self.rx_frame) {
+            handled += 1;
+            match self
+                .iface
+                .receive(&self.rx_frame[..len], &mut self.tx_frame)
+            {
+                Event::Transmit(n) => {
+                    let _ = self.device.transmit(&self.tx_frame[..n]);
+                }
+                Event::Udp {
+                    src,
+                    src_port,
+                    dst_port,
+                    payload_offset,
+                    payload_len,
+                } => {
+                    let payload = &self.rx_frame[payload_offset..payload_offset + payload_len];
+                    match self
+                        .iface
+                        .udp_send(src, src_port, dst_port, payload, &mut self.tx_frame)
+                    {
+                        Ok(n) => {
+                            if self.device.transmit(&self.tx_frame[..n]).is_ok() {
+                                self.udp_echoed += 1;
+                                let _ = writeln!(
+                                    log,
+                                    "net: udp echo {} bytes to {}:{}",
+                                    payload_len,
+                                    fmt_ipv4(src),
+                                    src_port
+                                );
+                            }
+                        }
+                        Err(SendError::NeedArp) => {
+                            let n = self.iface.pending_frame_len();
+                            let _ = self.device.transmit(&self.tx_frame[..n]);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        handled
+    }
+
+    /// Send one UDP datagram from the echo port, resolving the next hop
+    /// first if needed.
+    pub fn udp_send(
+        &mut self,
+        target: Ipv4,
+        port: u16,
+        payload: &[u8],
+        now: &dyn Fn() -> u64,
+        out: &mut impl Write,
+    ) -> bool {
+        for _ in 0..3 {
+            match self
+                .iface
+                .udp_send(target, port, UDP_ECHO_PORT, payload, &mut self.tx_frame)
+            {
+                Ok(len) => {
+                    return match self.device.transmit(&self.tx_frame[..len]) {
+                        Ok(()) => {
+                            let _ = writeln!(
+                                out,
+                                "net: sent {} bytes to {}:{}",
+                                payload.len(),
+                                fmt_ipv4(target),
+                                port
+                            );
+                            true
+                        }
+                        Err(err) => {
+                            let _ = writeln!(out, "net: transmit failed ({err:?})");
+                            false
+                        }
+                    };
+                }
+                Err(SendError::NeedArp) => {
+                    let len = self.iface.pending_frame_len();
+                    let _ = self.device.transmit(&self.tx_frame[..len]);
+                    let hop = self.iface.config().next_hop(target);
+                    let start = now();
+                    while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS
+                        && self.iface.arp_cache().lookup(hop).is_none()
+                    {
+                        let _ = self.poll_for_echo();
+                        core::hint::spin_loop();
+                    }
+                }
+                Err(SendError::BufferTooSmall) => {
+                    let _ = writeln!(out, "net: payload too large");
+                    return false;
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "net: could not resolve next hop for {}",
+            fmt_ipv4(target)
+        );
+        false
     }
 
     /// Ping `target`, writing progress lines to `out`. `now` returns the
@@ -212,7 +333,9 @@ impl NetStack {
                         found = Some(event);
                     }
                 }
-                Event::None => {}
+                // Datagrams arriving mid-ping are dropped; the main loop's
+                // `service` handles UDP when no command holds the stack.
+                Event::Udp { .. } | Event::None => {}
             }
         }
         found

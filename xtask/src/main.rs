@@ -61,6 +61,8 @@ fn cmd_iso() -> Result<(), Box<dyn std::error::Error>> {
 
 /// vCPUs given to QEMU; the kernel brings the extra ones online at boot.
 const QEMU_SMP: &str = "4";
+/// Kernel UDP echo port, forwarded from the host loopback by QEMU.
+const UDP_ECHO_PORT: u16 = 7777;
 
 fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
@@ -101,7 +103,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -126,7 +128,9 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg("user,id=n0")
+        .arg(format!(
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+        ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -188,7 +192,9 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg("user,id=n0")
+        .arg(format!(
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+        ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -295,7 +301,9 @@ fn cmd_qemu_script(
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg("user,id=n0")
+        .arg(format!(
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT}"
+        ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -325,6 +333,7 @@ fn cmd_qemu_script(
     mon("")?;
 
     let mut shots = Vec::new();
+    let mut udp_failures: Vec<String> = Vec::new();
     for key in &keys {
         if let Some(secs) = key.strip_prefix("sleep:") {
             std::thread::sleep(Duration::from_secs_f64(secs.parse()?));
@@ -340,6 +349,25 @@ fn cmd_qemu_script(
             let dz = parts.get(2).copied().unwrap_or("0");
             mon(&format!("mouse_move {dx} {dy} {dz}"))?;
             std::thread::sleep(Duration::from_millis(60));
+        } else if let Some(spec) = key.strip_prefix("udp:") {
+            // udp:<text> -> send <text> to the kernel's echo port from the
+            // host and require the echo back within 2 s.
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            socket.send_to(spec.as_bytes(), ("127.0.0.1", UDP_ECHO_PORT))?;
+            let mut reply = [0u8; 2048];
+            match socket.recv_from(&mut reply) {
+                Ok((n, _)) if &reply[..n] == spec.as_bytes() => {
+                    println!("udp echo ok: {spec}");
+                }
+                Ok((n, _)) => {
+                    udp_failures.push(format!(
+                        "<udp echo of {spec:?}, got {:?}>",
+                        String::from_utf8_lossy(&reply[..n])
+                    ));
+                }
+                Err(err) => udp_failures.push(format!("<udp echo of {spec:?}: {err}>")),
+            }
         } else if let Some(mask) = key.strip_prefix("mbtn:") {
             // mbtn:<mask> -> button state bitmask (1 left, 2 right, 4 middle)
             mon(&format!("mouse_button {mask}"))?;
@@ -379,6 +407,7 @@ fn cmd_qemu_script(
     if log.contains("KERNEL PANIC") {
         missing.push("<no kernel panic>".to_string());
     }
+    missing.extend(udp_failures);
     if log.contains("framebuffer present rejected") {
         missing.push("<no rejected framebuffer present>".to_string());
     }

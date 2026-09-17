@@ -10,9 +10,12 @@ pub mod wire;
 mod tests;
 
 use wire::{
-    ArpPacket, EthernetHeader, Icmp, Ipv4Header, ARP_OP_REPLY, ARP_OP_REQUEST, ETHERTYPE_ARP,
-    ETHERTYPE_IPV4, ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, IP_PROTO_ICMP, MAC_BROADCAST,
+    ArpPacket, EthernetHeader, Icmp, Ipv4Header, Udp, ARP_OP_REPLY, ARP_OP_REQUEST, ETHERTYPE_ARP,
+    ETHERTYPE_IPV4, ICMP_ECHO_REPLY, ICMP_ECHO_REQUEST, IP_PROTO_ICMP, IP_PROTO_UDP, MAC_BROADCAST,
 };
+
+/// Ports an interface can listen on at once.
+pub const MAX_BOUND_PORTS: usize = 4;
 
 pub type Mac = [u8; 6];
 pub type Ipv4 = [u8; 4];
@@ -60,6 +63,15 @@ pub enum Event {
     Transmit(usize),
     /// An echo reply for our outstanding ping arrived.
     EchoReply { from: Ipv4, seq: u16, ttl: u8 },
+    /// A datagram for a bound port arrived; its payload is
+    /// `frame[payload_offset..payload_offset + payload_len]`.
+    Udp {
+        src: Ipv4,
+        src_port: u16,
+        dst_port: u16,
+        payload_offset: usize,
+        payload_len: usize,
+    },
 }
 
 /// Outstanding ping, if any.
@@ -135,6 +147,9 @@ pub struct Counters {
     pub echo_replies_sent: u64,
     pub echo_requests_sent: u64,
     pub echo_replies_received: u64,
+    pub udp_received: u64,
+    pub udp_sent: u64,
+    pub udp_unbound: u64,
     pub dropped: u64,
 }
 
@@ -147,6 +162,7 @@ pub struct Interface {
     ident: u16,
     counters: Counters,
     pending_len: usize,
+    bound: [Option<u16>; MAX_BOUND_PORTS],
 }
 
 impl Interface {
@@ -164,10 +180,72 @@ impl Interface {
                 echo_replies_sent: 0,
                 echo_requests_sent: 0,
                 echo_replies_received: 0,
+                udp_received: 0,
+                udp_sent: 0,
+                udp_unbound: 0,
                 dropped: 0,
             },
             pending_len: 0,
+            bound: [None; MAX_BOUND_PORTS],
         }
+    }
+
+    /// Listen on a UDP port. Returns false when all slots are taken.
+    pub fn bind(&mut self, port: u16) -> bool {
+        if self.bound.contains(&Some(port)) {
+            return true;
+        }
+        match self.bound.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => {
+                *slot = Some(port);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn unbind(&mut self, port: u16) {
+        for slot in self.bound.iter_mut() {
+            if *slot == Some(port) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub fn is_bound(&self, port: u16) -> bool {
+        self.bound.contains(&Some(port))
+    }
+
+    /// Build a UDP datagram to `dst:dst_port` from `src_port` in `out`.
+    /// Like `ping`, returns `NeedArp` (with an ARP request written) when the
+    /// next hop's MAC is unknown.
+    pub fn udp_send(
+        &mut self,
+        dst: Ipv4,
+        dst_port: u16,
+        src_port: u16,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, SendError> {
+        let hop = self.config.next_hop(dst);
+        let Some(dst_mac) = self.arp.lookup(hop) else {
+            return match self.arp_request(hop, out) {
+                Some(len) => {
+                    self.pending_len = len;
+                    Err(SendError::NeedArp)
+                }
+                None => Err(SendError::BufferTooSmall),
+            };
+        };
+        let udp = Udp {
+            src_port,
+            dst_port,
+            payload,
+        };
+        let len = wire::build_udp(out, self.config.mac, dst_mac, self.config.ip, dst, &udp)
+            .ok_or(SendError::BufferTooSmall)?;
+        self.counters.udp_sent += 1;
+        Ok(len)
     }
 
     pub fn config(&self) -> &Config {
@@ -195,7 +273,7 @@ impl Interface {
         }
         match eth.ethertype {
             ETHERTYPE_ARP => self.receive_arp(payload, out),
-            ETHERTYPE_IPV4 => self.receive_ipv4(payload, out),
+            ETHERTYPE_IPV4 => self.receive_ipv4(eth.src, frame.as_ptr() as usize, payload, out),
             _ => Event::None,
         }
     }
@@ -227,14 +305,52 @@ impl Interface {
         Event::None
     }
 
-    fn receive_ipv4(&mut self, payload: &[u8], out: &mut [u8]) -> Event {
+    fn receive_ipv4(
+        &mut self,
+        src_mac: Mac,
+        frame_start: usize,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Event {
         let Some((ip, body)) = Ipv4Header::parse(payload) else {
             self.counters.dropped += 1;
             return Event::None;
         };
-        if ip.dst != self.config.ip || ip.protocol != IP_PROTO_ICMP {
+        if ip.dst != self.config.ip {
             return Event::None;
         }
+        // Neighbour learning: whoever sends us IPv4 directly is reachable at
+        // that MAC (covers hosts that never ARP us, like the QEMU gateway
+        // forwarding host traffic).
+        if self.config.same_subnet(ip.src) {
+            self.arp.insert(ip.src, src_mac);
+        }
+        match ip.protocol {
+            IP_PROTO_ICMP => self.receive_icmp(ip, body, out),
+            IP_PROTO_UDP => {
+                let Some(udp) = Udp::parse(body, ip.src, ip.dst) else {
+                    self.counters.dropped += 1;
+                    return Event::None;
+                };
+                if !self.is_bound(udp.dst_port) {
+                    self.counters.udp_unbound += 1;
+                    return Event::None;
+                }
+                self.counters.udp_received += 1;
+                let body_offset = body.as_ptr() as usize - frame_start;
+                Event::Udp {
+                    src: ip.src,
+                    src_port: udp.src_port,
+                    dst_port: udp.dst_port,
+                    payload_offset: body_offset + wire::UDP_HDR_LEN,
+                    payload_len: udp.payload.len(),
+                }
+            }
+            _ => Event::None,
+        }
+    }
+
+    fn receive_icmp(&mut self, ip: Ipv4Header, body: &[u8], out: &mut [u8]) -> Event {
         let Some(icmp) = Icmp::parse(body) else {
             self.counters.dropped += 1;
             return Event::None;

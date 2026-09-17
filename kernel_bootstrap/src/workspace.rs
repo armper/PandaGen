@@ -1066,7 +1066,7 @@ impl WorkspaceSession {
                 self.emit_line(serial, "smp present [on|off] - Spread presents across CPUs");
                 self.emit_line(
                     serial,
-                    "net [status|ping <ip>] - Network status or ICMP ping",
+                    "net [status|ping <ip>|udp <ip> <port> <text>] - Network",
                 );
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");

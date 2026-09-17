@@ -1207,6 +1207,14 @@ fn workspace_loop(
         // Run kernel tasks
         let kernel_progressed = kernel.run_once(serial);
 
+        // Service the network (ARP, ping, UDP echo) while nothing else holds it.
+        #[cfg(all(not(test), target_os = "none"))]
+        if let Some(mut guard) = NET.try_lock() {
+            if let Some(net) = guard.as_mut() {
+                net.service(serial);
+            }
+        }
+
         // Present any shadow content whose pacing interval has elapsed. This
         // is the single hardware present point of the loop.
         if let present_policy::PresentDecision::Present = present_pacer.poll(get_tick_count()) {
@@ -4942,6 +4950,24 @@ impl CommandService {
                     (Some("poll"), _) => {
                         let event = net.poll();
                         let _ = writeln!(output, "net: polled ({event:?})");
+                    }
+                    (Some("udp"), Some(ip)) => {
+                        let port = parts.next().and_then(|p| p.parse::<u16>().ok());
+                        let text = parts.next().unwrap_or("hello");
+                        match (net_stack::wire::parse_ipv4(ip), port) {
+                            (Some(ip), Some(port)) => {
+                                let _ = net.udp_send(
+                                    ip,
+                                    port,
+                                    text.as_bytes(),
+                                    &get_tick_count,
+                                    &mut output,
+                                );
+                            }
+                            _ => {
+                                let _ = writeln!(output, "usage: net udp <ip> <port> [text]");
+                            }
+                        }
                     }
                     _ => net.write_status(&mut output),
                 }
