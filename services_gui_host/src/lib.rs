@@ -21,6 +21,7 @@ use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTi
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 pub mod animation;
+pub mod backend;
 pub mod bench;
 pub mod degrade;
 pub mod host;
@@ -33,6 +34,7 @@ pub mod telemetry;
 pub mod theme;
 pub mod transport;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
+pub use backend::{BackendCapabilities, BackendError, RenderBackend, SoftwareBackend};
 pub use degrade::{Degradation, MemoryPressure, PressureMonitor, PressureThresholds};
 pub use host::{HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};

@@ -16,11 +16,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use graphics_rasterizer::{RgbaBuffer, RgbaColor};
+use graphics_rasterizer::RgbaColor;
 use services_gui_host::{
-    compose_shell, shell_layout, Compositor, DesktopCursor, DesktopWindow, HostedSurface,
-    LauncherItem, ShellModel, ShellNotice, ShellRects, ShellViewIds, SurfaceRect, SurfaceSize,
-    RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
+    compose_shell, shell_layout, Compositor, DesktopCursor, DesktopScene, DesktopWindow,
+    HostedSurface, LauncherItem, RenderBackend, ShellModel, ShellNotice, ShellRects, ShellViewIds,
+    SoftwareBackend, SurfaceRect, SurfaceSize, Theme, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -475,29 +475,39 @@ pub fn build_desktop_windows(
 
 /// Owns the RGBA target and composes desktop frames into it.
 pub struct DesktopFrameRenderer {
-    target: RgbaBuffer,
+    /// The renderer backend (GFX-050); software is authoritative.
+    backend: SoftwareBackend,
     layout: DesktopLayout,
-    compositor: Compositor,
     ids: DesktopViewIds,
-    frames: u64,
+    width: usize,
+    height: usize,
 }
 
+/// Background painted before the first frame; only visible if a scene is
+/// smaller than the surface.
+#[allow(dead_code)]
 const CLEAR_COLOR: RgbaColor = RgbaColor::new(0, 0, 0, 255);
 
 impl DesktopFrameRenderer {
     /// Allocate a renderer for a `width` x `height` pixel framebuffer.
     pub fn new(width: usize, height: usize) -> Self {
+        let backend = SoftwareBackend::new(width, height, Theme::DEFAULT)
+            .expect("framebuffer surfaces are within the software backend limit");
         Self {
-            target: RgbaBuffer::new(width, height, CLEAR_COLOR),
+            backend,
             layout: DesktopLayout::for_pixels(width, height),
-            compositor: Compositor::new(),
             ids: DesktopViewIds::new(),
-            frames: 0,
+            width,
+            height,
         }
     }
 
-    pub const fn compositor(&self) -> &Compositor {
-        &self.compositor
+    pub fn compositor(&self) -> &Compositor {
+        self.backend.compositor()
+    }
+
+    pub fn backend(&self) -> &dyn RenderBackend {
+        &self.backend
     }
 
     pub const fn view_ids(&self) -> &DesktopViewIds {
@@ -509,15 +519,31 @@ impl DesktopFrameRenderer {
     }
 
     pub const fn width(&self) -> usize {
-        self.target.width()
+        self.width
     }
 
     pub const fn height(&self) -> usize {
-        self.target.height()
+        self.height
     }
 
-    pub const fn frames_rendered(&self) -> u64 {
-        self.frames
+    pub fn frames_rendered(&self) -> u64 {
+        self.backend.frames_rendered()
+    }
+
+    /// Cell size of the desktop scene this renderer produces.
+    pub fn scene_size(&self) -> SurfaceSize {
+        self.layout.cells
+    }
+
+    /// Describe a frame as a scene: what the backend renders and what the
+    /// remote UI host can ship.
+    pub fn scene(
+        &self,
+        windows: Vec<DesktopWindow>,
+        pointer: Option<(usize, usize)>,
+    ) -> DesktopScene {
+        DesktopScene::new(self.layout.cells, windows)
+            .with_cursor(pointer.map(|(x, y)| DesktopCursor::new(x, y)))
     }
 
     /// Build the window list for `model` with this renderer's stable ids.
@@ -531,15 +557,13 @@ impl DesktopFrameRenderer {
         windows: Vec<DesktopWindow>,
         pointer: Option<(usize, usize)>,
     ) -> usize {
-        let cursor = pointer.map(|(x, y)| DesktopCursor::new(x, y));
-        let stats = self.compositor.render_desktop_to_target_with_cursor(
-            &mut self.target,
-            windows,
-            None,
-            cursor,
-        );
-        self.frames += 1;
-        stats.painted_windows
+        let scene = self.scene(windows, pointer);
+        match self.backend.render(&scene) {
+            Ok(stats) => stats.painted_windows,
+            // The scene is built from this renderer's own layout, so a size
+            // mismatch cannot happen; treat it as "nothing painted".
+            Err(_) => 0,
+        }
     }
 
     /// Compose `model` into the RGBA target. Returns the number of windows painted.
@@ -550,7 +574,7 @@ impl DesktopFrameRenderer {
 
     /// Tightly packed RGBA8888 pixels, `width * height * 4` bytes.
     pub fn pixels(&self) -> &[u8] {
-        self.target.as_bytes()
+        self.backend.pixels()
     }
 }
 
@@ -591,6 +615,12 @@ mod tests {
             ],
             notices: vec![],
         }
+    }
+
+    fn pixel_at(renderer: &DesktopFrameRenderer, x: usize, y: usize) -> RgbaColor {
+        let offset = (y * renderer.width() + x) * 4;
+        let p = &renderer.pixels()[offset..offset + 4];
+        RgbaColor::new(p[0], p[1], p[2], p[3])
     }
 
     fn find(windows: &[DesktopWindow], role: DesktopWindowRole) -> &DesktopWindow {
@@ -977,23 +1007,21 @@ mod tests {
         assert_eq!(renderer.frames_rendered(), 1);
 
         // Background is painted (not the clear colour) and window fill differs.
-        let bg = renderer.target.pixel(0, 0).unwrap();
+        let bg = pixel_at(&renderer, 0, 0);
         assert_ne!(bg, CLEAR_COLOR);
         let main = renderer.layout.main();
-        let inside_main = renderer
-            .target
-            .pixel(
-                (main.x + 1) * RASTER_CELL_WIDTH + 1,
-                (main.y + 1) * RASTER_CELL_HEIGHT + 1,
-            )
-            .unwrap();
+        let inside_main = pixel_at(
+            &renderer,
+            (main.x + 1) * RASTER_CELL_WIDTH + 1,
+            (main.y + 1) * RASTER_CELL_HEIGHT + 1,
+        );
         assert_ne!(inside_main, bg);
 
         // A pointer paints the cursor sprite on top of the desktop.
         let mut with_pointer = sample_model();
         with_pointer.pointer = Some((300, 400));
         renderer.render(&with_pointer);
-        let hotspot = renderer.target.pixel(300, 400).unwrap();
+        let hotspot = pixel_at(&renderer, 300, 400);
         assert_eq!(hotspot, RgbaColor::new(10, 10, 10, 255));
 
         // Re-rendering with a palette repaints the whole target deterministically.

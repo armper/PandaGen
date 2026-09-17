@@ -143,7 +143,7 @@ User-space services should provide policy:
 
 ### Epic 11: Hardware Acceleration Later
 
-- [ ] `GFX-050` Define a renderer backend trait so software and GPU renderers can share the same desktop contract.
+- [x] `GFX-050` Define a renderer backend trait so software and GPU renderers can share the same desktop contract.
 - [ ] `GFX-051` Add a GPU HAL exploration phase only after the software renderer path is stable and test-covered.
 - [ ] `GFX-052` Define which parts of composition remain CPU-side and which parts may move to GPU execution.
 
@@ -211,10 +211,8 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 10 (performance and correctness) is complete: work benchmarks, property tests, memory budgeting, a freeing allocator, clean degradation, and `gfx stats` telemetry (frames, presents, rejected and slow presents, present latency, pacer decisions, animation wakes, pointer events, pressure, heap, budget).
+`GFX-050` is in place: `RenderBackend` (capabilities, surface size, full and damage-limited rendering of a `DesktopScene`, pixels, frame count) with `SoftwareBackend` as the authoritative implementation, and the kernel desktop renderer now runs through it.
 
-Milestones A, B, and C are reached. The best next implementation step is the first story of Milestone D:
+The remaining stories are `GFX-051` (a GPU HAL exploration, explicitly gated on a stable software path, which is now the case) and `GFX-052` (deciding which parts of composition stay CPU-side). Both are design work rather than code the software path needs; the best next code step is to close the two loose ends the roadmap left in Epic 1:
 
-- `GFX-050` Define a renderer backend trait so software and GPU renderers can share the same desktop contract.
-
-The compositor already paints into any `RenderTarget`; a backend trait one level up (compose a `DesktopScene` and present it, report capabilities and stats) lets the software path stay authoritative while a GPU backend becomes an optional implementation of the same contract.
+- `GFX-001` to `GFX-005`: the desktop output contract, graphical `view_types` content, and a colour/brush/text-style model are now largely embodied by `DesktopScene`, `Theme`, and the transport; record them as the canonical contract and add serialisation tests for the graphical view payloads.
