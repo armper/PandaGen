@@ -120,7 +120,7 @@ User-space services should provide policy:
 
 ### Epic 8: Graphical App Surfaces
 
-- [ ] `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
+- [x] `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
 - [ ] `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
 - [ ] `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface.
 - [ ] `GFX-039` Add a graphical runtime for pipeline execution and status reporting.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 7 (desktop shell) is complete: shell surface, graphical chrome, graphical palette, toasts plus persistent status cards, and theme tokens.
+`GFX-036` is in place: in graphics mode the editor fills the workspace window with a line-number gutter, a current-line highlight, a caret placed past the gutter, a viewport sized to the window, and a status strip with mode, document, dirty state, cursor position, and line count, all over the unchanged `MinimalEditor` document and cursor model.
 
 The best next implementation step is:
 
-- `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
+- `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
 
-The editor already appears in the workspace window as text lines with a caret. A graphical renderer gives it a gutter with line numbers, a current-line highlight, a viewport sized to the window rather than the 23-row text console, and a status strip with mode and dirty state.
+The bare-metal kernel has a filesystem and `ls`/`cat`, but no picker surface yet; a list window with the highlighted-row facility, pointer selection like the palette, and Enter/click to open in the editor is the natural next app surface.

@@ -41,6 +41,36 @@ pub struct EditorModel {
     /// Cursor as (line, column) within `lines`.
     pub cursor: Option<(usize, usize)>,
     pub status: String,
+    /// Document line number of `lines[0]` (0-based).
+    pub first_line: usize,
+    /// Total document lines, for gutter width and the status strip.
+    pub line_count: usize,
+    pub dirty: bool,
+}
+
+/// Width in cells of the line-number gutter for `line_count` lines
+/// (digits plus one space), at least 3 digits wide.
+pub fn gutter_width(line_count: usize) -> usize {
+    let mut digits = 1;
+    let mut n = line_count.max(1);
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits.max(3) + 1
+}
+
+/// Prefix `text` with a right-aligned line number in a gutter of `width` cells.
+pub fn gutter_line(number: usize, width: usize, text: &str) -> String {
+    let digits = alloc::format!("{}", number);
+    let mut line = String::new();
+    for _ in digits.len()..width.saturating_sub(1) {
+        line.push(' ');
+    }
+    line.push_str(&digits);
+    line.push(' ');
+    line.push_str(text);
+    line
 }
 
 /// Everything the desktop needs to know about the workspace for one frame.
@@ -164,17 +194,43 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
     let content_rows = layout.main_content_rows();
     let (mut frame, title) = match &model.editor {
         Some(editor) => {
+            // Graphical editor view (GFX-036): line-number gutter, and the
+            // caret shifted past it.
+            let width = gutter_width(editor.line_count);
+            let lines: Vec<String> = editor
+                .lines
+                .iter()
+                .take(content_rows)
+                .enumerate()
+                .map(|(i, text)| {
+                    let number = editor.first_line + i + 1;
+                    if number <= editor.line_count.max(1) {
+                        gutter_line(number, width, text)
+                    } else {
+                        // Past the end of the document: blank gutter, no text.
+                        let mut blank = String::new();
+                        for _ in 0..width {
+                            blank.push(' ');
+                        }
+                        blank
+                    }
+                })
+                .collect();
             let mut frame = ViewFrame::new(
                 id,
                 ViewKind::TextBuffer,
                 0,
-                ViewContent::text_buffer(editor.lines.iter().take(content_rows).cloned().collect()),
+                ViewContent::text_buffer(lines),
                 0,
             );
             if let Some((line, column)) = editor.cursor {
-                frame = frame.with_cursor(CursorPosition::new(line, column));
+                frame = frame.with_cursor(CursorPosition::new(line, column + width));
             }
-            (frame, editor.title.clone())
+            let mut title = editor.title.clone();
+            if editor.dirty {
+                title.push_str(" [+]");
+            }
+            (frame, title)
         }
         None => {
             let visible_output = content_rows.saturating_sub(1);
@@ -213,8 +269,26 @@ pub fn build_desktop_windows(
     let status_left = model
         .editor
         .as_ref()
-        .map(|editor| editor.status.clone())
+        .map(|editor| {
+            let (line, col) = editor
+                .cursor
+                .map(|(l, c)| (editor.first_line + l + 1, c + 1))
+                .unwrap_or((0, 0));
+            alloc::format!(
+                "{}  {}{}  Ln {}, Col {}  ({} lines)",
+                editor.status,
+                editor.title,
+                if editor.dirty { " [+]" } else { "" },
+                line,
+                col,
+                editor.line_count
+            )
+        })
         .unwrap_or_else(|| model.status.clone());
+    let workspace_highlight = model
+        .editor
+        .as_ref()
+        .and_then(|editor| editor.cursor.map(|(line, _)| line));
 
     let palette = model.palette.as_ref().map(|palette| {
         let mut lines = Vec::with_capacity(palette.results.len() + 1);
@@ -251,6 +325,7 @@ pub fn build_desktop_windows(
         notices: model.notices.clone(),
         workspace: Some(workspace),
         workspace_title,
+        workspace_highlight,
         palette,
         palette_title: model
             .palette
@@ -515,19 +590,62 @@ mod tests {
         model.editor = Some(EditorModel {
             title: "readme.md".to_string(),
             lines: vec!["# PandaGen".to_string(), "".to_string()],
-            cursor: Some((0, 2)),
+            cursor: Some((1, 2)),
             status: "-- NORMAL --".to_string(),
+            first_line: 9,
+            line_count: 42,
+            dirty: true,
         });
         let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
         let main = find(&windows, DesktopWindowRole::Main);
-        assert_eq!(main.frame.title.as_deref(), Some("readme.md"));
-        assert_eq!(main.frame.cursor, Some(CursorPosition::new(0, 2)));
+        assert_eq!(main.frame.title.as_deref(), Some("readme.md [+]"));
+        // Gutter is 3 digits + space = 4 cells; caret shifts past it.
+        assert_eq!(main.frame.cursor, Some(CursorPosition::new(1, 6)));
+        assert_eq!(main.highlight_line, Some(1), "current line highlighted");
+        let ViewContent::TextBuffer { lines } = &main.frame.content else {
+            panic!("main must be a text buffer");
+        };
+        assert_eq!(lines[0], " 10 # PandaGen");
+        assert_eq!(lines[1], " 11 ");
+
+        // Rows past the end of a short document get a blank gutter.
+        let mut short = sample_model();
+        short.editor = Some(EditorModel {
+            title: "a.txt".to_string(),
+            lines: vec!["one".to_string(), "".to_string(), "".to_string()],
+            cursor: Some((0, 0)),
+            status: "-- NORMAL --".to_string(),
+            first_line: 0,
+            line_count: 1,
+            dirty: false,
+        });
+        let windows = build_desktop_windows(&layout, &short, &DesktopViewIds::new());
+        let ViewContent::TextBuffer { lines } =
+            &find(&windows, DesktopWindowRole::Main).frame.content
+        else {
+            panic!()
+        };
+        assert_eq!(lines[0], "  1 one");
+        assert_eq!(lines[1], "    ");
+        assert_eq!(
+            find(&windows, DesktopWindowRole::Main)
+                .frame
+                .title
+                .as_deref(),
+            Some("a.txt")
+        );
         let ViewContent::StatusLine { text } =
             &find(&windows, DesktopWindowRole::Status).frame.content
         else {
             panic!("status must be a status line");
         };
-        assert!(text.starts_with("-- NORMAL --"));
+        assert!(
+            text.starts_with("-- NORMAL --  readme.md [+]  Ln 11, Col 3  (42 lines)"),
+            "{text}"
+        );
+        assert_eq!(gutter_width(9), 4);
+        assert_eq!(gutter_width(12345), 6);
+        assert_eq!(gutter_line(7, 4, "x"), "  7 x");
     }
 
     #[test]

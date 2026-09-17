@@ -1422,6 +1422,18 @@ impl WorkspaceSession {
         return true;
     }
 
+    /// Resize the editor viewport to `rows` (graphics window height). Returns
+    /// true when the editor exists and its viewport changed.
+    pub fn set_editor_viewport_rows(&mut self, rows: usize) -> bool {
+        match self.editor.as_mut() {
+            Some(editor) if editor.viewport_rows() != rows.max(1) => {
+                editor.set_viewport_rows(rows);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Display name of the editor document.
     pub fn editor_title(&self) -> String {
         match &self.editor_path {

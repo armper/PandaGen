@@ -110,6 +110,8 @@ pub struct ShellModel {
     /// Workspace content and title (None shows an empty workspace surface).
     pub workspace: Option<ViewFrame>,
     pub workspace_title: String,
+    /// Workspace content line to highlight (editor current line).
+    pub workspace_highlight: Option<usize>,
     /// Palette content, when open.
     pub palette: Option<ViewFrame>,
     pub palette_title: String,
@@ -280,8 +282,9 @@ pub fn compose_shell(
     let mut workspace_frame = workspace_frame;
     workspace_frame.view_id = ids.workspace;
     workspace_frame.title = Some(model.workspace_title.clone());
-    let mut workspace =
-        DesktopWindow::new(workspace_frame, rects.workspace).with_role(DesktopWindowRole::Main);
+    let mut workspace = DesktopWindow::new(workspace_frame, rects.workspace)
+        .with_role(DesktopWindowRole::Main)
+        .with_highlight(model.workspace_highlight);
     if model.palette.is_none() {
         workspace = workspace.focused();
     }
@@ -402,6 +405,7 @@ mod tests {
                 0,
             )),
             workspace_title: "Workspace".to_string(),
+            workspace_highlight: None,
             palette: None,
             palette_title: "Commands".to_string(),
             palette_selection: None,

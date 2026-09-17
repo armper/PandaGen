@@ -86,6 +86,18 @@ impl MinimalEditor {
         self.viewport_rows
     }
 
+    /// Resize the viewport (e.g. to the graphical window height), keeping
+    /// the cursor visible.
+    pub fn set_viewport_rows(&mut self, rows: usize) {
+        self.viewport_rows = rows.max(1);
+        self.adjust_viewport();
+    }
+
+    /// Total lines in the document.
+    pub fn line_count(&self) -> usize {
+        self.core.buffer().line_count()
+    }
+
     /// Get current scroll offset
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset

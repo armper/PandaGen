@@ -148,6 +148,8 @@ const FB_SHADOW_ENABLED: bool = true;
 const CARET_BLINK_PERIOD_TICKS: u64 = 100;
 /// How long a shell notice stays on screen (8 s).
 const NOTICE_TTL_TICKS: u64 = 800;
+/// Editor viewport rows used by the text console renderer.
+const TEXT_EDITOR_VIEWPORT_ROWS: usize = 23;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -1373,6 +1375,10 @@ fn workspace_loop(
                 if let Some(shadow) = fb_shadow.as_mut() {
                     shadow.invalidate();
                 }
+                if !display_mode.is_graphics() {
+                    // Back to the text console's editor viewport.
+                    workspace.set_editor_viewport_rows(TEXT_EDITOR_VIEWPORT_ROWS);
+                }
             }
         }
 
@@ -1389,6 +1395,8 @@ fn workspace_loop(
                 let renderer = desktop_renderer
                     .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
                 let now = get_tick_count();
+                // The graphical editor uses the full window height.
+                workspace.set_editor_viewport_rows(renderer.layout().main_content_rows());
                 animation_clock
                     .wake_after(workspace.stamp_and_expire_notices(now, NOTICE_TTL_TICKS));
                 let mut model = build_desktop_model(&workspace, now);
@@ -2469,6 +2477,9 @@ fn build_desktop_model(
                     .get_viewport_cursor()
                     .map(|position| (position.row, position.col)),
                 status: String::from(editor.status_line()),
+                first_line: editor.scroll_offset(),
+                line_count: editor.line_count(),
+                dirty: editor.is_dirty(),
             });
         }
     }
