@@ -3491,6 +3491,9 @@ impl WorkspaceManager {
             }
             view_types::ViewContent::StatusLine { text } => vec![text.clone()],
             view_types::ViewContent::Panel { metadata } => vec![metadata.clone()],
+            view_types::ViewContent::Graphics { ops } => {
+                vec![format!("[graphics: {} ops]", ops.len())]
+            }
         }
     }
 

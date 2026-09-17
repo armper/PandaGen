@@ -63,11 +63,11 @@ User-space services should provide policy:
 
 ### Epic 1: Desktop Surface Contract
 
-- [ ] `GFX-001` Define the canonical desktop output contract for PandaGen: surface dimensions, layers, damage regions, frame revision, and presentation timing.
-- [ ] `GFX-002` Decide whether the long-term contract is a retained scene graph, immediate render commands, or a hybrid surface-plus-scene model.
-- [ ] `GFX-003` Extend `view_types` with first-class graphical content types instead of only text/status/panel payloads.
-- [ ] `GFX-004` Add serialization tests for graphical view payloads so remote UI and replay stay deterministic.
-- [ ] `GFX-005` Define a small color, brush, border, and text-style model that does not depend on ANSI or terminal semantics.
+- [x] `GFX-001` Define the canonical desktop output contract for PandaGen: surface dimensions, layers, damage regions, frame revision, and presentation timing.
+- [x] `GFX-002` Decide whether the long-term contract is a retained scene graph, immediate render commands, or a hybrid surface-plus-scene model.
+- [x] `GFX-003` Extend `view_types` with first-class graphical content types instead of only text/status/panel payloads.
+- [x] `GFX-004` Add serialization tests for graphical view payloads so remote UI and replay stay deterministic.
+- [x] `GFX-005` Define a small color, brush, border, and text-style model that does not depend on ANSI or terminal semantics.
 
 ### Epic 2: Workspace To Window Mapping
 
@@ -211,8 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-050` is in place: `RenderBackend` (capabilities, surface size, full and damage-limited rendering of a `DesktopScene`, pixels, frame count) with `SoftwareBackend` as the authoritative implementation, and the kernel desktop renderer now runs through it.
+Epic 1 is closed: `docs/desktop_contract.md` records the canonical contract (retained windows, immediate `DrawOp` content, damage, revision, pacing), `view_types` has first-class graphical content with serialisation tests, and the colour/brush/text-style model is `Color`, `PixelRect`, `TextStyle`, and `Theme`.
 
-The remaining stories are `GFX-051` (a GPU HAL exploration, explicitly gated on a stable software path, which is now the case) and `GFX-052` (deciding which parts of composition stay CPU-side). Both are design work rather than code the software path needs; the best next code step is to close the two loose ends the roadmap left in Epic 1:
+Every story except `GFX-051` and `GFX-052` (GPU exploration and CPU/GPU split, gated on the now-stable software path) is done. The best next implementation step is:
 
-- `GFX-001` to `GFX-005`: the desktop output contract, graphical `view_types` content, and a colour/brush/text-style model are now largely embodied by `DesktopScene`, `Theme`, and the transport; record them as the canonical contract and add serialisation tests for the graphical view payloads.
+- `GFX-052` Define which parts of composition remain CPU-side and which parts may move to GPU execution.
+
+It is a design note against the `RenderBackend` seam: window sorting, hit testing, damage, and text layout stay CPU-side; fills, blits, and glyph runs are the candidates for acceleration. Writing it down (with the capability flags a GPU backend would advertise) completes the roadmap's design work before any GPU HAL exploration (`GFX-051`).

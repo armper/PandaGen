@@ -321,6 +321,7 @@ impl TextRenderer {
             }
             ViewContent::StatusLine { text } => format!("{}\n", text),
             ViewContent::Panel { metadata } => format!("[Panel: {}]\n", metadata),
+            ViewContent::Graphics { ops } => format!("[Graphics: {} ops]\n", ops.len()),
         }
     }
 

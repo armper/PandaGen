@@ -214,6 +214,104 @@ pub enum ViewContent {
     StatusLine { text: String },
     /// Panel metadata (no actual graphics)
     Panel { metadata: String },
+    /// Graphical content: immediate draw operations in the view's own
+    /// pixel space (origin at the content area's top-left). The host clips
+    /// them to the window; the view never knows where it is on screen.
+    Graphics { ops: Vec<DrawOp> },
+}
+
+/// RGBA colour for graphical content. No palette indices, no ANSI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Color {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+/// Pixel rectangle in view space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelRect {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+/// Text styling for graphical text; a small closed set the host can honour
+/// with its bitmap fonts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct TextStyle {
+    /// Draw with the compact font instead of the desktop font.
+    #[serde(default)]
+    pub compact: bool,
+    /// De-emphasised (host maps to its muted text colour when `color` is None).
+    #[serde(default)]
+    pub muted: bool,
+}
+
+/// One immediate draw operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DrawOp {
+    Fill {
+        rect: PixelRect,
+        color: Color,
+    },
+    Border {
+        rect: PixelRect,
+        thickness: u32,
+        color: Color,
+    },
+    RoundedFill {
+        rect: PixelRect,
+        radius: u32,
+        color: Color,
+    },
+    RoundedBorder {
+        rect: PixelRect,
+        radius: u32,
+        thickness: u32,
+        color: Color,
+    },
+    Line {
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        color: Color,
+    },
+    Text {
+        x: u32,
+        y: u32,
+        text: String,
+        /// `None` uses the host's text colour (or muted colour with `style.muted`).
+        #[serde(default)]
+        color: Option<Color>,
+        #[serde(default)]
+        style: TextStyle,
+    },
 }
 
 impl ViewContent {
@@ -239,12 +337,17 @@ impl ViewContent {
         }
     }
 
+    /// Creates graphical content from draw operations
+    pub fn graphics(ops: Vec<DrawOp>) -> Self {
+        ViewContent::Graphics { ops }
+    }
+
     /// Returns the number of lines (for TextBuffer)
     pub fn line_count(&self) -> usize {
         match self {
             ViewContent::TextBuffer { lines } => lines.len(),
             ViewContent::StatusLine { .. } => 1,
-            ViewContent::Panel { .. } => 0,
+            ViewContent::Panel { .. } | ViewContent::Graphics { .. } => 0,
         }
     }
 
@@ -491,6 +594,78 @@ mod tests {
         assert_eq!(text_buffer, deserialized1);
         assert_eq!(status_line, deserialized2);
         assert_eq!(panel, deserialized3);
+    }
+
+    #[test]
+    fn test_graphics_content_serialization_round_trip() {
+        let ops = vec![
+            DrawOp::Fill {
+                rect: PixelRect::new(0, 0, 40, 20),
+                color: Color::rgb(10, 20, 30),
+            },
+            DrawOp::Border {
+                rect: PixelRect::new(2, 2, 36, 16),
+                thickness: 1,
+                color: Color::rgba(255, 255, 255, 128),
+            },
+            DrawOp::RoundedFill {
+                rect: PixelRect::new(4, 4, 10, 10),
+                radius: 3,
+                color: Color::rgb(1, 2, 3),
+            },
+            DrawOp::RoundedBorder {
+                rect: PixelRect::new(4, 4, 10, 10),
+                radius: 3,
+                thickness: 2,
+                color: Color::rgb(4, 5, 6),
+            },
+            DrawOp::Line {
+                x0: -5,
+                y0: 0,
+                x1: 100,
+                y1: 50,
+                color: Color::rgb(7, 8, 9),
+            },
+            DrawOp::Text {
+                x: 8,
+                y: 8,
+                text: "hi".to_string(),
+                color: None,
+                style: TextStyle {
+                    compact: true,
+                    muted: true,
+                },
+            },
+        ];
+        let content = ViewContent::graphics(ops.clone());
+        let json = serde_json::to_string(&content).unwrap();
+        let back: ViewContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, content);
+        assert_eq!(content.line_count(), 0);
+        assert_eq!(content.get_line(0), None);
+
+        // Ops are tagged by name on the wire; optional fields default.
+        assert!(json.contains(r#""op":"fill""#));
+        let minimal: DrawOp =
+            serde_json::from_str(r#"{"op":"text","x":1,"y":2,"text":"t"}"#).unwrap();
+        assert_eq!(
+            minimal,
+            DrawOp::Text {
+                x: 1,
+                y: 2,
+                text: "t".to_string(),
+                color: None,
+                style: TextStyle::default(),
+            }
+        );
+
+        // A frame carrying graphics round-trips with its cursor and title.
+        let frame = ViewFrame::new(ViewId::new(), ViewKind::Panel, 3, content, 9)
+            .with_title("Chart")
+            .with_cursor(CursorPosition::new(0, 0));
+        let json = serde_json::to_string(&frame).unwrap();
+        let back: ViewFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
     }
 
     #[test]

@@ -898,6 +898,7 @@ fn render_content(content: &ViewContent) -> String {
         ViewContent::TextBuffer { lines } => lines.join("\n"),
         ViewContent::StatusLine { text } => text.clone(),
         ViewContent::Panel { metadata } => format!("panel: {}", metadata),
+        ViewContent::Graphics { ops } => format!("graphics: {} ops", ops.len()),
     }
 }
 
@@ -912,6 +913,88 @@ fn render_content_lines(content: &ViewContent) -> Vec<String> {
         }
         ViewContent::StatusLine { text } => vec![text.clone()],
         ViewContent::Panel { metadata } => vec![format!("panel: {}", metadata)],
+        // Graphics have no text lines; they are drawn by `raster_graphics`.
+        ViewContent::Graphics { .. } => Vec::new(),
+    }
+}
+
+/// Execute a view's draw operations inside `content_rect`, in the view's
+/// own pixel space (GFX-003/005). Everything is clipped by the container.
+fn raster_graphics(
+    target: &mut impl RenderTarget,
+    content_rect: RasterRect,
+    ops: &[view_types::DrawOp],
+    theme: &Theme,
+) {
+    use graphics_rasterizer::{ContainerTarget, COMPACT_FONT};
+    use view_types::DrawOp;
+    let to_color = |c: view_types::Color| RgbaColor::new(c.r, c.g, c.b, c.a);
+    let to_rect = |r: view_types::PixelRect| {
+        RasterRect::new(
+            r.x as usize,
+            r.y as usize,
+            r.width as usize,
+            r.height as usize,
+        )
+    };
+    let mut canvas = ContainerTarget::new(target, content_rect);
+    for op in ops {
+        match op {
+            DrawOp::Fill { rect, color } => canvas.fill_rect(to_rect(*rect), to_color(*color)),
+            DrawOp::Border {
+                rect,
+                thickness,
+                color,
+            } => canvas.draw_border(to_rect(*rect), *thickness as usize, to_color(*color)),
+            DrawOp::RoundedFill {
+                rect,
+                radius,
+                color,
+            } => canvas.fill_rounded_rect(to_rect(*rect), *radius as usize, to_color(*color)),
+            DrawOp::RoundedBorder {
+                rect,
+                radius,
+                thickness,
+                color,
+            } => canvas.draw_rounded_border(
+                to_rect(*rect),
+                *radius as usize,
+                *thickness as usize,
+                to_color(*color),
+            ),
+            DrawOp::Line {
+                x0,
+                y0,
+                x1,
+                y1,
+                color,
+            } => canvas.draw_line(
+                *x0 as i64,
+                *y0 as i64,
+                *x1 as i64,
+                *y1 as i64,
+                to_color(*color),
+            ),
+            DrawOp::Text {
+                x,
+                y,
+                text,
+                color,
+                style,
+            } => {
+                let color = match color {
+                    Some(c) => to_color(*c),
+                    None if style.muted => theme.text_muted,
+                    None => theme.text,
+                };
+                let font = if style.compact {
+                    &COMPACT_FONT
+                } else {
+                    &DESKTOP_FONT
+                };
+                canvas.draw_text_with_font(*x as usize, *y as usize, text, font, color);
+            }
+        }
     }
 }
 
@@ -1075,6 +1158,19 @@ fn raster_window(
                     ),
                     theme.selection,
                 );
+            }
+            if let ViewContent::Graphics { ops } = &window.frame.content {
+                // Ops draw in content space: origin at the text origin so
+                // graphics and text views align.
+                let origin = RasterRect::new(
+                    rect.x + 2,
+                    content_top + 2,
+                    content_clip.right().saturating_sub(rect.x + 2),
+                    content_clip.bottom().saturating_sub(content_top + 2),
+                );
+                if let Some(canvas_rect) = origin.intersect(content_clip) {
+                    raster_graphics(&mut content_target, canvas_rect, ops, theme);
+                }
             }
             for (line_index, line) in render_content_lines(&window.frame.content)
                 .into_iter()
@@ -2453,6 +2549,100 @@ mod tests {
                 assert_ne!(surface.pixel(x, y), Some(Theme::DEFAULT.selection));
             }
         }
+    }
+
+    #[test]
+    fn test_graphics_content_draws_ops_clipped_to_the_content_area() {
+        use view_types::{Color, DrawOp, PixelRect, TextStyle};
+        let compositor = Compositor::new();
+        let ops = vec![
+            DrawOp::Fill {
+                rect: PixelRect::new(0, 0, 20, 10),
+                color: Color::rgb(200, 0, 0),
+            },
+            // Far beyond the window: must be clipped away.
+            DrawOp::Fill {
+                rect: PixelRect::new(1000, 1000, 50, 50),
+                color: Color::rgb(0, 200, 0),
+            },
+            DrawOp::Line {
+                x0: 0,
+                y0: 30,
+                x1: 400,
+                y1: 30,
+                color: Color::rgb(0, 0, 200),
+            },
+            DrawOp::Text {
+                x: 0,
+                y: 40,
+                text: "I".to_string(),
+                color: None,
+                style: TextStyle::default(),
+            },
+        ];
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::Panel,
+            1,
+            ViewContent::graphics(ops),
+            0,
+        )
+        .with_title("Chart");
+        let (w, h) = (RASTER_CELL_WIDTH, RASTER_CELL_HEIGHT);
+        let window = DesktopWindow::new(frame, SurfaceRect::new(1, 1, 12, 6)).focused();
+        let surface = compositor.compose_desktop_rgba(SurfaceSize::new(16, 9), vec![window]);
+
+        // Content origin: rect.x + 2, content_top + 2 with content_top = rect.y + cell height.
+        let ox = w + 2;
+        let oy = 2 * h + 2;
+        assert_eq!(surface.pixel(ox, oy), Some(RgbaColor::new(200, 0, 0, 255)));
+        assert_eq!(
+            surface.pixel(ox + 19, oy + 9),
+            Some(RgbaColor::new(200, 0, 0, 255))
+        );
+        assert_eq!(surface.pixel(ox + 20, oy + 10), Some(WINDOW_FILL_COLOR));
+        // Line runs to the window's inner edge and no further.
+        assert_eq!(
+            surface.pixel(ox + 50, oy + 30),
+            Some(RgbaColor::new(0, 0, 200, 255))
+        );
+        let inner_right = (1 + 12) * w - 1;
+        assert_eq!(
+            surface.pixel(inner_right - 1, oy + 30),
+            Some(RgbaColor::new(0, 0, 200, 255))
+        );
+        assert_ne!(
+            surface.pixel(inner_right, oy + 30),
+            Some(RgbaColor::new(0, 0, 200, 255))
+        );
+        // Nothing green anywhere (clipped op), text painted in theme text colour.
+        for y in 0..9 * h {
+            for x in 0..16 * w {
+                assert_ne!(surface.pixel(x, y), Some(RgbaColor::new(0, 200, 0, 255)));
+            }
+        }
+        let glyph = graphics_rasterizer::ascii_8x16_glyph('I');
+        let (dy, row) = glyph.iter().enumerate().find(|(_, r)| **r != 0).unwrap();
+        let dx = (0..8).find(|dx| (row >> (7 - dx)) & 1 == 1).unwrap();
+        assert_eq!(surface.pixel(ox + dx, oy + 40 + dy), Some(TEXT_COLOR));
+        // Hit testing still reports content cells for graphics windows.
+        let hit = compositor
+            .hit_test(
+                &[DesktopWindow::new(
+                    ViewFrame::new(
+                        ViewId::new(),
+                        ViewKind::Panel,
+                        1,
+                        ViewContent::graphics(vec![]),
+                        0,
+                    ),
+                    SurfaceRect::new(1, 1, 12, 6),
+                )],
+                ox + 3,
+                oy + 3,
+            )
+            .unwrap();
+        assert_eq!(hit.region, HitRegion::Content { line: 0, column: 0 });
     }
 
     #[test]
