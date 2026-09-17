@@ -168,6 +168,15 @@ struct TaskInfo {
     /// Ticks consumed since last scheduling
     ticks_in_quantum: u64,
     realtime: Option<RealTimeTask>,
+    /// Order in which the task last blocked; tasks that become due on the
+    /// same tick wake in this order so wake-up order is deterministic.
+    block_seq: u64,
+}
+
+impl TaskInfo {
+    fn is_finished(&self) -> bool {
+        matches!(self.state, TaskState::Exited | TaskState::Cancelled)
+    }
 }
 
 /// Run queue for tasks
@@ -241,6 +250,8 @@ pub struct Scheduler {
     current_ticks: u64,
     /// Audit log for scheduling events (test-only)
     audit_log: Vec<ScheduleEvent>,
+    /// Next value for `TaskInfo::block_seq`.
+    next_block_seq: u64,
 }
 
 impl Scheduler {
@@ -258,6 +269,7 @@ impl Scheduler {
             current_task: None,
             current_ticks: 0,
             audit_log: Vec::new(),
+            next_block_seq: 0,
         }
     }
 
@@ -269,6 +281,7 @@ impl Scheduler {
             state: TaskState::Runnable,
             ticks_in_quantum: 0,
             realtime: None,
+            block_seq: 0,
         };
         self.tasks.insert(task_id, task_info);
         self.enqueue_runnable(task_id);
@@ -399,20 +412,23 @@ impl Scheduler {
     /// that were sleeping and are now ready to run.
     pub fn wake_ready_tasks(&mut self) {
         let current_ticks = self.current_ticks;
-        let tasks_to_wake: Vec<TaskId> = self
+        // `tasks` is a HashMap, so iteration order is arbitrary; sort by
+        // (wake tick, block order) to keep wake-ups deterministic.
+        let mut tasks_to_wake: Vec<(u64, u64, TaskId)> = self
             .tasks
             .iter()
             .filter_map(|(task_id, info)| {
                 if let TaskState::Blocked { wake_tick } = info.state {
                     if current_ticks >= wake_tick {
-                        return Some(*task_id);
+                        return Some((wake_tick, info.block_seq, *task_id));
                     }
                 }
                 None
             })
             .collect();
+        tasks_to_wake.sort_by_key(|(wake_tick, seq, _)| (*wake_tick, *seq));
 
-        for task_id in tasks_to_wake {
+        for (_, _, task_id) in tasks_to_wake {
             self.unblock_task(task_id);
         }
     }
@@ -478,10 +494,18 @@ impl Scheduler {
     /// Blocked tasks are not scheduled until they become runnable again.
     /// The task will be automatically unblocked when current_ticks >= wake_tick.
     pub fn block_task(&mut self, task_id: TaskId, wake_tick: u64) {
-        if let Some(task_info) = self.tasks.get_mut(&task_id) {
-            task_info.state = TaskState::Blocked { wake_tick };
-            task_info.ticks_in_quantum = 0;
+        let seq = self.next_block_seq;
+        let Some(task_info) = self.tasks.get_mut(&task_id) else {
+            return;
+        };
+        // Finished tasks stay finished; blocking one must not revive it.
+        if task_info.is_finished() {
+            return;
         }
+        self.next_block_seq += 1;
+        task_info.state = TaskState::Blocked { wake_tick };
+        task_info.ticks_in_quantum = 0;
+        task_info.block_seq = seq;
         // Remove from run queue if present
         self.run_queue.remove(task_id);
         // Clear current task if it's being blocked
@@ -507,9 +531,15 @@ impl Scheduler {
     ///
     /// Exited tasks are removed from scheduling.
     pub fn exit_task(&mut self, task_id: TaskId) {
-        if let Some(task_info) = self.tasks.get_mut(&task_id) {
-            task_info.state = TaskState::Exited;
+        // Unknown or already finished tasks: nothing to do and nothing to
+        // log (one exit event per task).
+        let Some(task_info) = self.tasks.get_mut(&task_id) else {
+            return;
+        };
+        if task_info.is_finished() {
+            return;
         }
+        task_info.state = TaskState::Exited;
         // Remove from run queue if present
         self.run_queue.remove(task_id);
         // Clear current task if it's exiting
@@ -529,9 +559,13 @@ impl Scheduler {
     ///
     /// Cancelled tasks (due to resource exhaustion) are removed from scheduling.
     pub fn cancel_task(&mut self, task_id: TaskId) {
-        if let Some(task_info) = self.tasks.get_mut(&task_id) {
-            task_info.state = TaskState::Cancelled;
+        let Some(task_info) = self.tasks.get_mut(&task_id) else {
+            return;
+        };
+        if task_info.is_finished() {
+            return;
         }
+        task_info.state = TaskState::Cancelled;
         // Remove from run queue if present
         self.run_queue.remove(task_id);
         // Clear current task if it's being cancelled
