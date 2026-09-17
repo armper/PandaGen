@@ -17,6 +17,8 @@ extern crate std;
 extern crate alloc;
 
 mod bare_metal_editor_io;
+#[cfg(all(not(test), target_os = "none"))]
+mod bare_metal_net;
 mod bare_metal_storage;
 mod desktop_frame;
 mod display_mode;
@@ -898,6 +900,19 @@ pub extern "C" fn rust_main() -> ! {
         kernel_phys: kernel.boot.kernel_phys,
         kernel_virt: kernel.boot.kernel_virt,
     };
+    match bare_metal_net::NetStack::probe(storage_boot) {
+        Some(net) => {
+            klog!(
+                serial,
+                "net: virtio-net-pci mac={} ip={}\r\n",
+                net_stack::wire::fmt_mac(net.mac()),
+                net_stack::wire::fmt_ipv4(net.ip())
+            );
+            *NET.lock() = Some(net);
+        }
+        None => kprintln!(serial, "net: no virtio-net device"),
+    }
+
     let mut filesystem = match bare_metal_storage::BareMetalFilesystem::new_with_boot(storage_boot)
     {
         Ok(fs) => {
@@ -3820,6 +3835,11 @@ static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 /// Local APIC register window shared by every CPU (set once the HHDM is known).
 static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
 
+/// The network stack, once a virtio-net device has been found.
+#[cfg(all(not(test), target_os = "none"))]
+static NET: hal_x86_64::SpinLock<Option<bare_metal_net::NetStack>> =
+    hal_x86_64::SpinLock::new(None);
+
 /// Jobs for application processors (`smp run <n>`).
 static WORK: hal_x86_64::WorkQueue<32> = hal_x86_64::WorkQueue::new();
 
@@ -4894,6 +4914,36 @@ impl CommandService {
                     _ => {
                         let _ = writeln!(output, "kernel: address unavailable");
                     }
+                }
+            }
+            #[cfg(all(not(test), target_os = "none"))]
+            cmd if cmd.starts_with("net") => {
+                let mut parts = cmd.split_whitespace();
+                let _ = parts.next();
+                let mut net = NET.lock();
+                let Some(net) = net.as_mut() else {
+                    let _ = writeln!(output, "net: no device");
+                    return CommandResponse::ok(correlation_id, &output);
+                };
+                match (parts.next(), parts.next()) {
+                    (Some("ping"), Some(ip)) => match net_stack::wire::parse_ipv4(ip) {
+                        Some(ip) => {
+                            let _ = net.ping(ip, &get_tick_count, &mut output);
+                        }
+                        None => {
+                            let _ = writeln!(output, "net: bad address");
+                        }
+                    },
+                    (Some("ping"), None) => {
+                        let gw = net.ip();
+                        let _ = gw;
+                        let _ = net.ping([10, 0, 2, 2], &get_tick_count, &mut output);
+                    }
+                    (Some("poll"), _) => {
+                        let event = net.poll();
+                        let _ = writeln!(output, "net: polled ({event:?})");
+                    }
+                    _ => net.write_status(&mut output),
                 }
             }
             cmd if cmd.starts_with("smp") => {

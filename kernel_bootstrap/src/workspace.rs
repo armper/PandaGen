@@ -1006,6 +1006,12 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "net" {
+            self.emit_command_line(serial, command.as_bytes());
+            self.delegate_to_command_service(ctx, serial, command);
+            return;
+        }
+
         if cmd == "smp" {
             self.emit_command_line(serial, command.as_bytes());
             self.delegate_to_command_service(ctx, serial, command);
@@ -1057,6 +1063,11 @@ impl WorkspaceSession {
                 );
                 self.emit_line(serial, "cpus           - Show online CPUs");
                 self.emit_line(serial, "smp run <n>    - Run n jobs on the other CPUs");
+                self.emit_line(serial, "smp present [on|off] - Spread presents across CPUs");
+                self.emit_line(
+                    serial,
+                    "net [status|ping <ip>] - Network status or ICMP ping",
+                );
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");

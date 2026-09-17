@@ -183,6 +183,7 @@ let audit = kernel.scheduler_audit();
 **What We DON'T Have (Intentionally)**:
 - ❌ Priorities or fairness policies
 - 🟡 SMP: application processors online, LAPIC IPIs wake them to run queued jobs, desktop presents are split across CPUs (Phases 254-256); no multi-core scheduling yet
+- 🟡 Networking: virtio-net over PCI with ARP/IPv4/ICMP in `net_stack` (Phase 257); no UDP/TCP yet
 - ❌ Blocking syscalls or user/kernel mode
 - ❌ Real interrupt controller integration (yet)
 - ❌ Starvation prevention

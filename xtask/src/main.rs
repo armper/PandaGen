@@ -101,7 +101,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -125,6 +125,10 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
+        .arg("-netdev")
+        .arg("user,id=n0")
+        .arg("-device")
+        .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
         .arg(format!("file:{}", serial_log.display()))
         .arg("-display")
@@ -183,6 +187,10 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
+        .arg("-netdev")
+        .arg("user,id=n0")
+        .arg("-device")
+        .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
         .arg(format!("file:{}", serial_log.display()))
         .arg("-display")
@@ -286,6 +294,10 @@ fn cmd_qemu_script(
         .arg(format!("file={},format=raw,if=none,id=hd0", disk.display()))
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
+        .arg("-netdev")
+        .arg("user,id=n0")
+        .arg("-device")
+        .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
         .arg(format!("file:{}", serial_log.display()))
         .arg("-display")

@@ -15,6 +15,10 @@ pub const PCI_VENDOR_VIRTIO: u16 = 0x1AF4;
 pub const PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL: u16 = 0x1001;
 /// Modern-only virtio-blk device id (no legacy I/O BAR).
 pub const PCI_DEVICE_VIRTIO_BLK_MODERN: u16 = 0x1042;
+/// Transitional virtio-net device id.
+pub const PCI_DEVICE_VIRTIO_NET_TRANSITIONAL: u16 = 0x1000;
+/// Modern (virtio 1.0) virtio-net device id.
+pub const PCI_DEVICE_VIRTIO_NET_MODERN: u16 = 0x1041;
 
 const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
 const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
@@ -72,6 +76,12 @@ impl PciDeviceInfo {
             && (self.device_id == PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL
                 || self.device_id == PCI_DEVICE_VIRTIO_BLK_MODERN)
     }
+
+    pub const fn is_virtio_net(&self) -> bool {
+        self.vendor_id == PCI_VENDOR_VIRTIO
+            && (self.device_id == PCI_DEVICE_VIRTIO_NET_TRANSITIONAL
+                || self.device_id == PCI_DEVICE_VIRTIO_NET_MODERN)
+    }
 }
 
 pub fn config_read32(io: &mut impl PortIo, address: PciAddress, offset: u8) -> u32 {
@@ -114,11 +124,24 @@ pub fn enumerate_bus(io: &mut impl PortIo, bus: u8, mut visit: impl FnMut(PciDev
     }
 }
 
-/// First virtio-blk function on bus 0; stops probing at the first match.
-pub fn find_virtio_blk(io: &mut impl PortIo) -> Option<PciDeviceInfo> {
+/// First function on bus 0 matching `wanted`; stops probing at the first match.
+pub fn find_on_bus0(
+    io: &mut impl PortIo,
+    wanted: impl Fn(&PciDeviceInfo) -> bool,
+) -> Option<PciDeviceInfo> {
     (0..32u8)
         .filter_map(|device| probe(io, PciAddress::new(0, device, 0)))
-        .find(|info| info.is_virtio_blk())
+        .find(|info| wanted(info))
+}
+
+/// First virtio-blk function on bus 0.
+pub fn find_virtio_blk(io: &mut impl PortIo) -> Option<PciDeviceInfo> {
+    find_on_bus0(io, PciDeviceInfo::is_virtio_blk)
+}
+
+/// First virtio-net function on bus 0.
+pub fn find_virtio_net(io: &mut impl PortIo) -> Option<PciDeviceInfo> {
+    find_on_bus0(io, PciDeviceInfo::is_virtio_net)
 }
 
 /// Enable I/O space decoding and bus mastering (the device must DMA the

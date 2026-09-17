@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "graphics_rasterizer",
+    "net_stack",
     "kernel_bootstrap",
     "core_types",
     "ipc",
@@ -84,6 +85,7 @@ debug = "line-tables-only"
 [workspace.dependencies]
 # Core crates
 graphics_rasterizer = { path = "graphics_rasterizer" }
+net_stack = { path = "net_stack" }
 core_types = { path = "core_types" }
 ipc = { path = "ipc" }
 kernel_api = { path = "kernel_api" }

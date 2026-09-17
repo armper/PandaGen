@@ -33,7 +33,7 @@ pub struct StorageBootInfo {
 impl StorageBootInfo {
     /// Physical address of a kernel-image virtual address.
     #[allow(dead_code)]
-    fn image_phys(&self, virt: usize) -> Option<u64> {
+    pub(crate) fn image_phys(&self, virt: usize) -> Option<u64> {
         Some(
             (virt as u64)
                 .wrapping_sub(self.kernel_virt?)

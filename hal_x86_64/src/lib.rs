@@ -32,6 +32,7 @@ pub mod timer;
 pub mod tsc;
 pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_net;
 pub mod virtio_pci;
 pub mod work_queue;
 
@@ -57,6 +58,7 @@ pub use virtio::{
     QueuePlacement, VirtioMmioDevice, VirtioTransport, VirtqAvail, VirtqDesc, VirtqUsed, Virtqueue,
 };
 pub use virtio_blk::{DmaBuffers, QueueMemory, VirtioBlkDevice};
+pub use virtio_net::{NetDma, NetError, VirtioNetDevice};
 pub use virtio_pci::{LegacyQueueLayout, VirtioPciLegacy};
 pub use work_queue::{Job, JobResult, WorkQueue};
 
