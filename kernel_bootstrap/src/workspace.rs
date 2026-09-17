@@ -228,6 +228,9 @@ pub struct WorkspaceSession {
     pipeline_channel: Option<ChannelId>,
     /// Custom component hosted in the workspace window (GFX-040).
     hosted: Option<ListComponent>,
+    /// Deliberately held allocations from `heap stress`, for testing the
+    /// low-memory degradation path (GFX-048).
+    stress_blocks: Vec<Vec<u8>>,
 }
 
 /// Lifecycle of one pipeline stage.
@@ -535,6 +538,7 @@ impl WorkspaceSession {
             pipeline_run: None,
             pipeline_channel: None,
             hosted: None,
+            stress_blocks: Vec::new(),
         }
     }
 
@@ -965,6 +969,14 @@ impl WorkspaceSession {
             return;
         }
 
+        if cmd == "heap" {
+            self.emit_command_line(serial, command.as_bytes());
+            let sub = parts.next();
+            let arg = parts.next();
+            self.run_heap_command(serial, sub, arg);
+            return;
+        }
+
         if cmd == "pipeline" {
             self.emit_command_line(serial, command.as_bytes());
             let sub = parts.next();
@@ -995,6 +1007,10 @@ impl WorkspaceSession {
                 self.emit_line(
                     serial,
                     "pipeline run a,b,c | status | clear - Run kernel commands as stages",
+                );
+                self.emit_line(
+                    serial,
+                    "heap stress <KiB> | release - Hold or free test allocations",
                 );
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
@@ -1583,6 +1599,41 @@ impl WorkspaceSession {
         // Close palette after execution
         self.palette_overlay.close();
         return true;
+    }
+
+    fn run_heap_command(&mut self, serial: &mut SerialPort, sub: Option<&str>, arg: Option<&str>) {
+        match sub {
+            Some("stress") => {
+                let kib: usize = arg.and_then(|a| a.parse().ok()).unwrap_or(0);
+                if kib == 0 {
+                    self.emit_line(serial, "Usage: heap stress <KiB>");
+                    return;
+                }
+                // Allocate in 1 MiB pieces so a refusal is granular.
+                let mut held = 0usize;
+                let mut remaining = kib * 1024;
+                while remaining > 0 {
+                    let piece = remaining.min(1024 * 1024);
+                    let mut block = Vec::new();
+                    if block.try_reserve_exact(piece).is_err() {
+                        break;
+                    }
+                    block.resize(piece, 0xA5);
+                    self.stress_blocks.push(block);
+                    held += piece;
+                    remaining -= piece;
+                }
+                let line = format!("heap stress: holding {} KiB more", held / 1024);
+                self.emit_line(serial, &line);
+            }
+            Some("release") => {
+                let total: usize = self.stress_blocks.iter().map(Vec::len).sum();
+                self.stress_blocks.clear();
+                let line = format!("heap stress: released {} KiB", total / 1024);
+                self.emit_line(serial, &line);
+            }
+            _ => self.emit_line(serial, "Usage: heap stress <KiB> | heap release"),
+        }
     }
 
     fn run_pipeline_command(

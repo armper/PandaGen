@@ -154,6 +154,9 @@ const TEXT_EDITOR_VIEWPORT_ROWS: usize = 23;
 /// Share of the kernel heap the desktop may reserve for pixel buffers, in
 /// quarters (3 = 75%), leaving the rest for everything else.
 const GRAPHICS_HEAP_SHARE_QUARTERS: usize = 3;
+/// Consecutive heap samples before a pressure level is adopted or left
+/// (critical is immediate).
+const PRESSURE_HYSTERESIS_SAMPLES: u32 = 3;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
@@ -1006,6 +1009,12 @@ fn workspace_loop(
     workspace.set_graphics_available(graphics_available);
     workspace.set_display_mode(display_mode);
     let mut desktop_renderer: Option<desktop_frame::DesktopFrameRenderer> = None;
+    // GFX-048: degrade in a fixed order under memory pressure instead of
+    // failing inside an allocation.
+    let mut pressure_monitor = services_gui_host::PressureMonitor::new(
+        services_gui_host::PressureThresholds::DEFAULT,
+        PRESSURE_HYSTERESIS_SAMPLES,
+    );
     if display_mode.is_graphics() {
         if let Some(fb) = fb_console.as_ref() {
             let info = fb.info();
@@ -1459,6 +1468,44 @@ fn workspace_loop(
 
         let editor_active = workspace.is_editor_active();
         let mut clear_terminal = false;
+
+        // Sample memory pressure once per iteration (GFX-048).
+        {
+            let heap = GLOBAL_HEAP.stats();
+            if let Some(level) = pressure_monitor.sample(heap.free, heap.total) {
+                kprintln!(
+                    serial,
+                    "memory pressure: {:?} (free {} KiB of {} KiB)",
+                    level,
+                    heap.free / 1024,
+                    heap.total / 1024
+                );
+                let degradation = pressure_monitor.degradation();
+                if degradation.fall_back_to_text && display_mode.is_graphics() {
+                    workspace.push_notice(
+                        services_gui_host::NoticeLevel::Error,
+                        "Low memory: leaving graphics mode",
+                    );
+                    display_mode = display_mode::DisplayMode::TextConsole;
+                    workspace.set_display_mode(display_mode);
+                    workspace.set_editor_viewport_rows(TEXT_EDITOR_VIEWPORT_ROWS);
+                    output_dirty = true;
+                    input_dirty = true;
+                    output_initialized = false;
+                    prompt_initialized = false;
+                    status_initialized = false;
+                    last_output_rows = 0;
+                    last_output_seq = 0;
+                    clear_terminal = true;
+                    editor_render_cache.invalidate();
+                    if let Some(shadow) = fb_shadow.as_mut() {
+                        shadow.invalidate();
+                    }
+                } else if display_mode.is_graphics() {
+                    input_dirty = true;
+                }
+            }
+        }
         let palette_open = workspace.is_palette_open();
         if last_palette_open && !palette_open {
             // Palette closed: force a full redraw to clear overlay
@@ -1559,6 +1606,13 @@ fn workspace_loop(
                     .wake_after(workspace.stamp_and_expire_notices(now, NOTICE_TTL_TICKS));
                 let mut model =
                     build_desktop_model(&workspace, now, renderer.layout().main_content_rows());
+                let degradation = pressure_monitor.degradation();
+                if degradation.drop_notices {
+                    model.notices.clear();
+                }
+                if degradation.hide_pointer {
+                    model.pointer = None;
+                }
                 model.caret_visible = caret_blink.is_on_at(now);
                 animation_clock.wake_after(caret_blink.next_flip_after(now));
                 let mut windows = renderer.windows(&model);

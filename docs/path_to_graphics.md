@@ -138,7 +138,7 @@ User-space services should provide policy:
 - [x] `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
 - [x] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
 - [x] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
-- [ ] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
+- [x] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
 - [ ] `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
 
 ### Epic 11: Hardware Acceleration Later
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-The kernel's global allocator is now a coalescing free-list heap (Phase 246). Heap usage on the real image is flat across pointer motion and app switching, so the per-frame desktop model is no longer a leak.
+`GFX-048` is in place: a pure pressure classifier with hysteresis (critical adopted immediately) drives a fixed degradation order: low pressure sheds notices and the pointer sprite, critical pressure leaves graphics mode for the allocation-free text console with a notice, and recovery restores normal behaviour. `heap stress`/`heap release` exercise the path on the real image.
 
 The best next implementation step is:
 
-- `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
+- `GFX-049` Add observability hooks for present latency, redraw counts, and dropped frames.
 
-The budget refuses over-limit surfaces and VGA-only boots already fall back to text; what remains is a deliberate low-memory policy for the running desktop (shed notices, drop the cursor sprite, fall back to text) driven by heap stats, with tests.
+The pacer, animation clock, present path, and pressure monitor each keep counters; a single `gfx stats` surface (and a serial line on demand) that reports presents, deferred/coalesced frames, render counts, present ticks, pressure transitions, and heap numbers closes Epic 10.

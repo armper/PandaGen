@@ -22,6 +22,7 @@ use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 pub mod animation;
 pub mod bench;
+pub mod degrade;
 pub mod host;
 pub mod input_routing;
 pub mod layout;
@@ -31,6 +32,7 @@ pub mod shell;
 pub mod theme;
 pub mod transport;
 pub use animation::{AnimationClock, Blink, Easing, Transition};
+pub use degrade::{Degradation, MemoryPressure, PressureMonitor, PressureThresholds};
 pub use host::{HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent};
 pub use input_routing::{CaptureState, Delivery, DesktopInputRouter};
 pub use layout::{Anchor, Axis, Insets, LayoutId, LayoutNode, Length};
