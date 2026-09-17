@@ -124,7 +124,7 @@ User-space services should provide policy:
 - [x] `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
 - [x] `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface. Decision: text-native inside the host surface, which gained wheel scrollback.
 - [x] `GFX-039` Add a graphical runtime for pipeline execution and status reporting.
-- [ ] `GFX-040` Add a custom-component graphical host contract so future apps are not locked to text frames.
+- [x] `GFX-040` Add a custom-component graphical host contract so future apps are not locked to text frames.
 
 ### Epic 9: Remote And Replayability
 
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-039` is in place: `pipeline run a,b,c` executes kernel commands as sequential stages through the kernel command service on a dedicated reply channel, with a per-stage trace (state, ticks, first output line), fail-fast on error, a status surface in the workspace window with the running stage highlighted, and a finished/failed notice.
+Epic 8 (graphical app surfaces) is complete: editor, file picker, CLI decision plus host scrollback, pipeline runtime, and a hosted-component contract with the About component as its reference app.
 
 The best next implementation step is:
 
-- `GFX-040` Add a custom-component graphical host contract so future apps are not locked to text frames.
+- `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
 
-The workspace window today hosts four surfaces by special-casing the desktop builder (editor, picker, pipeline, scrollback). A host contract that any component implements (title, content, highlight, caret, status, pointer routing) turns those special cases into one interface and is what lets new apps plug in.
+The desktop is now described by data at every level (shell model, hosted surfaces, windows, theme). Shipping that description over the remote UI host, rather than pixels, is the natural transport and keeps replay deterministic (`GFX-043`).

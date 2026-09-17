@@ -51,7 +51,10 @@ use crate::bare_metal_storage::BareMetalFilesystem;
 use console_vga::{SplitLayout, TileId, TileManager, VGA_HEIGHT, VGA_WIDTH};
 
 use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
-use services_gui_host::{NoticeLevel, ShellNotice};
+use services_gui_host::{
+    HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent, NoticeLevel,
+    ShellNotice,
+};
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -223,6 +226,8 @@ pub struct WorkspaceSession {
     /// Dedicated reply channel for pipeline stages, so the console task
     /// polling the shared response channel cannot consume stage replies.
     pipeline_channel: Option<ChannelId>,
+    /// Custom component hosted in the workspace window (GFX-040).
+    hosted: Option<ListComponent>,
 }
 
 /// Lifecycle of one pipeline stage.
@@ -319,6 +324,17 @@ impl WorkspaceSession {
                 vec!["editor".to_string(), "edit".to_string(), "vim".to_string()],
             ),
             Box::new(|_| Ok("Opening editor...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "open_about",
+                "About PandaGen",
+                "Show system facts in a hosted component",
+                vec!["about".to_string(), "info".to_string()],
+            )
+            .with_category("Workspace"),
+            Box::new(|_| Ok("Opening About...".to_string())),
         );
 
         command_palette.register_command(
@@ -518,6 +534,7 @@ impl WorkspaceSession {
             scrollback_offset: 0,
             pipeline_run: None,
             pipeline_channel: None,
+            hosted: None,
         }
     }
 
@@ -645,6 +662,13 @@ impl WorkspaceSession {
                 }
                 _ => {}
             }
+            return true;
+        }
+
+        // 2c. A hosted custom component owns the keyboard while open.
+        if self.hosted.is_some() {
+            let _ = writeln!(serial, "  action=hosted_input");
+            self.host_event(HostEvent::Key(byte), serial);
             return true;
         }
 
@@ -998,6 +1022,9 @@ impl WorkspaceSession {
                     }
                     Some("file") | Some("picker") | Some("files") => {
                         self.open_file_picker(serial);
+                    }
+                    Some("about") => {
+                        self.open_about(serial);
                     }
                     _ => {
                         self.emit_line(serial, "Usage: open editor [path] | open cli | open file");
@@ -1508,6 +1535,11 @@ impl WorkspaceSession {
                 self.open_file_picker(serial);
                 return true;
             }
+            "open_about" => {
+                self.palette_overlay.close();
+                self.open_about(serial);
+                return true;
+            }
             "quit" => {
                 self.active_component = None;
                 self.emit_line(serial, "Closed component");
@@ -1760,6 +1792,67 @@ impl WorkspaceSession {
             self.push_notice(NoticeLevel::Error, &text);
         }
         changed
+    }
+
+    /// Open the About component: the reference custom hosted app.
+    pub fn open_about(&mut self, serial: &mut SerialPort) {
+        if self.is_editor_active() {
+            self.emit_line(serial, "Close the editor first (:q).");
+            return;
+        }
+        self.file_picker = None;
+        let entries = vec![
+            "PandaGen: a clean-slate OS runtime".to_string(),
+            "No POSIX, no paths, capabilities everywhere".to_string(),
+            format!("Display: {} mode", self.display_mode.label()),
+            format!(
+                "Pointer: {}",
+                if self.pointer_available {
+                    "PS/2 mouse"
+                } else {
+                    "none"
+                }
+            ),
+            "Enter: copy line to output    Esc: close".to_string(),
+        ];
+        self.hosted = Some(
+            ListComponent::new("About PandaGen", entries)
+                .with_status("About: Up/Down or hover, Enter activates, Esc closes"),
+        );
+        self.emit_line(serial, "About opened");
+    }
+
+    pub fn has_hosted(&self) -> bool {
+        self.hosted.is_some()
+    }
+
+    /// Surface of the hosted component for `rows` content rows.
+    pub fn hosted_surface(&self, rows: usize) -> Option<HostedSurface> {
+        self.hosted.as_ref().map(|c| c.surface(rows))
+    }
+
+    /// Deliver an event to the hosted component. Returns true when a redraw
+    /// is needed (state changed or the component closed).
+    pub fn host_event(&mut self, event: HostEvent, serial: &mut SerialPort) -> bool {
+        let Some(component) = self.hosted.as_mut() else {
+            return false;
+        };
+        match component.handle(event) {
+            HostResponse::Ignored => false,
+            HostResponse::Redraw => {
+                if let Some(index) = component.take_activated() {
+                    let line = component.entries.get(index).cloned().unwrap_or_default();
+                    let _ = writeln!(serial, "hosted: activated {}", index);
+                    self.push_output_bytes(line.as_bytes());
+                }
+                true
+            }
+            HostResponse::Close => {
+                self.hosted = None;
+                self.emit_line(serial, "About closed");
+                true
+            }
+        }
     }
 
     /// Open the file picker over the root listing.

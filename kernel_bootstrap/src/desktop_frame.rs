@@ -18,8 +18,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use graphics_rasterizer::{RgbaBuffer, RgbaColor};
 use services_gui_host::{
-    compose_shell, shell_layout, Compositor, DesktopCursor, DesktopWindow, LauncherItem,
-    ShellModel, ShellNotice, ShellRects, ShellViewIds, SurfaceRect, SurfaceSize,
+    compose_shell, shell_layout, Compositor, DesktopCursor, DesktopWindow, HostedSurface,
+    LauncherItem, ShellModel, ShellNotice, ShellRects, ShellViewIds, SurfaceRect, SurfaceSize,
     RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
@@ -126,6 +126,9 @@ pub struct DesktopModel {
     pub scrollback_offset: usize,
     /// Pipeline run shown in the workspace window (no editor or picker).
     pub pipeline: Option<PipelineModel>,
+    /// A custom hosted component's surface (GFX-040); takes the workspace
+    /// window when present and no editor or picker is open.
+    pub hosted: Option<HostedSurface>,
     /// Pointer position in surface pixels; `None` hides the cursor.
     pub pointer: Option<(usize, usize)>,
     /// Whether the text caret is drawn this frame (blink phase).
@@ -268,6 +271,20 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
             }
             (frame, title)
         }
+        None if model.hosted.is_some() && model.picker.is_none() => {
+            let hosted = model.hosted.as_ref().expect("checked");
+            let mut frame = ViewFrame::new(
+                id,
+                ViewKind::TextBuffer,
+                0,
+                ViewContent::text_buffer(hosted.lines.iter().take(content_rows).cloned().collect()),
+                0,
+            );
+            if let Some((line, column)) = hosted.caret {
+                frame = frame.with_cursor(CursorPosition::new(line, column));
+            }
+            (frame, hosted.title.clone())
+        }
         None if model.pipeline.is_some() && model.picker.is_none() => {
             // Pipeline status surface: the trace on top, prompt pinned below.
             let pipeline = model.pipeline.as_ref().expect("checked");
@@ -377,6 +394,9 @@ pub fn build_desktop_windows(
         })
         .unwrap_or_else(|| model.status.clone());
     let status_left = match (&model.editor, &model.picker, &model.pipeline) {
+        (None, None, _) if model.hosted.is_some() => {
+            model.hosted.as_ref().expect("checked").status.clone()
+        }
         (None, Some(picker), _) => alloc::format!(
             "Files: {} entries  Up/Down select  Enter open  Esc close",
             picker.entries.len()
@@ -391,6 +411,9 @@ pub fn build_desktop_windows(
     };
     let workspace_highlight = match (&model.editor, &model.picker, &model.pipeline) {
         (Some(editor), _, _) => editor.cursor.map(|(line, _)| line),
+        (None, None, _) if model.hosted.is_some() => {
+            model.hosted.as_ref().expect("checked").highlight
+        }
         (None, Some(picker), _) if !picker.entries.is_empty() => {
             Some(PICKER_ENTRIES_FIRST_LINE + picker.selection)
         }
@@ -551,6 +574,7 @@ mod tests {
             picker: None,
             scrollback_offset: 0,
             pipeline: None,
+            hosted: None,
             pointer: None,
             caret_visible: true,
             launcher: vec![
@@ -791,6 +815,53 @@ mod tests {
             panic!()
         };
         assert_eq!(lines[0], "0");
+    }
+
+    #[test]
+    fn test_hosted_surface_takes_the_workspace_window() {
+        let layout = DesktopLayout::for_pixels(1280, 800);
+        let mut model = sample_model();
+        model.hosted = Some(
+            HostedSurface::new("About")
+                .with_lines(vec!["PandaGen".to_string(), "clean-slate".to_string()])
+                .with_highlight(Some(1))
+                .with_caret(0, 3)
+                .with_status("Esc closes"),
+        );
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        let main = find(&windows, DesktopWindowRole::Main);
+        assert_eq!(main.frame.title.as_deref(), Some("About"));
+        assert_eq!(main.highlight_line, Some(1));
+        assert_eq!(main.frame.cursor, Some(CursorPosition::new(0, 3)));
+        let ViewContent::TextBuffer { lines } = &main.frame.content else {
+            panic!()
+        };
+        assert_eq!(lines, &vec!["PandaGen", "clean-slate"]);
+        let ViewContent::StatusLine { text } =
+            &find(&windows, DesktopWindowRole::Status).frame.content
+        else {
+            panic!()
+        };
+        assert!(text.starts_with("Esc closes"), "{text}");
+
+        // An open editor still wins over a hosted component.
+        model.editor = Some(EditorModel {
+            title: "x".to_string(),
+            lines: vec![],
+            cursor: None,
+            status: "-- NORMAL --".to_string(),
+            first_line: 0,
+            line_count: 0,
+            dirty: false,
+        });
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        assert_eq!(
+            find(&windows, DesktopWindowRole::Main)
+                .frame
+                .title
+                .as_deref(),
+            Some("x")
+        );
     }
 
     #[test]

@@ -1196,7 +1196,11 @@ fn workspace_loop(
                 // Route against the desktop the user currently sees.
                 if display_mode.is_graphics() {
                     if let Some(renderer) = desktop_renderer.as_ref() {
-                        let model = build_desktop_model(&workspace, get_tick_count());
+                        let model = build_desktop_model(
+                            &workspace,
+                            get_tick_count(),
+                            renderer.layout().main_content_rows(),
+                        );
                         let windows = renderer.windows(&model);
                         let deliveries =
                             input_router.route(renderer.compositor(), &windows, *event);
@@ -1266,6 +1270,27 @@ fn workspace_loop(
                                         }
                                     }
                                     _ => {}
+                                }
+                                continue;
+                            }
+
+                            if *target == renderer.view_ids().main() && workspace.has_hosted() {
+                                let event = match routed.kind {
+                                    input_types::PointerEventKind::Move { .. } => content_line
+                                        .map(|line| services_gui_host::HostEvent::Hover { line }),
+                                    input_types::PointerEventKind::Wheel { dy, .. } => {
+                                        Some(services_gui_host::HostEvent::Wheel { notches: dy })
+                                    }
+                                    _ if primary_press => content_line.map(|line| {
+                                        services_gui_host::HostEvent::Activate { line }
+                                    }),
+                                    _ => None,
+                                };
+                                if let Some(event) = event {
+                                    if workspace.host_event(event, serial) {
+                                        input_dirty = true;
+                                        output_dirty = true;
+                                    }
                                 }
                                 continue;
                             }
@@ -1474,7 +1499,8 @@ fn workspace_loop(
                 workspace.set_editor_viewport_rows(renderer.layout().main_content_rows());
                 animation_clock
                     .wake_after(workspace.stamp_and_expire_notices(now, NOTICE_TTL_TICKS));
-                let mut model = build_desktop_model(&workspace, now);
+                let mut model =
+                    build_desktop_model(&workspace, now, renderer.layout().main_content_rows());
                 model.caret_visible = caret_blink.is_on_at(now);
                 animation_clock.wake_after(caret_blink.next_flip_after(now));
                 let mut windows = renderer.windows(&model);
@@ -2518,6 +2544,7 @@ fn present_desktop_frame(
 fn build_desktop_model(
     workspace: &workspace::WorkspaceSession,
     now_tick: u64,
+    content_rows: usize,
 ) -> desktop_frame::DesktopModel {
     extern crate alloc;
     use alloc::string::String;
@@ -2593,6 +2620,7 @@ fn build_desktop_model(
     model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
 
     model.scrollback_offset = workspace.scrollback_offset();
+    model.hosted = workspace.hosted_surface(content_rows);
     if let Some(run) = workspace.pipeline_run() {
         model.pipeline = Some(desktop_frame::PipelineModel {
             lines: workspace::pipeline_trace_lines(run),
