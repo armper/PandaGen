@@ -611,6 +611,93 @@ fn raster_cursor(target: &mut impl RenderTarget, cursor: &DesktopCursor, theme: 
     }
 }
 
+/// A complete, serialisable description of one desktop frame (GFX-041).
+///
+/// This is what travels to a remote viewer instead of pixels: the window
+/// list (in cell units), the cursor, the theme, and the optional damage
+/// rectangle. Rendering it through `Compositor::render_scene` on any host
+/// reproduces the same pixels, which is what makes remote sessions and
+/// replays deterministic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesktopScene {
+    /// Surface size in cells.
+    pub size: SurfaceSize,
+    pub windows: Vec<DesktopWindow>,
+    #[serde(default)]
+    pub cursor: Option<DesktopCursor>,
+    #[serde(default)]
+    pub theme: Option<Theme>,
+    /// Region that changed since the previous scene, if known.
+    #[serde(default)]
+    pub damage: Option<RasterRect>,
+}
+
+impl DesktopScene {
+    pub fn new(size: SurfaceSize, windows: Vec<DesktopWindow>) -> Self {
+        Self {
+            size,
+            windows,
+            cursor: None,
+            theme: None,
+            damage: None,
+        }
+    }
+
+    pub fn with_cursor(mut self, cursor: Option<DesktopCursor>) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
+    pub fn with_damage(mut self, damage: Option<RasterRect>) -> Self {
+        self.damage = damage;
+        self
+    }
+
+    /// Pixel size of the surface this scene describes.
+    pub fn pixel_size(&self) -> (usize, usize) {
+        (
+            self.size.width.saturating_mul(RASTER_CELL_WIDTH),
+            self.size.height.saturating_mul(RASTER_CELL_HEIGHT),
+        )
+    }
+}
+
+impl Compositor {
+    /// Render a scene into `target`. The scene's theme, when present,
+    /// overrides the compositor's own so a remote viewer paints what the
+    /// sender saw.
+    pub fn render_scene(
+        &self,
+        target: &mut impl RenderTarget,
+        scene: &DesktopScene,
+    ) -> RasterRenderStats {
+        let painter = match scene.theme {
+            Some(theme) => Compositor::with_theme(theme),
+            None => *self,
+        };
+        painter.render_desktop_to_target_with_cursor(
+            target,
+            scene.windows.clone(),
+            scene.damage,
+            scene.cursor,
+        )
+    }
+
+    /// Render a scene into a fresh RGBA surface of the scene's pixel size.
+    pub fn render_scene_rgba(&self, scene: &DesktopScene) -> RasterSurfaceFrame {
+        let (width, height) = scene.pixel_size();
+        let theme = scene.theme.unwrap_or(self.theme);
+        let mut buffer = RgbaBuffer::new(width, height, theme.background);
+        let stats = self.render_scene(&mut buffer, scene);
+        RasterSurfaceFrame::new(buffer, stats.frame_count, stats.timestamp_ns)
+    }
+}
+
 /// Which part of a window a pixel lands on.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HitRegion {
@@ -2199,6 +2286,70 @@ mod tests {
         assert_eq!(
             target.pixel(cursor.x, cursor.y),
             Some(POINTER_OUTLINE_COLOR)
+        );
+    }
+
+    #[test]
+    fn test_desktop_scene_round_trips_and_renders_identically() {
+        let compositor = Compositor::new();
+        let frame = ViewFrame::new(
+            ViewId::new(),
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec!["hello".to_string()]),
+            5,
+        )
+        .with_title("Main")
+        .with_cursor(CursorPosition::new(0, 2));
+        let windows = vec![
+            DesktopWindow::new(frame, SurfaceRect::new(1, 1, 12, 5))
+                .with_highlight(Some(0))
+                .focused(),
+            DesktopWindow::new(
+                ViewFrame::new(
+                    ViewId::new(),
+                    ViewKind::Panel,
+                    1,
+                    ViewContent::panel("n"),
+                    6,
+                )
+                .with_title("Note"),
+                SurfaceRect::new(8, 0, 8, 3),
+            )
+            .with_role(DesktopWindowRole::Notification),
+        ];
+        let scene = DesktopScene::new(SurfaceSize::new(16, 7), windows.clone())
+            .with_cursor(Some(DesktopCursor::new(20, 30)))
+            .with_theme(Theme::LIGHT);
+
+        // JSON round trip preserves every field.
+        let json = serde_json::to_string(&scene).unwrap();
+        let back: DesktopScene = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, scene);
+
+        // Rendering the scene equals rendering its parts with the same theme.
+        let via_scene = compositor.render_scene_rgba(&back);
+        let light = Compositor::with_theme(Theme::LIGHT);
+        let (w, h) = scene.pixel_size();
+        let mut direct = RgbaBuffer::new(w, h, Theme::LIGHT.background);
+        light.render_desktop_to_target_with_cursor(
+            &mut direct,
+            windows,
+            None,
+            Some(DesktopCursor::new(20, 30)),
+        );
+        assert_eq!(via_scene.pixels, direct.as_bytes());
+        assert_eq!(via_scene.frame_count, 2);
+        assert_eq!(via_scene.timestamp_ns, 6);
+
+        // Optional fields default when absent on the wire.
+        let minimal: DesktopScene =
+            serde_json::from_str(r#"{"size":{"width":4,"height":2},"windows":[]}"#).unwrap();
+        assert_eq!(minimal.cursor, None);
+        assert_eq!(minimal.theme, None);
+        assert_eq!(
+            minimal.pixel_size(),
+            (4 * RASTER_CELL_WIDTH, 2 * RASTER_CELL_HEIGHT)
         );
     }
 

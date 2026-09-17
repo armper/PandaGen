@@ -5,12 +5,25 @@ use ipc::ChannelId;
 use ipc::{MessageEnvelope, MessagePayload, SchemaVersion};
 use kernel_api::{KernelApi, KernelError};
 use serde::{Deserialize, Serialize};
+use services_gui_host::DesktopScene;
 use services_workspace_manager::WorkspaceRenderSnapshot;
 use std::io::Write;
 use thiserror::Error;
 
 const REMOTE_UI_ACTION: &str = "ui.snapshot";
 const REMOTE_UI_SCHEMA: SchemaVersion = SchemaVersion::new(1, 0);
+/// Graphical desktop scenes (GFX-041) travel as their own action so a viewer
+/// that only understands text snapshots can ignore them.
+pub const REMOTE_DESKTOP_ACTION: &str = "ui.desktop";
+pub const REMOTE_DESKTOP_SCHEMA: SchemaVersion = SchemaVersion::new(1, 0);
+
+/// A graphical desktop frame: the scene data, not pixels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteDesktopFrame {
+    pub revision: u64,
+    pub timestamp_ns: u64,
+    pub scene: DesktopScene,
+}
 
 /// Snapshot frame streamed to remote UI clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +55,12 @@ impl From<KernelError> for RemoteUiError {
 /// Snapshot sink abstraction.
 pub trait SnapshotSink {
     fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError>;
+
+    /// Receive a graphical desktop frame. Sinks that only carry text
+    /// snapshots may keep the default, which drops the frame.
+    fn send_desktop(&mut self, _frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+        Ok(())
+    }
 }
 
 /// Remote UI host that fans out snapshots to sinks.
@@ -86,6 +105,29 @@ impl RemoteUiHost {
 
         Ok(frame)
     }
+
+    /// Ship a graphical desktop scene to every sink. Shares the revision
+    /// counter with text snapshots so a mixed stream stays totally ordered.
+    pub fn push_desktop(
+        &mut self,
+        scene: DesktopScene,
+        timestamp_ns: u64,
+    ) -> Result<RemoteDesktopFrame, RemoteUiError> {
+        self.revision += 1;
+        let frame = RemoteDesktopFrame {
+            revision: self.revision,
+            timestamp_ns,
+            scene,
+        };
+        for sink in &mut self.sinks {
+            sink.send_desktop(frame.clone())?;
+        }
+        Ok(frame)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 /// IPC sink for remote UI snapshots.
@@ -118,6 +160,28 @@ impl<K: KernelApi> SnapshotSink for IpcSnapshotSink<K> {
         self.kernel.send_message(self.channel, message)?;
         Ok(())
     }
+
+    fn send_desktop(&mut self, frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+        let payload =
+            MessagePayload::new(&frame).map_err(|err| RemoteUiError::Encode(err.to_string()))?;
+        let message = MessageEnvelope::new(
+            self.destination,
+            REMOTE_DESKTOP_ACTION,
+            REMOTE_DESKTOP_SCHEMA,
+            payload,
+        );
+        self.kernel.send_message(self.channel, message)?;
+        Ok(())
+    }
+}
+
+/// One JSON object per line; desktop frames are tagged so a reader can tell
+/// the two frame kinds apart.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JsonLineRecord {
+    Snapshot(RemoteSnapshotFrame),
+    Desktop(RemoteDesktopFrame),
 }
 
 /// JSON-line sink for network transports.
@@ -131,9 +195,9 @@ impl<W: Write> JsonLineSink<W> {
     }
 }
 
-impl<W: Write> SnapshotSink for JsonLineSink<W> {
-    fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
-        serde_json::to_writer(&mut self.writer, &frame)
+impl<W: Write> JsonLineSink<W> {
+    fn write_record(&mut self, record: &JsonLineRecord) -> Result<(), RemoteUiError> {
+        serde_json::to_writer(&mut self.writer, record)
             .map_err(|err| RemoteUiError::Encode(err.to_string()))?;
         self.writer
             .write_all(b"\n")
@@ -142,15 +206,31 @@ impl<W: Write> SnapshotSink for JsonLineSink<W> {
     }
 }
 
+impl<W: Write> SnapshotSink for JsonLineSink<W> {
+    fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
+        self.write_record(&JsonLineRecord::Snapshot(frame))
+    }
+
+    fn send_desktop(&mut self, frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+        self.write_record(&JsonLineRecord::Desktop(frame))
+    }
+}
+
 /// In-memory sink for tests.
 #[derive(Default)]
 pub struct InMemorySink {
     pub frames: Vec<RemoteSnapshotFrame>,
+    pub desktop_frames: Vec<RemoteDesktopFrame>,
 }
 
 impl SnapshotSink for InMemorySink {
     fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
         self.frames.push(frame);
+        Ok(())
+    }
+
+    fn send_desktop(&mut self, frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+        self.desktop_frames.push(frame);
         Ok(())
     }
 }
@@ -334,5 +414,99 @@ mod tests {
         assert_eq!(decoded.snapshot.layout.focused_tile, 0);
         assert_eq!(decoded.snapshot.tiles.len(), 1);
         assert_eq!(decoded.snapshot.status_strip, frame.snapshot.status_strip);
+    }
+
+    fn sample_scene() -> DesktopScene {
+        use services_gui_host::{DesktopCursor, DesktopWindow, SurfaceRect, SurfaceSize};
+        let frame = sample_view(ViewKind::TextBuffer, 9, "remote");
+        DesktopScene::new(
+            SurfaceSize::new(20, 8),
+            vec![DesktopWindow::new(frame, SurfaceRect::new(1, 1, 10, 5)).focused()],
+        )
+        .with_cursor(Some(DesktopCursor::new(3, 4)))
+    }
+
+    #[test]
+    fn test_push_desktop_shares_revision_and_reaches_every_sink() {
+        let mut host = RemoteUiHost::new();
+        let sink = Arc::new(Mutex::new(InMemorySink::default()));
+        struct Shared(Arc<Mutex<InMemorySink>>);
+        impl SnapshotSink for Shared {
+            fn send(&mut self, frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
+                self.0.lock().unwrap().send(frame)
+            }
+            fn send_desktop(&mut self, frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+                self.0.lock().unwrap().send_desktop(frame)
+            }
+        }
+        host.add_sink(Box::new(Shared(sink.clone())));
+
+        host.push_snapshot(sample_snapshot(), 10).unwrap();
+        let scene = sample_scene();
+        let frame = host.push_desktop(scene.clone(), 20).unwrap();
+        assert_eq!(
+            frame.revision, 2,
+            "desktop frames continue the same revision stream"
+        );
+        assert_eq!(host.revision(), 2);
+        let sink = sink.lock().unwrap();
+        assert_eq!(sink.frames.len(), 1);
+        assert_eq!(sink.desktop_frames.len(), 1);
+        assert_eq!(sink.desktop_frames[0], frame);
+        assert_eq!(sink.desktop_frames[0].scene, scene);
+    }
+
+    #[test]
+    fn test_ipc_sink_sends_desktop_frames_with_their_own_action() {
+        let kernel = MockKernel::default();
+        let sent = kernel.sent.clone();
+        let mut host = RemoteUiHost::new();
+        host.add_sink(Box::new(IpcSnapshotSink::new(
+            kernel,
+            ChannelId::new(),
+            ServiceId::new(),
+        )));
+        let scene = sample_scene();
+        host.push_desktop(scene.clone(), 5).unwrap();
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1.action, REMOTE_DESKTOP_ACTION);
+        let decoded: RemoteDesktopFrame = sent[0].1.payload.deserialize().unwrap();
+        assert_eq!(decoded.scene, scene);
+    }
+
+    #[test]
+    fn test_json_line_sink_tags_frame_kinds_and_round_trips() {
+        let scene = sample_scene();
+        #[derive(Clone, Default)]
+        struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = SharedBuffer::default();
+        let mut host = RemoteUiHost::new();
+        host.add_sink(Box::new(JsonLineSink::new(buffer.clone())));
+        host.push_snapshot(sample_snapshot(), 1).unwrap();
+        host.push_desktop(scene.clone(), 2).unwrap();
+        let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: JsonLineRecord = serde_json::from_str(lines[0]).unwrap();
+        let second: JsonLineRecord = serde_json::from_str(lines[1]).unwrap();
+        assert!(matches!(first, JsonLineRecord::Snapshot(_)));
+        match second {
+            JsonLineRecord::Desktop(frame) => {
+                assert_eq!(frame.revision, 2);
+                assert_eq!(frame.scene, scene);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(lines[1].starts_with(r#"{"kind":"desktop""#));
     }
 }

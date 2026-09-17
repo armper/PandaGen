@@ -18,3 +18,6 @@ default = ["workspace"]
 # windows. Off in the bare-metal kernel, where the compositor core is used
 # without the (std-only) workspace manager.
 workspace = ["dep:services_workspace_manager"]
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }

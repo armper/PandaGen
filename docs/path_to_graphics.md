@@ -128,7 +128,7 @@ User-space services should provide policy:
 
 ### Epic 9: Remote And Replayability
 
-- [ ] `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
+- [x] `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
 - [ ] `GFX-042` Define a compact transport format for graphical updates and damage regions.
 - [ ] `GFX-043` Preserve deterministic replay for graphical sessions the same way text snapshots are replayable today.
 - [ ] `GFX-044` Add round-trip tests for graphical snapshot serialization and remote transport.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 8 (graphical app surfaces) is complete: editor, file picker, CLI decision plus host scrollback, pipeline runtime, and a hosted-component contract with the About component as its reference app.
+`GFX-041` is in place: `DesktopScene` (windows in cell units, cursor, theme, damage) is the serialisable description of a frame, `Compositor::render_scene` reproduces it pixel-for-pixel on any host, and `RemoteUiHost::push_desktop` ships it over IPC (`ui.desktop`) or JSON lines alongside text snapshots on one revision stream.
 
 The best next implementation step is:
 
-- `GFX-041` Extend `services_remote_ui_host` to ship graphical desktop snapshots or scene payloads.
+- `GFX-042` Define a compact transport format for graphical updates and damage regions.
 
-The desktop is now described by data at every level (shell model, hosted surfaces, windows, theme). Shipping that description over the remote UI host, rather than pixels, is the natural transport and keeps replay deterministic (`GFX-043`).
+A full scene per frame is correct but wasteful when only the caret blinked; a delta format that carries changed windows and the damage rectangle, with a full-scene keyframe when needed, keeps remote sessions cheap without giving up determinism.
