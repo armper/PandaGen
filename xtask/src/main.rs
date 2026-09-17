@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("qemu-smoke") => cmd_qemu_smoke(),
         Some("qemu-script") => cmd_qemu_script(args),
         Some("remote") => cmd_remote(args),
+        Some("remote-tcp") => cmd_remote_tcp(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         _ => usage(),
@@ -36,6 +37,7 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask qemu-script [--keys k1,k2,sleep:0.5,shot:name,...] [--boot-wait secs]");
     println!("                          [--after secs] [--out prefix] [--expect-serial text]");
     println!("  cargo xtask remote <command...>   (read-only kernel command over UDP remote IPC)");
+    println!("  cargo xtask remote-tcp <command...>   (same, over the signed TCP line protocol)");
     println!("  cargo xtask image");
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::other("unknown xtask command").into())
@@ -68,6 +70,8 @@ const QEMU_SMP: &str = "4";
 const UDP_ECHO_PORT: u16 = 7777;
 /// Kernel TCP echo port, forwarded from the host loopback by QEMU.
 const TCP_ECHO_PORT: u16 = 7779;
+/// Kernel signed-line command port over TCP.
+const TCP_COMMAND_PORT: u16 = remote_ipc::line::KERNEL_COMMAND_PORT;
 /// Kernel remote IPC port, forwarded from the host loopback by QEMU.
 const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 
@@ -183,6 +187,57 @@ fn remote_replay_check(command: &str, timeout: Duration) -> Result<(), Box<dyn s
     }
 }
 
+/// A fresh nonce for the signed line protocol (time, pid, and a counter).
+fn fresh_nonce() -> u128 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let salt =
+        ((std::process::id() as u128) << 64) | COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    nanos ^ salt.rotate_left(17) ^ ((nanos as u64 as u128) << 64)
+}
+
+/// Run one read-only kernel command over the signed TCP line protocol.
+fn remote_tcp_call(
+    command: &str,
+    timeout: Duration,
+    token: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write as _};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], TCP_COMMAND_PORT));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let line = remote_ipc::line::sign(token.as_bytes(), fresh_nonce(), command);
+    stream.write_all(format!("{line}\n").as_bytes())?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reply = String::new();
+    reader.read_line(&mut reply)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    match remote_ipc::line::parse_reply(&reply) {
+        Some(Ok(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Some(Err(err)) => Err(io::Error::other(err).into()),
+        None => Err(io::Error::other(format!("malformed reply {reply:?}")).into()),
+    }
+}
+
+/// `cargo xtask remote-tcp <command...>`: call a running kernel over TCP.
+fn cmd_remote_tcp(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let command: Vec<String> = args.collect();
+    if command.is_empty() {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "remote-tcp expects a command").into());
+    }
+    let reply = remote_tcp_call(&command.join(" "), Duration::from_secs(3), &remote_token())?;
+    print!("{reply}");
+    if !reply.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
+
 /// `cargo xtask remote <command...>`: call a running kernel over UDP.
 fn cmd_remote(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let command: Vec<String> = args.collect();
@@ -236,7 +291,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print command line for debugging
     let qemu_cmd = format!(
-        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
+        "qemu-system-x86_64 -machine pc -smp {QEMU_SMP} -m 512M -cdrom {} -drive file={},format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 -netdev user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT} -device virtio-net-pci,netdev=n0 -serial file:{} -display {} -no-reboot",
         iso.display(),
         disk.display(),
         serial_log.display(),
@@ -262,7 +317,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -326,7 +381,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -437,7 +492,7 @@ fn cmd_qemu_script(
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT}"
+            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
         ))
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
@@ -509,6 +564,28 @@ fn cmd_qemu_script(
             match tcp_echo_check(text, Duration::from_secs(3)) {
                 Ok(()) => println!("tcp echo ok: {text}"),
                 Err(err) => udp_failures.push(format!("<tcp echo of {text:?}: {err}>")),
+            }
+        } else if let Some(spec) = key.strip_prefix("remote-tcp:") {
+            // remote-tcp:<command>;<expected>[;<token>] like remote:, over TCP.
+            let (command, rest) = spec.split_once(';').unwrap_or((spec, ""));
+            let (expected, token) = match rest.split_once(';') {
+                Some((expected, token)) => (expected, token.to_string()),
+                None => (rest, remote_token()),
+            };
+            match (
+                remote_tcp_call(command, Duration::from_secs(3), &token),
+                expected.strip_prefix('!'),
+            ) {
+                (Ok(reply), None) if reply.contains(expected) => {
+                    println!("remote-tcp ok: {command} -> {}", reply.trim_end());
+                }
+                (Err(err), Some(want)) if err.to_string().contains(want) => {
+                    println!("remote-tcp rejected as expected: {command} -> {err}");
+                }
+                (Ok(reply), _) => udp_failures.push(format!(
+                    "<remote-tcp {command:?} reply {reply:?} vs {expected:?}>"
+                )),
+                (Err(err), _) => udp_failures.push(format!("<remote-tcp {command:?}: {err}>")),
             }
         } else if let Some(command) = key.strip_prefix("replay:") {
             // replay:<command> -> send one signed call, expect a reply, then

@@ -3117,11 +3117,22 @@ fn remote_command_allowed(command: &str) -> bool {
 }
 
 /// One remote call in flight: who asked, and which envelope to answer.
+/// Where a remote reply goes.
+#[derive(Clone, Copy)]
+enum ReplyTarget {
+    /// A `remote_ipc` envelope answered by datagram.
+    Udp {
+        src: net_stack::Ipv4,
+        src_port: u16,
+        envelope_id: ipc::MessageId,
+        request_id: ipc::MessageId,
+    },
+    /// A signed line answered on the same TCP connection.
+    Tcp { conn: usize },
+}
+
 struct RemoteInFlight {
-    src: net_stack::Ipv4,
-    src_port: u16,
-    envelope_id: ipc::MessageId,
-    request_id: ipc::MessageId,
+    target: ReplyTarget,
     local_id: MessageId,
     started_tick: u64,
 }
@@ -3179,7 +3190,7 @@ impl RemoteCommandServer {
             };
             if let Some(result) = reply {
                 let pending = self.in_flight.take().unwrap();
-                self.respond(&pending, result);
+                self.respond(pending.target, result);
                 self.served += 1;
             }
         }
@@ -3187,7 +3198,7 @@ impl RemoteCommandServer {
         if self.in_flight.is_some() {
             return;
         }
-        let datagram = {
+        let request = {
             let Some(mut guard) = NET.try_lock() else {
                 return;
             };
@@ -3196,57 +3207,87 @@ impl RemoteCommandServer {
             };
             net.service(now, serial)
         };
-        let Some(datagram) = datagram else {
+        let Some(request) = request else {
             return;
         };
         let token = *REMOTE_TOKEN.lock();
-        let envelope = match remote_ipc::envelope_from_bytes(&datagram.bytes, token.as_bytes()) {
-            Ok(envelope) => envelope,
-            Err(err) => {
-                self.denied += 1;
-                klog!(serial, "remote: bad envelope ({err})\r\n");
-                return;
-            }
-        };
-        if !REMOTE_REPLAY.lock().accept(envelope.id) {
-            self.denied += 1;
-            klog!(serial, "remote: replayed message dropped\r\n");
-            return;
-        }
-        let call = match remote_ipc::authorize_call(&envelope, &[remote_ipc::CAP_KERNEL_COMMAND]) {
-            Ok(call) => call,
-            Err(err) => {
-                self.denied += 1;
-                klog!(serial, "remote: denied ({err})\r\n");
-                if let Ok(call) = remote_ipc::decode_call(&envelope) {
-                    let pending = RemoteInFlight {
-                        src: datagram.src,
-                        src_port: datagram.src_port,
-                        envelope_id: envelope.id,
-                        request_id: call.request_id,
-                        local_id: MessageId(0),
-                        started_tick: now,
+        let (target, command): (ReplyTarget, alloc::string::String) = match request {
+            bare_metal_net::RemoteRequest::Udp(datagram) => {
+                let envelope =
+                    match remote_ipc::envelope_from_bytes(&datagram.bytes, token.as_bytes()) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            self.denied += 1;
+                            klog!(serial, "remote: bad envelope ({err})\r\n");
+                            return;
+                        }
                     };
-                    self.respond(&pending, Err(alloc::string::String::from("unauthorized")));
+                if !REMOTE_REPLAY.lock().accept(envelope.id) {
+                    self.denied += 1;
+                    klog!(serial, "remote: replayed message dropped\r\n");
+                    return;
                 }
-                return;
+                let call = match remote_ipc::authorize_call(
+                    &envelope,
+                    &[remote_ipc::CAP_KERNEL_COMMAND],
+                ) {
+                    Ok(call) => call,
+                    Err(err) => {
+                        self.denied += 1;
+                        klog!(serial, "remote: denied ({err})\r\n");
+                        if let Ok(call) = remote_ipc::decode_call(&envelope) {
+                            let target = ReplyTarget::Udp {
+                                src: datagram.src,
+                                src_port: datagram.src_port,
+                                envelope_id: envelope.id,
+                                request_id: call.request_id,
+                            };
+                            self.respond(target, Err(alloc::string::String::from("unauthorized")));
+                        }
+                        return;
+                    }
+                };
+                let target = ReplyTarget::Udp {
+                    src: datagram.src,
+                    src_port: datagram.src_port,
+                    envelope_id: envelope.id,
+                    request_id: call.request_id,
+                };
+                if call.action != remote_ipc::ACTION_KERNEL_COMMAND_RUN {
+                    self.denied += 1;
+                    self.respond(
+                        target,
+                        Err(alloc::string::String::from("command not allowed")),
+                    );
+                    return;
+                }
+                let command = core::str::from_utf8(&call.payload).unwrap_or("").trim();
+                (target, alloc::string::String::from(command))
+            }
+            bare_metal_net::RemoteRequest::TcpLine { conn, line } => {
+                let target = ReplyTarget::Tcp { conn };
+                let text = core::str::from_utf8(&line).unwrap_or("");
+                let Some((nonce, command)) = remote_ipc::line::verify(token.as_bytes(), text)
+                else {
+                    self.denied += 1;
+                    klog!(serial, "remote: tcp line rejected (bad signature)\r\n");
+                    self.respond(target, Err(alloc::string::String::from("unauthorized")));
+                    return;
+                };
+                if !REMOTE_REPLAY.lock().accept_key(nonce) {
+                    self.denied += 1;
+                    klog!(serial, "remote: tcp line rejected (replay)\r\n");
+                    self.respond(target, Err(alloc::string::String::from("unauthorized")));
+                    return;
+                }
+                (target, alloc::string::String::from(command.trim()))
             }
         };
-        let command = core::str::from_utf8(&call.payload).unwrap_or("").trim();
-        let pending = RemoteInFlight {
-            src: datagram.src,
-            src_port: datagram.src_port,
-            envelope_id: envelope.id,
-            request_id: call.request_id,
-            local_id: MessageId(0),
-            started_tick: now,
-        };
-        if call.action != remote_ipc::ACTION_KERNEL_COMMAND_RUN || !remote_command_allowed(command)
-        {
+        if !remote_command_allowed(&command) {
             self.denied += 1;
             klog!(serial, "remote: refused command {:?}\r\n", command);
             self.respond(
-                &pending,
+                target,
                 Err(alloc::string::String::from("command not allowed")),
             );
             return;
@@ -3254,10 +3295,7 @@ impl RemoteCommandServer {
         let local_id = ctx.next_message_id();
         let Some(request) = CommandRequest::from_bytes(command.as_bytes(), local_id, channel)
         else {
-            self.respond(
-                &pending,
-                Err(alloc::string::String::from("command too long")),
-            );
+            self.respond(target, Err(alloc::string::String::from("command too long")));
             return;
         };
         if ctx
@@ -3265,49 +3303,59 @@ impl RemoteCommandServer {
             .is_err()
         {
             self.respond(
-                &pending,
+                target,
                 Err(alloc::string::String::from("command queue full")),
             );
             return;
         }
-        klog!(
-            serial,
-            "remote: running {:?} for {}:{}\r\n",
-            command,
-            net_stack::wire::fmt_ipv4(datagram.src),
-            datagram.src_port
-        );
+        klog!(serial, "remote: running {:?}\r\n", command);
         self.in_flight = Some(RemoteInFlight {
+            target,
             local_id,
-            ..pending
+            started_tick: now,
         });
     }
 
     #[cfg(all(not(test), target_os = "none"))]
     fn respond(
         &mut self,
-        pending: &RemoteInFlight,
+        target: ReplyTarget,
         result: Result<alloc::vec::Vec<u8>, alloc::string::String>,
     ) {
-        let response = remote_ipc::RemoteResponse {
-            request_id: pending.request_id,
-            result,
-        };
-        let Ok(envelope) = remote_ipc::encode_response(response, pending.envelope_id) else {
-            return;
-        };
-        let token = *REMOTE_TOKEN.lock();
-        let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope, token.as_bytes()) else {
-            return;
-        };
-        if let Some(net) = NET.lock().as_mut() {
-            if !net.udp_reply(pending.src, pending.src_port, &bytes) {
-                let mut serial = serial::SerialPort::new(serial::COM1);
-                klog!(
-                    serial,
-                    "remote: reply of {} bytes not sent\r\n",
-                    bytes.len()
-                );
+        match target {
+            ReplyTarget::Udp {
+                src,
+                src_port,
+                envelope_id,
+                request_id,
+            } => {
+                let response = remote_ipc::RemoteResponse { request_id, result };
+                let Ok(envelope) = remote_ipc::encode_response(response, envelope_id) else {
+                    return;
+                };
+                let token = *REMOTE_TOKEN.lock();
+                let Ok(bytes) = remote_ipc::envelope_to_bytes(&envelope, token.as_bytes()) else {
+                    return;
+                };
+                if let Some(net) = NET.lock().as_mut() {
+                    if !net.udp_reply(src, src_port, &bytes) {
+                        let mut serial = serial::SerialPort::new(serial::COM1);
+                        klog!(
+                            serial,
+                            "remote: reply of {} bytes not sent\r\n",
+                            bytes.len()
+                        );
+                    }
+                }
+            }
+            ReplyTarget::Tcp { conn } => {
+                let line = remote_ipc::line::reply(&result);
+                if let Some(net) = NET.lock().as_mut() {
+                    if !net.tcp_reply(conn, line.as_bytes()) {
+                        let mut serial = serial::SerialPort::new(serial::COM1);
+                        klog!(serial, "remote: tcp reply not sent\r\n");
+                    }
+                }
             }
         }
     }

@@ -25,6 +25,8 @@ pub const UDP_ECHO_PORT: u16 = 7777;
 pub const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 /// TCP port that echoes lines back to the peer.
 pub const TCP_ECHO_PORT: u16 = 7779;
+/// TCP port serving signed command lines (see `remote_ipc::line`).
+pub const TCP_COMMAND_PORT: u16 = remote_ipc::line::KERNEL_COMMAND_PORT;
 
 /// A datagram received on `REMOTE_PORT`, handed to the kernel's remote
 /// command server.
@@ -32,6 +34,17 @@ pub struct RemoteDatagram {
     pub src: Ipv4,
     pub src_port: u16,
     pub bytes: alloc::vec::Vec<u8>,
+}
+
+/// A request for the kernel's remote command server.
+pub enum RemoteRequest {
+    /// A `remote_ipc` envelope on `REMOTE_PORT`.
+    Udp(RemoteDatagram),
+    /// One signed line on a `TCP_COMMAND_PORT` connection.
+    TcpLine {
+        conn: usize,
+        line: alloc::vec::Vec<u8>,
+    },
 }
 
 const RX_BUFFERS: usize = 8;
@@ -105,6 +118,7 @@ impl NetStack {
         iface.bind(REMOTE_PORT);
         iface.bind(DHCP_CLIENT_PORT);
         iface.tcp_listen(TCP_ECHO_PORT);
+        iface.tcp_listen(TCP_COMMAND_PORT);
         Some(Self {
             device,
             iface,
@@ -283,7 +297,7 @@ impl NetStack {
     /// Background servicing from the main loop: answer ARP, ping, and
     /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns the first datagram
     /// for `REMOTE_PORT` seen (later ones wait in the receive queue).
-    pub fn service(&mut self, now: u64, log: &mut impl Write) -> Option<RemoteDatagram> {
+    pub fn service(&mut self, now: u64, log: &mut impl Write) -> Option<RemoteRequest> {
         self.iface.tcp_tick(now);
         let mut remote = None;
         while remote.is_none() {
@@ -297,7 +311,17 @@ impl NetStack {
                 Event::Transmit(n) => {
                     let _ = self.device.transmit(&self.tx_frame[..n]);
                 }
-                Event::TcpReady { conn } => self.tcp_echo_service(conn, log),
+                Event::TcpReady { conn } => {
+                    let port = self.iface.tcp().connection(conn).map(|c| c.local_port);
+                    match port {
+                        Some(TCP_COMMAND_PORT) => {
+                            if let Some(line) = self.tcp_command_service(conn, log) {
+                                remote = Some(RemoteRequest::TcpLine { conn, line });
+                            }
+                        }
+                        _ => self.tcp_echo_service(conn, log),
+                    }
+                }
                 Event::Udp {
                     src,
                     src_port,
@@ -306,11 +330,11 @@ impl NetStack {
                     payload_len,
                 } if dst_port == REMOTE_PORT => {
                     let payload = &self.rx_frame[payload_offset..payload_offset + payload_len];
-                    remote = Some(RemoteDatagram {
+                    remote = Some(RemoteRequest::Udp(RemoteDatagram {
                         src,
                         src_port,
                         bytes: payload.to_vec(),
-                    });
+                    }));
                 }
                 Event::Udp {
                     src,
@@ -348,6 +372,54 @@ impl NetStack {
         }
         self.flush_tcp();
         remote
+    }
+
+    /// Command port: hand one complete line to the caller; close after the
+    /// peer does.
+    fn tcp_command_service(
+        &mut self,
+        conn: usize,
+        log: &mut impl Write,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        self.log_new_connection(conn, log);
+        let mut line = [0u8; 1024];
+        let taken = self.iface.tcp_mut().read_line(conn, &mut line);
+        if self
+            .iface
+            .tcp()
+            .connection(conn)
+            .is_some_and(|c| c.peer_closed() && c.readable() == 0)
+        {
+            self.iface.tcp_mut().close(conn);
+        }
+        taken.map(|n| line[..n].to_vec())
+    }
+
+    /// Send a reply line on a command connection.
+    pub fn tcp_reply(&mut self, conn: usize, line: &[u8]) -> bool {
+        let written = self.iface.tcp_mut().write(conn, line);
+        let ok = written == line.len() && self.iface.tcp_mut().write(conn, b"\n") == 1;
+        self.flush_tcp();
+        ok
+    }
+
+    /// Pending command lines on other connections are picked up by later
+    /// `service` calls; nothing else to do here.
+    fn log_new_connection(&mut self, conn: usize, log: &mut impl Write) {
+        let accepted = self.iface.tcp().accepted;
+        if accepted != self.tcp_accepted_seen {
+            self.tcp_accepted_seen = accepted;
+            if let Some(c) = self.iface.tcp().connection(conn) {
+                let _ = writeln!(
+                    log,
+                    "net: tcp conn{conn} from {}:{} port {} ({:?})",
+                    fmt_ipv4(c.peer),
+                    c.peer_port,
+                    c.local_port,
+                    c.state
+                );
+            }
+        }
     }
 
     /// Echo service on `TCP_ECHO_PORT`: whatever arrives is sent back; when

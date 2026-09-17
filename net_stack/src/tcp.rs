@@ -130,7 +130,7 @@ impl Connection {
 }
 
 pub struct Tcp {
-    listen_port: Option<u16>,
+    listen_ports: [Option<u16>; 2],
     conns: [Connection; MAX_CONNECTIONS],
     next_iss: u32,
     now: u64,
@@ -154,7 +154,7 @@ fn seq_lt(a: u32, b: u32) -> bool {
 impl Tcp {
     pub const fn new() -> Self {
         Self {
-            listen_port: None,
+            listen_ports: [None; 2],
             conns: [const { Connection::closed() }; MAX_CONNECTIONS],
             next_iss: 0x1000,
             now: 0,
@@ -167,12 +167,18 @@ impl Tcp {
         }
     }
 
+    /// Accept connections on `port` (up to two ports).
     pub fn listen(&mut self, port: u16) {
-        self.listen_port = Some(port);
+        if self.listen_ports.contains(&Some(port)) {
+            return;
+        }
+        if let Some(slot) = self.listen_ports.iter_mut().find(|s| s.is_none()) {
+            *slot = Some(port);
+        }
     }
 
-    pub fn listen_port(&self) -> Option<u16> {
-        self.listen_port
+    pub fn is_listening(&self, port: u16) -> bool {
+        self.listen_ports.contains(&Some(port))
     }
 
     pub fn connection(&self, index: usize) -> Option<&Connection> {
@@ -210,7 +216,7 @@ impl Tcp {
             None => {
                 if seg.flags & TCP_SYN != 0
                     && seg.flags & TCP_ACK == 0
-                    && Some(seg.dst_port) == self.listen_port
+                    && self.is_listening(seg.dst_port)
                 {
                     self.accept(seg)
                 } else if seg.flags & TCP_RST == 0 {
@@ -365,6 +371,19 @@ impl Tcp {
     /// The immediate reply produced by the last `receive`, if any.
     pub fn take_reply(&mut self) -> Option<Outgoing> {
         self.reply.take()
+    }
+
+    /// Read one line (through its newline) if a complete line is buffered,
+    /// or the whole buffer when it is full without a newline.
+    pub fn read_line(&mut self, index: usize, out: &mut [u8]) -> Option<usize> {
+        let conn = &self.conns[index];
+        let end = match conn.rx[..conn.rx_len].iter().position(|&b| b == b'\n') {
+            Some(pos) => pos + 1,
+            None if conn.rx_len == BUFFER_BYTES => conn.rx_len,
+            None => return None,
+        };
+        let n = end.min(out.len());
+        Some(self.read(index, &mut out[..n]))
     }
 
     /// Read up to `out.len()` bytes of received data.
@@ -699,5 +718,24 @@ mod tests {
         assert_eq!(tcp.receive(syn), None);
         assert!(tcp.take_reply().is_none());
         assert_eq!(tcp.connections().count(), MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn read_line_waits_for_newline_and_two_ports_listen() {
+        let mut tcp = Tcp::new();
+        tcp.listen(7779);
+        tcp.listen(7780);
+        tcp.listen(7781);
+        assert!(tcp.is_listening(7779) && tcp.is_listening(7780));
+        assert!(!tcp.is_listening(7781), "only two listen slots");
+        let (index, snd) = handshake(&mut tcp);
+        tcp.receive(seg(1001, snd, TCP_ACK | TCP_PSH, b"par"));
+        let mut buf = [0u8; 32];
+        assert_eq!(tcp.read_line(index, &mut buf), None);
+        tcp.receive(seg(1004, snd, TCP_ACK | TCP_PSH, b"tial\nnext"));
+        assert_eq!(tcp.read_line(index, &mut buf), Some(8));
+        assert_eq!(&buf[..8], b"partial\n");
+        assert_eq!(tcp.read_line(index, &mut buf), None);
+        assert_eq!(tcp.connection(index).unwrap().readable(), 4);
     }
 }

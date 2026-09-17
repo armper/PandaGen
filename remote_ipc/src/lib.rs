@@ -275,17 +275,25 @@ impl<const N: usize> ReplayGuard<N> {
 
     /// Whether `id` was accepted recently.
     pub fn is_replay(&self, id: MessageId) -> bool {
-        let key = Self::key(id);
+        self.is_replay_key(Self::key(id))
+    }
+
+    pub fn is_replay_key(&self, key: u128) -> bool {
         self.seen[..self.len].contains(&key)
     }
 
     /// Record `id` as accepted; returns false (and records nothing) if it
     /// was already in the window.
     pub fn accept(&mut self, id: MessageId) -> bool {
-        if self.is_replay(id) {
+        self.accept_key(Self::key(id))
+    }
+
+    /// Same as `accept` for a raw 128-bit nonce (the TCP line protocol).
+    pub fn accept_key(&mut self, key: u128) -> bool {
+        if self.is_replay_key(key) {
             return false;
         }
-        self.seen[self.next] = Self::key(id);
+        self.seen[self.next] = key;
         self.next = (self.next + 1) % N;
         if self.len < N {
             self.len += 1;
@@ -305,6 +313,101 @@ impl<const N: usize> ReplayGuard<N> {
 impl<const N: usize> Default for ReplayGuard<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Signed line protocol for the TCP command port: one request per line,
+/// `<nonce as 32 hex digits> <base64 tag> <command>`, where the tag is
+/// HMAC-SHA256(token, nonce_hex || 0 || command). Replies are one line:
+/// `+<base64 output>` on success or `-<message>` on failure.
+pub mod line {
+    use super::{b64, sha256};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// TCP port the kernel serves signed command lines on.
+    pub const KERNEL_COMMAND_PORT: u16 = 7780;
+
+    fn signing_input(nonce_hex: &str, command: &str) -> Vec<u8> {
+        let mut input = Vec::with_capacity(nonce_hex.len() + 1 + command.len());
+        input.extend_from_slice(nonce_hex.as_bytes());
+        input.push(0);
+        input.extend_from_slice(command.as_bytes());
+        input
+    }
+
+    pub fn nonce_hex(nonce: u128) -> String {
+        let mut s = String::with_capacity(32);
+        for byte in nonce.to_be_bytes() {
+            let hi = b"0123456789abcdef"[(byte >> 4) as usize] as char;
+            let lo = b"0123456789abcdef"[(byte & 15) as usize] as char;
+            s.push(hi);
+            s.push(lo);
+        }
+        s
+    }
+
+    fn parse_nonce(text: &str) -> Option<u128> {
+        if text.len() != 32 {
+            return None;
+        }
+        let mut value: u128 = 0;
+        for c in text.bytes() {
+            let digit = (c as char).to_digit(16)? as u128;
+            value = (value << 4) | digit;
+        }
+        Some(value)
+    }
+
+    /// Build a request line (without the trailing newline).
+    pub fn sign(token: &[u8], nonce: u128, command: &str) -> String {
+        let nonce_hex = nonce_hex(nonce);
+        let tag = sha256::hmac(token, &signing_input(&nonce_hex, command));
+        let mut line = nonce_hex;
+        line.push(' ');
+        line.push_str(&b64::encode(&tag));
+        line.push(' ');
+        line.push_str(command);
+        line
+    }
+
+    /// Verify a request line; returns the nonce and command.
+    pub fn verify<'a>(token: &[u8], line: &'a str) -> Option<(u128, &'a str)> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        let (nonce_hex, rest) = line.split_once(' ')?;
+        let (tag_b64, command) = rest.split_once(' ')?;
+        let nonce = parse_nonce(nonce_hex)?;
+        let tag = b64::decode(tag_b64)?;
+        let expected = sha256::hmac(token, &signing_input(nonce_hex, command));
+        if !sha256::tags_equal(&expected, &tag) {
+            return None;
+        }
+        Some((nonce, command))
+    }
+
+    /// Encode a reply line (without the trailing newline).
+    pub fn reply(result: &Result<Vec<u8>, String>) -> String {
+        match result {
+            Ok(bytes) => {
+                let mut s = String::from("+");
+                s.push_str(&b64::encode(bytes));
+                s
+            }
+            Err(err) => {
+                let mut s = String::from("-");
+                s.push_str(err);
+                s
+            }
+        }
+    }
+
+    /// Decode a reply line.
+    pub fn parse_reply(line: &str) -> Option<Result<Vec<u8>, String>> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(payload) = line.strip_prefix('+') {
+            return b64::decode(payload).map(Ok);
+        }
+        line.strip_prefix('-').map(|err| Err(String::from(err)))
     }
 }
 
@@ -773,5 +876,31 @@ mod tests {
         assert!(!guard.accept(ids[3]));
         assert!(guard.accept(ids[4]));
         assert_eq!(guard.len(), 3);
+    }
+
+    #[test]
+    fn test_line_protocol_sign_verify_and_replies() {
+        let token = b"pandagen-dev";
+        let request = line::sign(token, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210, "cpus");
+        assert!(request.starts_with("0123456789abcdeffedcba9876543210 "));
+        assert!(request.ends_with(" cpus"));
+        let with_newline = format!("{request}\n");
+        let (nonce, command) = line::verify(token, &with_newline).unwrap();
+        assert_eq!(nonce, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+        assert_eq!(command, "cpus");
+        assert!(line::verify(b"other", &request).is_none(), "wrong token");
+        let tampered = request.replace("cpus", "halt");
+        assert!(line::verify(token, &tampered).is_none(), "tampered command");
+        assert!(line::verify(token, "nonce tag").is_none(), "malformed");
+        assert!(line::verify(token, "zz tag cpus").is_none(), "bad nonce");
+        let ok = line::reply(&Ok(b"cpus: online=4".to_vec()));
+        assert_eq!(line::parse_reply(&ok), Some(Ok(b"cpus: online=4".to_vec())));
+        let err = line::reply(&Err("unauthorized".to_string()));
+        assert_eq!(err, "-unauthorized");
+        assert_eq!(line::parse_reply("-nope\n"), Some(Err("nope".to_string())));
+        assert_eq!(line::parse_reply("?"), None);
+        let mut guard = ReplayGuard::<4>::new();
+        assert!(guard.accept_key(nonce));
+        assert!(!guard.accept_key(nonce));
     }
 }
