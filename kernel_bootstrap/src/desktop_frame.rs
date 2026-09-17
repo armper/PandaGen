@@ -73,6 +73,23 @@ pub fn gutter_line(number: usize, width: usize, text: &str) -> String {
     line
 }
 
+/// File picker content for the desktop (GFX-037).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PickerModel {
+    /// Directory breadcrumb shown on the first line.
+    pub breadcrumb: String,
+    pub entries: Vec<String>,
+    pub selection: usize,
+}
+
+/// Picker content line of the first entry (line 0 is the breadcrumb).
+pub const PICKER_ENTRIES_FIRST_LINE: usize = 1;
+
+/// Map a picker content line to an entry index, if it is one.
+pub fn picker_entry_at_line(line: usize) -> Option<usize> {
+    line.checked_sub(PICKER_ENTRIES_FIRST_LINE)
+}
+
 /// Everything the desktop needs to know about the workspace for one frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DesktopModel {
@@ -90,6 +107,8 @@ pub struct DesktopModel {
     pub main_title: String,
     pub editor: Option<EditorModel>,
     pub palette: Option<PaletteModel>,
+    /// File picker shown in the workspace window when no editor is open.
+    pub picker: Option<PickerModel>,
     /// Pointer position in surface pixels; `None` hides the cursor.
     pub pointer: Option<(usize, usize)>,
     /// Whether the text caret is drawn this frame (blink phase).
@@ -232,6 +251,22 @@ fn main_frame(layout: &DesktopLayout, model: &DesktopModel, id: ViewId) -> (View
             }
             (frame, title)
         }
+        None if model.picker.is_some() => {
+            let picker = model.picker.as_ref().expect("checked");
+            let mut lines = Vec::with_capacity(picker.entries.len() + 1);
+            let mut crumb = String::from("ROOT / ");
+            crumb.push_str(&picker.breadcrumb);
+            lines.push(crumb);
+            lines.extend(
+                picker
+                    .entries
+                    .iter()
+                    .take(content_rows.saturating_sub(1))
+                    .cloned(),
+            );
+            let frame = ViewFrame::new(id, ViewKind::Panel, 0, ViewContent::text_buffer(lines), 0);
+            (frame, String::from("Files"))
+        }
         None => {
             let visible_output = content_rows.saturating_sub(1);
             let skip = model.output_lines.len().saturating_sub(visible_output);
@@ -285,10 +320,20 @@ pub fn build_desktop_windows(
             )
         })
         .unwrap_or_else(|| model.status.clone());
-    let workspace_highlight = model
-        .editor
-        .as_ref()
-        .and_then(|editor| editor.cursor.map(|(line, _)| line));
+    let status_left = match (&model.editor, &model.picker) {
+        (None, Some(picker)) => alloc::format!(
+            "Files: {} entries  Up/Down select  Enter open  Esc close",
+            picker.entries.len()
+        ),
+        _ => status_left,
+    };
+    let workspace_highlight = match (&model.editor, &model.picker) {
+        (Some(editor), _) => editor.cursor.map(|(line, _)| line),
+        (None, Some(picker)) if !picker.entries.is_empty() => {
+            Some(PICKER_ENTRIES_FIRST_LINE + picker.selection)
+        }
+        _ => None,
+    };
 
     let palette = model.palette.as_ref().map(|palette| {
         let mut lines = Vec::with_capacity(palette.results.len() + 1);
@@ -440,6 +485,7 @@ mod tests {
             main_title: "Workspace".to_string(),
             editor: None,
             palette: None,
+            picker: None,
             pointer: None,
             caret_visible: true,
             launcher: vec![
@@ -647,6 +693,34 @@ mod tests {
                 .as_deref(),
             Some("a.txt")
         );
+    }
+
+    #[test]
+    fn test_picker_model_renders_breadcrumb_entries_and_selection() {
+        let layout = DesktopLayout::for_pixels(1280, 800);
+        let mut model = sample_model();
+        model.picker = Some(PickerModel {
+            breadcrumb: String::new(),
+            entries: vec!["readme.md".to_string(), "test.txt".to_string()],
+            selection: 1,
+        });
+        let windows = build_desktop_windows(&layout, &model, &DesktopViewIds::new());
+        let main = find(&windows, DesktopWindowRole::Main);
+        assert_eq!(main.frame.title.as_deref(), Some("Files"));
+        assert_eq!(main.frame.cursor, None, "picker shows no caret");
+        assert_eq!(main.highlight_line, Some(2));
+        let ViewContent::TextBuffer { lines } = &main.frame.content else {
+            panic!()
+        };
+        assert_eq!(lines, &vec!["ROOT / ", "readme.md", "test.txt"]);
+        let ViewContent::StatusLine { text } =
+            &find(&windows, DesktopWindowRole::Status).frame.content
+        else {
+            panic!()
+        };
+        assert!(text.starts_with("Files: 2 entries"), "{text}");
+        assert_eq!(picker_entry_at_line(2), Some(1));
+        assert_eq!(picker_entry_at_line(0), None);
     }
 
     #[test]

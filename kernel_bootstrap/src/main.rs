@@ -1265,6 +1265,37 @@ fn workspace_loop(
                                 continue;
                             }
 
+                            if *target == renderer.view_ids().main()
+                                && workspace.is_file_picker_open()
+                            {
+                                let entry =
+                                    content_line.and_then(desktop_frame::picker_entry_at_line);
+                                match routed.kind {
+                                    input_types::PointerEventKind::Move { .. } => {
+                                        if let Some(index) = entry {
+                                            if workspace.picker_hover(index) {
+                                                input_dirty = true;
+                                            }
+                                        }
+                                    }
+                                    input_types::PointerEventKind::Wheel { dy, .. } => {
+                                        if workspace.picker_scroll(dy) {
+                                            input_dirty = true;
+                                        }
+                                    }
+                                    _ if primary_press => {
+                                        if let Some(index) = entry {
+                                            if workspace.picker_click(index, serial) {
+                                                input_dirty = true;
+                                                output_dirty = true;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             if primary_press && workspace.is_palette_open() {
                                 // Clicking anywhere else dismisses the palette.
                                 if workspace.palette_dismiss() {
@@ -2516,6 +2547,14 @@ fn build_desktop_model(
             .truncate(services_gui_host::shell::MAX_NOTICES);
     }
     model.status_right = alloc::format!("{} | t={}", workspace.display_mode().label(), now_tick);
+
+    if let Some(picker) = workspace.file_picker() {
+        model.picker = Some(desktop_frame::PickerModel {
+            breadcrumb: String::new(),
+            entries: picker.entries.clone(),
+            selection: picker.selection,
+        });
+    }
 
     if workspace.is_palette_open() {
         let palette = workspace.palette_overlay();

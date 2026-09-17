@@ -206,6 +206,15 @@ pub struct WorkspaceSession {
     notices: Vec<PendingNotice>,
     /// Path of the document open in the editor, if it has one.
     editor_path: Option<String>,
+    /// File picker, when open (GFX-037).
+    file_picker: Option<FilePickerState>,
+}
+
+/// File picker state: a flat listing of the root with a selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePickerState {
+    pub entries: Vec<String>,
+    pub selection: usize,
 }
 
 /// Maximum notices retained for the shell.
@@ -241,6 +250,17 @@ impl WorkspaceSession {
                 vec!["editor".to_string(), "edit".to_string(), "vim".to_string()],
             ),
             Box::new(|_| Ok("Opening editor...".to_string())),
+        );
+
+        command_palette.register_command(
+            CommandDescriptor::new(
+                "open_file",
+                "Open File",
+                "Pick a file to open in the editor",
+                vec!["open".to_string(), "file".to_string(), "picker".to_string()],
+            )
+            .with_category("Workspace"),
+            Box::new(|_| Ok("Opening file picker...".to_string())),
         );
 
         command_palette.register_command(
@@ -425,6 +445,7 @@ impl WorkspaceSession {
             pointer_captured: false,
             notices: Vec::new(),
             editor_path: None,
+            file_picker: None,
         }
     }
 
@@ -535,6 +556,24 @@ impl WorkspaceSession {
                 let _ = writeln!(serial, "  palette_action=unknown_byte");
                 return true; // Consume unknown bytes when palette is open
             }
+        }
+
+        // 2b. If the file picker is open, it owns the keyboard.
+        if self.file_picker.is_some() {
+            let _ = writeln!(serial, "  action=picker_input");
+            match byte {
+                0x80 | b'k' => self.picker_move(-1),
+                0x81 | b'j' => self.picker_move(1),
+                b'\n' | b'\r' => {
+                    self.picker_open_selection(serial);
+                }
+                0x1b | b'q' => {
+                    self.file_picker = None;
+                    self.emit_line(serial, "File picker closed");
+                }
+                _ => {}
+            }
+            return true;
         }
 
         // 3. Check tile focus before delivering to component
@@ -843,7 +882,7 @@ impl WorkspaceSession {
             "help" => {
                 self.emit_line(serial, "Workspace Commands:");
                 self.emit_line(serial, "help           - Show this help");
-                self.emit_line(serial, "open <what>    - Open editor or CLI");
+                self.emit_line(serial, "open <what>    - Open editor, CLI, or file picker");
                 self.emit_line(serial, "list           - List components");
                 self.emit_line(serial, "focus <id>     - Focus component");
                 self.emit_line(serial, "clear | cls    - Clear the screen");
@@ -873,8 +912,11 @@ impl WorkspaceSession {
                         self.active_component = Some(ComponentType::Cli);
                         self.set_cli_active(true, serial);
                     }
+                    Some("file") | Some("picker") | Some("files") => {
+                        self.open_file_picker(serial);
+                    }
                     _ => {
-                        self.emit_line(serial, "Usage: open editor [path] | open cli");
+                        self.emit_line(serial, "Usage: open editor [path] | open cli | open file");
                     }
                 }
             }
@@ -1377,6 +1419,11 @@ impl WorkspaceSession {
                 self.palette_overlay.close();
                 return true;
             }
+            "open_file" => {
+                self.palette_overlay.close();
+                self.open_file_picker(serial);
+                return true;
+            }
             "quit" => {
                 self.active_component = None;
                 self.emit_line(serial, "Closed component");
@@ -1420,6 +1467,107 @@ impl WorkspaceSession {
         // Close palette after execution
         self.palette_overlay.close();
         return true;
+    }
+
+    /// Open the file picker over the root listing.
+    pub fn open_file_picker(&mut self, serial: &mut SerialPort) {
+        if self.is_editor_active() {
+            self.emit_line(serial, "Close the editor first (:q) to pick a file.");
+            return;
+        }
+        #[cfg(not(test))]
+        let entries = match self.filesystem.as_mut() {
+            Some(fs) => match fs.list_files() {
+                Ok(files) => files,
+                Err(_) => {
+                    self.emit_line(serial, "Failed to list files");
+                    return;
+                }
+            },
+            None => {
+                self.emit_line(serial, "No filesystem available");
+                return;
+            }
+        };
+        #[cfg(test)]
+        let entries: Vec<String> = Vec::new();
+        if entries.is_empty() {
+            self.emit_line(serial, "(no files)");
+            return;
+        }
+        self.emit_line(serial, "Files (Up/Down select, Enter open, Esc close):");
+        for entry in &entries {
+            let mut line = String::from("  ");
+            line.push_str(entry);
+            self.emit_line(serial, &line);
+        }
+        self.file_picker = Some(FilePickerState {
+            entries,
+            selection: 0,
+        });
+    }
+
+    pub fn is_file_picker_open(&self) -> bool {
+        self.file_picker.is_some()
+    }
+
+    pub fn file_picker(&self) -> Option<&FilePickerState> {
+        self.file_picker.as_ref()
+    }
+
+    fn picker_move(&mut self, delta: i32) {
+        if let Some(picker) = self.file_picker.as_mut() {
+            let last = picker.entries.len().saturating_sub(1);
+            picker.selection = if delta < 0 {
+                picker
+                    .selection
+                    .saturating_sub(delta.unsigned_abs() as usize)
+            } else {
+                picker.selection.saturating_add(delta as usize).min(last)
+            };
+        }
+    }
+
+    /// Pointer hover over a picker entry. Returns true if the selection moved.
+    pub fn picker_hover(&mut self, index: usize) -> bool {
+        match self.file_picker.as_mut() {
+            Some(picker) if !picker.entries.is_empty() => {
+                let index = index.min(picker.entries.len() - 1);
+                let changed = picker.selection != index;
+                picker.selection = index;
+                changed
+            }
+            _ => false,
+        }
+    }
+
+    /// Wheel over the picker: positive notches move up.
+    pub fn picker_scroll(&mut self, notches: i32) -> bool {
+        if self.file_picker.is_none() || notches == 0 {
+            return false;
+        }
+        self.picker_move(-notches);
+        true
+    }
+
+    /// Open the selected entry in the editor and close the picker.
+    pub fn picker_open_selection(&mut self, serial: &mut SerialPort) -> bool {
+        let Some(picker) = self.file_picker.take() else {
+            return false;
+        };
+        let Some(name) = picker.entries.get(picker.selection).cloned() else {
+            return false;
+        };
+        let _ = writeln!(serial, "picker: open {}", name);
+        self.active_component = Some(ComponentType::Editor);
+        self.open_editor(serial, Some(&name));
+        true
+    }
+
+    /// Click on a picker entry: select and open it.
+    pub fn picker_click(&mut self, index: usize, serial: &mut SerialPort) -> bool {
+        self.picker_hover(index);
+        self.picker_open_selection(serial)
     }
 
     /// Resize the editor viewport to `rows` (graphics window height). Returns

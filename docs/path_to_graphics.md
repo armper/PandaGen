@@ -121,7 +121,7 @@ User-space services should provide policy:
 ### Epic 8: Graphical App Surfaces
 
 - [x] `GFX-036` Add a graphical renderer for the editor using the same document state and cursor model it already has.
-- [ ] `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
+- [x] `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
 - [ ] `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface.
 - [ ] `GFX-039` Add a graphical runtime for pipeline execution and status reporting.
 - [ ] `GFX-040` Add a custom-component graphical host contract so future apps are not locked to text frames.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-`GFX-036` is in place: in graphics mode the editor fills the workspace window with a line-number gutter, a current-line highlight, a caret placed past the gutter, a viewport sized to the window, and a status strip with mode, document, dirty state, cursor position, and line count, all over the unchanged `MinimalEditor` document and cursor model.
+`GFX-037` is in place: `open file` (or the Open File launcher/palette entry) shows the root listing in the workspace window with a breadcrumb, a highlighted selection driven by Up/Down, j/k, pointer hover, and wheel, and Enter or a click opens the entry in the graphical editor.
 
 The best next implementation step is:
 
-- `GFX-037` Add a graphical renderer for the file picker with selection, directory breadcrumbs, and status strip.
+- `GFX-038` Add a graphical renderer for the CLI component or decide to keep CLI text-native inside a graphical host surface.
 
-The bare-metal kernel has a filesystem and `ls`/`cat`, but no picker surface yet; a list window with the highlighted-row facility, pointer selection like the palette, and Enter/click to open in the editor is the natural next app surface.
+The CLI already runs inside the workspace window in graphics mode as text lines with a prompt; the decision to make is whether it needs anything beyond that (a distinct title, prompt styling, scrollback via a scroll region) or whether text-native inside the host surface is the right end state.
