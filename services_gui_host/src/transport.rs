@@ -13,7 +13,10 @@ use graphics_rasterizer::RasterRect;
 use serde::{Deserialize, Serialize};
 use view_types::ViewId;
 
-use crate::{window_pixel_rect, DesktopCursor, DesktopScene, DesktopWindow, SurfaceSize, Theme};
+use crate::{
+    caret_pixel_rect, window_pixel_rect, DesktopCursor, DesktopScene, DesktopWindow, SurfaceSize,
+    Theme,
+};
 
 /// Changes between two scenes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +54,30 @@ pub enum SceneUpdate {
     Delta(SceneDelta),
 }
 
+/// Damage for a window that changed. A caret-only change (same window with
+/// only `frame.cursor` different) damages just the two caret rectangles,
+/// which is what makes a blinking caret cheap on the wire and on screen.
+fn changed_window_damage(old: &DesktopWindow, new: &DesktopWindow) -> RasterRect {
+    let mut same_but_caret = new.clone();
+    same_but_caret.frame.cursor = old.frame.cursor;
+    if &same_but_caret == old {
+        let mut acc = None;
+        for cursor in [old.frame.cursor, new.frame.cursor].into_iter().flatten() {
+            if let Some(rect) = caret_pixel_rect(new, cursor) {
+                acc = union(acc, rect);
+            }
+        }
+        if let Some(rect) = acc {
+            return rect;
+        }
+    }
+    union(
+        Some(window_pixel_rect(old.rect)),
+        window_pixel_rect(new.rect),
+    )
+    .expect("union of two rects")
+}
+
 /// Extend `acc` by `rect`.
 fn union(acc: Option<RasterRect>, rect: RasterRect) -> Option<RasterRect> {
     Some(match acc {
@@ -78,8 +105,7 @@ pub fn diff_scenes(prev: &DesktopScene, next: &DesktopScene) -> SceneDelta {
         {
             Some(old) if old == window => {}
             Some(old) => {
-                damage = union(damage, window_pixel_rect(old.rect));
-                damage = union(damage, window_pixel_rect(window.rect));
+                damage = union(damage, changed_window_damage(old, window));
                 changed.push(window.clone());
             }
             None => {
@@ -344,8 +370,9 @@ mod tests {
         assert_eq!(delta.cursor, Some(Some(DesktopCursor::new(100, 100))));
         assert_eq!(delta.theme, None);
         let damage = delta.damage.unwrap();
-        // Damage covers the side window, the note, main, and both cursors.
-        assert_eq!(damage.x, 0);
+        // Damage covers the side window, the note, the caret cells in main,
+        // and both pointer sprites (the old one starts at x = 5).
+        assert_eq!(damage.x, 5);
         assert!(damage.right() >= 40 * RASTER_CELL_WIDTH);
         assert!(damage.bottom() >= 20 * RASTER_CELL_HEIGHT);
 
@@ -360,6 +387,17 @@ mod tests {
         }
         assert_eq!(applied.cursor, expected.cursor);
         assert_eq!(applied.size, expected.size);
+
+        // Caret-only change damages just the caret cells, not the window.
+        let mut caret_moved = b.clone();
+        caret_moved.windows[0].frame.cursor = Some(CursorPosition::new(0, 5));
+        let small = diff_scenes(&b, &caret_moved);
+        let d = small.damage.unwrap();
+        assert!(
+            d.width <= 4 + 5 * RASTER_CELL_WIDTH && d.height <= RASTER_CELL_HEIGHT,
+            "{d:?}"
+        );
+        assert_eq!(small.changed.len(), 1);
 
         // No change: empty delta with no damage.
         let none = diff_scenes(&b, &b);

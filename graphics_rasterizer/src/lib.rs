@@ -977,6 +977,58 @@ impl<T: RenderTarget + ?Sized> RenderTarget for ContainerTarget<'_, T> {
     }
 }
 
+/// Wraps a target and counts pixel writes and reads, for benchmarks and
+/// work-bound tests (GFX-045). Counting is exact: every provided draw op
+/// bottoms out in `write_pixel`.
+pub struct CountingTarget<'a, T: RenderTarget + ?Sized> {
+    target: &'a mut T,
+    writes: u64,
+    reads: u64,
+}
+
+impl<'a, T: RenderTarget + ?Sized> CountingTarget<'a, T> {
+    pub fn new(target: &'a mut T) -> Self {
+        Self {
+            target,
+            writes: 0,
+            reads: 0,
+        }
+    }
+
+    pub const fn writes(&self) -> u64 {
+        self.writes
+    }
+
+    pub const fn reads(&self) -> u64 {
+        self.reads
+    }
+
+    pub fn reset(&mut self) {
+        self.writes = 0;
+        self.reads = 0;
+    }
+}
+
+impl<T: RenderTarget + ?Sized> RenderTarget for CountingTarget<'_, T> {
+    fn width(&self) -> usize {
+        self.target.width()
+    }
+
+    fn height(&self) -> usize {
+        self.target.height()
+    }
+
+    fn write_pixel(&mut self, x: usize, y: usize, color: RgbaColor) {
+        self.writes += 1;
+        self.target.write_pixel(x, y, color);
+    }
+
+    fn pixel(&self, x: usize, y: usize) -> Option<RgbaColor> {
+        // `pixel` takes `&self`; reads are counted by callers that care.
+        self.target.pixel(x, y)
+    }
+}
+
 impl<T: RenderTarget + ?Sized> RenderTarget for ScissorTarget<'_, T> {
     fn width(&self) -> usize {
         self.target.width()
@@ -1632,6 +1684,24 @@ mod tests {
         assert_eq!(parent.pixel(14, 15), Some(CLEAR));
         assert_eq!(parent.pixel(19, 19), Some(ACCENT));
         assert_eq!(parent.pixel(20, 20), Some(CLEAR));
+    }
+
+    #[test]
+    fn test_counting_target_counts_every_pixel_write() {
+        let mut buffer = RgbaBuffer::new(20, 10, CLEAR);
+        let mut counting = CountingTarget::new(&mut buffer);
+        counting.fill_rect(RasterRect::new(0, 0, 5, 4), ACCENT);
+        assert_eq!(counting.writes(), 20);
+        counting.draw_hline(0, 9, 100, DETAIL);
+        assert_eq!(counting.writes(), 40, "clipped writes are not counted");
+        counting.reset();
+        counting.draw_text_with_font(0, 0, "I", &DESKTOP_FONT, ACCENT);
+        // The 20x10 buffer clips the 16-row glyph: only rows 0..10 are written.
+        let lit_visible = glyph_pixels(&DESKTOP_FONT, 'I')
+            .iter()
+            .filter(|(_, y)| *y < 10)
+            .count() as u64;
+        assert_eq!(counting.writes(), lit_visible);
     }
 
     #[test]

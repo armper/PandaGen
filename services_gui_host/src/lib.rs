@@ -21,6 +21,7 @@ use services_workspace_manager::{SplitAxis, WorkspaceRenderSnapshot, WorkspaceTi
 use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
 
 pub mod animation;
+pub mod bench;
 pub mod host;
 pub mod input_routing;
 pub mod layout;
@@ -766,6 +767,28 @@ pub fn composition_order(windows: &[DesktopWindow]) -> Vec<usize> {
 /// Pixel rectangle of a window placed in cell units.
 pub fn window_pixel_rect(rect: SurfaceRect) -> RasterRect {
     pixel_rect(rect)
+}
+
+/// Pixel rectangle the caret sprite occupies for `cursor` in `window`, or
+/// `None` when the caret falls outside the content area. Matches the caret
+/// drawn by the painter exactly, so damage can be limited to it.
+pub fn caret_pixel_rect(
+    window: &DesktopWindow,
+    cursor: view_types::CursorPosition,
+) -> Option<RasterRect> {
+    let rect = pixel_rect(window.rect);
+    let content_top = if window.chrome {
+        rect.y + RASTER_CELL_HEIGHT
+    } else {
+        rect.y
+    };
+    let caret = RasterRect::new(
+        rect.x + 2 + cursor.column * RASTER_CELL_WIDTH,
+        content_top + 1 + cursor.line * RASTER_CELL_HEIGHT,
+        4,
+        RASTER_CELL_HEIGHT.saturating_sub(2),
+    );
+    window_content_rect_for(rect, window.chrome).and_then(|content| caret.intersect(content))
 }
 
 impl Compositor {

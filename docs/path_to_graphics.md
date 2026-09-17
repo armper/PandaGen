@@ -135,7 +135,7 @@ User-space services should provide policy:
 
 ### Epic 10: Performance And Correctness
 
-- [ ] `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
+- [x] `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
 - [ ] `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
 - [ ] `GFX-047` Add memory budgeting for large surfaces, atlases, and off-screen buffers.
 - [ ] `GFX-048` Add failure behavior for low-memory or missing-framebuffer cases so the system degrades cleanly.
@@ -211,10 +211,10 @@ The reason is simple: PandaGen already has enough layout and framebuffer foundat
 
 ## Immediate Next Story
 
-Epic 9 (remote and replayability) is complete: `SceneReplay` reconstructs every scene of a recorded stream, and tests prove pixel identity between live full renders and both replayed full renders and damage-limited incremental repaints, through JSON serialisation and the remote host's JSON-line sink.
+`GFX-045` is in place: `services_gui_host::bench` measures pixels written, windows painted, and damage area for full composes (8 and 64 cascaded windows, an 8x6 tile grid) and damage-limited frames (pointer move, caret blink, palette open), with regression bounds under `cargo test` and a wall-clock example. The first run exposed a caret blink repainting a third of the screen; caret-only changes now damage only the caret cells.
 
 The best next implementation step is:
 
-- `GFX-045` Add compositor benchmarks for many windows, many tiles, and frequent cursor or overlay updates.
+- `GFX-046` Add property tests for clipping, z-order, and damage accumulation invariants.
 
-With correctness pinned down, Epic 10 starts by measuring: a benchmark harness under `cargo test`/`cargo bench` that reports compose time and pixels touched for representative desktops, so later optimisations (damage-aware cursor repaint, present-only-damage in graphics mode) have a baseline.
+The benchmark gives bounds on typical desktops; property tests give guarantees on arbitrary ones: a pixel outside every window is background, the top-most window at a pixel is the one hit testing reports, and rendering with a damage rectangle never differs from a full render inside that rectangle.
