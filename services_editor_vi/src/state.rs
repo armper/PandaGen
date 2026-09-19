@@ -270,7 +270,7 @@ impl fmt::Display for TextBuffer {
 
 /// Editor state snapshot for undo/redo
 #[derive(Debug, Clone)]
-struct EditorSnapshot {
+pub struct EditorSnapshot {
     buffer: TextBuffer,
     cursor: Cursor,
 }
@@ -536,11 +536,28 @@ impl EditorState {
     }
 
     /// Save current state for undo
-    pub fn save_undo_snapshot(&mut self) {
-        let snapshot = EditorSnapshot {
+    /// The current buffer and cursor, to be pushed only if an edit lands.
+    pub fn buffer_snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
             buffer: self.buffer.clone(),
             cursor: self.cursor.clone(),
-        };
+        }
+    }
+
+    /// Record an edit. Pushing a snapshot for a key that changed nothing
+    /// evicted real history from the front of a 100-entry stack, so holding
+    /// a no-op key made the text the user wanted back unreachable.
+    pub fn push_undo(&mut self, snapshot: EditorSnapshot) {
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+        const MAX_UNDO_STACK: usize = 100;
+        if self.undo_stack.len() > MAX_UNDO_STACK {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    pub fn save_undo_snapshot(&mut self) {
+        let snapshot = self.buffer_snapshot();
         self.undo_stack.push(snapshot);
         // Clear redo stack when making a new edit
         self.redo_stack.clear();

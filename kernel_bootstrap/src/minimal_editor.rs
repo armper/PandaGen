@@ -203,42 +203,64 @@ impl MinimalEditor {
                                 }
                             }
                             CoreIoRequest::SaveAndQuit => {
-                                if let Some(ref handle) = self.document {
-                                    let content = self.core.buffer().as_string();
-                                    let _ = io.save(handle, &content);
+                                // `:wq` used to throw the result away and
+                                // exit regardless. With no path -- which is
+                                // what `editor` with no argument gives you --
+                                // the save always failed, so everything typed
+                                // disappeared without even the message that
+                                // plain `:w` prints. Quit only if it saved.
+                                let Some(handle) = self.document.clone() else {
+                                    self.status =
+                                        String::from("Error: no file path (use :w <path>)");
+                                    return false;
+                                };
+                                let content = self.core.buffer().as_string();
+                                match io.save(&handle, &content) {
+                                    Ok(msg) => {
+                                        self.status = msg;
+                                        self.core.mark_saved();
+                                        true
+                                    }
+                                    Err(_) => {
+                                        self.status = String::from("Error: failed to save file");
+                                        false
+                                    }
                                 }
-                                true // Quit anyway
                             }
                         }
                     } else {
-                        // No filesystem available - use old behavior
+                        // No filesystem. Saying so and then marking the
+                        // buffer clean told `:q` the work was safe, and the
+                        // very next `:q` threw it away without complaint.
+                        // The dirty flag is the only thing standing between
+                        // `:q` and losing everything typed.
                         use editor_core::CoreIoRequest;
                         match io_req {
                             CoreIoRequest::Save | CoreIoRequest::SaveAs(_) => {
                                 self.status = String::from("Filesystem unavailable");
-                                self.core.mark_saved();
                                 false
                             }
                             CoreIoRequest::SaveAndQuit => {
                                 self.status = String::from("Filesystem unavailable");
-                                true // Quit anyway
+                                false
                             }
                         }
                     }
                 }
                 #[cfg(test)]
                 {
-                    // In test mode, simulate IO operations
+                    // The same rule as the no-filesystem branch above: a
+                    // save that did not happen must not mark the buffer
+                    // clean, and must not let `:wq` exit.
                     use editor_core::CoreIoRequest;
                     match io_req {
                         CoreIoRequest::Save | CoreIoRequest::SaveAs(_) => {
                             self.status = String::from("Filesystem unavailable in test mode");
-                            self.core.mark_saved();
                             false
                         }
                         CoreIoRequest::SaveAndQuit => {
                             self.status = String::from("Filesystem unavailable in test mode");
-                            true // Quit anyway
+                            false
                         }
                     }
                 }

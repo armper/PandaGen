@@ -182,8 +182,15 @@ impl EditorCore {
 
             // Editing
             Key::X => {
-                self.save_undo_snapshot();
+                // The snapshot goes on the stack only if something actually
+                // changed. `delete_char` returns false on an empty line, and
+                // pushing anyway meant holding `x` on a blank line evicted
+                // real history one entry at a time -- the stack is capped at
+                // 100 and drops from the front. The text the user wanted back
+                // became unreachable by any number of undos.
+                let before = self.buffer_snapshot();
                 if self.buffer.delete_char(self.cursor) {
+                    self.push_undo(before);
                     self.dirty = true;
                     CoreOutcome::Changed
                 } else {
@@ -191,8 +198,9 @@ impl EditorCore {
                 }
             }
             Key::D => {
-                self.save_undo_snapshot();
+                let before = self.buffer_snapshot();
                 if self.buffer.delete_line(self.cursor.row) {
+                    self.push_undo(before);
                     self.dirty = true;
                     if self.cursor.row >= self.buffer.line_count() {
                         self.cursor.row = self.buffer.line_count().saturating_sub(1);
@@ -399,11 +407,25 @@ impl EditorCore {
 
     // Undo/redo implementation
 
-    fn save_undo_snapshot(&mut self) {
-        let snapshot = BufferSnapshot {
+    /// The current buffer and cursor, to be pushed only if an edit lands.
+    fn buffer_snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
             buffer: self.buffer.clone(),
             cursor: self.cursor,
-        };
+        }
+    }
+
+    fn push_undo(&mut self, snapshot: BufferSnapshot) {
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+        const MAX_UNDO_STACK: usize = 100;
+        if self.undo_stack.len() > MAX_UNDO_STACK {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn save_undo_snapshot(&mut self) {
+        let snapshot = self.buffer_snapshot();
         self.undo_stack.push(snapshot);
         // Clear redo stack on new edit
         self.redo_stack.clear();
@@ -575,6 +597,49 @@ impl EditorCore {
 impl Default for EditorCore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod undo_retention_tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    #[test]
+    fn keys_that_change_nothing_do_not_evict_real_undo_history() {
+        // `x` and `d` pushed an undo snapshot *before* testing whether the
+        // operation did anything. `delete_char` returns false on an empty
+        // line, so holding `x` there filled the 100-entry stack with copies
+        // of the same state, dropping the real history from the front. The
+        // text the user wanted back became unreachable by any number of
+        // undos.
+        let mut core = EditorCore::new();
+        core.load_content("important".to_string());
+
+        // One real edit, then delete the line so `x` has nothing to do.
+        core.apply_key(Key::X);
+        core.apply_key(Key::D);
+        assert_eq!(core.buffer().as_string(), "");
+
+        // A user leaning on `x` on the now-empty line.
+        for _ in 0..120 {
+            core.apply_key(Key::X);
+        }
+
+        // Undo must still reach the original text.
+        for _ in 0..200 {
+            if core.buffer().as_string() == "important" {
+                return;
+            }
+            if matches!(core.apply_key(Key::U), CoreOutcome::Continue) {
+                break;
+            }
+        }
+        panic!(
+            "the original text is unreachable; no-op keys evicted it. \
+             Buffer is now {:?}",
+            core.buffer().as_string()
+        );
     }
 }
 

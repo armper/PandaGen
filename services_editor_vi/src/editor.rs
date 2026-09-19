@@ -252,9 +252,10 @@ impl Editor {
 
             // Delete character under cursor (only without modifiers)
             KeyCode::X if event.modifiers.is_empty() => {
-                self.state.save_undo_snapshot();
+                let before = self.state.buffer_snapshot();
                 let pos = self.state.cursor().position();
                 if self.state.buffer_mut().delete_char(pos) {
+                    self.state.push_undo(before);
                     self.state.mark_dirty();
                     self.state.mark_line_dirty(pos.row);
                 }

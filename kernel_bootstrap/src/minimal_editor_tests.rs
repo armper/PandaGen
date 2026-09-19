@@ -196,7 +196,39 @@ mod tests {
 
         // Should show filesystem unavailable message
         assert!(editor.status_line().contains("unavailable"));
-        assert!(!editor.is_dirty()); // But pretend we saved
+        // And must *not* pretend it saved. The dirty flag is the only thing
+        // standing between `:q` and losing everything typed; clearing it
+        // after telling the user the save failed meant the very next `:q`
+        // threw the work away without complaint.
+        assert!(
+            editor.is_dirty(),
+            "a save that did not happen must leave the buffer dirty"
+        );
+    }
+
+    #[test]
+    fn write_and_quit_does_not_quit_when_the_write_failed() {
+        // `:wq` discarded the save result and exited regardless. With no
+        // path -- which is what `editor` with no argument gives you -- the
+        // save always failed, so everything typed disappeared without even
+        // the message that plain `:w` prints.
+        let mut editor = MinimalEditor::new(24);
+        editor.process_byte(b'i');
+        for byte in b"work worth keeping" {
+            editor.process_byte(*byte);
+        }
+        editor.process_byte(0x1B);
+
+        editor.process_byte(b':');
+        editor.process_byte(b'w');
+        editor.process_byte(b'q');
+        let should_quit = editor.process_byte(b'\n');
+
+        assert!(
+            !should_quit,
+            "the editor exited although the write did not happen"
+        );
+        assert!(editor.is_dirty(), "and the work is still unsaved");
     }
 
     #[test]
