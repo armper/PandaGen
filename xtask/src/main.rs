@@ -78,6 +78,23 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-serial".to_string(),
         "flush=negotiated".to_string(),
     ];
+    cmd_qemu_script(args.into_iter())?;
+
+    // A machine without a working 8254. The LAPIC calibration used to wait
+    // for a PIT tick that never came, so the boot CPU stopped for good after
+    // "PIT configured for 100 Hz" -- no prompt, no message, no recovery.
+    // It must reach the workspace either way.
+    println!("== boot without a PIT");
+    let args = [
+        "--machine".to_string(),
+        "pc,pit=off".to_string(),
+        "--keys".to_string(),
+        "sleep:25".to_string(),
+        "--out".to_string(),
+        "dist/qemu_nopit".to_string(),
+        "--expect-serial".to_string(),
+        "PandaGen Workspace".to_string(),
+    ];
     cmd_qemu_script(args.into_iter())
 }
 
@@ -628,6 +645,7 @@ fn cmd_qemu_script(
     let mut allow_exception = false;
     let mut forbid_serial: Vec<String> = Vec::new();
     let mut port_base: u16 = 0;
+    let mut machine = "pc".to_string();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -649,6 +667,10 @@ fn cmd_qemu_script(
             "--forbid-serial" => forbid_serial.push(value("--forbid-serial")?.replace("\\n", "\n")),
             "--allow-exception" => allow_exception = true,
             "--port-base" => port_base = value("--port-base")?.parse()?,
+            // The QEMU machine string, so a run can boot hardware the
+            // default `pc` does not have -- `pc,pit=off` is how the
+            // calibration hang was reproduced.
+            "--machine" => machine = value("--machine")?,
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -692,7 +714,7 @@ fn cmd_qemu_script(
     let mut child = Command::new("qemu-system-x86_64")
         .current_dir(&root)
         .arg("-machine")
-        .arg("pc")
+        .arg(&machine)
         .arg("-smp")
         .arg(QEMU_SMP)
         .arg("-m")

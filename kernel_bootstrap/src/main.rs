@@ -582,20 +582,53 @@ fn calibrate_lapic_timer(serial: &mut serial::SerialPort) {
         return;
     };
     const SAMPLE_TICKS: u64 = 10;
+    // How far the LAPIC counter may fall before we conclude the PIT is never
+    // going to tick. The LAPIC is the only clock here that does not depend on
+    // the thing being waited for, and a quarter of its range is tens of
+    // seconds at any plausible bus frequency -- long enough that a slow
+    // machine cannot trip it, finite enough that a machine without a working
+    // 8254 still boots.
+    const GIVE_UP_COUNTS: u32 = u32::MAX / 4;
     apic.set_timer_divide(16);
     apic.start_timer_masked(u32::MAX);
-    // Align to a tick edge, then count over SAMPLE_TICKS ticks.
+
+    // Align to a tick edge, then count over SAMPLE_TICKS ticks. Both waits
+    // used to spin forever: `get_tick_count` is written only by the PIT's IRQ
+    // 0 handler, so on a machine where that interrupt never arrives -- no
+    // 8254, no 8259, or IRQ 0 routed somewhere we never unmask -- the boot
+    // CPU stopped here for good, after "PIT configured for 100 Hz" and
+    // before anything else. No prompt, no message, no recovery.
+    let mut timed_out = false;
     let start_tick = get_tick_count();
+    let guard = apic.timer_current();
     while get_tick_count() == start_tick {
+        if guard.wrapping_sub(apic.timer_current()) > GIVE_UP_COUNTS {
+            timed_out = true;
+            break;
+        }
         core::hint::spin_loop();
     }
     let begin = apic.timer_current();
     let edge = get_tick_count();
-    while get_tick_count() < edge + SAMPLE_TICKS {
+    while !timed_out && get_tick_count() < edge + SAMPLE_TICKS {
+        if begin.wrapping_sub(apic.timer_current()) > GIVE_UP_COUNTS {
+            timed_out = true;
+        }
         core::hint::spin_loop();
     }
     let end = apic.timer_current();
     apic.stop_timer();
+    if timed_out {
+        // Leave LAPIC_TIMER_INITIAL at zero: the APs already treat that as
+        // "do not start a timer", so they idle rather than misfire.
+        let _ = writeln!(
+            serial,
+            "LAPIC timer: calibration gave up, no PIT tick arrived; \
+             per-CPU timers stay off"
+        );
+        apic.send_ipi_all_excluding_self(IPI_WAKE_VECTOR);
+        return;
+    }
     let counts = begin.wrapping_sub(end) as u64;
     // PIT ticks are 100 Hz, so one LAPIC period at LAPIC_TIMER_HZ is:
     let per_period = counts * 100 / SAMPLE_TICKS / LAPIC_TIMER_HZ;
@@ -4298,11 +4331,14 @@ fn init_memory(
     let map = resp.entries();
 
     let mut allocator = FrameAllocator::new();
+    let mut dropped_reserved = 0usize;
     for entry in map {
         match entry.entry_type {
             EntryType::USABLE => allocator.add_range(entry.base, entry.length),
             EntryType::BOOTLOADER_RECLAIMABLE | EntryType::EXECUTABLE_AND_MODULES => {
-                allocator.add_reserved_range(entry.base, entry.length)
+                if !allocator.add_reserved_range(entry.base, entry.length) {
+                    dropped_reserved += 1;
+                }
             }
             _ => {}
         }
@@ -4316,6 +4352,17 @@ fn init_memory(
         allocator.total_frames(),
         allocator.reserved_range_count()
     );
+    if dropped_reserved > 0 {
+        // A memory map with more reserved regions than the table holds. The
+        // allocator will hand out memory that belongs to the bootloader or
+        // the kernel image, and the corruption surfaces somewhere else
+        // entirely -- so say it here, where it is still explicable.
+        let _ = writeln!(
+            serial,
+            "allocator: WARNING {dropped_reserved} reserved regions did not fit; \
+             memory that must not be allocated may be handed out"
+        );
+    }
 
     let heap = match boot.hhdm_offset {
         Some(offset) => init_heap(serial, &mut allocator, offset),
@@ -6143,14 +6190,28 @@ impl FrameAllocator {
         self.len += 1;
     }
 
-    fn add_reserved_range(&mut self, base: u64, length: u64) {
-        let start = align_up(base, PAGE_SIZE);
-        let end = align_down(base.saturating_add(length), PAGE_SIZE);
-        if end <= start || self.reserved_len >= self.reserved.len() {
-            return;
+    /// Exclude `[base, base + length)` from allocation. Returns false if the
+    /// table is full, which the caller must report: a reserved range that is
+    /// silently dropped lets the allocator place the heap, or a fresh page
+    /// table, on top of the kernel image.
+    #[must_use]
+    fn add_reserved_range(&mut self, base: u64, length: u64) -> bool {
+        // Outward, not inward. Rounding inward is right for a usable range --
+        // it shrinks what may be handed out -- and exactly backwards for an
+        // exclusion, where it shrinks what must not be. A reserved region
+        // whose end was not page-aligned exposed its final partial page, and
+        // one shorter than a page was discarded outright.
+        let start = align_down(base, PAGE_SIZE);
+        let end = align_up(base.saturating_add(length), PAGE_SIZE);
+        if end <= start {
+            return true;
+        }
+        if self.reserved_len >= self.reserved.len() {
+            return false;
         }
         self.reserved[self.reserved_len] = Range { start, end };
         self.reserved_len += 1;
+        true
     }
 
     fn reserved_range_count(&self) -> usize {
@@ -6409,6 +6470,64 @@ mod tests {
         assert_eq!(a, 0x1000);
         assert_eq!(b, 0x2000);
         assert_eq!(c, 0x5000);
+    }
+
+    #[test]
+    fn a_reserved_range_covers_every_page_it_touches() {
+        // Reserved ranges were rounded *inward*, the rule that is correct for
+        // usable ranges and exactly backwards for exclusions: it shrinks what
+        // must not be handed out. `init_memory` feeds the kernel image into
+        // this list -- the boot stack, the IDT, the per-CPU GDTs, the IST
+        // stacks, the DMA area -- and Limine makes no alignment promise about
+        // that entry. Its final partial page was handed to the heap or to a
+        // fresh page table, which memsets it. Silent, and the symptom is an
+        // arbitrary corruption much later.
+        let mut allocator = FrameAllocator::new();
+        allocator.add_range(0x10_0000, 0x10_0000);
+        // A kernel image whose length is not a whole number of pages.
+        allocator.add_reserved_range(0x10_0000, 0x2800);
+        allocator.reset_cursor();
+
+        let frame = allocator.allocate_frame().unwrap();
+        assert!(
+            frame >= 0x10_3000,
+            "handed out 0x{frame:x}, which holds bytes 0x2000..0x2800 of a \
+             reserved region"
+        );
+    }
+
+    #[test]
+    fn a_reserved_range_smaller_than_a_page_is_still_reserved() {
+        // Rounding inward made `end <= start` for any sub-page region, and
+        // the guard then dropped it entirely -- the allocator would place the
+        // heap straight on top of it.
+        let mut allocator = FrameAllocator::new();
+        allocator.add_range(0x10_0000, 0x10_0000);
+        allocator.add_reserved_range(0x10_0800, 0x400);
+        assert_eq!(
+            allocator.reserved_range_count(),
+            1,
+            "a reserved region shorter than a page was discarded"
+        );
+        allocator.reset_cursor();
+        assert!(allocator.allocate_frame().unwrap() >= 0x10_1000);
+    }
+
+    #[test]
+    fn a_dropped_reserved_range_is_reported_rather_than_swallowed() {
+        // The table holds 32 entries and overflow returned quietly. Dropping
+        // a usable range only loses memory; dropping a *reserved* one lets
+        // the allocator place the heap, or a page table, on top of the kernel
+        // image. `init_memory` had no way to notice.
+        let mut allocator = FrameAllocator::new();
+        for index in 0..40u64 {
+            let accepted = allocator.add_reserved_range(index * 0x2000, 0x1000);
+            assert_eq!(
+                accepted,
+                index < 32,
+                "range {index} must report whether it was recorded"
+            );
+        }
     }
 
     #[test]
