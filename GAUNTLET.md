@@ -92,6 +92,29 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | S10 | hal/virtio_blk | `VIRTIO_BLK_F_FLUSH` is never negotiated and `UNSUPP` is treated as success, so nothing survives host power loss | FIXED (293) |
 | X1 | boot config | The shipped image authenticates with the published constant `pandagen-dev` and accepts any caller name | FIXED (285) |
 | X2 | remote_ipc | The replay window is a ring: 260 ordinary commands pushed a captured request out of it and it was accepted again, against the running kernel, with no key (`remote_replay`) | FIXED (292) |
+| E1 | services_editor_vi | `:e <missing>` kept the previous file's buffer *and* handle, so the next `:w` overwrote a file the user never opened | FIXED (296) |
+| E2 | services_editor_vi | The undo stack survived loading a new file; one `u` pulled the previous file's text in and `:w` wrote it | FIXED (296) |
+| E3 | editor_core + vi | Byte offsets used as character offsets: a cursor inside a multi-byte character panics, which aborts the kernel | FIXED (296) |
+| E4 | kernel/minimal_editor | `:wq` quit whether or not the write happened; with no path everything typed disappeared silently | FIXED (299) |
+| E5 | kernel/minimal_editor | `:w` with no filesystem said so and then marked the buffer clean, so the next `:q` discarded the work | FIXED (299) |
+| E6 | services_workspace_manager | Closing or quitting dropped a dirty editor with no prompt; the editor's own `:q` guard was decorative | FIXED (300) |
+| E7 | editor_core + vi | Keys that changed nothing pushed undo snapshots and evicted real history from a 100-entry stack | FIXED (299) |
+| E8 | services_editor_vi | Every save stripped the file's trailing newline; opening and saving changed the file | FIXED (296) |
+| E9 | fs_view | `ls` iterated a HashMap, so the order changed on every invocation | FIXED (300) |
+| B1 | kernel/boot | `calibrate_lapic_timer` spun on a PIT tick with no bound; no 8254 meant no boot, no message, no recovery | FIXED (297) |
+| B2 | kernel/boot | Reserved ranges rounded *inward*, exposing the kernel image's final partial page and dropping sub-page regions | FIXED (297) |
+| B3 | kernel/boot | The heap demanded 32 MiB contiguous or nothing, then walked ten steps past a fatal condition into the allocator. Floor was 48 MiB, now 12 | FIXED (301) |
+| B3b | kernel/boot | A *refused* `allocate_contiguous` left the cursor at the end, so the allocator was spent by a request it had declined | FIXED (301) |
+| B4 | kernel/boot | 32-entry reserved table overflowed silently | FIXED (297) |
+| B5 | kernel/boot | CPUs past the eighth ran with no GDT/TSS, so a double fault there triple-faults | FIXED (302) |
+| B6 | kernel/ps2 | The keyboard IRQ handler did not check the AUX bit the mouse handler checks | FIXED (303) |
+| B7 | hal/mouse | A keystroke during mouse bring-up was eaten as the ACK; no pointer for the rest of the boot | FIXED (303) |
+| G1 | kernel/present | A present band waited 100M polls -- measured 4.6 s -- for microseconds of work; the desktop froze while the APs were busy | FIXED (298) |
+| G2 | kernel/palette + picker | Clicking blank space below a list ran an unseen command, or opened a file | FIXED (298) |
+| G3 | kernel/display | In text mode the palette was invisible while the editor was open and still swallowed every keystroke | FIXED (301) |
+| G4 | kernel/palette | The selection could walk past the last drawn row; text mode drew 4 of 10 | FIXED (298) |
+| G6 | kernel/present | The worker's generation guard was checked before the band was read, not after | FIXED (298) |
+| G8 | kernel/desktop_frame | A framebuffer past the backend's limit `expect`ed, which aborts the kernel | FIXED (301) |
 | X4 | remote_ipc | The message-envelope path keeps the bounded window: a `MessageId` is a random UUID, so there is no order to compare against and a captured envelope still comes back into range | OPEN |
 | X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | FIXED (285) |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
@@ -181,17 +204,57 @@ The whole gauntlet suite (11 scripts) passes in one run, in any order, and
 
 **Every finding from rounds 1 and 2 is closed.** Phases 278-293.
 
-**Open:** X4 only — the message-envelope replay path. It cannot be fixed the
-way X2 was, because a `MessageId` is a random UUID and there is no order to
-compare against. Fixing it means changing how envelope ids are minted, which
-is a wider change than the line protocol was.
+**Round 3's three critics have all reported** — graphics/compositor, the boot
+path, and `services_*` above the kernel. Twenty-two findings confirmed and
+fixed across Phases 296-303. X4 was fixed in 294.
 
-**Next: round 3.** Dispatch critics at the three areas no critic has seen:
+**Still open from round 3, in the order to take them:**
 
-1. The graphics and compositor path.
-2. The boot path.
-3. `services_*` above the kernel (workspace manager, editor, file picker,
-   fs view) — by far the largest body of code here and entirely unexamined.
+1. **G5** — the editor writes straight to VRAM while every other text
+   surface goes through the shadow framebuffer, so the 3 MiB shadow is
+   reserved and unused whenever the editor is open and the two buffers
+   diverge. Not currently harmful (nothing marks the pacer dirty in that
+   state) but it is a trap for the next caller that does.
+2. **B9** — PCI enumeration sees only bus 0, function 0: no multifunction
+   check, no bridge recursion. A virtio device behind a PCIe root port, the
+   normal topology on `-machine q35`, is invisible. Fails safe.
+3. **G7** — the framebuffer assumes 32 bpp and a 4-byte-aligned pitch
+   whatever the bootloader reports. Not reachable under QEMU + Limine.
+4. Minor, all confirmed by the services critic: `undo`/`redo` set dirty
+   unconditionally so undoing back to the on-disk text still blocks `:q`;
+   `:wq` on a clean buffer exits without writing (`:x` semantics under the
+   name `wq`); the workspace CLI's command history is uncapped while
+   `cli_console`'s caps at 100; `services_editor_vi::render.rs` compares a
+   char index against a byte column so the cursor is drawn wrong on a line
+   with a multi-byte character; `services_file_picker` pushes a
+   `DirectoryView` per descent with no depth cap, and nothing forbids a
+   directory cycle (unconfirmed — the critic did not construct one).
+
+### Round 3
+
+Three critics, three areas none had seen, twenty-two confirmed findings.
+Three method notes:
+
+**A critic that says what it could *not* prove is worth more.** All three
+separated confirmed defects from unconfirmed ones and from well-argued
+negative results, and the negatives saved real time: the graphics critic
+cleared the rasterizer's pixel addressing, the glyph tables and the pointer
+clamping; the boot critic cleared the interrupt stub stack alignment, the
+PIC EOI paths and the AP bring-up window. Those are areas a later round
+should not re-visit.
+
+**Reachability and severity are different questions.** E3 (a cursor inside a
+multi-byte character panics, which aborts the kernel) had no route from the
+booted machine — every input path is ASCII-only — and the critic said so
+plainly rather than overstating it. It is still fixed: a latent kernel abort
+is worth closing whatever today's reachability.
+
+**One fix's first attempt was defeated by another defect.** B3's shrinking
+heap reported "no contiguous run of 2048 KiB" on a machine with 23 MiB free.
+The loop was right; `allocate_contiguous` left its cursor at the end of the
+last range on failure, so the allocator was spent by a request it had
+*refused*, and only the first size was ever really tried. When a fix
+produces an impossible number, suspect the thing underneath it.
 
 **The canonical verification, which must pass before any commit:**
 
@@ -204,9 +267,16 @@ It runs the workspace tests, builds the ISO, discovers every judge in
 exit status. Judges are discovered, not listed, so a new one counts the
 moment it is written, and the command refuses to pass if it finds none.
 
+It now also boots a machine with 16 MiB, one with sixteen CPUs, and one with
+no 8254, because each of those was a defect that only a differently-shaped
+machine could show.
+
 It exists because a verification run once went green against a **stale
 image**: the kernel had stopped building and I read the log for "ISO ready"
-instead of checking the exit status. Check the status, not the output.
+instead of checking the exit status. It happened a second time one phase
+later, with `cargo test --workspace` failing on `error: type ... is private`,
+which matches neither "FAILED" nor "error[". **Check the exit status, never
+the output.**
 
 **Stop condition:** three consecutive critic rounds with no confirmed
 finding, or Armando returns.
