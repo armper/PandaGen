@@ -381,8 +381,8 @@ mod tests {
 
     impl VirtioTransport for FakeNet {
         fn begin(&mut self) {}
-        fn negotiate_no_features(&mut self) -> bool {
-            true
+        fn negotiate_features(&mut self, _wanted: u64) -> Option<u64> {
+            Some(0)
         }
         fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16> {
             let expected = if index == 0 { self.rx } else { self.tx };

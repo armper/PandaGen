@@ -1203,7 +1203,7 @@ pub extern "C" fn rust_main() -> ! {
         Ok(fs) => {
             kprintln!(
                 serial,
-                "Filesystem ready (backend: {}, {})",
+                "Filesystem ready (backend: {}, {}, flush={})",
                 {
                     *STORAGE_BACKEND.lock() = fs.backend_name();
                     fs.backend_name()
@@ -1212,6 +1212,14 @@ pub extern "C" fn rust_main() -> ! {
                     "formatted"
                 } else {
                     "mounted existing"
+                },
+                // A driver that silently skips FLUSH looks exactly like one
+                // with nothing to flush, and the difference is whether a
+                // commit survives the host losing power. Say which it is.
+                if fs.backend_flushes() {
+                    "negotiated"
+                } else {
+                    "device has no cache"
                 }
             );
             fs

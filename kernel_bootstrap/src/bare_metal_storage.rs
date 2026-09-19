@@ -109,6 +109,20 @@ impl StorageBackend {
             Self::VirtioBlkPci(_) => StorageBackendKind::VirtioBlkPci,
         }
     }
+
+    /// Whether this backend has a writeback cache that FLUSH must reach.
+    /// Printed at boot: a driver that silently skips FLUSH looks exactly
+    /// like one that has nothing to flush, and the difference is whether a
+    /// commit survives the host losing power.
+    fn flush_supported(&self) -> bool {
+        match self {
+            Self::RamDisk(_) => false,
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlk(dev) => dev.flush_supported(),
+            #[cfg(all(not(test), target_os = "none"))]
+            Self::VirtioBlkPci(dev) => dev.flush_supported(),
+        }
+    }
 }
 
 impl BlockDevice for StorageBackend {
@@ -158,6 +172,8 @@ pub struct BareMetalFilesystem {
     pub(crate) fs: PersistentFilesystem<StorageBackend>,
     root_id: ObjectId,
     backend_kind: StorageBackendKind,
+    /// Whether that backend has a writeback cache FLUSH must reach.
+    backend_flushes: bool,
     /// True when this boot formatted the disk (no valid superblock found).
     freshly_formatted: bool,
 }
@@ -182,6 +198,7 @@ impl BareMetalFilesystem {
     pub fn new_with_boot(boot: StorageBootInfo) -> Result<Self, TransactionError> {
         let mut disk = create_storage_backend(boot);
         let backend_kind = disk.kind();
+        let backend_flushes = disk.flush_supported();
         let formatted = BlockStorage::has_valid_superblock(&mut disk);
         let (fs, freshly_formatted) = if formatted {
             (PersistentFilesystem::open(disk, ROOT_DIR_ID)?, false)
@@ -197,6 +214,7 @@ impl BareMetalFilesystem {
             fs,
             root_id,
             backend_kind,
+            backend_flushes,
             freshly_formatted,
         })
     }
@@ -215,6 +233,11 @@ impl BareMetalFilesystem {
     }
 
     /// Get the active storage backend display name.
+    /// Whether the backing device has a cache that `flush` must reach.
+    pub fn backend_flushes(&self) -> bool {
+        self.backend_flushes
+    }
+
     pub fn backend_name(&self) -> &'static str {
         match self.backend_kind {
             StorageBackendKind::RamDisk => "ramdisk",

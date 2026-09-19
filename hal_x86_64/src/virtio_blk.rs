@@ -22,6 +22,15 @@ const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+/// The device has a writeback cache and honours FLUSH.
+///
+/// Declining this left the driver with no way to make a write durable: the
+/// device may hold it in a volatile cache, and FLUSH came back UNSUPP, which
+/// the driver read as success. Every commit record the storage layer thought
+/// it had persisted was a promise the host could break -- and break out of
+/// order, so a commit record could outlive the data it describes, which is
+/// the one ordering the whole crash-safe design rests on.
+const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 
 const SECTOR_SIZE: usize = 512;
 const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
@@ -61,6 +70,9 @@ pub struct VirtioBlkDevice<T: VirtioTransport> {
     queue: Virtqueue,
     dma: DmaBuffers,
     capacity_sectors: u64,
+    /// Whether the device offered VIRTIO_BLK_F_FLUSH, and so whether a
+    /// completed write may still be sitting in a volatile cache.
+    flush_supported: bool,
 }
 
 impl<T: VirtioTransport> VirtioBlkDevice<T> {
@@ -75,9 +87,10 @@ impl<T: VirtioTransport> VirtioBlkDevice<T> {
         dma: DmaBuffers,
     ) -> Result<Self, BlockError> {
         transport.begin();
-        if !transport.negotiate_no_features() {
-            return Err(BlockError::NotReady);
-        }
+        let features = transport
+            .negotiate_features(VIRTIO_BLK_F_FLUSH)
+            .ok_or(BlockError::NotReady)?;
+        let flush_supported = features & VIRTIO_BLK_F_FLUSH != 0;
         let wanted = transport.queue_max_size(0).min(VIRTQ_MAX_SIZE as u16);
         if wanted == 0 {
             return Err(BlockError::NotReady);
@@ -96,7 +109,15 @@ impl<T: VirtioTransport> VirtioBlkDevice<T> {
             queue,
             dma,
             capacity_sectors,
+            flush_supported,
         })
+    }
+
+    /// Whether the device has a writeback cache that FLUSH must reach.
+    /// A device that does not offer it commits writes before acknowledging
+    /// them, so there is nothing to flush.
+    pub fn flush_supported(&self) -> bool {
+        self.flush_supported
     }
 
     pub fn capacity_sectors(&self) -> u64 {
@@ -206,6 +227,14 @@ impl<T: VirtioTransport> BlockDevice for VirtioBlkDevice<T> {
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
+        if !self.flush_supported {
+            // The spec is explicit: a device that does not offer
+            // VIRTIO_BLK_F_FLUSH has no writeback cache, so a completed write
+            // is already durable and there is nothing to ask for. Sending
+            // FLUSH anyway and reading UNSUPP as success is how this looked
+            // safe when it was not.
+            return Ok(());
+        }
         let desc_head = self.queue.alloc_desc(2).ok_or(BlockError::IoError)?;
         let desc_status = desc_head + 1;
         self.write_header(VIRTIO_BLK_T_FLUSH, 0);
@@ -222,9 +251,9 @@ impl<T: VirtioTransport> BlockDevice for VirtioBlkDevice<T> {
             next: 0,
         };
         match self.submit_and_wait(desc_head)? {
-            // Without VIRTIO_BLK_F_FLUSH negotiated the device answers UNSUPP;
-            // writes are already durable on the host side in that case.
-            VIRTIO_BLK_S_OK | VIRTIO_BLK_S_UNSUPP => Ok(()),
+            VIRTIO_BLK_S_OK => Ok(()),
+            // We negotiated FLUSH, so UNSUPP is the device breaking its
+            // word. Reporting success here is exactly the lie this fixes.
             _ => Err(BlockError::IoError),
         }
     }
@@ -254,6 +283,12 @@ mod tests {
         driver_ok: bool,
         last_used: u16,
         requests: Vec<u32>,
+        /// What this device claims to support, and what the driver asked for.
+        offered_features: u64,
+        requested_features: u64,
+        /// Set when a write lands but is not yet durable; FLUSH clears it.
+        /// A device with a writeback cache loses these on host power loss.
+        dirty_cache: bool,
     }
 
     impl FakeTransport {
@@ -268,7 +303,18 @@ mod tests {
                 driver_ok: false,
                 last_used: 0,
                 requests: Vec::new(),
+                // Most real devices offer FLUSH; the tests below cover both.
+                offered_features: VIRTIO_BLK_F_FLUSH,
+                requested_features: 0,
+                dirty_cache: false,
             }
+        }
+
+        /// A device with no writeback cache, which therefore does not offer
+        /// FLUSH and answers UNSUPP if one is sent anyway.
+        fn without_flush(mut self) -> Self {
+            self.offered_features = 0;
+            self
         }
 
         unsafe fn process(&mut self) {
@@ -314,11 +360,21 @@ mod tests {
                         let data = chain[1].addr as usize as *const u8;
                         let len = chain[1].len as usize;
                         core::ptr::copy_nonoverlapping(data, self.disk[off..].as_mut_ptr(), len);
+                        // A writeback cache acknowledges the write before it
+                        // is durable.
+                        if self.offered_features & VIRTIO_BLK_F_FLUSH != 0 {
+                            self.dirty_cache = true;
+                        }
                         VIRTIO_BLK_S_OK
                     }
                     VIRTIO_BLK_T_FLUSH => {
                         assert_eq!(chain.len(), 2);
-                        VIRTIO_BLK_S_UNSUPP
+                        if self.requested_features & VIRTIO_BLK_F_FLUSH != 0 {
+                            self.dirty_cache = false;
+                            VIRTIO_BLK_S_OK
+                        } else {
+                            VIRTIO_BLK_S_UNSUPP
+                        }
                     }
                     _ => 1,
                 };
@@ -339,8 +395,9 @@ mod tests {
         fn begin(&mut self) {
             self.began = true;
         }
-        fn negotiate_no_features(&mut self) -> bool {
-            true
+        fn negotiate_features(&mut self, wanted: u64) -> Option<u64> {
+            self.requested_features = wanted;
+            Some(wanted & self.offered_features)
         }
         fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16> {
             assert_eq!(index, 0);
@@ -400,6 +457,53 @@ mod tests {
         let queue = leak_queue();
         let transport = FakeTransport::new(queue, sectors);
         unsafe { VirtioBlkDevice::new(transport, queue, leak_dma()) }.expect("device")
+    }
+
+    #[test]
+    fn a_write_to_a_caching_device_is_not_durable_until_it_is_flushed() {
+        // The driver declined every optional feature, including
+        // VIRTIO_BLK_F_FLUSH. A device with a writeback cache therefore
+        // acknowledged writes it had not committed, and the FLUSH the
+        // storage layer sent came back UNSUPP -- which the driver reported
+        // as success. Every "durable" commit record was a promise the host
+        // could break, and break out of order.
+        let mut dev = device(64);
+        assert!(
+            dev.flush_supported,
+            "a device offering FLUSH must have it negotiated"
+        );
+
+        dev.write_block(3, &vec![7u8; BLOCK_SIZE]).unwrap();
+        assert!(
+            dev.transport.dirty_cache,
+            "the device acknowledged a write it has not committed"
+        );
+
+        dev.flush().expect("flush must succeed once negotiated");
+        assert!(
+            !dev.transport.dirty_cache,
+            "flush returned Ok while the write was still only in the cache"
+        );
+        assert!(dev.transport.requests.contains(&VIRTIO_BLK_T_FLUSH));
+    }
+
+    #[test]
+    fn a_device_without_a_cache_is_never_sent_a_flush() {
+        // The spec is explicit that a device which does not offer FLUSH has
+        // no writeback cache, so its completed writes are already durable.
+        // Sending FLUSH anyway and reading UNSUPP as success is what made
+        // the unsafe case look like this one.
+        let queue = leak_queue();
+        let transport = FakeTransport::new(queue, 64).without_flush();
+        let mut dev = unsafe { VirtioBlkDevice::new(transport, queue, leak_dma()) }.unwrap();
+        assert!(!dev.flush_supported);
+
+        dev.write_block(3, &vec![7u8; BLOCK_SIZE]).unwrap();
+        dev.flush().expect("nothing to flush is not a failure");
+        assert!(
+            !dev.transport.requests.contains(&VIRTIO_BLK_T_FLUSH),
+            "sent FLUSH to a device that never offered it"
+        );
     }
 
     #[test]

@@ -124,12 +124,13 @@ impl<P: PortIo> crate::virtio::VirtioTransport for VirtioPciLegacy<P> {
         self.add_status(crate::virtio::VIRTIO_STATUS_DRIVER as u8);
     }
 
-    fn negotiate_no_features(&mut self) -> bool {
-        // Legacy has no FEATURES_OK handshake; writing zero guest features
-        // simply declines everything optional.
-        let _ = self.host_features();
-        self.set_guest_features(0);
-        true
+    fn negotiate_features(&mut self, wanted: u64) -> Option<u64> {
+        // Legacy has no FEATURES_OK handshake, and only the low 32 bits
+        // exist; writing the guest features is the whole negotiation.
+        let offered = self.host_features() as u64;
+        let accepted = offered & wanted & 0xffff_ffff;
+        self.set_guest_features(accepted as u32);
+        Some(accepted)
     }
 
     fn setup_queue(

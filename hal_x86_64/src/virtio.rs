@@ -465,7 +465,13 @@ pub trait VirtioTransport {
     fn begin(&mut self);
     /// Negotiate features: the driver accepts none beyond the baseline.
     /// Returns false if the device rejected the negotiation.
-    fn negotiate_no_features(&mut self) -> bool;
+    fn negotiate_no_features(&mut self) -> bool {
+        self.negotiate_features(0).is_some()
+    }
+    /// Ask for the features in `wanted` that the device also offers.
+    /// Returns the set actually in effect, or `None` if the device rejected
+    /// the negotiation.
+    fn negotiate_features(&mut self, wanted: u64) -> Option<u64>;
     /// Configure queue `index` with `size` entries at `placement`; returns
     /// the size actually in effect (legacy transports fix the size).
     fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16>;
@@ -483,10 +489,17 @@ impl VirtioTransport for VirtioMmioDevice {
         self.add_status(VIRTIO_STATUS_DRIVER);
     }
 
-    fn negotiate_no_features(&mut self) -> bool {
-        self.set_driver_features(0, 0);
+    fn negotiate_features(&mut self, wanted: u64) -> Option<u64> {
+        let offered = (self.device_features(0) as u64) | ((self.device_features(1) as u64) << 32);
+        let accepted = offered & wanted;
+        self.set_driver_features(0, accepted as u32);
+        self.set_driver_features(1, (accepted >> 32) as u32);
         self.add_status(VIRTIO_STATUS_FEATURES_OK);
-        (self.status() & VIRTIO_STATUS_FEATURES_OK) != 0
+        if (self.status() & VIRTIO_STATUS_FEATURES_OK) != 0 {
+            Some(accepted)
+        } else {
+            None
+        }
     }
 
     fn setup_queue(&mut self, index: u16, size: u16, placement: QueuePlacement) -> Option<u16> {
