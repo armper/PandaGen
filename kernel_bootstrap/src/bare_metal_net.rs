@@ -154,7 +154,7 @@ unsafe impl Send for NetStack {}
 impl NetStack {
     /// Find a virtio-net PCI function, bring it up, and configure the
     /// interface with QEMU user-networking defaults.
-    pub fn probe(boot: StorageBootInfo) -> Option<Self> {
+    pub fn probe(boot: StorageBootInfo, remote_enabled: bool) -> Option<Self> {
         let mut io = RealPortIo::new();
         let info = hal_x86_64::pci::find_virtio_net(&mut io)?;
         let base = info.io_base()?;
@@ -180,10 +180,14 @@ impl NetStack {
         let mac = device.mac();
         let mut iface = Interface::new(Config::unconfigured(mac));
         iface.bind(UDP_ECHO_PORT);
-        iface.bind(REMOTE_PORT);
+        if remote_enabled {
+            iface.bind(REMOTE_PORT);
+        }
         iface.bind(DHCP_CLIENT_PORT);
         let _ = iface.tcp_listen(TCP_ECHO_PORT);
-        let _ = iface.tcp_listen(TCP_COMMAND_PORT);
+        if remote_enabled {
+            let _ = iface.tcp_listen(TCP_COMMAND_PORT);
+        }
         let _ = iface.tcp_listen(HTTP_PORT);
         Some(Self {
             device,

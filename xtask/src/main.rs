@@ -128,10 +128,47 @@ struct UdpTransport {
     port: u16,
 }
 
-/// Master secret for remote calls: `PANDAGEN_REMOTE_TOKEN` or the dev default.
+/// Where `cargo xtask iso` leaves the secret it baked into the image.
+const REMOTE_TOKEN_FILE: &str = "dist/remote-token";
+
+/// The secret for the image currently in `dist/`, creating one if this is the
+/// first build. Not in version control: it is per-machine, per-build.
+fn provision_remote_token(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let path = root.join(REMOTE_TOKEN_FILE);
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let existing = existing.trim().to_string();
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    // 128 bits from the OS, hex encoded so it survives a kernel command line.
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read;
+        f.read_exact(&mut bytes)
+    })?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, format!("{token}\n"))?;
+    println!("remote secret written to {REMOTE_TOKEN_FILE} (keep it out of version control)");
+    Ok(token)
+}
+
+/// Master secret for remote calls: `PANDAGEN_REMOTE_TOKEN`, else the secret
+/// baked into the image in `dist/`, else the development default.
 fn remote_token() -> String {
-    env::var("PANDAGEN_REMOTE_TOKEN")
-        .unwrap_or_else(|_| remote_ipc::DEFAULT_REMOTE_TOKEN.to_string())
+    if let Ok(from_env) = env::var("PANDAGEN_REMOTE_TOKEN") {
+        return from_env;
+    }
+    if let Ok(from_file) = fs::read_to_string(repo_root().join(REMOTE_TOKEN_FILE)) {
+        let trimmed = from_file.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    remote_ipc::DEFAULT_REMOTE_TOKEN.to_string()
 }
 
 /// Caller name for remote calls: `PANDAGEN_REMOTE_CALLER` or `xtask`.
@@ -922,11 +959,24 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     fs::create_dir_all(staging.join("EFI/BOOT"))?;
     fs::create_dir_all(staging.join("limine"))?;
 
+    // Every build gets its own remote secret, baked into the boot config and
+    // left in dist/ for the client. The kernel refuses to open its remote
+    // ports without one, so an image built from this repository is not
+    // controllable by anyone who merely has the repository.
+    let token = provision_remote_token(&root)?;
     let limine_conf = root.join("boot/limine.conf");
     let limine_cfg = root.join("boot/limine.cfg");
-    copy_file(limine_conf.clone(), staging.join("boot/limine.conf"))?;
-    copy_file(limine_conf.clone(), staging.join("limine.conf"))?;
-    copy_file(limine_conf, staging.join("limine/limine.conf"))?;
+    let conf_text = fs::read_to_string(&limine_conf)?;
+    let conf_text = conf_text.replace("@REMOTE_TOKEN@", &token);
+    let staged_conf = staging.join("boot/limine.conf");
+    if let Some(parent) = staged_conf.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&staged_conf, &conf_text)?;
+    fs::write(staging.join("limine.conf"), &conf_text)?;
+    let limine_dir = staging.join("limine");
+    fs::create_dir_all(&limine_dir)?;
+    fs::write(limine_dir.join("limine.conf"), &conf_text)?;
     copy_file(limine_cfg.clone(), staging.join("boot/limine.cfg"))?;
     copy_file(limine_cfg.clone(), staging.join("limine.cfg"))?;
     copy_file(limine_cfg, staging.join("limine/limine.cfg"))?;

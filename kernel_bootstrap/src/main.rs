@@ -1183,7 +1183,8 @@ pub extern "C" fn rust_main() -> ! {
         kernel_phys: kernel.boot.kernel_phys,
         kernel_virt: kernel.boot.kernel_virt,
     };
-    match bare_metal_net::NetStack::probe(storage_boot) {
+    let remote_enabled = REMOTE_ENABLED.load(core::sync::atomic::Ordering::Acquire);
+    match bare_metal_net::NetStack::probe(storage_boot, remote_enabled) {
         Some(mut net) => {
             net.dhcp(&get_tick_count, &mut serial);
             klog!(
@@ -3046,11 +3047,12 @@ fn present_framebuffer_shadow(
     }
 }
 
-/// Present the composed desktop RGBA frame (graphics display mode).
-/// Read-only commands a remote caller may run.
-const REMOTE_ALLOWED_COMMANDS: [&str; 8] = [
-    "help", "boot", "mem", "cpus", "heap", "ticks", "net", "spin",
-];
+/// Commands a remote caller may run.
+///
+/// `boot` is deliberately absent: it prints the kernel's physical and virtual
+/// load addresses and the HHDM offset, which is exactly what turns a memory
+/// bug into an exploit.
+const REMOTE_ALLOWED_COMMANDS: [&str; 7] = ["help", "mem", "cpus", "heap", "ticks", "net", "spin"];
 
 /// Whether a remote command line is on the read-only allowlist. `net`
 /// is allowed only without arguments (status).
@@ -4173,9 +4175,16 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
     if let Some(cmdline) = EXECUTABLE_CMDLINE_REQUEST.get_response() {
         let bytes = cmdline.cmdline().to_bytes();
         info.display_mode = display_mode::DisplayMode::from_cmdline(bytes);
-        if let Some(token) = RemoteToken::from_cmdline(bytes) {
-            *REMOTE_TOKEN.lock() = token;
-            kprintln!(serial, "remote: token set from command line");
+        match RemoteToken::from_cmdline(bytes) {
+            Some(token) => {
+                *REMOTE_TOKEN.lock() = token;
+                REMOTE_ENABLED.store(true, core::sync::atomic::Ordering::Release);
+                kprintln!(serial, "remote: control enabled by command-line secret");
+            }
+            None => kprintln!(
+                serial,
+                "remote: no remote_token= given; remote control ports stay closed"
+            ),
         }
         if let Some(callers) = RemoteCallers::from_cmdline(bytes) {
             kprintln!(serial, "remote: {} caller(s) allowed", callers.len);
@@ -4386,6 +4395,12 @@ static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 /// Local APIC register window shared by every CPU (set once the HHDM is known).
 static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
 
+/// Whether a remote secret was supplied at boot. Without one the remote
+/// control ports are never opened: the compiled-in default is a constant
+/// published in this repository, and a machine that accepts it is
+/// controllable by anyone who has read the source.
+static REMOTE_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Storage backend name, for the HTTP status page.
 static STORAGE_BACKEND: hal_x86_64::SpinLock<&'static str> = hal_x86_64::SpinLock::new("none");
 
@@ -4468,12 +4483,22 @@ impl RemoteToken {
         &self.bytes[..self.len]
     }
 
-    /// `remote_token=<value>` from the kernel command line, if present.
+    /// `remote_token=<value>` from the kernel command line, if it names a
+    /// real secret.
+    ///
+    /// A value that is still the build-time placeholder, or the development
+    /// default, is treated as absent: both are constants published in this
+    /// repository, and accepting either would let anyone who has read the
+    /// source drive the machine.
     fn from_cmdline(cmdline: &[u8]) -> Option<Self> {
         let text = core::str::from_utf8(cmdline).ok()?;
         text.split_ascii_whitespace()
             .filter_map(|token| token.strip_prefix("remote_token="))
-            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                !value.is_empty()
+                    && !value.contains('@')
+                    && *value != remote_ipc::DEFAULT_REMOTE_TOKEN
+            })
             .last()
             .map(Self::from_str)
     }

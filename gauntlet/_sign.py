@@ -23,7 +23,26 @@ DEFAULT_MASTER = "pandagen-dev"
 
 
 def master_token():
-    return os.environ.get("PANDAGEN_REMOTE_TOKEN", DEFAULT_MASTER).encode()
+    """The secret for the image under test.
+
+    `cargo xtask iso` bakes a fresh random secret into each build and leaves
+    it in dist/remote-token; the kernel refuses to open its remote ports
+    without one. Fall back to the published development constant only when
+    there is no build.
+    """
+    from_env = os.environ.get("PANDAGEN_REMOTE_TOKEN")
+    if from_env:
+        return from_env.encode()
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(os.path.dirname(here), "dist", "remote-token")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            token = handle.read().strip()
+            if token:
+                return token.encode()
+    except OSError:
+        pass
+    return DEFAULT_MASTER.encode()
 
 
 def caller_name():
