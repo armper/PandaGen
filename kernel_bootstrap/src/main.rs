@@ -3324,10 +3324,14 @@ fn run_present_bands(bands: &[framebuffer::PresentBand]) {
         let mut slots = PRESENT_BANDS.lock();
         slots[..bands.len()].copy_from_slice(bands);
     }
-    WORK.reset();
-    let mut ids = [u32::MAX; framebuffer::MAX_PRESENT_BANDS];
+    let generation = PRESENT_GENERATION
+        .fetch_add(1, core::sync::atomic::Ordering::AcqRel)
+        .wrapping_add(1);
+    let mut ids = [u64::MAX; framebuffer::MAX_PRESENT_BANDS];
     for (i, slot) in ids.iter_mut().enumerate().take(bands.len()).skip(1) {
-        *slot = WORK.submit(JOB_PRESENT_BAND, i as u64).unwrap_or(u32::MAX);
+        *slot = WORK
+            .submit(JOB_PRESENT_BAND, (generation << 8) | i as u64)
+            .unwrap_or(u64::MAX);
     }
     #[cfg(not(test))]
     if let Some(mut apic) = LAPIC.get() {
@@ -3336,14 +3340,20 @@ fn run_present_bands(bands: &[framebuffer::PresentBand]) {
     // SAFETY: see `present_rgba8888_bands`.
     unsafe { framebuffer::convert_rgba_rows(&bands[0]) };
     for (i, id) in ids.iter().enumerate().take(bands.len()).skip(1) {
-        if *id == u32::MAX || WORK.wait(*id, 100_000_000).is_none() {
+        if *id == u64::MAX || WORK.wait(*id, 100_000_000).is_none() {
             PRESENT_FALLBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            // Nobody picked it up (or it is still running: the queue slot is
-            // consumed, so redoing the rows here is only redundant work).
+            // Nobody picked it up in time. Reclaim the ring slot if the job
+            // is still queued, then convert the band here.
+            if *id != u64::MAX {
+                WORK.cancel(*id);
+            }
             // SAFETY: as above.
             unsafe { framebuffer::convert_rgba_rows(&bands[i]) };
         }
     }
+    // Any worker still holding a band job for this generation will now see a
+    // newer one and leave the buffers alone.
+    PRESENT_GENERATION.fetch_add(1, core::sync::atomic::Ordering::Release);
 }
 
 fn present_desktop_frame(
@@ -4473,6 +4483,11 @@ static PRESENT_BANDS: hal_x86_64::SpinLock<
     [framebuffer::PresentBand; framebuffer::MAX_PRESENT_BANDS],
 > = hal_x86_64::SpinLock::new([framebuffer::PresentBand::EMPTY; framebuffer::MAX_PRESENT_BANDS]);
 
+/// Incremented for every parallel present. A band job carries the generation
+/// it was queued for, so a worker that wakes up late does not paint a band
+/// belonging to a frame the boot CPU has already moved past.
+static PRESENT_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Whether desktop presents are spread across the application processors.
 static PARALLEL_PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
@@ -4482,10 +4497,18 @@ fn run_job(job: hal_x86_64::Job) -> u64 {
             (1..=job.arg).fold(0u64, |acc, i| acc.wrapping_add(i.wrapping_mul(i)))
         }
         JOB_PRESENT_BAND => {
-            let band = PRESENT_BANDS.lock()[job.arg as usize % framebuffer::MAX_PRESENT_BANDS];
+            // arg packs the present generation and the band index.
+            let generation = job.arg >> 8;
+            let index = (job.arg & 0xFF) as usize;
+            if generation != PRESENT_GENERATION.load(core::sync::atomic::Ordering::Acquire) {
+                // The boot CPU gave up waiting and moved on; those buffers
+                // may already describe a different frame.
+                return 0;
+            }
+            let band = PRESENT_BANDS.lock()[index % framebuffer::MAX_PRESENT_BANDS];
             if band.rows() > 0 {
-                // SAFETY: the boot CPU keeps both buffers alive until every
-                // band job of this present has completed.
+                // SAFETY: the generation still matches, so the boot CPU is
+                // inside the present that published these buffers.
                 unsafe { framebuffer::convert_rgba_rows(&band) };
             }
             band.rows() as u64
@@ -5486,12 +5509,11 @@ impl CommandService {
             let _ = writeln!(output, "smp: no application processors online");
             return;
         }
-        WORK.reset();
         let before = hal_x86_64::lapic::IPI_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-        let mut ids = [0u32; 32];
+        let mut ids = [u64::MAX; 32];
         for (i, slot) in ids.iter_mut().enumerate().take(jobs as usize) {
             let arg = 1_000 * (i as u64 + 1);
-            *slot = WORK.submit(JOB_SUM_OF_SQUARES, arg).unwrap_or(u32::MAX);
+            *slot = WORK.submit(JOB_SUM_OF_SQUARES, arg).unwrap_or(u64::MAX);
         }
         #[cfg(not(test))]
         let woke = LAPIC
@@ -5505,6 +5527,10 @@ impl CommandService {
         let mut done = 0;
         let mut lines = FixedBuffer::<RESPONSE_MAX>::new();
         for (i, id) in ids.iter().enumerate().take(jobs as usize) {
+            if *id == u64::MAX {
+                let _ = writeln!(lines, "  job{i} not queued");
+                continue;
+            }
             match WORK.wait(*id, 200_000_000) {
                 Some(r) => {
                     done += 1;
