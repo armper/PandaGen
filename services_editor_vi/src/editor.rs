@@ -66,6 +66,10 @@ pub enum EditorAction {
 pub struct Editor {
     state: EditorState,
     document: Option<DocumentHandle>,
+    /// The name of a document the user opened that does not exist yet.
+    /// Saving creates it under this name rather than writing into whatever
+    /// document happened to be open before.
+    pending_path: Option<String>,
     io: Option<Box<dyn EditorIo>>,
     view: EditorView,
     /// View handles for publishing (optional)
@@ -82,6 +86,7 @@ impl Editor {
         Self {
             state: EditorState::new(),
             document: None,
+            pending_path: None,
             io: None,
             view: EditorView::default(),
             main_view_handle: None,
@@ -96,6 +101,7 @@ impl Editor {
         Self {
             state: EditorState::new(),
             document: None,
+            pending_path: None,
             io: None,
             view: EditorView::new(viewport_lines),
             main_view_handle: None,
@@ -144,14 +150,21 @@ impl Editor {
                 Ok(())
             }
             Err(IoError::NotFound) => {
-                // File not found - create empty buffer with path as target
-                if let Some(path) = options.path {
-                    self.state.set_document_label(Some(path.clone()));
-                    self.state
-                        .set_status_message(format!("[New File] {}", path));
-                    // Don't set a document handle yet - will be created on save
-                } else {
-                    self.state.set_status_message("[New File]");
+                // A file that is not there is still a different document.
+                // This used to relabel the buffer and return Ok without
+                // touching either the text or the handle: the user saw
+                // "[New File] new.txt", typed, saved -- and their work went
+                // into whichever file they had open before, which they had
+                // never asked to change. The new file was never created.
+                self.state.load_content(String::new());
+                self.document = None;
+                self.pending_path = options.path.clone();
+                self.state.set_document_label(options.path.clone());
+                match options.path {
+                    Some(path) => self
+                        .state
+                        .set_status_message(format!("[New File] {}", path)),
+                    None => self.state.set_status_message("[New File]"),
                 }
                 Ok(())
             }
@@ -177,6 +190,7 @@ impl Editor {
     /// Load document content (simulated for now, real I/O would use storage service)
     pub fn load_document(&mut self, content: String, handle: DocumentHandle) {
         let label = handle.path_label.clone();
+        self.pending_path = None;
         self.state.load_content(content);
         self.state.set_document_label(label);
         self.document = Some(handle);
@@ -498,6 +512,10 @@ impl Editor {
             self.state
                 .set_status_message(format!("Saved version {}", new_version));
             Ok(new_version)
+        } else if let (true, Some(path)) = (self.io.is_some(), self.pending_path.clone()) {
+            // A file the user opened that did not exist yet: saving it means
+            // creating it, under the name they asked for.
+            self.save_document_as(&path)
         } else if self.io.is_some() {
             // Have I/O but no document - suggest Save As
             self.state

@@ -770,3 +770,180 @@ fn test_search_not_found() {
     // Status should indicate not found
     assert!(editor.state().status_message().contains("not found"));
 }
+
+// ---------------------------------------------------------------------------
+// A file must not be able to become another file.
+//
+// Both of these end the same way: the user believes they are working on one
+// file and the editor writes their work into a different one. A fake I/O
+// layer keyed by path is enough to see it; no storage is involved.
+// ---------------------------------------------------------------------------
+
+/// An in-memory filesystem, so a test can say exactly what is on disk.
+struct FakeIo {
+    files: Rc<RefCell<std::collections::HashMap<String, String>>>,
+}
+
+fn fake_files(entries: &[(&str, &str)]) -> Rc<RefCell<std::collections::HashMap<String, String>>> {
+    let mut files = std::collections::HashMap::new();
+    for (name, body) in entries {
+        files.insert((*name).to_string(), (*body).to_string());
+    }
+    Rc::new(RefCell::new(files))
+}
+
+fn id_for(path: &str) -> ObjectId {
+    let mut bytes = [0u8; 16];
+    let name = path.as_bytes();
+    let take = name.len().min(16);
+    bytes[..take].copy_from_slice(&name[..take]);
+    ObjectId::from_bytes(bytes)
+}
+
+impl EditorIo for FakeIo {
+    fn open(&mut self, options: OpenOptions) -> Result<OpenResult, IoError> {
+        let path = options.path.clone().ok_or(IoError::NotFound)?;
+        let content = self
+            .files
+            .borrow()
+            .get(&path)
+            .cloned()
+            .ok_or(IoError::NotFound)?;
+        Ok(OpenResult {
+            content,
+            handle: DocumentHandle::new(id_for(&path), VersionId::new(), Some(path), true),
+        })
+    }
+
+    fn save(&mut self, handle: &DocumentHandle, content: &str) -> Result<SaveResult, IoError> {
+        let path = handle.path_label.clone().ok_or(IoError::NotFound)?;
+        self.files.borrow_mut().insert(path, content.to_string());
+        Ok(SaveResult::new(
+            VersionId::new(),
+            true,
+            "Saved successfully",
+            Some(handle.object_id),
+        ))
+    }
+
+    fn save_as(&mut self, path: &str, content: &str) -> Result<SaveResult, IoError> {
+        self.files
+            .borrow_mut()
+            .insert(path.to_string(), content.to_string());
+        Ok(SaveResult::new(
+            VersionId::new(),
+            true,
+            "Saved successfully",
+            Some(id_for(path)),
+        ))
+    }
+}
+
+fn editor_over(files: &Rc<RefCell<std::collections::HashMap<String, String>>>) -> Editor {
+    let mut editor = Editor::new();
+    editor.set_io(Box::new(FakeIo {
+        files: files.clone(),
+    }));
+    editor
+}
+
+#[test]
+fn opening_a_file_that_does_not_exist_must_not_leave_the_previous_one_loaded() {
+    // `:e new.txt` on a missing file relabelled the buffer and returned Ok
+    // without touching the buffer or the document handle. The user saw
+    // "[New File] new.txt", typed, and `:w` wrote their work into a.txt --
+    // destroying a file they had not opened, while new.txt was never created.
+    let files = fake_files(&[("a.txt", "AAA")]);
+    let mut editor = editor_over(&files);
+
+    editor
+        .open_with(OpenOptions::new().with_path("a.txt"))
+        .unwrap();
+    assert_eq!(editor.get_content(), "AAA");
+
+    editor
+        .open_with(OpenOptions::new().with_path("new.txt"))
+        .unwrap();
+    assert_eq!(
+        editor.get_content(),
+        "",
+        "opening a file that does not exist must give an empty buffer, not \
+         leave the previous file's text in place"
+    );
+    assert_ne!(
+        editor.document().and_then(|d| d.path_label.clone()),
+        Some("a.txt".to_string()),
+        "the document handle still points at the file the user left, so the \
+         next save writes their work into it"
+    );
+}
+
+#[test]
+fn undo_must_not_reach_back_into_a_file_the_user_already_left() {
+    // `load_content` reset the buffer, cursor and dirty flag but not the undo
+    // stack. Open a.txt, edit it, open b.txt, press `u` once -- and b.txt's
+    // buffer became a.txt's text. The next `:w` destroyed b.txt.
+    let files = fake_files(&[("a.txt", "AAA"), ("b.txt", "BBB")]);
+    let mut editor = editor_over(&files);
+
+    editor
+        .open_with(OpenOptions::new().with_path("a.txt"))
+        .unwrap();
+    editor.process_input(press_key(KeyCode::I)).unwrap();
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    editor.process_input(press_key(KeyCode::Escape)).unwrap();
+
+    editor
+        .open_with(OpenOptions::new().with_path("b.txt"))
+        .unwrap();
+    assert_eq!(editor.get_content(), "BBB");
+
+    // One undo, in a file whose own history is empty.
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(
+        editor.get_content(),
+        "BBB",
+        "undo in a freshly opened file reached back into the previous one"
+    );
+}
+
+#[test]
+fn opening_a_file_and_saving_it_does_not_change_it() {
+    // `TextBuffer::from_string` splits on `lines()` and `as_string` joins with
+    // `\n`, so the trailing newline every text file ends with was eaten by
+    // every open-and-save round trip, whether or not the user typed anything.
+    let files = fake_files(&[("notes.txt", "one\ntwo\n")]);
+    let mut editor = editor_over(&files);
+
+    editor
+        .open_with(OpenOptions::new().with_path("notes.txt"))
+        .unwrap();
+    editor.save_current_document().expect("save must succeed");
+
+    assert_eq!(
+        files.borrow().get("notes.txt").unwrap(),
+        "one\ntwo\n",
+        "opening a file and saving it without typing anything changed it"
+    );
+}
+
+#[test]
+fn a_cursor_inside_a_multi_byte_character_does_not_kill_the_machine() {
+    // The vi editor's own buffer has the same byte-index-as-column defect as
+    // editor_core. A panic here is an abort, so this is the machine.
+    let files = fake_files(&[("accents.txt", "héllo")]);
+    let mut editor = editor_over(&files);
+    editor
+        .open_with(OpenOptions::new().with_path("accents.txt"))
+        .unwrap();
+
+    // Two presses of `l` put the column inside the `é`.
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::L)).unwrap();
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    assert_eq!(editor.get_content(), "hllo", "the whole character goes");
+
+    // And searching across one must not panic either.
+    editor.state_mut().append_to_search('o');
+    editor.state_mut().find_next(true);
+}

@@ -31,6 +31,22 @@ pub struct TextBuffer {
     lines: Vec<String>,
 }
 
+/// The largest character boundary at or before `col`.
+///
+/// The cursor column is counted in keystrokes but used as a byte index.
+/// On any line holding a character outside ASCII the two disagree, and
+/// `String::remove`, `insert` and `split_off` panic on an index inside a
+/// character. The kernel aborts on panic, so that is the machine gone, not
+/// just the editor. Snapping to a boundary makes the operation act on the
+/// whole character, which is what the user meant.
+pub(crate) fn floor_boundary(line: &str, col: usize) -> usize {
+    let mut col = col.min(line.len());
+    while col > 0 && !line.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
+}
+
 impl TextBuffer {
     pub fn new() -> Self {
         Self {
@@ -78,7 +94,8 @@ impl TextBuffer {
             return false;
         }
 
-        line.insert(pos.col, ch);
+        let at = floor_boundary(line, pos.col);
+        line.insert(at, ch);
         true
     }
 
@@ -93,7 +110,8 @@ impl TextBuffer {
             return false;
         }
 
-        let rest = line.split_off(pos.col);
+        let at = floor_boundary(line, pos.col);
+        let rest = line.split_off(at);
         self.lines.insert(pos.row + 1, rest);
         true
     }
@@ -109,7 +127,7 @@ impl TextBuffer {
             return false;
         }
 
-        line.remove(pos.col);
+        line.remove(floor_boundary(line, pos.col));
         true
     }
 
@@ -119,8 +137,13 @@ impl TextBuffer {
         if pos.col > 0 {
             // Delete character on same line
             let line = &mut self.lines[pos.row];
-            line.remove(pos.col - 1);
-            Some(Position::new(pos.row, pos.col - 1))
+            let at = floor_boundary(line, pos.col);
+            let previous = floor_boundary(line, at.saturating_sub(1));
+            if previous == at {
+                return Some(Position::new(pos.row, at));
+            }
+            line.remove(previous);
+            Some(Position::new(pos.row, previous))
         } else if pos.row > 0 {
             // Join with previous line
             let current_line = self.lines.remove(pos.row);
@@ -156,6 +179,48 @@ impl TextBuffer {
 impl Default for TextBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    // The cursor column counts keystrokes but indexes bytes. On a line with
+    // any character outside ASCII the two disagree, and `String::remove`,
+    // `insert` and slicing panic on an index that is not a char boundary.
+    // The kernel aborts on panic, so this is the machine, not the editor.
+
+    #[test]
+    fn deleting_inside_a_multi_byte_character_does_not_panic() {
+        let mut buffer = TextBuffer::from_string("héllo".to_string());
+        // Two presses of `l` from the start: col 2 is inside the `é`.
+        assert!(buffer.delete_char(Position::new(0, 2)));
+        assert_eq!(buffer.line(0), Some("hllo"), "the whole character goes");
+    }
+
+    #[test]
+    fn inserting_inside_a_multi_byte_character_does_not_panic() {
+        let mut buffer = TextBuffer::from_string("héllo".to_string());
+        assert!(buffer.insert_char(Position::new(0, 2), 'x'));
+        assert!(
+            buffer.line(0).is_some_and(|l| l.contains('x')),
+            "the character must land somewhere sensible"
+        );
+    }
+
+    #[test]
+    fn backspacing_inside_a_multi_byte_character_does_not_panic() {
+        let mut buffer = TextBuffer::from_string("héllo".to_string());
+        assert!(buffer.backspace(Position::new(0, 3)).is_some());
+    }
+
+    #[test]
+    fn splitting_a_line_inside_a_multi_byte_character_does_not_panic() {
+        let mut buffer = TextBuffer::from_string("héllo".to_string());
+        assert!(buffer.insert_newline(Position::new(0, 2)));
+        assert_eq!(buffer.line_count(), 2);
     }
 }
 

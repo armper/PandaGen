@@ -486,6 +486,7 @@ impl EditorCore {
         while row < line_count {
             if let Some(line) = self.buffer.line(row) {
                 if col < line.len() {
+                    let col = crate::buffer::floor_boundary(line, col);
                     if let Some(pos) = line[col..].find(query.as_str()) {
                         self.cursor = Position::new(row, col + pos);
                         return true;
@@ -510,6 +511,7 @@ impl EditorCore {
         if self.search_query.is_empty() && start_pos.row < line_count {
             if let Some(line) = self.buffer.line(start_pos.row) {
                 let end_col = start_pos.col.min(line.len());
+                let end_col = crate::buffer::floor_boundary(line, end_col);
                 if let Some(pos) = line[..end_col].find(query.as_str()) {
                     self.cursor = Position::new(start_pos.row, pos);
                     return true;

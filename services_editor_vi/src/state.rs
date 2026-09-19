@@ -115,26 +115,56 @@ impl Default for Cursor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     lines: Vec<String>,
+    /// Whether the text this buffer was loaded from ended with a newline,
+    /// so saving it back does not quietly remove one.
+    trailing_newline: bool,
+}
+
+/// The largest character boundary at or before `col`.
+///
+/// The cursor column is counted in keystrokes but used as a byte index. On
+/// any line holding a character outside ASCII the two disagree, and
+/// `String::remove`, `insert`, `split_off` and slicing all panic on an index
+/// inside a character. The kernel aborts on panic, so that is the machine
+/// gone, not just the editor.
+fn floor_boundary(line: &str, col: usize) -> usize {
+    let mut col = col.min(line.len());
+    while col > 0 && !line.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
 }
 
 impl TextBuffer {
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
+            trailing_newline: false,
         }
     }
 
     pub fn from_string(content: String) -> Self {
+        let trailing_newline = content.ends_with('\n');
         let lines = if content.is_empty() {
             vec![String::new()]
         } else {
             content.lines().map(|s| s.to_string()).collect()
         };
-        Self { lines }
+        Self {
+            lines,
+            trailing_newline,
+        }
     }
 
     pub fn as_string(&self) -> String {
-        self.lines.join("\n")
+        let mut text = self.lines.join("\n");
+        // `lines()` discards the final newline that every text file ends
+        // with, so opening a file and saving it -- without typing anything --
+        // used to change it on disk. Remember whether it was there.
+        if self.trailing_newline {
+            text.push('\n');
+        }
+        text
     }
 
     pub fn line_count(&self) -> usize {
@@ -164,7 +194,8 @@ impl TextBuffer {
             return false;
         }
 
-        line.insert(pos.col, ch);
+        let at = floor_boundary(line, pos.col);
+        line.insert(at, ch);
         true
     }
 
@@ -179,7 +210,8 @@ impl TextBuffer {
             return false;
         }
 
-        let rest = line.split_off(pos.col);
+        let at = floor_boundary(line, pos.col);
+        let rest = line.split_off(at);
         self.lines.insert(pos.row + 1, rest);
         true
     }
@@ -195,7 +227,7 @@ impl TextBuffer {
             return false;
         }
 
-        line.remove(pos.col);
+        line.remove(floor_boundary(line, pos.col));
         true
     }
 
@@ -204,7 +236,9 @@ impl TextBuffer {
         if pos.col > 0 {
             // Delete character on same line
             let line = &mut self.lines[pos.row];
-            line.remove(pos.col - 1);
+            let at = floor_boundary(line, pos.col);
+            let previous = floor_boundary(line, at.saturating_sub(1));
+            line.remove(previous);
             return Some(Position::new(pos.row, pos.col - 1));
         } else if pos.row > 0 {
             // Join with previous line
@@ -396,10 +430,18 @@ impl EditorState {
         self.document_label = label;
     }
 
+    /// Replace everything that belongs to the document being edited.
+    ///
+    /// The undo history belongs to it too. Leaving it behind meant one `u`
+    /// in a freshly opened file pulled the *previous* file's text into the
+    /// buffer, and the next `:w` wrote it to disk -- destroying a file the
+    /// user had only looked at.
     pub fn load_content(&mut self, content: String) {
         self.buffer = TextBuffer::from_string(content);
         self.cursor = Cursor::new();
         self.dirty = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     /// Get current search query
@@ -456,6 +498,7 @@ impl EditorState {
             while row < line_count {
                 if let Some(line) = self.buffer.line(row) {
                     if col < line.len() {
+                        let col = floor_boundary(line, col);
                         if let Some(pos) = line[col..].find(query) {
                             self.cursor.set_position(Position::new(row, col + pos));
                             return true;
@@ -480,6 +523,7 @@ impl EditorState {
             if self.search_query.is_empty() && start_pos.row < line_count {
                 if let Some(line) = self.buffer.line(start_pos.row) {
                     let end_col = start_pos.col.min(line.len());
+                    let end_col = floor_boundary(line, end_col);
                     if let Some(pos) = line[..end_col].find(query) {
                         self.cursor.set_position(Position::new(start_pos.row, pos));
                         return true;
