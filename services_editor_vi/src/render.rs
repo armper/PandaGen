@@ -47,17 +47,26 @@ impl EditorView {
         output
     }
 
+    /// Draw `line` with the cursor marked at byte offset `col`.
+    ///
+    /// This compared a *character* index against a *byte* column, so on any
+    /// line holding a character outside ASCII the marker drifted -- or
+    /// vanished, when no character index ever equalled the byte offset. The
+    /// cosmetic sibling of the panic that the same confusion caused in the
+    /// buffer.
     fn render_line_with_cursor(&self, line: &str, col: usize) -> String {
         let mut result = String::new();
-        for (i, ch) in line.chars().enumerate() {
-            if i == col {
+        let mut marked = false;
+        for (offset, ch) in line.char_indices() {
+            if offset == col {
                 result.push_str(&format!("[{}]", ch));
+                marked = true;
             } else {
                 result.push(ch);
             }
         }
-        // Cursor at end of line
-        if col == line.len() {
+        // Cursor at end of line, or past a boundary we never matched.
+        if !marked && col >= line.len() {
             result.push_str("[ ]");
         }
         result
@@ -428,5 +437,25 @@ mod tests {
         assert!(status.contains("Custom message"));
         // Hint should not appear when status message is present
         assert!(!status.contains("Normal — i=Insert"));
+    }
+}
+
+#[cfg(test)]
+mod cursor_position_tests {
+    use super::*;
+
+    #[test]
+    fn the_cursor_is_drawn_where_the_column_points() {
+        let renderer = EditorView::default();
+
+        // Plain ASCII: character index and byte offset agree.
+        assert_eq!(renderer.render_line_with_cursor("abc", 1), "a[b]c");
+        assert_eq!(renderer.render_line_with_cursor("abc", 3), "abc[ ]");
+
+        // With a two-byte character in front, the byte offset of `l` is 3.
+        // Comparing against the character index put the marker on `é`.
+        assert_eq!(renderer.render_line_with_cursor("héllo", 3), "hé[l]lo");
+        assert_eq!(renderer.render_line_with_cursor("héllo", 0), "[h]éllo");
+        assert_eq!(renderer.render_line_with_cursor("héllo", 1), "h[é]llo");
     }
 }

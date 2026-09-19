@@ -244,7 +244,15 @@ impl FilePicker {
                 return FilePickerResult::Continue;
             };
 
-            // Push current directory onto stack
+            // Push current directory onto stack. Bounded: a full
+            // `DirectoryView` is cloned per descent, and nothing in
+            // `services_fs_view::link` forbids a directory that contains
+            // itself, so an unbounded stack is a way to exhaust a machine
+            // that may have twelve megabytes. No real tree is this deep.
+            const MAX_DEPTH: usize = 64;
+            if self.directory_stack.len() >= MAX_DEPTH {
+                return FilePickerResult::Continue;
+            }
             self.directory_stack.push(self.current_directory.clone());
 
             // Navigate into the subdirectory

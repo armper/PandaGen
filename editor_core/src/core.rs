@@ -59,6 +59,8 @@ pub struct EditorCore {
     status_message: String,
     undo_stack: Vec<BufferSnapshot>,
     redo_stack: Vec<BufferSnapshot>,
+    /// The text as it stands on disk, so undoing back to it counts as clean.
+    saved_text: String,
 }
 
 impl EditorCore {
@@ -75,7 +77,18 @@ impl EditorCore {
             status_message: String::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            saved_text: String::new(),
         }
+    }
+
+    /// Whether the buffer differs from what is on disk.
+    ///
+    /// `undo` and `redo` used to set this unconditionally, so undoing an
+    /// edit all the way back to the saved text still blocked `:q` -- the
+    /// editor insisted there was unsaved work when the file on disk and the
+    /// buffer were identical.
+    fn recompute_dirty(&mut self) {
+        self.dirty = self.buffer.as_string() != self.saved_text;
     }
 
     /// Apply a key event and return the outcome
@@ -449,7 +462,7 @@ impl EditorCore {
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;
-            self.dirty = true;
+            self.recompute_dirty();
             true
         } else {
             false
@@ -468,7 +481,7 @@ impl EditorCore {
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;
-            self.dirty = true;
+            self.recompute_dirty();
             true
         } else {
             false
@@ -583,6 +596,7 @@ impl EditorCore {
     // Public API for loading content
     pub fn load_content(&mut self, content: String) {
         self.buffer = TextBuffer::from_string(content);
+        self.saved_text = self.buffer.as_string();
         self.cursor = Position::zero();
         self.dirty = false;
         self.undo_stack.clear();
@@ -590,6 +604,7 @@ impl EditorCore {
     }
 
     pub fn mark_saved(&mut self) {
+        self.saved_text = self.buffer.as_string();
         self.dirty = false;
     }
 }
@@ -604,6 +619,27 @@ impl Default for EditorCore {
 mod undo_retention_tests {
     use super::*;
     use alloc::string::ToString;
+
+    #[test]
+    fn undoing_back_to_the_saved_text_leaves_the_buffer_clean() {
+        // `undo` and `redo` set the dirty flag unconditionally, so undoing an
+        // edit all the way back still blocked `:q`: the editor insisted
+        // there was unsaved work while the buffer and the file on disk were
+        // character for character identical.
+        let mut core = EditorCore::new();
+        core.load_content("saved".to_string());
+        assert!(!core.dirty());
+
+        core.apply_key(Key::X);
+        assert!(core.dirty(), "an edit must make it dirty");
+
+        core.apply_key(Key::U);
+        assert_eq!(core.buffer().as_string(), "saved");
+        assert!(
+            !core.dirty(),
+            "the buffer matches the file on disk, so there is nothing to save"
+        );
+    }
 
     #[test]
     fn keys_that_change_nothing_do_not_evict_real_undo_history() {

@@ -865,6 +865,13 @@ impl InlineConsole {
             KeyCode::Enter => {
                 let command = self.input_buffer.clone();
                 if !command.trim().is_empty() {
+                    // Capped, as `cli_console` caps its own: unbounded, this
+                    // grows for as long as the session lasts, on a machine
+                    // that may have twelve megabytes.
+                    const MAX_HISTORY: usize = 100;
+                    if self.history.len() >= MAX_HISTORY {
+                        self.history.remove(0);
+                    }
                     self.history.push(command.clone());
                 }
                 self.input_buffer.clear();
