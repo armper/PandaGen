@@ -36,6 +36,9 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("  cargo xtask qemu");
     println!("  cargo xtask qemu-smoke");
     println!("  cargo xtask qemu-script [--keys k1,k2,sleep:0.5,shot:name,...] [--boot-wait secs]");
+    println!(
+        "      [--expect-serial TEXT] [--forbid-serial TEXT] [--port-base N] [--allow-exception]"
+    );
     println!("                          [--after secs] [--out prefix] [--expect-serial text]");
     println!("  cargo xtask remote <command...>   (read-only kernel command over UDP remote IPC)");
     println!("  cargo xtask remote-tcp <command...>   (same, over the signed TCP line protocol)");
@@ -526,6 +529,7 @@ fn cmd_qemu_script(
     let mut out = root.join("dist/qemu_script");
     let mut expect_serial: Vec<String> = Vec::new();
     let mut allow_exception = false;
+    let mut forbid_serial: Vec<String> = Vec::new();
     let mut port_base: u16 = 0;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -543,7 +547,9 @@ fn cmd_qemu_script(
             "--boot-wait" => boot_wait = value("--boot-wait")?.parse()?,
             "--after" => after = value("--after")?.parse()?,
             "--out" => out = root.join(value("--out")?),
-            "--expect-serial" => expect_serial.push(value("--expect-serial")?),
+            "--expect-serial" => expect_serial.push(value("--expect-serial")?.replace("\\n", "\n")),
+            // The mirror of --expect-serial: the run fails if this appears.
+            "--forbid-serial" => forbid_serial.push(value("--forbid-serial")?.replace("\\n", "\n")),
             "--allow-exception" => allow_exception = true,
             "--port-base" => port_base = value("--port-base")?.parse()?,
             other => {
@@ -814,6 +820,11 @@ fn cmd_qemu_script(
     for needle in &expect_serial {
         if !log.contains(needle.as_str()) {
             missing.push(needle.clone());
+        }
+    }
+    for needle in &forbid_serial {
+        if log.contains(needle.as_str()) {
+            missing.push(format!("<forbidden in serial: {needle:?}>"));
         }
     }
     if log.contains("KERNEL PANIC") {

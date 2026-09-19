@@ -77,7 +77,7 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | F2 | kernel/tcp | Command port served one request per received packet, so a pipelined client stalled until unrelated traffic arrived (`cmd_pipeline`) | FIXED (278) |
 | F3 | net_stack/tcp | Four idle connections to the unauthenticated echo port take the signed command port offline permanently; no reaper, and a full table black-holes instead of resetting (`tcp_slots`) | FIXED (279) |
 | F4 | kernel/smp | One `WORK` queue with two independent owners that both call `reset()`; present bands and `smp run` jobs corrupt each other's ids and results | FIXED (280) |
-| F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | OPEN |
+| F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | FIXED (281) |
 | F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | OPEN |
 | F7 | kernel/serial | `SERIAL_LOCK` is taken per `write_str` fragment, so one CPU's line splits another's; `write_byte` skips it entirely | OPEN |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | OPEN |
@@ -118,11 +118,13 @@ result. Its positive findings are about shared state, not lock order.
 
 ## Resume here
 
-F1, F2 fixed (278); F3 fixed (279); F4 fixed (280). **Next: F5** (response
-channel drained by both the console task and the workspace loop, so GUI
-command output can vanish), then F6 (`&mut Kernel` aliased across CPUs), F7
-(serial lock per fragment), F8 (virtio descriptor validation).
+F1, F2 (278), F3 (279), F4 (280), F5 (281) are all fixed and committed.
+**Next: F6** (`&mut Kernel` aliased with `&Kernel` across CPUs; needs
+`create_channel` to take `&self`, so `channel_count` becomes an atomic), then
+F7 (serial lock taken per fragment, so lines interleave under multi-CPU load)
+and F8 (virtio `poll_receive` trusts device-supplied descriptor and slot
+indices).
 
-F5 is the most user-visible of the four and should get an end-to-end test:
-issue a command from the graphical shell while application processors are
-polling, and require the output to appear in the shell.
+Round 2 has not been dispatched yet. When F6-F8 are closed, send fresh critics
+at: the HTTP server once it exists, the storage stack (`services_storage` and
+virtio-blk) which no critic has looked at, and the graphics/compositor path.

@@ -1324,9 +1324,14 @@ fn workspace_loop(
 ) -> ! {
     // Get command and response channels from kernel
     let command_channel = ChannelId(0);
-    let response_channel = ChannelId(1);
+    // Channel 1 belongs to the serial console task. The graphical workspace
+    // gets its own below, because a channel with two readers loses messages
+    // to whichever CPU polls first.
 
-    let mut workspace = workspace::WorkspaceSession::new(command_channel, response_channel);
+    let workspace_response = kernel
+        .create_channel()
+        .expect("workspace reply channel available");
+    let mut workspace = workspace::WorkspaceSession::new(command_channel, workspace_response);
     // GFX-047: pixel buffers are budgeted against a fixed share of the heap
     // and refused with a typed error rather than failing inside `alloc`.
     let heap_total = GLOBAL_HEAP.stats().total;
@@ -1590,7 +1595,7 @@ fn workspace_loop(
         remote_server.poll(&mut ctx, serial, command_channel, get_tick_count());
 
         // Try to receive response
-        if let Some(message) = ctx.try_recv(response_channel) {
+        if let Some(message) = ctx.try_recv(workspace_response) {
             if let KernelMessage::CommandResponse(response) = message {
                 match response.status {
                     CommandStatus::Ok => {
