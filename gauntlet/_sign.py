@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import time
 
 DEFAULT_MASTER = "pandagen-dev"
 
@@ -59,7 +60,12 @@ def sign(command, caller=None, key=None, nonce=None):
     """One request line, without the trailing newline."""
     caller = caller if caller is not None else caller_name()
     key = key if key is not None else caller_key(caller=caller)
-    nonce = nonce if nonce is not None else secrets.randbits(128)
+    # Nanoseconds since the epoch on top, randomness underneath. The kernel
+    # refuses a nonce that has fallen behind the newest one it has seen, so
+    # a captured line goes stale rather than coming back into range when the
+    # replay window rolls over.
+    if nonce is None:
+        nonce = (time.time_ns() << 64) | secrets.randbits(64)
     nonce_hex = f"{nonce:032x}"
     payload = nonce_hex.encode() + b"\x00" + caller.encode() + b"\x00" + command.encode()
     tag = hmac.new(key, payload, hashlib.sha256).digest()

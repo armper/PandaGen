@@ -316,17 +316,21 @@ fn remote_replay_check(
     }
 }
 
-/// A fresh nonce for the signed line protocol (time, pid, and a counter).
+/// A fresh nonce for the signed line protocol.
+///
+/// Nanoseconds since the epoch in the top 64 bits, uniqueness in the bottom
+/// 64. The order matters: the kernel refuses a nonce that has fallen behind
+/// the newest one it has seen, so a captured request goes stale instead of
+/// coming back into range once the replay window rolls over.
 fn fresh_nonce() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let salt =
-        ((std::process::id() as u128) << 64) | COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-    nanos ^ salt.rotate_left(17) ^ ((nanos as u64 as u128) << 64)
+    let unique = ((std::process::id() as u64) << 32) ^ COUNTER.fetch_add(1, Ordering::Relaxed);
+    ((nanos as u128) << 64) | unique as u128
 }
 
 /// Run one read-only kernel command over the signed TCP line protocol.

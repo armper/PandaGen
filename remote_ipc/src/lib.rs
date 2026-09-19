@@ -252,12 +252,32 @@ pub mod sha256 {
 }
 
 /// Remembers the last `N` accepted message ids so a captured, correctly
-/// signed datagram cannot simply be sent again. The window is bounded;
-/// a replay older than `N` accepted messages would be accepted.
+/// signed request cannot simply be sent again.
+///
+/// The window alone is not enough. It is a ring: once `N` further requests
+/// have been accepted, one captured earlier falls out and is accepted again.
+/// An attacker needs no key for that, only a packet capture and the patience
+/// to let the operator work -- 260 ordinary commands were enough.
+///
+/// `accept_key` therefore also refuses any nonce older than every nonce it
+/// still remembers. Once the window is full, a request below that floor is
+/// one that has already fallen out of it, so it is exactly the request the
+/// ring can no longer judge -- and refusing it turns a captured line stale
+/// for good instead of merely for a while. Reordering is tolerated up to the
+/// depth of the window and no further, which is the honest bound.
+///
+/// This requires the caller's nonces to be ordered; every signer of the line
+/// protocol in this tree puts the clock in the top 64 bits.
+///
+/// `accept` (the message-envelope path) cannot do this: `MessageId` is a
+/// random UUID, so old and new are indistinguishable. It keeps the bounded
+/// window and the weakness that goes with it.
 pub struct ReplayGuard<const N: usize> {
     seen: [u128; N],
     next: usize,
     len: usize,
+    /// Highest nonce accepted through `accept_key`.
+    high: u128,
 }
 
 impl<const N: usize> ReplayGuard<N> {
@@ -266,6 +286,7 @@ impl<const N: usize> ReplayGuard<N> {
             seen: [0; N],
             next: 0,
             len: 0,
+            high: 0,
         }
     }
 
@@ -285,11 +306,36 @@ impl<const N: usize> ReplayGuard<N> {
     /// Record `id` as accepted; returns false (and records nothing) if it
     /// was already in the window.
     pub fn accept(&mut self, id: MessageId) -> bool {
-        self.accept_key(Self::key(id))
+        // Deliberately not `accept_key`: a `MessageId` is a random UUID, so
+        // there is no order to compare against and the bounded window is all
+        // this path has.
+        self.record_key(Self::key(id))
     }
 
-    /// Same as `accept` for a raw 128-bit nonce (the TCP line protocol).
+    /// Accept a raw 128-bit nonce from the line protocol.
+    ///
+    /// Unlike `accept`, this requires the nonce to be ordered and refuses
+    /// anything older than every nonce still in the window.
     pub fn accept_key(&mut self, key: u128) -> bool {
+        // Only once the window is full has anything been forgotten, and only
+        // then is a floor needed.
+        if self.len == N {
+            let oldest = self.seen[..self.len].iter().copied().min().unwrap_or(0);
+            if key < oldest {
+                return false;
+            }
+        }
+        if !self.record_key(key) {
+            return false;
+        }
+        if key > self.high {
+            self.high = key;
+        }
+        true
+    }
+
+    /// Record a nonce in the window; false if it was already there.
+    fn record_key(&mut self, key: u128) -> bool {
         if self.is_replay_key(key) {
             return false;
         }
@@ -950,6 +996,43 @@ mod tests {
         assert!(sha256::tags_equal(b"ab", b"ab"));
         assert!(!sha256::tags_equal(b"ab", b"ac"));
         assert!(!sha256::tags_equal(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn a_captured_nonce_stays_refused_after_the_window_rolls_over() {
+        // The window alone is a ring: 260 ordinary commands were enough to
+        // push a captured request out of it and make it valid again, against
+        // the real kernel, with no key. Ordered nonces make it stale for
+        // good.
+        const NOW: u128 = 1_700_000_000_000_000_000u128 << 64;
+        let mut guard = ReplayGuard::<4>::new();
+
+        let captured = NOW;
+        assert!(guard.accept_key(captured), "accepted the first time");
+        assert!(
+            !guard.accept_key(captured),
+            "an immediate replay is refused"
+        );
+
+        // The operator works; the window rolls over several times. A
+        // millisecond apart is realistic and well inside any clock slack.
+        for step in 1..=20u128 {
+            let fresh = captured + (step << 64) * 1_000_000;
+            assert!(guard.accept_key(fresh), "ordinary command {step}");
+        }
+        assert!(
+            !guard.accept_key(captured),
+            "a captured request must not become valid again by waiting"
+        );
+
+        // Requests that arrive out of order, but within the window, are
+        // still fine: this must not break a caller whose packets overtake
+        // one another.
+        let reordered = captured + (20u128 << 64) * 1_000_000 - (1u128 << 64) * 500_000;
+        assert!(
+            guard.accept_key(reordered),
+            "a nonce inside the window but not the newest must be accepted"
+        );
     }
 
     #[test]
