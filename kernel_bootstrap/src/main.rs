@@ -3128,7 +3128,7 @@ impl RemoteCommandServer {
             let Some(net) = guard.as_mut() else {
                 return;
             };
-            net.service(now, serial)
+            net.service(&get_tick_count, serial)
         };
         let Some(request) = request else {
             return;

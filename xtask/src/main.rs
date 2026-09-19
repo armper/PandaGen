@@ -79,10 +79,46 @@ const TCP_COMMAND_PORT: u16 = remote_ipc::line::KERNEL_COMMAND_PORT;
 /// Kernel remote IPC port, forwarded from the host loopback by QEMU.
 const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 
+/// The four forwarded ports, shifted by a base so several QEMU instances can
+/// run at once (`qemu-script --port-base N`).
+#[derive(Clone, Copy)]
+struct Ports {
+    udp_echo: u16,
+    remote: u16,
+    tcp_echo: u16,
+    tcp_command: u16,
+}
+
+impl Ports {
+    fn with_base(base: u16) -> Self {
+        Self {
+            udp_echo: UDP_ECHO_PORT + base,
+            remote: REMOTE_PORT + base,
+            tcp_echo: TCP_ECHO_PORT + base,
+            tcp_command: TCP_COMMAND_PORT + base,
+        }
+    }
+
+    /// The guest always listens on its own fixed ports; only the host side moves.
+    fn hostfwd(&self) -> String {
+        format!(
+            "user,id=n0,hostfwd=udp:127.0.0.1:{}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_COMMAND_PORT}",
+            self.udp_echo, self.remote, self.tcp_echo, self.tcp_command
+        )
+    }
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Self::with_base(0)
+    }
+}
+
 /// UDP datagram transport for `remote_ipc` against the kernel's port.
 struct UdpTransport {
     socket: std::net::UdpSocket,
     key: remote_ipc::CallerKey,
+    port: u16,
 }
 
 /// Master secret for remote calls: `PANDAGEN_REMOTE_TOKEN` or the dev default.
@@ -129,7 +165,7 @@ impl remote_ipc::RemoteTransport for UdpTransport {
     fn send(&mut self, message: ipc::MessageEnvelope) -> Result<(), remote_ipc::RemoteIpcError> {
         let bytes = remote_ipc::envelope_to_bytes(&message, &self.key.caller, &self.key.key)?;
         self.socket
-            .send_to(&bytes, ("127.0.0.1", REMOTE_PORT))
+            .send_to(&bytes, ("127.0.0.1", self.port))
             .map(|_| ())
             .map_err(|err| remote_ipc::RemoteIpcError::Codec(err.to_string()))
     }
@@ -154,6 +190,7 @@ fn remote_call(
     command: &str,
     timeout: Duration,
     token: &str,
+    port: u16,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
@@ -162,7 +199,8 @@ fn remote_call(
         caller: key.caller.clone(),
         allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
     };
-    let mut client = remote_ipc::RemoteIpcClient::new(UdpTransport { socket, key }, authority);
+    let mut client =
+        remote_ipc::RemoteIpcClient::new(UdpTransport { socket, key, port }, authority);
     let reply = client.call(
         remote_ipc::CAP_KERNEL_COMMAND,
         remote_ipc::ACTION_KERNEL_COMMAND_RUN,
@@ -172,9 +210,13 @@ fn remote_call(
 }
 
 /// Round-trip one line over the kernel's TCP echo port and expect a clean close.
-fn tcp_echo_check(text: &str, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+fn tcp_echo_check(
+    text: &str,
+    timeout: Duration,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{BufRead, BufReader, Write as _};
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], TCP_ECHO_PORT));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -195,7 +237,11 @@ fn tcp_echo_check(text: &str, timeout: Duration) -> Result<(), Box<dyn std::erro
 }
 
 /// Send a signed call twice: the first must be answered, the replay must not.
-fn remote_replay_check(command: &str, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+fn remote_replay_check(
+    command: &str,
+    timeout: Duration,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
     let key = caller_key(&remote_token());
@@ -212,13 +258,13 @@ fn remote_replay_check(command: &str, timeout: Duration) -> Result<(), Box<dyn s
     let bytes =
         remote_ipc::envelope_to_bytes(&remote_ipc::encode_call(call)?, &key.caller, &key.key)?;
     let mut buf = [0u8; 4096];
-    socket.send_to(&bytes, ("127.0.0.1", REMOTE_PORT))?;
+    socket.send_to(&bytes, ("127.0.0.1", port))?;
     let (n, _) = socket.recv_from(&mut buf)?;
     let (reply, _) = remote_ipc::envelope_from_bytes(&buf[..n], &key)?;
     remote_ipc::decode_response(&reply)?
         .result
         .map_err(|err| io::Error::other(format!("first call failed: {err}")))?;
-    socket.send_to(&bytes, ("127.0.0.1", REMOTE_PORT))?;
+    socket.send_to(&bytes, ("127.0.0.1", port))?;
     match socket.recv_from(&mut buf) {
         Ok((n, _)) => Err(io::Error::other(format!("replay was answered with {} bytes", n)).into()),
         Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(()),
@@ -244,9 +290,10 @@ fn remote_tcp_call(
     command: &str,
     timeout: Duration,
     token: &str,
+    port: u16,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::io::{BufRead, BufReader, Write as _};
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], TCP_COMMAND_PORT));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -269,7 +316,12 @@ fn cmd_remote_tcp(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std:
     if command.is_empty() {
         return Err(io::Error::new(ErrorKind::InvalidInput, "remote-tcp expects a command").into());
     }
-    let reply = remote_tcp_call(&command.join(" "), Duration::from_secs(3), &remote_token())?;
+    let reply = remote_tcp_call(
+        &command.join(" "),
+        Duration::from_secs(3),
+        &remote_token(),
+        Ports::default().tcp_command,
+    )?;
     print!("{reply}");
     if !reply.ends_with('\n') {
         println!();
@@ -283,7 +335,12 @@ fn cmd_remote(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::err
     if command.is_empty() {
         return Err(io::Error::new(ErrorKind::InvalidInput, "remote expects a command").into());
     }
-    let reply = remote_call(&command.join(" "), Duration::from_secs(3), &remote_token())?;
+    let reply = remote_call(
+        &command.join(" "),
+        Duration::from_secs(3),
+        &remote_token(),
+        Ports::default().remote,
+    )?;
     print!("{reply}");
     if !reply.ends_with('\n') {
         println!();
@@ -355,9 +412,7 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
-        ))
+        .arg(Ports::default().hostfwd())
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -419,9 +474,7 @@ fn cmd_qemu_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
-        ))
+        .arg(Ports::default().hostfwd())
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -467,17 +520,13 @@ fn cmd_qemu_script(
         )
         .into());
     }
-    let disk = root.join(DISK_OUTPUT);
-    if !disk.exists() {
-        cmd_image()?;
-    }
-
     let mut keys: Vec<String> = Vec::new();
     let mut boot_wait = 10.0f64;
     let mut after = 1.0f64;
     let mut out = root.join("dist/qemu_script");
     let mut expect_serial: Vec<String> = Vec::new();
     let mut allow_exception = false;
+    let mut port_base: u16 = 0;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -496,6 +545,7 @@ fn cmd_qemu_script(
             "--out" => out = root.join(value("--out")?),
             "--expect-serial" => expect_serial.push(value("--expect-serial")?),
             "--allow-exception" => allow_exception = true,
+            "--port-base" => port_base = value("--port-base")?.parse()?,
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -505,6 +555,23 @@ fn cmd_qemu_script(
             }
         }
     }
+    // Each port base gets its own disk image so concurrent runs do not
+    // corrupt one another's filesystem.
+    let base_disk = root.join(DISK_OUTPUT);
+    if !base_disk.exists() {
+        cmd_image()?;
+    }
+    let disk = if port_base == 0 {
+        base_disk
+    } else {
+        let private = root.join(format!("dist/pandagen-{port_base}.disk"));
+        if !private.exists() {
+            fs::copy(&base_disk, &private)?;
+        }
+        private
+    };
+    let ports = Ports::with_base(port_base);
+
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -512,7 +579,11 @@ fn cmd_qemu_script(
     let serial_log = PathBuf::from(format!("{out_str}.serial.log"));
     let _ = fs::remove_file(&serial_log);
     // AF_UNIX paths are short; keep the socket out of the (long) repo path.
-    let sock = PathBuf::from(format!("/tmp/pandagen-mon-{}.sock", std::process::id()));
+    let sock = PathBuf::from(format!(
+        "/tmp/pandagen-mon-{}-{}.sock",
+        std::process::id(),
+        port_base
+    ));
     let _ = fs::remove_file(&sock);
 
     let mut child = Command::new("qemu-system-x86_64")
@@ -530,9 +601,7 @@ fn cmd_qemu_script(
         .arg("-device")
         .arg("virtio-blk-pci,drive=hd0")
         .arg("-netdev")
-        .arg(format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{UDP_ECHO_PORT}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{REMOTE_PORT}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{TCP_ECHO_PORT}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{TCP_COMMAND_PORT}-:{TCP_COMMAND_PORT}"
-        ))
+        .arg(ports.hostfwd())
         .arg("-device")
         .arg("virtio-net-pci,netdev=n0")
         .arg("-serial")
@@ -584,7 +653,7 @@ fn cmd_qemu_script(
             // host and require the echo back within 2 s.
             let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
             socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-            socket.send_to(spec.as_bytes(), ("127.0.0.1", UDP_ECHO_PORT))?;
+            socket.send_to(spec.as_bytes(), ("127.0.0.1", ports.udp_echo))?;
             let mut reply = [0u8; 2048];
             match socket.recv_from(&mut reply) {
                 Ok((n, _)) if &reply[..n] == spec.as_bytes() => {
@@ -601,9 +670,42 @@ fn cmd_qemu_script(
         } else if let Some(text) = key.strip_prefix("tcp:") {
             // tcp:<text> -> connect to the kernel's TCP echo port, send the
             // line, require it back, then close and require EOF.
-            match tcp_echo_check(text, Duration::from_secs(3)) {
+            match tcp_echo_check(text, Duration::from_secs(3), ports.tcp_echo) {
                 Ok(()) => println!("tcp echo ok: {text}"),
                 Err(err) => udp_failures.push(format!("<tcp echo of {text:?}: {err}>")),
+            }
+        } else if let Some(name) = key.strip_prefix("gauntlet:") {
+            // gauntlet:<name> -> run gauntlet/<name>.py against this boot.
+            // The script sees the forwarded ports in the environment and
+            // fails the run by exiting non-zero.
+            let script = root.join(format!("gauntlet/{name}.py"));
+            if !script.exists() {
+                udp_failures.push(format!("<gauntlet {name}: no {}>", script.display()));
+            } else {
+                let started = std::time::Instant::now();
+                let output = Command::new("python3")
+                    .arg(&script)
+                    .current_dir(&root)
+                    .env("PANDAGEN_UDP_PORT", ports.udp_echo.to_string())
+                    .env("PANDAGEN_REMOTE_PORT", ports.remote.to_string())
+                    .env("PANDAGEN_TCP_ECHO_PORT", ports.tcp_echo.to_string())
+                    .env("PANDAGEN_TCP_COMMAND_PORT", ports.tcp_command.to_string())
+                    .output()?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let secs = started.elapsed().as_secs_f64();
+                if output.status.success() {
+                    println!("gauntlet {name}: PASS ({secs:.1}s) {}", stdout.trim());
+                } else {
+                    println!("gauntlet {name}: FAIL ({secs:.1}s)");
+                    for line in stdout.lines().chain(stderr.lines()) {
+                        println!("    {line}");
+                    }
+                    udp_failures.push(format!(
+                        "<gauntlet {name}: {}>",
+                        stdout.lines().last().unwrap_or("failed").trim()
+                    ));
+                }
             }
         } else if let Some(spec) = key.strip_prefix("remote-tcp:") {
             // remote-tcp:<command>;<expected>[;<token>] like remote:, over TCP.
@@ -613,7 +715,7 @@ fn cmd_qemu_script(
                 None => (rest, remote_token()),
             };
             match (
-                remote_tcp_call(command, Duration::from_secs(3), &token),
+                remote_tcp_call(command, Duration::from_secs(3), &token, ports.tcp_command),
                 expected.strip_prefix('!'),
             ) {
                 (Ok(reply), None) if reply.contains(expected) => {
@@ -632,8 +734,9 @@ fn cmd_qemu_script(
             // steps (mouse, keys) overlap it; remote-join waits for it.
             let command = command.to_string();
             let token = remote_token();
+            let bg_port = ports.tcp_command;
             background_remote = Some(std::thread::spawn(move || {
-                remote_tcp_call(&command, Duration::from_secs(10), &token)
+                remote_tcp_call(&command, Duration::from_secs(10), &token, bg_port)
                     .map(|r| format!("{command} -> {}", r.trim_end()))
                     .map_err(|e| format!("{command}: {e}"))
             }));
@@ -647,7 +750,7 @@ fn cmd_qemu_script(
         } else if let Some(command) = key.strip_prefix("replay:") {
             // replay:<command> -> send one signed call, expect a reply, then
             // resend the identical datagram and expect silence.
-            match remote_replay_check(command, Duration::from_secs(3)) {
+            match remote_replay_check(command, Duration::from_secs(3), ports.remote) {
                 Ok(()) => println!("replay refused as expected: {command}"),
                 Err(err) => udp_failures.push(format!("<replay {command:?}: {err}>")),
             }
@@ -663,7 +766,7 @@ fn cmd_qemu_script(
                 None => (rest, remote_token()),
             };
             match (
-                remote_call(command, Duration::from_secs(3), &token),
+                remote_call(command, Duration::from_secs(3), &token, ports.remote),
                 expected.strip_prefix('!'),
             ) {
                 (Ok(reply), None) if reply.contains(expected) => {

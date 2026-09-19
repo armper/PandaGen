@@ -164,19 +164,22 @@ impl NetStack {
     }
 
     /// Renew automatically once half the lease has elapsed (100 Hz ticks).
-    /// The exchange uses the tick passed in, so it cannot wait for replies
-    /// here; `dhcp_renew` from the command path does.
-    fn maybe_renew(&mut self, now: u64, log: &mut impl Write) {
+    ///
+    /// The clock must be live. An earlier version captured the current tick
+    /// into a constant closure, which made the reply-wait condition
+    /// `now() - start < REPLY_TIMEOUT_TICKS` read `0 < 100` forever: with no
+    /// DHCP server answering, the boot CPU span here until reset.
+    fn maybe_renew(&mut self, clock: &dyn Fn() -> u64, log: &mut impl Write) {
         if self.address_source != "dhcp" || self.lease_seconds == 0 {
             return;
         }
+        let now = clock();
         let half_lease_ticks = (self.lease_seconds as u64) * 100 / 2;
         if now.saturating_sub(self.lease_started_tick) >= half_lease_ticks {
             // Move the mark first so a failed attempt retries after another
             // half-lease rather than on every pass.
             self.lease_started_tick = now;
-            let clock = move || now;
-            let _ = self.dhcp_renew(&clock, log);
+            let _ = self.dhcp_renew(clock, log);
         }
     }
 
@@ -382,9 +385,13 @@ impl NetStack {
     /// Background servicing from the main loop: answer ARP, ping, and
     /// echo UDP datagrams on `UDP_ECHO_PORT`. Returns the first datagram
     /// for `REMOTE_PORT` seen (later ones wait in the receive queue).
-    pub fn service(&mut self, now: u64, log: &mut impl Write) -> Option<RemoteRequest> {
-        self.iface.tcp_tick(now);
-        self.maybe_renew(now, log);
+    pub fn service(
+        &mut self,
+        clock: &dyn Fn() -> u64,
+        log: &mut impl Write,
+    ) -> Option<RemoteRequest> {
+        self.iface.tcp_tick(clock());
+        self.maybe_renew(clock, log);
         let mut remote = None;
         while remote.is_none() {
             let Some(len) = self.device.poll_receive(&mut self.rx_frame) else {
@@ -456,8 +463,33 @@ impl NetStack {
                 _ => {}
             }
         }
+        // A client may have pipelined several requests into one segment.
+        // Without this pass the second one waits for unrelated traffic to
+        // arrive, because only a received frame produces `TcpReady`.
+        if remote.is_none() {
+            remote = self.buffered_command_line(log);
+        }
         self.flush_tcp();
         remote
+    }
+
+    /// A complete command line already sitting in some command-port
+    /// connection's receive buffer.
+    fn buffered_command_line(&mut self, log: &mut impl Write) -> Option<RemoteRequest> {
+        let mut pending = [usize::MAX; net_stack::tcp::MAX_CONNECTIONS];
+        let mut count = 0;
+        for (index, conn) in self.iface.tcp().connections() {
+            if conn.local_port == TCP_COMMAND_PORT && conn.readable() > 0 && count < pending.len() {
+                pending[count] = index;
+                count += 1;
+            }
+        }
+        for &index in &pending[..count] {
+            if let Some(line) = self.tcp_command_service(index, log) {
+                return Some(RemoteRequest::TcpLine { conn: index, line });
+            }
+        }
+        None
     }
 
     /// Command port: hand one complete line to the caller; close after the
