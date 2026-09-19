@@ -19,6 +19,10 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
+
+/// Upper bound on the commit ring, matching what `format` will ever choose.
+/// A mounted superblock claiming more is refused rather than scanned.
+const MAX_COMMIT_LOG_BLOCKS: u64 = 256;
 use serde::{Deserialize, Serialize};
 
 /// Superblock - stored in block 0
@@ -42,6 +46,29 @@ struct Superblock {
     commit_log_blocks: u64,
     /// Commit sequence number (monotonically increasing)
     commit_sequence: u64,
+    /// Sequence covered by the checkpoint in the reserved region. Zero means
+    /// there is none; defaulted so a disk written before checkpoints existed
+    /// still mounts.
+    #[serde(default)]
+    checkpoint_sequence: u64,
+}
+
+/// The allocation map, written whole into the reserved region so that a
+/// mount does not depend on commit records that the ring has overwritten.
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    sequence: u64,
+    allocations: Vec<AllocationEntry>,
+    latest: Vec<(ObjectId, VersionId)>,
+}
+
+/// Header block of a checkpoint: how long the payload is and whether it is
+/// intact. A checkpoint that fails this is ignored and the log is used alone.
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointHeader {
+    bytes: u64,
+    sequence: u64,
+    checksum: u32,
 }
 
 const SUPERBLOCK_MAGIC: u64 = 0x50414E44_47454E00; // "PANDAGEN\0"
@@ -201,6 +228,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             commit_log_start: 1,
             commit_log_blocks,
             commit_sequence: 0,
+            checkpoint_sequence: 0,
         };
 
         // Write superblock to block 0
@@ -256,6 +284,26 @@ impl<D: BlockDevice> BlockStorage<D> {
             return Err(BlockStorageError::InvalidSuperblock);
         }
 
+        // Everything below this point sizes allocations from superblock
+        // fields, and block 0 is whatever happens to be on the disk. A
+        // `total_blocks` of 200 billion used to turn a mount into an
+        // unbounded allocation, which on the kernel is an abort: a single
+        // edited byte made the machine unbootable. Check the geometry
+        // against the device the disk is actually on.
+        let device_blocks = device.block_count();
+        let geometry_sound = superblock.total_blocks <= device_blocks
+            && superblock.data_start < superblock.total_blocks
+            && superblock.commit_log_blocks > 0
+            && superblock.commit_log_blocks <= MAX_COMMIT_LOG_BLOCKS
+            && superblock
+                .commit_log_start
+                .checked_add(superblock.commit_log_blocks)
+                .is_some_and(|end| end <= superblock.total_blocks)
+            && superblock.bitmap_start <= superblock.total_blocks;
+        if !geometry_sound {
+            return Err(BlockStorageError::InvalidSuperblock);
+        }
+
         // Create storage instance
         let free_blocks: BTreeSet<u64> = (superblock.data_start..superblock.total_blocks).collect();
 
@@ -276,55 +324,211 @@ impl<D: BlockDevice> BlockStorage<D> {
         Ok(storage)
     }
 
+    /// Write the whole allocation map into the reserved region.
+    ///
+    /// The commit log is a fixed ring, so a record is eventually overwritten
+    /// by a later one. Without this the map could only ever be rebuilt from
+    /// the last `commit_log_blocks` commits, and everything older became
+    /// unreachable even though its data blocks were intact.
+    fn write_checkpoint(&mut self) -> Result<(), BlockStorageError> {
+        if self.superblock.bitmap_blocks < 2 {
+            return Ok(());
+        }
+        let checkpoint = Checkpoint {
+            sequence: self.superblock.commit_sequence,
+            allocations: self.allocations.values().cloned().collect(),
+            latest: self
+                .latest_versions
+                .iter()
+                .map(|(object, version)| (*object, *version))
+                .collect(),
+        };
+        let payload =
+            serde_json::to_vec(&checkpoint).map_err(|_| BlockStorageError::SerializationError)?;
+        let payload_blocks = payload.len().div_ceil(BLOCK_SIZE) as u64;
+        if payload_blocks + 1 > self.superblock.bitmap_blocks {
+            // Too big to record. The log still covers recent commits, so
+            // leave the previous checkpoint in place rather than tearing it.
+            return Ok(());
+        }
+
+        let header = CheckpointHeader {
+            bytes: payload.len() as u64,
+            sequence: checkpoint.sequence,
+            checksum: crc32fast::hash(&payload),
+        };
+        let header_json =
+            serde_json::to_vec(&header).map_err(|_| BlockStorageError::SerializationError)?;
+        if header_json.len() > BLOCK_SIZE {
+            return Err(BlockStorageError::SerializationError);
+        }
+
+        // Payload first, then the header that vouches for it: a crash in
+        // between leaves the old header pointing at the old payload, which
+        // fails its checksum and is ignored, rather than a header that
+        // vouches for a half-written payload.
+        for index in 0..payload_blocks {
+            let mut block = [0u8; BLOCK_SIZE];
+            let start = index as usize * BLOCK_SIZE;
+            let end = (start + BLOCK_SIZE).min(payload.len());
+            block[..end - start].copy_from_slice(&payload[start..end]);
+            self.device
+                .write_block(self.superblock.bitmap_start + 1 + index, &block)?;
+        }
+        self.device.flush()?;
+
+        let mut block = [0u8; BLOCK_SIZE];
+        block[..header_json.len()].copy_from_slice(&header_json);
+        self.device
+            .write_block(self.superblock.bitmap_start, &block)?;
+        self.device.flush()?;
+
+        self.superblock.checkpoint_sequence = checkpoint.sequence;
+        self.write_superblock()?;
+        Ok(())
+    }
+
+    /// Load the checkpoint, if there is an intact one. Returns the sequence
+    /// it covers.
+    fn load_checkpoint(&mut self) -> u64 {
+        if self.superblock.bitmap_blocks < 2 || self.superblock.checkpoint_sequence == 0 {
+            return 0;
+        }
+        let mut block = [0u8; BLOCK_SIZE];
+        if self
+            .device
+            .read_block(self.superblock.bitmap_start, &mut block)
+            .is_err()
+        {
+            return 0;
+        }
+        let json_end = block.iter().position(|&b| b == 0).unwrap_or(BLOCK_SIZE);
+        let Ok(header) = serde_json::from_slice::<CheckpointHeader>(&block[..json_end]) else {
+            return 0;
+        };
+        let payload_blocks = (header.bytes as usize).div_ceil(BLOCK_SIZE) as u64;
+        if payload_blocks + 1 > self.superblock.bitmap_blocks {
+            return 0;
+        }
+        let mut payload = Vec::with_capacity(header.bytes as usize);
+        for index in 0..payload_blocks {
+            let mut chunk = [0u8; BLOCK_SIZE];
+            if self
+                .device
+                .read_block(self.superblock.bitmap_start + 1 + index, &mut chunk)
+                .is_err()
+            {
+                return 0;
+            }
+            let take = (header.bytes as usize - payload.len()).min(BLOCK_SIZE);
+            payload.extend_from_slice(&chunk[..take]);
+        }
+        if crc32fast::hash(&payload) != header.checksum {
+            return 0;
+        }
+        let Ok(checkpoint) = serde_json::from_slice::<Checkpoint>(&payload) else {
+            return 0;
+        };
+
+        for alloc in &checkpoint.allocations {
+            let blocks_needed = (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
+            let fits = alloc
+                .block_idx
+                .checked_add(blocks_needed)
+                .is_some_and(|end| end <= self.superblock.total_blocks);
+            if !fits {
+                continue;
+            }
+            self.allocations
+                .insert((alloc.object_id, alloc.version_id), alloc.clone());
+            for j in 0..blocks_needed {
+                self.free_blocks.remove(&(alloc.block_idx + j));
+            }
+        }
+        for (object, version) in checkpoint.latest {
+            self.latest_versions.insert(object, version);
+        }
+        checkpoint.sequence
+    }
+
     /// Perform crash recovery by scanning commit log
     fn perform_recovery(&mut self) -> Result<StorageRecoveryReport, BlockStorageError> {
-        let mut recovered_commits = 0;
         let mut discarded_transactions = 0;
-        let mut last_sequence = 0;
+        // Everything up to here is already in the map; the ring only has to
+        // cover what happened since.
+        let checkpoint_sequence = self.load_checkpoint();
 
-        // Scan commit log blocks
+        // The commit log is a ring, so block order and sequence order
+        // diverge the moment it wraps. Collect every intact record first and
+        // apply them in sequence order; scanning in block order and keeping
+        // only records newer than the highest seen so far discarded almost
+        // the whole filesystem after the first wrap.
+        let mut records: Vec<CommitRecord> = Vec::new();
         for i in 0..self.superblock.commit_log_blocks {
             let block_idx = self.superblock.commit_log_start + i;
             let mut block = [0u8; BLOCK_SIZE];
 
             match self.device.read_block(block_idx, &mut block) {
                 Ok(_) => {
-                    // Try to parse commit record
                     let json_end = block.iter().position(|&b| b == 0).unwrap_or(BLOCK_SIZE);
-                    if json_end > 0 {
-                        if let Ok(record) =
-                            serde_json::from_slice::<CommitRecord>(&block[..json_end])
+                    if json_end == 0 {
+                        continue;
+                    }
+                    match serde_json::from_slice::<CommitRecord>(&block[..json_end]) {
+                        Ok(record)
+                            if record.is_valid() && record.sequence > checkpoint_sequence =>
                         {
-                            // Validate checksum
-                            if record.is_valid() && record.sequence > last_sequence {
-                                // Apply this commit
-                                for alloc in &record.allocations {
-                                    self.allocations
-                                        .insert((alloc.object_id, alloc.version_id), alloc.clone());
-                                    self.latest_versions
-                                        .insert(alloc.object_id, alloc.version_id);
-
-                                    // Mark blocks as allocated
-                                    let blocks_needed =
-                                        (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
-                                    for j in 0..blocks_needed {
-                                        self.free_blocks.remove(&(alloc.block_idx + j));
-                                    }
-                                }
-                                last_sequence = record.sequence;
-                                recovered_commits += 1;
-                            } else {
-                                discarded_transactions += 1;
-                            }
+                            records.push(record)
                         }
+                        Ok(record) if record.is_valid() => {
+                            // Already covered by the checkpoint.
+                            let _ = record;
+                        }
+                        Ok(_) => discarded_transactions += 1,
+                        Err(_) => {}
                     }
                 }
-                Err(_) => {
-                    // Skip unreadable blocks
+                Err(_) => discarded_transactions += 1,
+            }
+        }
+
+        records.sort_by_key(|record| record.sequence);
+        let recovered_commits = records.len();
+        let last_sequence = records
+            .last()
+            .map(|record| record.sequence)
+            .unwrap_or(checkpoint_sequence)
+            .max(checkpoint_sequence);
+
+        for record in &records {
+            for alloc in &record.allocations {
+                // A record is only as trustworthy as the disk it came from;
+                // its checksum is unkeyed. Refuse allocations that do not fit
+                // the device rather than looping over a forged size.
+                let blocks_needed = (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
+                let fits = alloc
+                    .block_idx
+                    .checked_add(blocks_needed)
+                    .is_some_and(|end| end <= self.superblock.total_blocks);
+                if !fits {
                     discarded_transactions += 1;
+                    continue;
+                }
+                self.allocations
+                    .insert((alloc.object_id, alloc.version_id), alloc.clone());
+                self.latest_versions
+                    .insert(alloc.object_id, alloc.version_id);
+                for j in 0..blocks_needed {
+                    self.free_blocks.remove(&(alloc.block_idx + j));
                 }
             }
         }
+
+        // The superblock update that records a commit is a separate write
+        // from the commit record itself, so a crash between them leaves the
+        // sequence stale. Reusing it would overwrite a live record in the
+        // ring and silently destroy an already-committed object.
+        self.superblock.commit_sequence = self.superblock.commit_sequence.max(last_sequence);
 
         Ok(StorageRecoveryReport {
             recovered_commits,
@@ -335,7 +539,6 @@ impl<D: BlockDevice> BlockStorage<D> {
         })
     }
 
-    /// Get recovery report (if storage was opened from existing device)
     pub fn recovery_report(&self) -> Option<&StorageRecoveryReport> {
         self.recovery_report.as_ref()
     }
@@ -348,6 +551,7 @@ impl<D: BlockDevice> BlockStorage<D> {
     ) -> Result<(), BlockStorageError> {
         // Increment commit sequence
         self.superblock.commit_sequence += 1;
+
         let sequence = self.superblock.commit_sequence;
 
         // Create commit record with checksum
@@ -375,6 +579,13 @@ impl<D: BlockDevice> BlockStorage<D> {
         self.write_superblock()?;
 
         Ok(())
+    }
+
+    /// Whether the ring is close enough to wrapping that the map should be
+    /// folded into the reserved region.
+    fn checkpoint_due(&self) -> bool {
+        let interval = (self.superblock.commit_log_blocks / 2).max(1);
+        self.superblock.commit_sequence % interval == 0
     }
 
     /// Write superblock to disk
@@ -535,7 +746,9 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
                     .allocate_blocks(size_bytes)
                     .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
 
-                let first_block = blocks[0];
+                // A zero-length object allocates no blocks. Indexing the
+                // empty list here aborted the kernel on an empty file.
+                let first_block = blocks.first().copied().unwrap_or(0);
                 self.write_data(&blocks, &write.data)
                     .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
 
@@ -559,6 +772,15 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
                     .insert((alloc.object_id, alloc.version_id), alloc.clone());
                 self.latest_versions
                     .insert(alloc.object_id, alloc.version_id);
+            }
+
+            // Step 4: fold the map into the reserved region often enough that
+            // the commit ring never wraps past what the checkpoint covers.
+            // This must follow step 3, or the checkpoint omits the very
+            // commit that triggered it.
+            if self.checkpoint_due() {
+                self.write_checkpoint()
+                    .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
             }
         }
 

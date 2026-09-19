@@ -80,6 +80,19 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | FIXED (281) |
 | F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | FIXED (282) |
 | F7 | kernel/serial | `SERIAL_LOCK` is taken per `write_str` fragment, so one CPU's line splits another's; `write_byte` skips it entirely | FIXED (282) |
+| S1 | services_storage | Remount discarded most of the filesystem: ring scanned in block order, and the ring was the only persistent metadata | FIXED (284) |
+| S2 | services_storage | `blocks[0]` on a zero-length write panicked, and the kernel aborts on panic: an empty file bricked the machine | FIXED (284) |
+| S4 | services_storage | A stale commit sequence overwrote a live ring record, destroying an already-committed object at a later unrelated write | FIXED (284) |
+| S7 | services_storage | `total_blocks` from block 0 was trusted; a byte edit turned a mount into an unbounded allocation | FIXED (284) |
+| S3 | services_storage | Reads assume contiguous allocation; `allocate_blocks` does not guarantee it, so an object can read another's blocks | OPEN |
+| S5 | services_storage | Object ids restart at 1 every boot, so files from different boots alias to one object | OPEN |
+| S6 | services_storage | A failed commit returns `Ok` on retry having written nothing, and leaks its blocks | OPEN |
+| S8 | services_storage | Multi-step operations are not atomic; `write_file_by_name` has a window where neither version is reachable | OPEN |
+| S9 | services_storage | Nothing is ever freed; deletion leaks, and the disk fills monotonically | OPEN |
+| S10 | hal/virtio_blk | `VIRTIO_BLK_F_FLUSH` is never negotiated and `UNSUPP` is treated as success, so nothing survives host power loss | OPEN |
+| X1 | boot config | The shipped image authenticates with the published constant `pandagen-dev` and accepts any caller name | OPEN |
+| X2 | remote_ipc | The 256-entry replay window is flushable, and nonces are not ordered or time-bound | OPEN |
+| X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | OPEN |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
 
@@ -126,8 +139,12 @@ the whole gauntlet suite passes.
 
 1. Done (Phase 283). PandaGen serves HTTP on port 8080 and `gauntlet:http_curl`
    holds it to real `curl`. Pointing curl at it found F9 immediately.
-2. Storage and security critics are out. When they report, verify before
-   fixing, as always.
+2. Storage and security critics have reported. Storage S1, S2, S4, S7 are
+   fixed (Phase 284). **Next: X1**, which is the most serious thing on the
+   board — the shipped ISO authenticates with a constant published in this
+   repository — then X3 (address disclosure), then the remaining storage
+   findings in the critic's suggested order: S5 (id aliasing), S3
+   (contiguity), S6 (lying commit), S8 (atomicity).
 
 Still unvisited by any critic: the graphics and compositor path, the boot
 path, and `services_*` above the kernel.
