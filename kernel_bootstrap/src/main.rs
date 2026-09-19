@@ -676,7 +676,12 @@ extern "C" fn keyboard_irq_handler() {
     // Read scancode from PS/2 data port
     unsafe {
         let status = inb(0x64);
-        if (status & 0x01) != 0 {
+        // Bit 0: output buffer full. Bit 5: the byte is auxiliary (mouse)
+        // data. The mouse handler checks both; this checked only the first,
+        // so any condition that raised IRQ 1 with an aux byte latched pushed
+        // a mouse byte into the keystroke stream. The two handlers read the
+        // same register and should agree about what it means.
+        if (status & 0x21) == 0x01 {
             let scancode = inb(0x60);
             let dropped = KEYBOARD_EVENT_QUEUE.push(scancode);
             if KBD_DEBUG_LOG {

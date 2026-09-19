@@ -205,11 +205,34 @@ impl<'a, P: PortIo> Ps2Controller<'a, P> {
         Ok(self.io.inb(PS2_DATA_PORT))
     }
 
+    /// Read a byte that came from the mouse, discarding any that did not.
+    ///
+    /// The keyboard is scanning throughout this handshake -- bring-up
+    /// deliberately runs after the keyboard's IRQ is enabled -- so a
+    /// keystroke in the window was consumed as the mouse's ACK, the whole of
+    /// `initialize` failed with a Nack, IRQ 12 was never unmasked, and the
+    /// desktop had no pointer until the next reboot. All from one key
+    /// pressed at the wrong moment.
+    fn read_aux_data(&mut self) -> Result<u8, MouseInitError> {
+        for _ in 0..WAIT_LIMIT {
+            let status = self.io.inb(PS2_STATUS_PORT);
+            if status & STATUS_OBF == 0 {
+                continue;
+            }
+            let byte = self.io.inb(PS2_DATA_PORT);
+            if status & STATUS_AUX_DATA != 0 {
+                return Ok(byte);
+            }
+            // A keyboard byte. Drop it and keep waiting for the mouse.
+        }
+        Err(MouseInitError::NoResponse)
+    }
+
     /// Send one byte to the mouse and require an ACK.
     fn mouse_byte(&mut self, byte: u8) -> Result<(), MouseInitError> {
         self.write_command(CTRL_WRITE_AUX)?;
         self.write_data(byte)?;
-        let response = self.read_data()?;
+        let response = self.read_aux_data()?;
         if response == MOUSE_ACK {
             Ok(())
         } else {
@@ -247,7 +270,7 @@ impl Ps2MouseInit {
             ctrl.mouse_byte(rate)?;
         }
         ctrl.mouse_byte(MOUSE_GET_ID)?;
-        let device_id = ctrl.read_data()?;
+        let device_id = ctrl.read_aux_data()?;
 
         ctrl.mouse_byte(MOUSE_ENABLE_REPORTING)?;
 
@@ -404,10 +427,24 @@ mod tests {
                 .push((PS2_STATUS_PORT, STATUS_OBF | STATUS_AUX_DATA));
             self.reads.push((PS2_DATA_PORT, value));
         }
+        /// A byte from the *keyboard* sitting in the buffer: OBF set, AUX
+        /// clear. Bring-up runs with the keyboard scanning, so this is what
+        /// a keystroke during the handshake looks like.
+        fn keyboard_byte(&mut self, scancode: u8) {
+            self.reads.push((PS2_STATUS_PORT, STATUS_OBF));
+            self.reads.push((PS2_DATA_PORT, scancode));
+        }
         /// write_command(0xD4) + write_data(byte) + ACK
         fn mouse_byte_ack(&mut self) {
             self.input_clear();
             self.input_clear();
+            self.data(MOUSE_ACK);
+        }
+        /// The same, with the user pressing a key just before the ACK.
+        fn mouse_byte_ack_interrupted(&mut self, scancode: u8) {
+            self.input_clear();
+            self.input_clear();
+            self.keyboard_byte(scancode);
             self.data(MOUSE_ACK);
         }
     }
@@ -428,6 +465,38 @@ mod tests {
         s.data(device_id); // id byte
         s.mouse_byte_ack(); // enable reporting
         s
+    }
+
+    #[test]
+    fn a_keystroke_during_bring_up_does_not_cost_the_pointer() {
+        // `read_data` took whatever was in the data port without checking
+        // whether it came from the mouse. Bring-up deliberately runs after
+        // the keyboard's IRQ is enabled, so the keyboard is scanning for the
+        // whole ~12 round-trip handshake: a key pressed in that window was
+        // consumed as the mouse's ACK, `initialize` failed with a Nack, IRQ
+        // 12 was never unmasked, and the desktop had no pointer until the
+        // next reboot.
+        let mut s = InitScript::new();
+        s.input_clear(); // enable aux
+        s.input_clear(); // read command byte (command)
+        s.data(0x61); // command byte value
+        s.input_clear(); // write command byte (command)
+        s.input_clear(); // write command byte (data)
+        s.mouse_byte_ack_interrupted(0x1E); // the user presses 'a'
+        for _ in 0..3 {
+            s.mouse_byte_ack();
+            s.mouse_byte_ack();
+        }
+        s.mouse_byte_ack();
+        s.data(ID_INTELLIMOUSE);
+        s.mouse_byte_ack();
+
+        let mut io = FakePortIo::new();
+        io.script_reads(&s.reads);
+        let report = Ps2MouseInit::initialize(&mut io)
+            .expect("a keystroke during bring-up must not lose the mouse");
+        assert!(report.wheel);
+        assert_eq!(io.remaining_reads(), 0, "every scripted read consumed");
     }
 
     #[test]
