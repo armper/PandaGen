@@ -619,6 +619,12 @@ pub enum WorkspaceError {
     #[cfg_attr(feature = "std", error("No components available"))]
     NoComponents,
 
+    #[cfg_attr(
+        feature = "std",
+        error("Component {0} has unsaved changes; save it or close it forcibly")
+    )]
+    UnsavedChanges(ComponentId),
+
     #[cfg_attr(feature = "std", error("Invalid command: {0}"))]
     InvalidCommand(String),
 
@@ -671,6 +677,13 @@ impl WorkspaceError {
             WorkspaceError::NoComponents => (
                 "No components available".to_string(),
                 vec!["open editor <path>".to_string(), "help".to_string()],
+            ),
+            WorkspaceError::UnsavedChanges(id) => (
+                format!("Component {} has unsaved changes", id),
+                vec![
+                    "save the buffer with :w".to_string(),
+                    format!("close comp:{} --force", id),
+                ],
             ),
             WorkspaceError::InvalidCommand(cmd) => (
                 format!("Invalid command: {}", cmd),
@@ -2015,7 +2028,45 @@ impl WorkspaceManager {
     }
 
     /// Terminates a component
+    /// Whether this component is holding work the user has not saved.
+    pub fn component_has_unsaved_work(&self, component_id: ComponentId) -> bool {
+        matches!(
+            self.component_instances.get(&component_id),
+            Some(ComponentInstance::Editor(editor)) if editor.state().is_dirty()
+        )
+    }
+
+    /// Every component holding unsaved work.
+    pub fn components_with_unsaved_work(&self) -> Vec<ComponentId> {
+        self.component_instances
+            .iter()
+            .filter(|(_, instance)| {
+                matches!(instance, ComponentInstance::Editor(editor) if editor.state().is_dirty())
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Close a component.
+    ///
+    /// A user-initiated close of a component holding unsaved work is
+    /// refused. The editor itself already refuses `:q` when dirty; the
+    /// workspace around it dropped the instance -- buffer and all -- without
+    /// a word, so one `close` destroyed everything typed. Callers that mean
+    /// it anyway use `terminate_component_forced`.
     pub fn terminate_component(
+        &mut self,
+        component_id: ComponentId,
+        reason: ExitReason,
+    ) -> Result<(), WorkspaceError> {
+        if matches!(reason, ExitReason::Normal) && self.component_has_unsaved_work(component_id) {
+            return Err(WorkspaceError::UnsavedChanges(component_id));
+        }
+        self.terminate_component_forced(component_id, reason)
+    }
+
+    /// Close a component whatever it is holding.
+    pub fn terminate_component_forced(
         &mut self,
         component_id: ComponentId,
         reason: ExitReason,
@@ -2198,10 +2249,21 @@ impl WorkspaceManager {
                 }
             }
             Action::Quit => {
-                // Quit application by terminating all components
+                // Quit used to terminate every component in a loop and
+                // discard the errors, so it destroyed every unsaved buffer in
+                // the workspace without asking. Refuse while anything is
+                // unsaved, and say what.
+                let unsaved = self.components_with_unsaved_work();
+                if !unsaved.is_empty() {
+                    self.workspace_status.set_last_action(format!(
+                        "{} component(s) have unsaved changes; save them first",
+                        unsaved.len()
+                    ));
+                    return false;
+                }
                 let component_ids: Vec<ComponentId> = self.components.keys().copied().collect();
                 for id in component_ids {
-                    let _ = self.terminate_component(
+                    let _ = self.terminate_component_forced(
                         id,
                         ExitReason::Cancelled {
                             reason: "Quit action triggered".to_string(),
@@ -4934,6 +4996,57 @@ mod tests {
         } else {
             panic!("Expected editor instance");
         }
+    }
+
+    #[test]
+    fn closing_an_editor_with_unsaved_work_is_refused() {
+        // `terminate_component` dropped the instance -- the Editor and its
+        // buffer -- with no dirty check, and `close comp:<id>` reported
+        // success. The editor itself refuses `:q` when dirty; the workspace
+        // around it destroyed the same buffer without a word.
+        use crate::keybindings::Action;
+
+        let mut workspace = create_test_workspace();
+        let id = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap();
+
+        // Type something and do not save it.
+        workspace.focus_component(id).unwrap();
+        for ch in ['i', 'x'] {
+            workspace.route_input(&InputEvent::key(key_event_for_char(ch).unwrap()));
+        }
+        assert!(
+            workspace.component_has_unsaved_work(id),
+            "the buffer must be dirty for this test to mean anything"
+        );
+
+        let err = workspace
+            .terminate_component(id, ExitReason::Normal)
+            .expect_err("closing a dirty editor must be refused");
+        assert!(matches!(err, WorkspaceError::UnsavedChanges(_)));
+        assert!(
+            workspace.component_has_unsaved_work(id),
+            "and the work must still be there"
+        );
+
+        // Quit must not take it either.
+        assert!(
+            !workspace.execute_action(&Action::Quit),
+            "Quit terminated every component and discarded the errors"
+        );
+        assert!(workspace.component_has_unsaved_work(id));
+
+        // Forcing it through is still possible for a caller that means it.
+        workspace
+            .terminate_component_forced(id, ExitReason::Normal)
+            .unwrap();
+        assert!(!workspace.component_has_unsaved_work(id));
     }
 
     #[test]

@@ -79,9 +79,17 @@ impl DirectoryView {
         self.entries.get(name)
     }
 
-    /// Lists all entries in the directory
+    /// Lists all entries in the directory, by name.
+    ///
+    /// This iterated a `HashMap` and handed the result straight to the user,
+    /// so `ls` printed a different order on every invocation -- three runs,
+    /// three orders -- while the crate documentation promised "Deterministic:
+    /// Consistent ordering". The file picker and the workspace's recursive
+    /// resolver both sort, so this was an omission rather than a convention.
     pub fn list_entries(&self) -> Vec<&DirectoryEntry> {
-        self.entries.values().collect()
+        let mut entries: Vec<&DirectoryEntry> = self.entries.values().collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
     }
 
     /// Counts the number of entries
@@ -197,5 +205,47 @@ mod tests {
 
         let entries = dir.list_entries();
         assert_eq!(entries.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    use services_storage::{ObjectId, ObjectKind};
+
+    #[test]
+    fn listing_a_directory_gives_the_same_order_every_time() {
+        // `ls` iterated a HashMap, so it shuffled on every invocation. Ten
+        // entries, so the randomised hasher cannot accidentally produce a
+        // sorted order and hide the defect.
+        let names = [
+            "zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "iota", "sigma", "gamma",
+        ];
+        let mut dir = DirectoryView::new(ObjectId::new());
+        for name in names {
+            dir.add_entry(DirectoryEntry::new(
+                name.to_string(),
+                ObjectId::new(),
+                ObjectKind::Blob,
+            ));
+        }
+
+        let first: Vec<String> = dir.list_entries().iter().map(|e| e.name.clone()).collect();
+        let mut sorted = names.map(|n| n.to_string()).to_vec();
+        sorted.sort();
+        assert_eq!(first, sorted, "entries must come back in name order");
+
+        // And a second directory built in a different insertion order must
+        // list identically.
+        let mut other = DirectoryView::new(ObjectId::new());
+        for name in names.iter().rev() {
+            other.add_entry(DirectoryEntry::new(
+                name.to_string(),
+                ObjectId::new(),
+                ObjectKind::Blob,
+            ));
+        }
+        let second: Vec<String> = other.list_entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(first, second, "the order must not depend on insertion");
     }
 }
