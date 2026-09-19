@@ -258,7 +258,13 @@ impl Tcp {
             let limit = match conn.state {
                 State::Closed => continue,
                 State::SynReceived => SYN_TIMEOUT_TICKS,
-                State::Established | State::CloseWait => IDLE_TIMEOUT_TICKS,
+                State::Established => IDLE_TIMEOUT_TICKS,
+                // CloseWait means the peer is gone and nothing further will
+                // ever arrive; only our own side is still open. Holding a
+                // scarce slot for the full idle timeout on a peer that has
+                // already left is indefensible, and it is the backstop for
+                // any service that forgets to close its half.
+                State::CloseWait => CLOSING_TIMEOUT_TICKS,
                 _ => CLOSING_TIMEOUT_TICKS,
             };
             if now.saturating_sub(conn.last_activity) >= limit {
@@ -644,6 +650,35 @@ mod tests {
         }
     }
 
+    /// Like `seg`, but from a chosen source port, so successive clients are
+    /// distinct connections rather than the same one reopening.
+    fn seg_from(src_port: u16, seq: u32, ack: u32, flags: u8, payload: &[u8]) -> Segment<'_> {
+        Segment {
+            src: PEER,
+            src_port,
+            dst_port: PORT,
+            seq,
+            ack,
+            flags,
+            window: 65535,
+            payload,
+        }
+    }
+
+    fn handshake_from(tcp: &mut Tcp, src_port: u16) -> (usize, u32) {
+        tcp.listen(PORT);
+        let index = tcp
+            .receive(seg_from(src_port, 1000, 0, TCP_SYN, &[]))
+            .expect("the table must have room for this client");
+        let synack = tcp.take_reply().unwrap();
+        let iss = synack.seq;
+        assert_eq!(
+            tcp.receive(seg_from(src_port, 1001, iss + 1, TCP_ACK, &[])),
+            Some(index)
+        );
+        (index, iss + 1)
+    }
+
     fn handshake(tcp: &mut Tcp) -> (usize, u32) {
         tcp.listen(PORT);
         let index = tcp.receive(seg(1000, 0, TCP_SYN, &[])).unwrap();
@@ -880,6 +915,65 @@ mod tests {
             "an unanswered handshake must not hold a slot"
         );
         assert!(tcp.reaped >= 1);
+    }
+
+    #[test]
+    fn a_peer_that_hung_up_does_not_hold_a_slot_for_the_idle_timeout() {
+        // CloseWait used to share the 120-second idle timeout with a live
+        // connection, even though the peer has already left and nothing more
+        // can ever arrive on it. With eight slots for every port, six
+        // ordinary HTTP clients that each made one request and hung up --
+        // which is what every HTTP client does -- took the whole machine off
+        // the network for two minutes.
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        let (index, snd) = handshake(&mut tcp);
+
+        // The peer sends FIN and never speaks again. We ACK it and, like a
+        // service that forgets to close its half, do nothing further.
+        assert_eq!(
+            tcp.receive(seg(1001, snd, TCP_ACK | TCP_FIN, &[])),
+            Some(index)
+        );
+        tcp.take_reply();
+        assert_eq!(tcp.connection(index).unwrap().state, State::CloseWait);
+
+        tcp.set_now(CLOSING_TIMEOUT_TICKS - 1);
+        assert!(
+            tcp.connection(index).is_some(),
+            "the slot is released on a timer, not immediately"
+        );
+        tcp.set_now(CLOSING_TIMEOUT_TICKS);
+        assert!(
+            tcp.connection(index).is_none(),
+            "a peer that hung up must not hold a slot for the full idle timeout"
+        );
+        assert!(
+            CLOSING_TIMEOUT_TICKS < IDLE_TIMEOUT_TICKS,
+            "the point of this test is that the two differ"
+        );
+    }
+
+    #[test]
+    fn six_clients_that_hang_up_in_turn_do_not_exhaust_the_port() {
+        // The end-to-end shape: sequential, entirely well-behaved clients.
+        // None of them overlaps another, so one slot would be enough if the
+        // table let go of peers that had left.
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        for round in 0..MAX_PER_PORT + 4 {
+            let now = round as u64 * CLOSING_TIMEOUT_TICKS;
+            tcp.set_now(now);
+            let port = 2000 + round as u16;
+            let (index, snd) = handshake_from(&mut tcp, port);
+            assert!(
+                tcp.connection(index).is_some(),
+                "client {round} could not be accepted; the table is still \
+                 holding slots for clients that already hung up"
+            );
+            tcp.receive(seg_from(port, 1001, snd, TCP_ACK | TCP_FIN, &[]));
+            tcp.take_reply();
+        }
     }
 
     #[test]

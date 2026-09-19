@@ -447,6 +447,20 @@ impl NetStack {
             t.resets_sent,
             self.tcp_echoed_bytes
         );
+        // Which slots are occupied, and by what. A table full of connections
+        // the peer already closed looks identical, from the counters alone,
+        // to a table full of live ones.
+        let mut line = FixedBuf::<192>::new();
+        for (index, conn) in t.connections() {
+            let _ = write!(line, " {index}:{}:{:?}", conn.local_port, conn.state);
+        }
+        let _ = writeln!(
+            out,
+            "net: tcp slots {}/{}{}",
+            t.connections().count(),
+            net_stack::tcp::MAX_CONNECTIONS,
+            core::str::from_utf8(line.as_bytes()).unwrap_or("")
+        );
     }
 
     /// Pull in every pending frame, letting the interface answer ARP and
@@ -608,7 +622,25 @@ impl NetStack {
         };
 
         let (head_len, keep_alive, route) = match action {
-            Action::Wait => return,
+            Action::Wait => {
+                // Nothing to parse yet. If the peer has also hung up, there
+                // never will be: every HTTP client closes its keep-alive
+                // connection this way, and a server that does not close its
+                // own half leaves the slot in CloseWait until the idle
+                // reaper. Eight slots serve every port, so a handful of
+                // ordinary requests would take the whole machine off the
+                // network.
+                if self.http_streams[conn].remaining == 0
+                    && self
+                        .iface
+                        .tcp()
+                        .connection(conn)
+                        .is_some_and(|c| c.peer_closed())
+                {
+                    self.iface.tcp_mut().close(conn);
+                }
+                return;
+            }
             Action::HeadTooLarge => {
                 self.http_drain(conn, usize::MAX);
                 self.http_respond(conn, 431, "text/plain", b"header too large\n", false);
