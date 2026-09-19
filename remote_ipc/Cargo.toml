@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 ipc = { workspace = true }
 core_types = { workspace = true }
+uuid = { version = "1.0", default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }

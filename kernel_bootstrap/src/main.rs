@@ -3190,7 +3190,10 @@ impl RemoteCommandServer {
                     return;
                 }
                 let caller = RemoteToken::from_str(&caller);
-                if !REMOTE_REPLAY.lock().accept(envelope.id) {
+                // `accept_ordered`, not `accept`: envelope ids are minted
+                // from the sender's clock, so a captured datagram goes stale
+                // instead of coming back into range when the window rolls.
+                if !REMOTE_REPLAY.lock().accept_ordered(envelope.id) {
                     self.denied += 1;
                     klog!(serial, "remote: replayed message dropped\r\n");
                     return;

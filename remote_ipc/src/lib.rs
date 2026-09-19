@@ -294,6 +294,14 @@ impl<const N: usize> ReplayGuard<N> {
         id.as_uuid().as_u128()
     }
 
+    /// Accept an ordered message id, with the same floor as `accept_key`.
+    ///
+    /// Use this wherever the sender mints ids with `ordered_id`; `accept`
+    /// remains for ids that carry no order.
+    pub fn accept_ordered(&mut self, id: MessageId) -> bool {
+        self.accept_key(Self::key(id))
+    }
+
     /// Whether `id` was accepted recently.
     pub fn is_replay(&self, id: MessageId) -> bool {
         self.is_replay_key(Self::key(id))
@@ -763,6 +771,18 @@ pub fn envelope_from_bytes(
     ))
 }
 
+/// A message id that sorts by when it was minted.
+///
+/// `MessageEnvelope::new` mints a random id, which leaves the replay guard
+/// with the bounded window and nothing else: a captured envelope comes back
+/// into range once the window rolls over. The caller supplies the clock
+/// because this crate also runs in the kernel, where there is none -- put
+/// nanoseconds since the epoch in the top 64 bits and uniqueness underneath,
+/// exactly as the line protocol does.
+pub fn ordered_id(nonce: u128) -> MessageId {
+    MessageId::from_uuid(uuid::Uuid::from_u128(nonce))
+}
+
 pub fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> {
     let payload =
         MessagePayload::new(&call).map_err(|err| RemoteIpcError::Codec(err.to_string()))?;
@@ -772,6 +792,16 @@ pub fn encode_call(call: RemoteCall) -> Result<MessageEnvelope, RemoteIpcError> 
         REMOTE_SCHEMA,
         payload,
     ))
+}
+
+/// As `encode_call`, but with an id the receiver can order. See `ordered_id`.
+pub fn encode_call_with_id(
+    call: RemoteCall,
+    id: MessageId,
+) -> Result<MessageEnvelope, RemoteIpcError> {
+    let mut message = encode_call(call)?;
+    message.id = id;
+    Ok(message)
 }
 
 pub fn encode_response(
@@ -1033,6 +1063,32 @@ mod tests {
             guard.accept_key(reordered),
             "a nonce inside the window but not the newest must be accepted"
         );
+    }
+
+    #[test]
+    fn an_envelope_id_that_carries_its_time_goes_stale_like_a_line_nonce() {
+        // The envelope path had only the bounded window, because a
+        // `MessageId` is a random UUID and old is indistinguishable from
+        // new. Ids minted by `ordered_id` sort by when they were made, so
+        // the same floor that protects the line protocol protects this.
+        const NOW: u128 = 1_700_000_000_000_000_000u128 << 64;
+        let mut guard = ReplayGuard::<4>::new();
+
+        let captured = ordered_id(NOW);
+        assert!(guard.accept_ordered(captured));
+        assert!(!guard.accept_ordered(captured), "an immediate replay");
+
+        for step in 1..=20u128 {
+            let fresh = ordered_id(NOW + (step << 64) * 1_000_000);
+            assert!(guard.accept_ordered(fresh), "ordinary call {step}");
+        }
+        assert!(
+            !guard.accept_ordered(captured),
+            "a captured envelope must not become valid again by waiting"
+        );
+
+        // The round trip through a UUID must not lose the ordering.
+        assert!(ordered_id(NOW).as_uuid().as_u128() < ordered_id(NOW + 1).as_uuid().as_u128());
     }
 
     #[test]

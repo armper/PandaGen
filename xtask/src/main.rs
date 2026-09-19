@@ -299,8 +299,8 @@ fn remote_replay_check(
             allowed_caps: vec![remote_ipc::CAP_KERNEL_COMMAND],
         },
     };
-    let bytes =
-        remote_ipc::envelope_to_bytes(&remote_ipc::encode_call(call)?, &key.caller, &key.key)?;
+    let envelope = remote_ipc::encode_call_with_id(call, remote_ipc::ordered_id(fresh_nonce()))?;
+    let bytes = remote_ipc::envelope_to_bytes(&envelope, &key.caller, &key.key)?;
     let mut buf = [0u8; 4096];
     socket.send_to(&bytes, ("127.0.0.1", port))?;
     let (n, _) = socket.recv_from(&mut buf)?;
