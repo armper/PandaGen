@@ -48,6 +48,9 @@ pub struct VirtioNetDevice<T: VirtioTransport> {
     mac: [u8; 6],
     frames_received: u64,
     frames_sent: u64,
+    /// Frames dropped because the device reported an impossible index or
+    /// length.
+    rx_errors: u64,
 }
 
 impl<T: VirtioTransport> VirtioNetDevice<T> {
@@ -81,6 +84,7 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
             mac,
             frames_received: 0,
             frames_sent: 0,
+            rx_errors: 0,
         };
         device.post_all_rx();
         Ok(device)
@@ -108,12 +112,23 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
         self.mac
     }
 
+    /// Descriptor table pointer, for tests that emulate a hostile device.
+    #[cfg(test)]
+    pub(crate) fn queue_desc_ptr(&self) -> *mut VirtqDesc {
+        self.rx.desc.as_ptr() as *mut VirtqDesc
+    }
+
     pub fn frames_received(&self) -> u64 {
         self.frames_received
     }
 
     pub fn frames_sent(&self) -> u64 {
         self.frames_sent
+    }
+
+    /// Frames dropped because the device reported an impossible index or length.
+    pub fn rx_errors(&self) -> u64 {
+        self.rx_errors
     }
 
     fn rx_buffer(&self, slot: usize) -> (*mut u8, u64) {
@@ -165,14 +180,28 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
     /// larger than `out` are dropped.
     pub fn poll_receive(&mut self, out: &mut [u8]) -> Option<usize> {
         let (id, len) = self.rx.get_used()?;
+        // The used ring is device-writable memory. A descriptor id or buffer
+        // slot out of range would index past the descriptor table or read far
+        // beyond the DMA region, so both are checked before use.
+        if id as usize >= self.rx.size as usize {
+            self.rx_errors += 1;
+            return None;
+        }
         let desc = id as u16;
         let slot = self.rx.desc[desc as usize].next as usize;
+        if slot >= self.dma.rx_count {
+            self.rx_errors += 1;
+            self.rx.free_desc(desc);
+            return None;
+        }
         self.rx.free_desc(desc);
         let len = len as usize;
         let mut result = None;
         if len > NET_HDR_LEN {
-            let frame_len = (len - NET_HDR_LEN).min(MAX_FRAME_LEN);
-            if frame_len <= out.len() {
+            // A frame longer than the buffer is dropped rather than
+            // truncated: a truncated frame is a different frame.
+            let frame_len = len - NET_HDR_LEN;
+            if frame_len <= MAX_FRAME_LEN && frame_len <= out.len() && len <= NET_BUF_LEN {
                 let (buf, _) = self.rx_buffer(slot);
                 // SAFETY: the device wrote `len` bytes into this buffer.
                 unsafe {
@@ -314,6 +343,15 @@ mod tests {
             };
             used.idx.store(uidx.wrapping_add(1), Ordering::Release);
             true
+        }
+
+        /// Report an arbitrary completion, as a buggy or hostile device
+        /// would. The driver must not trust `id`.
+        unsafe fn deliver_raw(&mut self, id: u32, len: u32) {
+            let used = &mut *self.rx.used;
+            let uidx = used.idx.load(Ordering::Acquire);
+            used.ring[(uidx as usize) % self.size as usize] = VirtqUsedElem { id, len };
+            used.idx.store(uidx.wrapping_add(1), Ordering::Release);
         }
 
         unsafe fn process_tx(&mut self) {
@@ -466,5 +504,49 @@ mod tests {
             assert_eq!(out[0], i);
         }
         assert_eq!(dev.frames_received(), 50);
+    }
+
+    #[test]
+    fn a_device_reported_descriptor_id_out_of_range_is_dropped() {
+        // The used ring is device-writable. Indexing the descriptor table
+        // with an id from it would panic, and a panic here is a dead machine.
+        let mut dev = device(3);
+        let mut out = [0u8; MAX_FRAME_LEN];
+        unsafe { dev.transport.deliver_raw(9999, 128) };
+        assert_eq!(dev.poll_receive(&mut out), None);
+        assert_eq!(dev.rx_errors(), 1);
+        // The driver is not wedged: a well-formed frame still arrives.
+        assert!(unsafe { dev.transport.deliver(&[7u8; 64]) });
+        assert_eq!(dev.poll_receive(&mut out), Some(64));
+        assert_eq!(&out[..64], &[7u8; 64]);
+    }
+
+    #[test]
+    fn a_buffer_slot_out_of_range_is_dropped() {
+        // The slot index lives in the descriptor, which the device can also
+        // reach. Trusting it would read far past the DMA region and then
+        // echo that memory back to the network.
+        let mut dev = device(3);
+        let mut out = [0u8; MAX_FRAME_LEN];
+        let head = dev.transport.rx_pending[0];
+        unsafe {
+            (*dev.queue_desc_ptr().add(head as usize)).next = 4096;
+            dev.transport.deliver_raw(head as u32, 128);
+        }
+        assert_eq!(dev.poll_receive(&mut out), None);
+        assert_eq!(dev.rx_errors(), 1);
+    }
+
+    #[test]
+    fn an_oversized_length_is_dropped_rather_than_truncated() {
+        // A truncated frame is a different frame; a hardened stack drops it.
+        let mut dev = device(3);
+        let mut out = [0u8; MAX_FRAME_LEN];
+        let head = dev.transport.rx_pending[0];
+        unsafe {
+            dev.transport
+                .deliver_raw(head as u32, (NET_BUF_LEN + 64) as u32)
+        };
+        assert_eq!(dev.poll_receive(&mut out), None);
     }
 }

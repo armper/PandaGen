@@ -78,9 +78,9 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | F3 | net_stack/tcp | Four idle connections to the unauthenticated echo port take the signed command port offline permanently; no reaper, and a full table black-holes instead of resetting (`tcp_slots`) | FIXED (279) |
 | F4 | kernel/smp | One `WORK` queue with two independent owners that both call `reset()`; present bands and `smp run` jobs corrupt each other's ids and results | FIXED (280) |
 | F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | FIXED (281) |
-| F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | OPEN |
-| F7 | kernel/serial | `SERIAL_LOCK` is taken per `write_str` fragment, so one CPU's line splits another's; `write_byte` skips it entirely | OPEN |
-| F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | OPEN |
+| F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | FIXED (282) |
+| F7 | kernel/serial | `SERIAL_LOCK` is taken per `write_str` fragment, so one CPU's line splits another's; `write_byte` skips it entirely | FIXED (282) |
+| F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
 
 ## Rejected claims
 
@@ -118,13 +118,14 @@ result. Its positive findings are about shared state, not lock order.
 
 ## Resume here
 
-F1, F2 (278), F3 (279), F4 (280), F5 (281) are all fixed and committed.
-**Next: F6** (`&mut Kernel` aliased with `&Kernel` across CPUs; needs
-`create_channel` to take `&self`, so `channel_count` becomes an atomic), then
-F7 (serial lock taken per fragment, so lines interleave under multi-CPU load)
-and F8 (virtio `poll_receive` trusts device-supplied descriptor and slot
-indices).
+**Round 1 is closed.** All eight findings are fixed across Phases 278-282, and
+the whole gauntlet suite passes.
 
-Round 2 has not been dispatched yet. When F6-F8 are closed, send fresh critics
-at: the HTTP server once it exists, the storage stack (`services_storage` and
-virtio-blk) which no critic has looked at, and the graphics/compositor path.
+**Next: round 2.** Two things in parallel:
+
+1. Raise the bar. `net_stack/src/http.rs` is written and host-tested but not
+   yet wired into the kernel. Finish it so `curl` becomes a judge: a real
+   HTTP client is far harsher than any script I would write by hand.
+2. Dispatch fresh critics at areas round 1 never looked at: the storage stack
+   (`services_storage` plus virtio-blk, where a crash mid-transaction is the
+   interesting case), the graphics and compositor path, and the boot path.

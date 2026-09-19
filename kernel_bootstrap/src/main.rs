@@ -1118,7 +1118,11 @@ pub extern "C" fn rust_main() -> ! {
         "Interrupts enabled, timer at 100 Hz, keyboard IRQ 1"
     );
 
-    let kernel = unsafe {
+    // Initialise through a unique reference, then immediately narrow to a
+    // shared one: every application processor also holds `&Kernel`, and a
+    // live `&mut` alongside those is undefined behaviour even though each
+    // field is individually locked.
+    let kernel: &Kernel = unsafe {
         Kernel::init_in_place(
             &mut *core::ptr::addr_of_mut!(KERNEL_STORAGE),
             boot,
@@ -1290,7 +1294,7 @@ fn idle_pause() {
 }
 
 #[cfg(not(test))]
-fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
+fn console_loop(serial: &mut serial::SerialPort, kernel: &Kernel) -> ! {
     let mut last_tick_display = 0u64;
     loop {
         let progressed = kernel.run_once(serial);
@@ -1316,7 +1320,7 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &mut Kernel) -> ! {
 #[cfg(not(test))]
 fn workspace_loop(
     serial: &mut serial::SerialPort,
-    kernel: &mut Kernel,
+    kernel: &Kernel,
     mut vga_console: Option<&mut console_vga::VgaConsole>,
     mut fb_console: Option<&mut framebuffer::BareMetalFramebuffer>,
     filesystem: Option<bare_metal_storage::BareMetalFilesystem>,
@@ -5193,7 +5197,7 @@ struct Kernel {
     allocator: hal_x86_64::SpinLock<Option<FrameAllocator>>,
     heap: hal_x86_64::SpinLock<Option<BumpHeap>>,
     channels: [hal_x86_64::SpinLock<Channel>; MAX_CHANNELS],
-    channel_count: u8,
+    channel_count: core::sync::atomic::AtomicU8,
     next_message_id: core::sync::atomic::AtomicU64,
     scheduler: hal_x86_64::SpinLock<CooperativeScheduler>,
     tasks: [hal_x86_64::SpinLock<Option<TaskSlot>>; MAX_TASKS],
@@ -5219,7 +5223,7 @@ impl Kernel {
         core::ptr::addr_of_mut!((*ptr).boot).write(boot);
         core::ptr::addr_of_mut!((*ptr).allocator).write(hal_x86_64::SpinLock::new(allocator));
         core::ptr::addr_of_mut!((*ptr).heap).write(hal_x86_64::SpinLock::new(heap));
-        core::ptr::addr_of_mut!((*ptr).channel_count).write(0);
+        core::ptr::addr_of_mut!((*ptr).channel_count).write(core::sync::atomic::AtomicU8::new(0));
         core::ptr::addr_of_mut!((*ptr).next_message_id)
             .write(core::sync::atomic::AtomicU64::new(1));
         core::ptr::addr_of_mut!((*ptr).scheduler)
@@ -5258,7 +5262,7 @@ impl Kernel {
             allocator: hal_x86_64::SpinLock::new(allocator),
             heap: hal_x86_64::SpinLock::new(heap),
             channels: core::array::from_fn(|_| hal_x86_64::SpinLock::new(Channel::new())),
-            channel_count: 0,
+            channel_count: core::sync::atomic::AtomicU8::new(0),
             next_message_id: core::sync::atomic::AtomicU64::new(1),
             scheduler: hal_x86_64::SpinLock::new(CooperativeScheduler::new()),
             tasks: core::array::from_fn(|_| hal_x86_64::SpinLock::new(None)),
@@ -5274,6 +5278,23 @@ impl Kernel {
         let _ = kernel.spawn_task(TaskDomain::User, TaskKind::Console(console_task));
 
         kernel
+    }
+
+    /// Reserve a channel. Takes `&self` so no caller needs a unique
+    /// reference to the kernel: the boot CPU and every application processor
+    /// share one, and holding a `&mut` alongside those shared borrows is
+    /// undefined behaviour regardless of the interior locks.
+    fn create_channel(&self) -> Result<ChannelId, KernelError> {
+        use core::sync::atomic::Ordering;
+        let index = self
+            .channel_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                ((count as usize) < MAX_CHANNELS).then_some(count + 1)
+            })
+            .map_err(|_| KernelError::OutOfChannels)?;
+        let id = ChannelId(index);
+        self.channels[id.index()].lock().reset();
+        Ok(id)
     }
 
     /// A context over the shared kernel state for one task poll or one
@@ -5350,13 +5371,7 @@ impl KernelApiV0 for Kernel {
     }
 
     fn create_channel(&mut self) -> Result<ChannelId, KernelError> {
-        if self.channel_count as usize >= MAX_CHANNELS {
-            return Err(KernelError::OutOfChannels);
-        }
-        let id = ChannelId(self.channel_count);
-        self.channel_count = self.channel_count.saturating_add(1);
-        self.channels[id.index()].lock().reset();
-        Ok(id)
+        Kernel::create_channel(self)
     }
 
     fn send(&mut self, channel: ChannelId, message: KernelMessage) -> Result<(), KernelError> {
@@ -6396,7 +6411,15 @@ pub mod serial {
             }
         }
 
+        /// One byte, writer lock held. Used for the terminal echo, which is
+        /// a single character and would otherwise land inside another CPU's
+        /// line.
         pub fn write_byte(&mut self, byte: u8) -> fmt::Result {
+            let _writer = SERIAL_LOCK.lock();
+            self.write_byte_raw(byte)
+        }
+
+        fn write_byte_raw(&mut self, byte: u8) -> fmt::Result {
             while !self.transmit_ready() {
                 unsafe {
                     asm!("pause", options(nomem, nostack, preserves_flags));
@@ -6451,15 +6474,26 @@ pub mod serial {
     static SERIAL_LOCK: hal_x86_64::SpinLock<()> = hal_x86_64::SpinLock::new(());
 
     impl SerialPort {
-        /// Write without taking the writer lock (fatal exception path only).
+        /// Write without taking the writer lock (fatal exception path only,
+        /// and internally once the lock is already held).
         pub fn write_str_unlocked(&mut self, s: &str) -> fmt::Result {
             for byte in s.bytes() {
                 if byte == b'\n' {
-                    self.write_byte(b'\r')?;
+                    self.write_byte_raw(b'\r')?;
                 }
-                self.write_byte(byte)?;
+                self.write_byte_raw(byte)?;
             }
             Ok(())
+        }
+    }
+
+    /// Borrows the port without re-taking the writer lock, so one formatted
+    /// write is emitted as a unit.
+    struct Held<'a>(&'a mut SerialPort);
+
+    impl fmt::Write for Held<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            self.0.write_str_unlocked(s)
         }
     }
 
@@ -6467,6 +6501,14 @@ pub mod serial {
         fn write_str(&mut self, s: &str) -> fmt::Result {
             let _writer = SERIAL_LOCK.lock();
             self.write_str_unlocked(s)
+        }
+
+        /// `writeln!` lowers to several `write_str` calls. Taking the lock
+        /// per call let another CPU's line land in the middle of this one,
+        /// so the whole formatted write is held instead.
+        fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+            let _writer = SERIAL_LOCK.lock();
+            fmt::Write::write_fmt(&mut Held(self), args)
         }
     }
 
