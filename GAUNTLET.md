@@ -85,16 +85,17 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | S4 | services_storage | A stale commit sequence overwrote a live ring record, destroying an already-committed object at a later unrelated write | FIXED (284) |
 | S7 | services_storage | `total_blocks` from block 0 was trusted; a byte edit turned a mount into an unbounded allocation | FIXED (284) |
 | S3 | services_storage | Reads assume contiguous allocation; `allocate_blocks` does not guarantee it, so an object can read another's blocks | OPEN |
-| S5 | services_storage | Object ids restart at 1 every boot, so files from different boots alias to one object | OPEN |
+| S5 | services_storage | Object ids restart at 1 every boot, so files from different boots alias to one object; confirmed on a real image (`b.txt` and `p.txt` shared one id, `cat b.txt` printed p.txt) | FIXED (286) |
 | S6 | services_storage | A failed commit returns `Ok` on retry having written nothing, and leaks its blocks | OPEN |
 | S8 | services_storage | Multi-step operations are not atomic; `write_file_by_name` has a window where neither version is reachable | OPEN |
 | S9 | services_storage | Nothing is ever freed; deletion leaks, and the disk fills monotonically | OPEN |
 | S10 | hal/virtio_blk | `VIRTIO_BLK_F_FLUSH` is never negotiated and `UNSUPP` is treated as success, so nothing survives host power loss | OPEN |
-| X1 | boot config | The shipped image authenticates with the published constant `pandagen-dev` and accepts any caller name | OPEN |
+| X1 | boot config | The shipped image authenticates with the published constant `pandagen-dev` and accepts any caller name | FIXED (285) |
 | X2 | remote_ipc | The 256-entry replay window is flushable, and nonces are not ordered or time-bound | OPEN |
-| X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | OPEN |
+| X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | FIXED (285) |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
+| F10 | kernel/http + net_stack/tcp | An ordinary keep-alive client that hangs up leaves its slot in CloseWait for the 120 s idle timeout; eight slots serve every port, so a handful of plain `curl` requests reset all later ones and take the command port with them (`http_slots`) | FIXED (287) |
 
 ## Rejected claims
 
@@ -130,21 +131,49 @@ The SMP critic returned a clean lock-order graph (acyclic; `GLOBAL_HEAP` and
 `SERIAL_LOCK` are true leaves) and no deadlock, which is a meaningful negative
 result. Its positive findings are about shared state, not lock order.
 
+### Round 2
+
+Storage and security critics reported. Everything they raised that reproduced
+is fixed: S1, S2, S4, S7 (Phase 284), X1 and X3 (285), S5 (286).
+
+S5 is worth recording as a method note. The critic's claim was true on the
+kernel and **invisible on the host**, because `ObjectId::new()` is a real v4
+UUID off the kernel and a restarting counter on it. No host test could fail.
+It was confirmed instead by scanning the raw disk image for two names sharing
+an id, and then by `cat` in QEMU. The guard that shipped with the fix asserts
+the *mechanism* (a serial is never handed out twice across a remount) rather
+than the symptom, because only the mechanism is observable where tests run.
+
+F10 came out of the suite rather than a critic: `tcp_slots` failed only when
+run after the other scripts, and passed alone. The ordering dependency was the
+finding, not a flaw in the test. Worth remembering — **an order-dependent
+failure in this suite is evidence, not noise.**
+
 ## Resume here
 
-**Round 1 is closed.** All eight findings are fixed across Phases 278-282, and
-the whole gauntlet suite passes.
+**Rounds 1 and 2 are closed.** Sixteen findings fixed across Phases 278-287.
+The whole gauntlet suite (11 scripts) passes in one run, in any order, and
+`cargo test --workspace` is clean.
 
-**Next: round 2.** Two things in parallel:
+**Open, in the order to take them:**
 
-1. Done (Phase 283). PandaGen serves HTTP on port 8080 and `gauntlet:http_curl`
-   holds it to real `curl`. Pointing curl at it found F9 immediately.
-2. Storage and security critics have reported. Storage S1, S2, S4, S7 are
-   fixed (Phase 284). **Next: X1**, which is the most serious thing on the
-   board — the shipped ISO authenticates with a constant published in this
-   repository — then X3 (address disclosure), then the remaining storage
-   findings in the critic's suggested order: S5 (id aliasing), S3
-   (contiguity), S6 (lying commit), S8 (atomicity).
+1. **S3** (contiguity) — reads assume an object's blocks are contiguous and
+   `allocate_blocks` does not promise that. Most likely to be silent
+   corruption, like S5 was. Reproduce it the same way: force a fragmented
+   free list, then compare bytes.
+2. **S6** (a failed commit returns `Ok` on retry having written nothing).
+3. **S8** (atomicity: `write_file_by_name` has a window where neither
+   version is reachable).
+4. **S9** (nothing is ever freed).
+5. **X2** (the replay window is flushable; nonces are not ordered or
+   time-bound).
+6. **S10** (no `VIRTIO_BLK_F_FLUSH`). Note: **explicitly not reproducible
+   with the tools here** — killing QEMU leaves the host page cache intact, so
+   the disk image looks durable when it is not. Fix it on the reasoning, and
+   say in the commit that the test could not be written.
 
-Still unvisited by any critic: the graphics and compositor path, the boot
-path, and `services_*` above the kernel.
+**Still unvisited by any critic:** the graphics and compositor path, the boot
+path, and `services_*` above the kernel. Round 3 should dispatch there.
+
+**Stop condition:** three consecutive critic rounds with no confirmed
+finding, or Armando returns.
