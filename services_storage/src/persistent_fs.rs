@@ -227,12 +227,24 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         object_id: ObjectId,
         kind: ObjectKind,
         timestamp: u64,
-    ) -> Result<(), TransactionError> {
+    ) -> Result<Option<DirectoryEntry>, TransactionError> {
         let mut dir = self.read_directory(dir_id)?;
         let entry = DirectoryEntry::new(name.into(), object_id, kind);
+        // Whatever this name pointed at is no longer reachable through it.
+        // Returned rather than released here: only the caller knows whether
+        // any other name still refers to it.
+        let displaced = dir.get_entry(&entry.name).cloned();
         dir.add_entry(entry.name.clone(), entry, timestamp);
         self.write_directory(dir_id, &dir)?;
-        Ok(())
+        Ok(displaced)
+    }
+
+    /// Give an object's blocks back. The caller must have established that
+    /// nothing else refers to it; see `BlockStorage::release_object`.
+    pub fn release_object(&mut self, object_id: ObjectId) -> Result<(), TransactionError> {
+        self.storage
+            .release_object(object_id)
+            .map_err(|e| TransactionError::StorageError(alloc::format!("{:?}", e)))
     }
 
     /// Unlink an entry from a directory

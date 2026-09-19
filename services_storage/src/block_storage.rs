@@ -91,6 +91,13 @@ struct CommitRecord {
     sequence: u64,
     /// List of allocations made in this transaction
     allocations: Vec<AllocationEntry>,
+    /// Objects this transaction gave back. Recorded rather than merely
+    /// applied in memory because recovery replays the ring: without this the
+    /// next mount would re-reserve blocks that had been freed and handed to
+    /// somebody else. Records are applied in sequence order, so a release
+    /// always lands after the allocation it undoes.
+    #[serde(default)]
+    released: Vec<ObjectId>,
     /// CRC32 checksum of the commit record (excluding this field)
     checksum: u32,
 }
@@ -102,10 +109,20 @@ impl CommitRecord {
         sequence: u64,
         allocations: Vec<AllocationEntry>,
     ) -> Self {
+        Self::with_releases(transaction_id, sequence, allocations, Vec::new())
+    }
+
+    fn with_releases(
+        transaction_id: TransactionId,
+        sequence: u64,
+        allocations: Vec<AllocationEntry>,
+        released: Vec<ObjectId>,
+    ) -> Self {
         let mut record = Self {
             transaction_id,
             sequence,
             allocations,
+            released,
             checksum: 0,
         };
         record.checksum = record.compute_checksum();
@@ -589,6 +606,27 @@ impl<D: BlockDevice> BlockStorage<D> {
                     self.free_blocks.remove(&block);
                 }
             }
+            // Releases are applied after the same record's allocations, and
+            // records come in sequence order, so a release always undoes an
+            // allocation that has already been replayed.
+            for object in &record.released {
+                let doomed: Vec<(ObjectId, VersionId)> = self
+                    .allocations
+                    .keys()
+                    .filter(|(candidate, _)| candidate == object)
+                    .copied()
+                    .collect();
+                for key in doomed {
+                    if let Some(entry) = self.allocations.remove(&key) {
+                        for block in entry.block_list() {
+                            if block < self.superblock.total_blocks {
+                                self.free_blocks.insert(block);
+                            }
+                        }
+                    }
+                }
+                self.latest_versions.remove(object);
+            }
         }
 
         // The superblock update that records a commit is a separate write
@@ -616,13 +654,22 @@ impl<D: BlockDevice> BlockStorage<D> {
         transaction_id: TransactionId,
         allocations: Vec<AllocationEntry>,
     ) -> Result<(), BlockStorageError> {
+        self.write_commit_record_with(transaction_id, allocations, Vec::new())
+    }
+
+    fn write_commit_record_with(
+        &mut self,
+        transaction_id: TransactionId,
+        allocations: Vec<AllocationEntry>,
+        released: Vec<ObjectId>,
+    ) -> Result<(), BlockStorageError> {
         // Increment commit sequence
         self.superblock.commit_sequence += 1;
 
         let sequence = self.superblock.commit_sequence;
 
         // Create commit record with checksum
-        let record = CommitRecord::new(transaction_id, sequence, allocations);
+        let record = CommitRecord::with_releases(transaction_id, sequence, allocations, released);
 
         // Serialize commit record
         let record_json =
@@ -747,6 +794,55 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         self.read_data(&blocks, entry.size_bytes)
     }
+    /// Give an object's blocks back to the free set.
+    ///
+    /// Nothing was ever freed: every save allocated a fresh object and the
+    /// one it replaced kept its blocks forever, so a 512-block disk died
+    /// after 48 saves of an eight-block file. The release is written to the
+    /// commit log as well as applied in memory, because recovery replays the
+    /// ring and would otherwise re-reserve blocks that had since been handed
+    /// to somebody else.
+    ///
+    /// The caller decides an object is unreachable. There are no reference
+    /// counts here, so releasing an object that another name still points at
+    /// would hand out live blocks -- no caller in this tree ever binds one
+    /// object to two names, and a release site must keep that true.
+    pub fn release_object(&mut self, object_id: ObjectId) -> Result<(), BlockStorageError> {
+        let doomed: Vec<(ObjectId, VersionId)> = self
+            .allocations
+            .keys()
+            .filter(|(object, _)| *object == object_id)
+            .copied()
+            .collect();
+        if doomed.is_empty() {
+            return Ok(());
+        }
+
+        // The record goes down first: if it fails, nothing has changed and
+        // the blocks stay where they are.
+        self.write_commit_record_with(TransactionId::new(), Vec::new(), alloc::vec![object_id])?;
+
+        for key in doomed {
+            if let Some(entry) = self.allocations.remove(&key) {
+                for block in entry.block_list() {
+                    if block < self.superblock.total_blocks {
+                        self.free_blocks.insert(block);
+                    }
+                }
+            }
+        }
+        self.latest_versions.remove(&object_id);
+
+        // A release consumes a ring slot without going through `commit`, so
+        // without this a run of releases could wrap the ring past what the
+        // checkpoint covers -- which is how the filesystem lost most of
+        // itself in Phase 284.
+        if self.checkpoint_due() {
+            self.write_checkpoint()?;
+        }
+        Ok(())
+    }
+
     /// The body of a commit. `taken` collects every block this attempt
     /// removed from the free set, so the caller can give them back; `durable`
     /// is set once the commit record has landed and the attempt can no longer

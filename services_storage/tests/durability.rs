@@ -295,3 +295,100 @@ fn identities_from_two_boots_of_one_disk_never_collide() {
         );
     }
 }
+
+#[test]
+fn saving_the_same_file_over_and_over_does_not_consume_the_disk() {
+    // Every write allocates a fresh version and nothing ever released the
+    // one it replaced, so a file saved repeatedly -- an editor autosaving,
+    // a log rewritten -- consumed the disk in proportion to the number of
+    // saves rather than its size. A 512-block disk died after a few dozen
+    // saves of a file that would fit two hundred times over.
+    let disk = SharedDisk::new(512);
+    let mut fs = PersistentFilesystem::format_with_root(disk, "test", ROOT).unwrap();
+
+    const SAVES: usize = 100;
+    const BODY: usize = 4096 * 8; // eight blocks; 100 saves is 800 if leaked
+    let mut id = fs.write_file(&vec![b'0'; BODY]).unwrap();
+    fs.link("notes.txt", ROOT, id, ObjectKind::Blob, 0).unwrap();
+
+    for save in 1..=SAVES {
+        let body = vec![b'0' + (save % 10) as u8; BODY];
+        id = match fs.write_file(&body) {
+            Ok(id) => id,
+            Err(err) => panic!(
+                "save {save} of {SAVES} failed with {err:?}; {} blocks of file \
+                 have used up a {} block disk",
+                BODY / 4096,
+                512
+            ),
+        };
+        // Rebinding the name is what makes the previous object unreachable,
+        // so that is where it is released.
+        if let Some(old) = fs.link("notes.txt", ROOT, id, ObjectKind::Blob, 0).unwrap() {
+            fs.release_object(old.object_id).unwrap();
+        }
+        assert_eq!(
+            fs.read_file(id).unwrap(),
+            body,
+            "save {save} read back wrong"
+        );
+    }
+}
+
+#[test]
+fn released_blocks_stay_released_across_a_remount() {
+    // Recovery replays the commit ring. A release that lived only in memory
+    // would be undone by the next mount, which would re-reserve every block
+    // the released objects once held. The checkpoint hides this most of the
+    // time -- it snapshots the map after the release -- so the window is the
+    // commits that come *after* the last checkpoint. Several short mounts
+    // land in that window over and over, and a lost release compounds: each
+    // cycle the disk would come back a little smaller until it died.
+    let disk = SharedDisk::new(512);
+    const CYCLES: usize = 20;
+    const SAVES_PER_CYCLE: usize = 5;
+    const BODY: usize = 4096 * 8; // 40 blocks per cycle if nothing is freed
+
+    {
+        let mut fs = PersistentFilesystem::format_with_root(disk.clone(), "test", ROOT).unwrap();
+        let id = fs.write_file(b"seed").unwrap();
+        fs.link("notes.txt", ROOT, id, ObjectKind::Blob, 0).unwrap();
+    }
+
+    let mut last = String::new();
+    for cycle in 0..CYCLES {
+        let mut fs = PersistentFilesystem::open(disk.clone(), ROOT)
+            .unwrap_or_else(|err| panic!("mount {cycle} failed: {err:?}"));
+
+        for save in 0..SAVES_PER_CYCLE {
+            last = format!("{cycle:02}-{save:02}");
+            let mut body = vec![b'.'; BODY];
+            body[..last.len()].copy_from_slice(last.as_bytes());
+            let id = fs.write_file(&body).unwrap_or_else(|err| {
+                panic!(
+                    "mount {cycle}, save {save} failed with {err:?}: the disk is \
+                     smaller than it was, so a release did not survive recovery"
+                )
+            });
+            if let Some(old) = fs.link("notes.txt", ROOT, id, ObjectKind::Blob, 0).unwrap() {
+                fs.release_object(old.object_id).unwrap();
+            }
+        }
+    }
+
+    // And the name still points at the last thing written to it.
+    let mut fs = PersistentFilesystem::open(disk, ROOT).unwrap();
+    let entry = fs
+        .list(ROOT)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "notes.txt")
+        .expect("the file must still be listed")
+        .1;
+    let body = fs.read_file(entry.object_id).expect("and still readable");
+    assert_eq!(
+        &body[..last.len()],
+        last.as_bytes(),
+        "after the remounts the name points at the wrong version"
+    );
+}

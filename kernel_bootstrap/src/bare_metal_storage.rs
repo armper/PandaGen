@@ -232,13 +232,23 @@ impl BareMetalFilesystem {
         content: &[u8],
     ) -> Result<ObjectId, TransactionError> {
         let file_id = self.fs.write_file(content)?;
-        self.fs.link(
+        let displaced = self.fs.link(
             name,
             self.root_id,
             file_id,
             services_storage::ObjectKind::Blob,
             0,
         )?;
+        // The name now points at the new object, so whatever it displaced is
+        // unreachable: nothing in this tree ever binds one object to two
+        // names. Without this, every save kept its predecessor's blocks
+        // forever and the disk filled in proportion to how often a file was
+        // saved rather than how large it was.
+        if let Some(old) = displaced {
+            if old.object_id != file_id {
+                let _ = self.fs.release_object(old.object_id);
+            }
+        }
         Ok(file_id)
     }
 
@@ -277,7 +287,10 @@ impl BareMetalFilesystem {
 
     /// Delete a file
     pub fn delete_file(&mut self, name: &str) -> Result<(), TransactionError> {
-        self.fs.unlink(name, self.root_id, 0)?;
+        if let Some(entry) = self.fs.unlink(name, self.root_id, 0)? {
+            // Deleting used to remove the name and keep the blocks.
+            let _ = self.fs.release_object(entry.object_id);
+        }
         Ok(())
     }
 
