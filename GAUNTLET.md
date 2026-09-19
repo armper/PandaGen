@@ -84,14 +84,15 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | S2 | services_storage | `blocks[0]` on a zero-length write panicked, and the kernel aborts on panic: an empty file bricked the machine | FIXED (284) |
 | S4 | services_storage | A stale commit sequence overwrote a live ring record, destroying an already-committed object at a later unrelated write | FIXED (284) |
 | S7 | services_storage | `total_blocks` from block 0 was trusted; a byte edit turned a mount into an unbounded allocation | FIXED (284) |
-| S3 | services_storage | Reads assume contiguous allocation; `allocate_blocks` does not guarantee it, so an object can read another's blocks | OPEN |
+| S3 | services_storage | Reads assume contiguous allocation; `allocate_blocks` does not guarantee it, so an object can read another's blocks | FIXED (288) |
 | S5 | services_storage | Object ids restart at 1 every boot, so files from different boots alias to one object; confirmed on a real image (`b.txt` and `p.txt` shared one id, `cat b.txt` printed p.txt) | FIXED (286) |
-| S6 | services_storage | A failed commit returns `Ok` on retry having written nothing, and leaks its blocks | OPEN |
-| S8 | services_storage | Multi-step operations are not atomic; `write_file_by_name` has a window where neither version is reachable | OPEN |
-| S9 | services_storage | Nothing is ever freed; deletion leaks, and the disk fills monotonically | OPEN |
-| S10 | hal/virtio_blk | `VIRTIO_BLK_F_FLUSH` is never negotiated and `UNSUPP` is treated as success, so nothing survives host power loss | OPEN |
+| S6 | services_storage | A failed commit returns `Ok` on retry having written nothing, and leaks its blocks | FIXED (289) |
+| S8 | services_storage | Multi-step operations are not atomic; `write_file_by_name` has a window where neither version is reachable | FIXED (290) |
+| S9 | services_storage | Nothing is ever freed; deletion leaks, and the disk fills monotonically | FIXED (291) |
+| S10 | hal/virtio_blk | `VIRTIO_BLK_F_FLUSH` is never negotiated and `UNSUPP` is treated as success, so nothing survives host power loss | FIXED (293) |
 | X1 | boot config | The shipped image authenticates with the published constant `pandagen-dev` and accepts any caller name | FIXED (285) |
-| X2 | remote_ipc | The 256-entry replay window is flushable, and nonces are not ordered or time-bound | OPEN |
+| X2 | remote_ipc | The replay window is a ring: 260 ordinary commands pushed a captured request out of it and it was accepted again, against the running kernel, with no key (`remote_replay`) | FIXED (292) |
+| X4 | remote_ipc | The message-envelope path keeps the bounded window: a `MessageId` is a random UUID, so there is no order to compare against and a captured envelope still comes back into range | OPEN |
 | X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | FIXED (285) |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
@@ -149,31 +150,57 @@ run after the other scripts, and passed alone. The ordering dependency was the
 finding, not a flaw in the test. Worth remembering — **an order-dependent
 failure in this suite is evidence, not noise.**
 
+### Round 2, continued
+
+S3, S6, S8, S9, S10, X2 all reproduced and are fixed. Three method notes
+worth carrying forward:
+
+**S3 and S6 were one bug from two ends.** S6's failed commit leaked its
+blocks, which punched a hole in the free list, which is the only condition
+under which S3's contiguity assumption breaks. Neither reproduces without
+the other. When two findings in the same area both look hard to trigger,
+try triggering them with each other.
+
+**A unit test can pass while the machine fails.** X2's first fix used an
+eighteen-minute staleness slack. It passed tier 1 and failed tier 2 in the
+same minute: 260 requests take three seconds, so the captured line was
+comfortably inside the slack. Tier 1 proved the code did what I wrote; only
+the real kernel proved what I wrote was the wrong rule.
+
+**Say when a test cannot be written.** S10's data loss is not reproducible
+here — killing QEMU leaves the host page cache intact. The fix is verified
+at the level of the *mechanism* (the feature is negotiated against QEMU's
+real device, the FLUSH is sent, a device that lies is now an error) and the
+commit says plainly that the loss itself was never demonstrated.
+
 ## Resume here
 
 **Rounds 1 and 2 are closed.** Sixteen findings fixed across Phases 278-287.
 The whole gauntlet suite (11 scripts) passes in one run, in any order, and
 `cargo test --workspace` is clean.
 
-**Open, in the order to take them:**
+**Every finding from rounds 1 and 2 is closed.** Phases 278-293.
 
-1. **S3** (contiguity) — reads assume an object's blocks are contiguous and
-   `allocate_blocks` does not promise that. Most likely to be silent
-   corruption, like S5 was. Reproduce it the same way: force a fragmented
-   free list, then compare bytes.
-2. **S6** (a failed commit returns `Ok` on retry having written nothing).
-3. **S8** (atomicity: `write_file_by_name` has a window where neither
-   version is reachable).
-4. **S9** (nothing is ever freed).
-5. **X2** (the replay window is flushable; nonces are not ordered or
-   time-bound).
-6. **S10** (no `VIRTIO_BLK_F_FLUSH`). Note: **explicitly not reproducible
-   with the tools here** — killing QEMU leaves the host page cache intact, so
-   the disk image looks durable when it is not. Fix it on the reasoning, and
-   say in the commit that the test could not be written.
+**Open:** X4 only — the message-envelope replay path. It cannot be fixed the
+way X2 was, because a `MessageId` is a random UUID and there is no order to
+compare against. Fixing it means changing how envelope ids are minted, which
+is a wider change than the line protocol was.
 
-**Still unvisited by any critic:** the graphics and compositor path, the boot
-path, and `services_*` above the kernel. Round 3 should dispatch there.
+**Next: round 3.** Dispatch critics at the three areas no critic has seen:
+
+1. The graphics and compositor path.
+2. The boot path.
+3. `services_*` above the kernel (workspace manager, editor, file picker,
+   fs view) — by far the largest body of code here and entirely unexamined.
+
+**The canonical verification, which must pass before any commit:**
+
+```
+cargo test --workspace
+cargo xtask iso
+cargo xtask qemu-script --keys "sleep:3,<every gauntlet:… script>,sleep:1" \
+  --expect-serial "flush=negotiated"
+```
 
 **Stop condition:** three consecutive critic rounds with no confirmed
 finding, or Armando returns.
