@@ -4797,8 +4797,22 @@ fn ap_idle_loop(lapic_id: u32) -> ! {
 /// kernel has work to schedule on it.
 #[cfg(all(not(test), target_os = "none"))]
 unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
-    let index = CPUS.register(cpu.lapic_id).unwrap_or(MAX_TABLE_CPUS);
-    init_cpu_tables(index);
+    let Some(index) = CPUS.register_within(cpu.lapic_id, MAX_TABLE_CPUS) else {
+        // More CPUs than there are per-CPU tables. See below.
+        halt_loop();
+    };
+    if !init_cpu_tables(index) {
+        // Only MAX_TABLE_CPUS CPUs have a GDT and TSS here, while the CPU
+        // registry holds many more. A CPU past that used to load the shared
+        // IDT and join the idle loop while still on the bootloader's tables
+        // -- and the IDT says vector 8 uses IST1, which lives in *this CPU's*
+        // TSS. If the bootloader left IST1 zero, a double fault would load
+        // RSP = 0 and triple-fault instead of printing the diagnostic the
+        // exception handler exists to print. Park instead of joining: the
+        // machine runs on fewer CPUs rather than resetting on the first
+        // fault that reaches one of them.
+        halt_loop();
+    }
     load_idt();
     if let Some(mut apic) = LAPIC.get() {
         apic.enable(SPURIOUS_VECTOR);
@@ -4879,7 +4893,20 @@ fn start_application_processors(
             cpu.goto_address.write(ap_entry);
         }
     }
-    let all_up = CPUS.wait_for(cpus.len(), 50_000_000);
+    // Only MAX_TABLE_CPUS can join; the rest park themselves in `ap_entry`
+    // because there is no GDT or TSS for them. Waiting for all of them would
+    // spend fifty million polls and then report a timeout that is not one.
+    let expected = cpus.len().min(MAX_TABLE_CPUS);
+    let all_up = CPUS.wait_for(expected, 50_000_000);
+    if cpus.len() > MAX_TABLE_CPUS {
+        klog!(
+            serial,
+            "SMP: {} of {} CPUs parked; only {} have per-CPU tables\r\n",
+            cpus.len() - MAX_TABLE_CPUS,
+            cpus.len(),
+            MAX_TABLE_CPUS
+        );
+    }
     klog!(
         serial,
         "SMP: {} of {} CPUs online (bsp lapic {}){}\r\n",

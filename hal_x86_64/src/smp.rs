@@ -31,13 +31,38 @@ impl CpuRegistry {
     /// Record a CPU as online; returns its logical index, or `None` when the
     /// registry is full.
     pub fn register(&self, lapic_id: u32) -> Option<usize> {
-        let index = self.online.fetch_add(1, Ordering::AcqRel) as usize;
-        if index >= MAX_CPUS {
-            self.online.fetch_sub(1, Ordering::AcqRel);
-            return None;
+        self.register_within(lapic_id, MAX_CPUS)
+    }
+
+    /// Record a CPU as online only if fewer than `limit` are already
+    /// registered, without consuming a slot when it refuses.
+    ///
+    /// The kernel has per-CPU tables for fewer CPUs than this registry
+    /// tracks, and a CPU that joins without them is a CPU whose first double
+    /// fault becomes a triple fault. Refusing here keeps the count honest --
+    /// a CPU that was turned away must not be reported online, or the
+    /// display would keep splitting work across CPUs that are parked.
+    pub fn register_within(&self, lapic_id: u32, limit: usize) -> Option<usize> {
+        let limit = limit.min(MAX_CPUS);
+        let mut current = self.online.load(Ordering::Acquire);
+        loop {
+            if current as usize >= limit {
+                return None;
+            }
+            match self.online.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let index = current as usize;
+                    self.lapic_ids[index].store(lapic_id, Ordering::Release);
+                    return Some(index);
+                }
+                Err(seen) => current = seen,
+            }
         }
-        self.lapic_ids[index].store(lapic_id, Ordering::Release);
-        Some(index)
     }
 
     pub fn online(&self) -> usize {
@@ -129,5 +154,35 @@ mod tests {
         let mut ids: std::vec::Vec<u32> = (0..16).map(|i| reg.lapic_id(i).unwrap()).collect();
         ids.sort_unstable();
         assert_eq!(ids, (0..16).collect::<std::vec::Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_registration_does_not_consume_a_slot() {
+        // The kernel has per-CPU tables for fewer CPUs than this registry
+        // tracks, and a CPU without them triple-faults on its first double
+        // fault instead of printing a diagnostic. Turning one away must not
+        // inflate the online count, or the display keeps splitting work
+        // across CPUs that are parked.
+        let registry = CpuRegistry::new();
+        for id in 0..4u32 {
+            assert_eq!(registry.register_within(id, 4), Some(id as usize));
+        }
+        assert_eq!(registry.online(), 4);
+
+        assert_eq!(registry.register_within(99, 4), None, "past the limit");
+        assert_eq!(
+            registry.online(),
+            4,
+            "a CPU that was turned away must not be counted online"
+        );
+
+        // And a later registration under a higher limit still works.
+        assert_eq!(registry.register_within(5, 8), Some(4));
+        assert_eq!(registry.online(), 5);
     }
 }

@@ -103,6 +103,24 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    // More CPUs than there are per-CPU tables. Those without a GDT and TSS
+    // must park rather than join: a double fault on one of them would load
+    // RSP = 0 and triple-fault the machine.
+    println!("== boot with more CPUs than tables");
+    let args = [
+        "--smp".to_string(),
+        "16".to_string(),
+        "--keys".to_string(),
+        "sleep:6".to_string(),
+        "--out".to_string(),
+        "dist/qemu_smp16".to_string(),
+        "--expect-serial".to_string(),
+        "PandaGen Workspace".to_string(),
+        "--forbid-serial".to_string(),
+        "[timeout]".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot without a PIT");
     let args = [
         "--machine".to_string(),
@@ -666,6 +684,7 @@ fn cmd_qemu_script(
     let mut port_base: u16 = 0;
     let mut machine = "pc".to_string();
     let mut memory = "512M".to_string();
+    let mut smp = QEMU_SMP.to_string();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -694,6 +713,9 @@ fn cmd_qemu_script(
             // Guest memory, so a run can boot a machine smaller than the
             // default and find where the kernel actually stops working.
             "--memory" => memory = value("--memory")?,
+            // CPU count, so a run can boot more CPUs than the kernel has
+            // per-CPU tables for.
+            "--smp" => smp = value("--smp")?,
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -739,7 +761,7 @@ fn cmd_qemu_script(
         .arg("-machine")
         .arg(&machine)
         .arg("-smp")
-        .arg(QEMU_SMP)
+        .arg(&smp)
         .arg("-m")
         .arg(&memory)
         .arg("-cdrom")
