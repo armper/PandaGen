@@ -26,12 +26,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("remote-key") => cmd_remote_key(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
+        Some("gauntlet") => cmd_gauntlet(),
         _ => usage(),
     }
 }
 
+/// The whole verification, in one command that cannot quietly pass.
+///
+/// Every step's exit status is checked. A run once went green against a
+/// stale image because I read the build log for "ISO ready" instead of
+/// looking at the status, so this exists to make that mistake unavailable.
+/// Judges are discovered from the gauntlet directory rather than listed, so
+/// a new one is included the moment it is written.
+fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+
+    println!("== cargo test --workspace");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["test", "--workspace"])
+        .status()?;
+    if !status.success() {
+        return Err("workspace tests failed".into());
+    }
+
+    println!("== cargo xtask iso");
+    cmd_iso()?;
+
+    let mut judges: Vec<String> = fs::read_dir(root.join("gauntlet"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // `_harness` and `_sign` are libraries, not judges.
+            let stem = name.strip_suffix(".py")?;
+            if stem.starts_with('_') {
+                return None;
+            }
+            Some(format!("gauntlet:{stem}"))
+        })
+        .collect();
+    if judges.is_empty() {
+        return Err("no gauntlet judges found; the suite cannot pass vacuously".into());
+    }
+    judges.sort();
+    println!("== {} judges: {}", judges.len(), judges.join(" "));
+
+    let keys = format!("sleep:3,remote:cpus,{},sleep:1", judges.join(","));
+    let args = [
+        "--keys".to_string(),
+        keys,
+        "--expect-serial".to_string(),
+        "flush=negotiated".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())
+}
+
 fn usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("Usage:");
+    println!("  cargo xtask gauntlet   (the whole verification: tests, iso, every judge)");
     println!("  cargo xtask iso");
     println!("  cargo xtask qemu");
     println!("  cargo xtask qemu-smoke");

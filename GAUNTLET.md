@@ -196,11 +196,17 @@ is a wider change than the line protocol was.
 **The canonical verification, which must pass before any commit:**
 
 ```
-cargo test --workspace
-cargo xtask iso
-cargo xtask qemu-script --keys "sleep:3,<every gauntlet:… script>,sleep:1" \
-  --expect-serial "flush=negotiated"
+cargo xtask gauntlet
 ```
+
+It runs the workspace tests, builds the ISO, discovers every judge in
+`gauntlet/` and runs them all through a booted kernel, and checks each step's
+exit status. Judges are discovered, not listed, so a new one counts the
+moment it is written, and the command refuses to pass if it finds none.
+
+It exists because a verification run once went green against a **stale
+image**: the kernel had stopped building and I read the log for "ISO ready"
+instead of checking the exit status. Check the status, not the output.
 
 **Stop condition:** three consecutive critic rounds with no confirmed
 finding, or Armando returns.
