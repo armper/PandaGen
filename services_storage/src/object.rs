@@ -9,6 +9,17 @@ use uuid::Uuid;
 
 use crate::permissions::Ownership;
 
+/// Build an identity from a serial number that the filesystem persists.
+///
+/// The tag byte keeps object and version identities in separate spaces and
+/// keeps both clear of well-known ids such as the filesystem root.
+const fn serial_bytes(tag: u8, serial: u64) -> [u8; 16] {
+    let s = serial.to_be_bytes();
+    [
+        b'P', b'G', tag, 0, 0, 0, 0, 0, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]
+}
+
 /// Unique identifier for a storage object
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(Uuid);
@@ -28,6 +39,12 @@ impl ObjectId {
     /// filesystem root that must be the same across boots.
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(Uuid::from_bytes(bytes))
+    }
+
+    /// An identity from a serial the filesystem persists, so it is unique
+    /// for the life of the disk rather than for the life of one boot.
+    pub const fn from_serial(serial: u64) -> Self {
+        Self::from_bytes(serial_bytes(b'O', serial))
     }
 
     /// Returns the inner UUID
@@ -64,6 +81,15 @@ impl VersionId {
     /// Creates a version ID from a UUID
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
+    }
+
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
+    }
+
+    /// An identity from a persisted serial; see `ObjectId::from_serial`.
+    pub const fn from_serial(serial: u64) -> Self {
+        Self::from_bytes(serial_bytes(b'V', serial))
     }
 
     /// Returns the inner UUID

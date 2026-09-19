@@ -6,7 +6,7 @@
 //! tests does it.
 
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
-use services_storage::{ObjectId, ObjectKind, PersistentFilesystem};
+use services_storage::{BlockStorage, ObjectId, ObjectKind, PersistentFilesystem};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -196,4 +196,102 @@ fn a_hostile_superblock_cannot_hang_or_exhaust_the_mount() {
         result.is_err(),
         "a superblock claiming more blocks than the device has must be refused"
     );
+}
+
+#[test]
+fn the_identity_serial_never_repeats_across_a_remount() {
+    // This is the mechanism the test below depends on, and the only part of
+    // the defect that a host test can actually see: on the host `ObjectId::new`
+    // was always a random v4 UUID, so collisions never showed up here. Only
+    // the kernel build minted ids from a counter that restarted at one on
+    // every boot. The fix is to stop depending on boot-local entropy at all
+    // and hand out serials from a high-water mark kept in the superblock, so
+    // assert exactly that: no serial is ever handed out twice.
+    let disk = SharedDisk::new(512);
+    const PER_BOOT: u64 = 2_500; // past the 1024-serial reservation, twice over
+
+    let mut first = Vec::new();
+    {
+        let mut storage = BlockStorage::format(disk.clone()).unwrap();
+        for _ in 0..PER_BOOT {
+            first.push(storage.next_serial().unwrap());
+        }
+    }
+
+    let mut storage = BlockStorage::open(disk).expect("the disk must remount");
+    let mut second = Vec::new();
+    for _ in 0..PER_BOOT {
+        second.push(storage.next_serial().unwrap());
+    }
+
+    let highest = *first.iter().max().unwrap();
+    let reused: Vec<_> = second.iter().copied().filter(|s| *s <= highest).collect();
+    assert!(
+        reused.is_empty(),
+        "{} serials minted after the remount were at or below the {highest} already \
+         handed out before it (first: {:?})",
+        reused.len(),
+        reused.first()
+    );
+
+    // A crash between reservations may skip serials; that is the price and it
+    // is fine. Reusing even one is not.
+    let mut all = first;
+    all.extend(&second);
+    let unique: std::collections::BTreeSet<_> = all.iter().copied().collect();
+    assert_eq!(unique.len(), all.len(), "a serial was handed out twice");
+}
+
+#[test]
+fn identities_from_two_boots_of_one_disk_never_collide() {
+    // The end-to-end shape of the same defect. On the host this passes either
+    // way; it is here so the property is stated where it belongs, and it is
+    // real coverage for the kernel, which shares this code. The proof that the
+    // kernel is fixed is the disk-image scan, not this test.
+    let disk = SharedDisk::new(512);
+    const PER_BOOT: usize = 12;
+
+    let mut first = Vec::new();
+    {
+        let mut fs = PersistentFilesystem::format_with_root(disk.clone(), "test", ROOT).unwrap();
+        for index in 0..PER_BOOT {
+            let id = fs
+                .write_file(format!("first boot {index}").as_bytes())
+                .unwrap();
+            fs.link(format!("a{index}"), ROOT, id, ObjectKind::Blob, 0)
+                .unwrap();
+            first.push(id);
+        }
+    }
+
+    let mut fs = PersistentFilesystem::open(disk, ROOT).expect("the disk must remount");
+    let mut second = Vec::new();
+    for index in 0..PER_BOOT {
+        let id = fs
+            .write_file(format!("second boot {index}").as_bytes())
+            .unwrap();
+        fs.link(format!("b{index}"), ROOT, id, ObjectKind::Blob, 0)
+            .unwrap();
+        second.push(id);
+    }
+
+    let clashes: Vec<_> = second.iter().filter(|id| first.contains(id)).collect();
+    assert!(
+        clashes.is_empty(),
+        "{} of {PER_BOOT} identities minted after the remount were already in use \
+         before it (first clash: {:?})",
+        clashes.len(),
+        clashes.first()
+    );
+
+    // And the older files must still read back as themselves, not as their
+    // namesakes from the second boot.
+    for (index, id) in first.iter().enumerate() {
+        let want = format!("first boot {index}");
+        assert_eq!(
+            fs.read_file(*id).unwrap(),
+            want.as_bytes(),
+            "file {index} from the first boot no longer holds its own contents"
+        );
+    }
 }

@@ -199,7 +199,11 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         timestamp: u64,
     ) -> Result<ObjectId, TransactionError> {
         // Create new directory
-        let new_dir_id = ObjectId::new();
+        let new_dir_id = ObjectId::from_serial(
+            self.storage
+                .next_serial()
+                .map_err(|e| TransactionError::StorageError(alloc::format!("{:?}", e)))?,
+        );
         let mut new_dir = PersistentDirectory::new(owner, timestamp);
         new_dir.parent = Some(parent_dir_id);
 
@@ -255,7 +259,11 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
 
     /// Write file content (as a Blob object)
     pub fn write_file(&mut self, content: &[u8]) -> Result<ObjectId, TransactionError> {
-        let file_id = ObjectId::new();
+        let file_id = ObjectId::from_serial(
+            self.storage
+                .next_serial()
+                .map_err(|e| TransactionError::StorageError(alloc::format!("{:?}", e)))?,
+        );
         let mut tx = self.storage.begin_transaction()?;
         self.storage.write(&mut tx, file_id, content)?;
         self.storage.commit(&mut tx)?;

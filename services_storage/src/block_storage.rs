@@ -20,6 +20,10 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
 
+/// How many identity serials are reserved on disk at a time. A crash loses
+/// at most this many; reusing even one would alias two objects.
+const SERIAL_RESERVATION: u64 = 1024;
+
 /// Upper bound on the commit ring, matching what `format` will ever choose.
 /// A mounted superblock claiming more is refused rather than scanned.
 const MAX_COMMIT_LOG_BLOCKS: u64 = 256;
@@ -46,6 +50,10 @@ struct Superblock {
     commit_log_blocks: u64,
     /// Commit sequence number (monotonically increasing)
     commit_sequence: u64,
+    /// Next identity serial that has not been handed out. Reserved in
+    /// batches, so a crash may skip serials but can never reuse one.
+    #[serde(default)]
+    next_serial: u64,
     /// Sequence covered by the checkpoint in the reserved region. Zero means
     /// there is none; defaulted so a disk written before checkpoints existed
     /// still mounts.
@@ -147,6 +155,10 @@ struct AllocationEntry {
 pub struct BlockStorage<D: BlockDevice> {
     device: D,
     superblock: Superblock,
+    /// Next identity serial to hand out, and the end of the reservation
+    /// currently recorded on disk.
+    serial_next: u64,
+    serial_limit: u64,
     /// Map object versions to their block locations
     allocations: BTreeMap<(ObjectId, VersionId), AllocationEntry>,
     /// Track the latest version for each object
@@ -229,6 +241,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             commit_log_blocks,
             commit_sequence: 0,
             checkpoint_sequence: 0,
+            next_serial: 0,
         };
 
         // Write superblock to block 0
@@ -247,6 +260,8 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         Ok(Self {
             device,
+            serial_next: superblock.next_serial,
+            serial_limit: superblock.next_serial,
             superblock,
             allocations: BTreeMap::new(),
             latest_versions: BTreeMap::new(),
@@ -309,6 +324,8 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         let mut storage = Self {
             device,
+            serial_next: superblock.next_serial,
+            serial_limit: superblock.next_serial,
             superblock,
             allocations: BTreeMap::new(),
             latest_versions: BTreeMap::new(),
@@ -322,6 +339,23 @@ impl<D: BlockDevice> BlockStorage<D> {
         storage.recovery_report = Some(recovery_report);
 
         Ok(storage)
+    }
+
+    /// A serial that has never been handed out on this disk.
+    ///
+    /// Identities used to come from a counter that restarted at one on every
+    /// boot, so the Nth object of one boot had the same id as the Nth object
+    /// of the next: two unrelated files aliased to a single object, and
+    /// reading one returned the other's contents.
+    pub fn next_serial(&mut self) -> Result<u64, BlockStorageError> {
+        if self.serial_next >= self.serial_limit {
+            self.serial_limit = self.serial_next.saturating_add(SERIAL_RESERVATION);
+            self.superblock.next_serial = self.serial_limit;
+            self.write_superblock()?;
+        }
+        let serial = self.serial_next;
+        self.serial_next += 1;
+        Ok(serial)
     }
 
     /// Write the whole allocation map into the reserved region.
@@ -718,7 +752,10 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
             return Err(TransactionError::AlreadyFinalized);
         }
 
-        let version_id = VersionId::new();
+        let version_id = VersionId::from_serial(
+            self.next_serial()
+                .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?,
+        );
 
         // Add to pending writes
         self.pending.entry(tx.id()).or_default().push(PendingWrite {
