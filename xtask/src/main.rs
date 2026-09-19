@@ -84,6 +84,25 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // for a PIT tick that never came, so the boot CPU stopped for good after
     // "PIT configured for 100 Hz" -- no prompt, no message, no recovery.
     // It must reach the workspace either way.
+    // A machine with a fraction of the memory. The heap asked for 32 MiB of
+    // contiguous frames and gave up if it could not have it, then carried on
+    // for ten more steps and died in the global allocator. It must either
+    // run on a smaller heap or refuse legibly -- never abort.
+    println!("== boot on a small machine");
+    let args = [
+        "--memory".to_string(),
+        "16M".to_string(),
+        "--keys".to_string(),
+        "sleep:8".to_string(),
+        "--out".to_string(),
+        "dist/qemu_lowmem".to_string(),
+        "--expect-serial".to_string(),
+        "PandaGen Workspace".to_string(),
+        "--forbid-serial".to_string(),
+        "ALLOCATION ERROR".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot without a PIT");
     let args = [
         "--machine".to_string(),
@@ -646,6 +665,7 @@ fn cmd_qemu_script(
     let mut forbid_serial: Vec<String> = Vec::new();
     let mut port_base: u16 = 0;
     let mut machine = "pc".to_string();
+    let mut memory = "512M".to_string();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -671,6 +691,9 @@ fn cmd_qemu_script(
             // default `pc` does not have -- `pc,pit=off` is how the
             // calibration hang was reproduced.
             "--machine" => machine = value("--machine")?,
+            // Guest memory, so a run can boot a machine smaller than the
+            // default and find where the kernel actually stops working.
+            "--memory" => memory = value("--memory")?,
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -718,7 +741,7 @@ fn cmd_qemu_script(
         .arg("-smp")
         .arg(QEMU_SMP)
         .arg("-m")
-        .arg("512M")
+        .arg(&memory)
         .arg("-cdrom")
         .arg(&iso)
         .arg("-drive")

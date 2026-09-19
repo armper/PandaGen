@@ -2265,6 +2265,11 @@ impl WorkspaceSession {
         self.active_component == Some(ComponentType::Editor) && self.editor.is_some()
     }
 
+    /// Whether the command palette is taking input.
+    pub fn palette_is_open(&self) -> bool {
+        self.palette_overlay.is_open()
+    }
+
     /// Get reference to the editor
     pub fn editor(&self) -> Option<&MinimalEditor> {
         self.editor.as_ref()

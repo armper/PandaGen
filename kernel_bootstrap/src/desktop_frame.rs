@@ -489,10 +489,26 @@ pub struct DesktopFrameRenderer {
 const CLEAR_COLOR: RgbaColor = RgbaColor::new(0, 0, 0, 255);
 
 impl DesktopFrameRenderer {
-    /// Allocate a renderer for a `width` x `height` pixel framebuffer.
+    /// Allocate a renderer for a `width` x `height` pixel framebuffer, or
+    /// `None` if the backend will not take a surface that size.
+    ///
+    /// This used to `expect`, and the kernel aborts on panic. Every other
+    /// decision on this path is careful -- a graphics mode the budget cannot
+    /// afford is refused and falls back to text with a notice -- so an
+    /// assertion here was the one place that care was abandoned.
+    pub fn try_new(width: usize, height: usize) -> Option<Self> {
+        let backend = SoftwareBackend::new(width, height, Theme::DEFAULT).ok()?;
+        Some(Self::from_parts(backend, width, height))
+    }
+
+    /// Allocate a renderer, panicking if the surface is too large. Tests
+    /// only; the boot path uses `try_new` and falls back to text.
+    #[cfg(test)]
     pub fn new(width: usize, height: usize) -> Self {
-        let backend = SoftwareBackend::new(width, height, Theme::DEFAULT)
-            .expect("framebuffer surfaces are within the software backend limit");
+        Self::try_new(width, height).expect("test surface is within the backend limit")
+    }
+
+    fn from_parts(backend: SoftwareBackend, width: usize, height: usize) -> Self {
         Self {
             backend,
             layout: DesktopLayout::for_pixels(width, height),
@@ -575,6 +591,26 @@ impl DesktopFrameRenderer {
     /// Tightly packed RGBA8888 pixels, `width * height * 4` bytes.
     pub fn pixels(&self) -> &[u8] {
         self.backend.pixels()
+    }
+}
+
+#[cfg(test)]
+mod surface_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_surface_the_backend_will_not_take_is_refused_not_asserted() {
+        // `new` used to `expect`, and the kernel aborts on panic. Every other
+        // decision on this path refuses and falls back to text with a notice;
+        // this was the one place that care was abandoned.
+        assert!(
+            DesktopFrameRenderer::try_new(4000, 3000).is_none(),
+            "a surface past the backend limit must be refused"
+        );
+        assert!(
+            DesktopFrameRenderer::try_new(1280, 800).is_some(),
+            "and an ordinary one must still be built"
+        );
     }
 }
 

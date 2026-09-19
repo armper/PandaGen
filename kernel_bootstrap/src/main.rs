@@ -1071,6 +1071,19 @@ pub extern "C" fn rust_main() -> ! {
     kprintln!(serial, "PandaGen: kernel_bootstrap online");
     let boot = boot_info(&mut serial);
     let (mut allocator, heap) = init_memory(&mut serial, &boot);
+    if heap.is_none() {
+        // Without a heap the global allocator stays at start == end == 0 and
+        // every `alloc` returns null. Boot used to carry on regardless and
+        // die ten steps later inside `alloc_error_handler`, with
+        // "ALLOCATION ERROR: size=16" and nothing to connect it to the cause
+        // it had already printed. Stop where the reason is still legible.
+        kprintln!(
+            serial,
+            "FATAL: no heap; PandaGen cannot start on this machine. See the \
+             heap line above for why."
+        );
+        halt_loop();
+    }
 
     kprintln!(serial, "Initializing interrupts...");
     if init_cpu_tables(0) {
@@ -2047,8 +2060,22 @@ fn workspace_loop(
                         .info();
                     (info.width, info.height)
                 };
-                let renderer = desktop_renderer
-                    .get_or_insert_with(|| desktop_frame::DesktopFrameRenderer::new(width, height));
+                if desktop_renderer.is_none() {
+                    desktop_renderer = desktop_frame::DesktopFrameRenderer::try_new(width, height);
+                }
+                let Some(renderer) = desktop_renderer.as_mut() else {
+                    // Too large a surface for the software backend. Say so
+                    // and stay in text, the same way an unaffordable budget
+                    // is handled -- rather than aborting the machine.
+                    klog!(
+                        serial,
+                        "gfx: {}x{} is larger than the software backend will take; staying in text mode\r\n",
+                        width,
+                        height
+                    );
+                    display_mode = display_mode::DisplayMode::TextConsole;
+                    continue;
+                };
                 let now = get_tick_count();
                 // The graphical editor uses the full window height.
                 workspace.set_editor_viewport_rows(renderer.layout().main_content_rows());
@@ -2091,7 +2118,15 @@ fn workspace_loop(
                 }
 
                 if let Some(sink) = sink {
-                    if workspace.is_editor_active() {
+                    // Not while the palette is up. Opening the palette does
+                    // not change the active component, so this branch kept
+                    // drawing the editor -- and both palette renderers live
+                    // behind `!rendered_editor`, so nothing drew the palette
+                    // at all. Input was already being routed to it, so the
+                    // machine looked frozen: typed characters stopped
+                    // reaching the editor, nothing appeared, and Enter ran
+                    // whatever was selected in an invisible search box.
+                    if workspace.is_editor_active() && !workspace.palette_is_open() {
                         let normal_attr = console_vga::Style::Normal.to_vga_attr();
                         let bold_attr = console_vga::Style::Bold.to_vga_attr();
 
@@ -4406,12 +4441,41 @@ fn init_heap(
     // 32 MiB: the text shadow and the desktop RGBA target are ~4 MiB each at
     // 1280x800, and the bump allocator never returns per-frame allocations.
     const HEAP_PAGES: u64 = 8192;
-    let Some(phys_base) = allocator.allocate_contiguous(HEAP_PAGES) else {
-        let _ = writeln!(serial, "heap: allocation failed");
-        return None;
+    // Below this there is no point continuing; the machine cannot build a
+    // console, let alone a desktop.
+    const MIN_HEAP_PAGES: u64 = 512; // 2 MiB
+    // This asked for 32 MiB of *contiguous* memory and gave up if it could
+    // not have it -- then boot carried on for ten more steps past a
+    // condition it had already printed as fatal, and died in the global
+    // allocator with "ALLOCATION ERROR: size=16". A smaller machine can run
+    // a smaller heap; take what is there.
+    let mut pages = HEAP_PAGES;
+    let phys_base = loop {
+        if let Some(base) = allocator.allocate_contiguous(pages) {
+            break base;
+        }
+        if pages <= MIN_HEAP_PAGES {
+            let _ = writeln!(
+                serial,
+                "heap: no contiguous run of {} KiB is available; this machine \
+                 has too little memory to run PandaGen",
+                MIN_HEAP_PAGES * PAGE_SIZE / 1024
+            );
+            return None;
+        }
+        pages /= 2;
     };
+    if pages < HEAP_PAGES {
+        let _ = writeln!(
+            serial,
+            "heap: only {} KiB available, less than the {} KiB wanted; \
+             graphics modes will be limited",
+            pages * PAGE_SIZE / 1024,
+            HEAP_PAGES * PAGE_SIZE / 1024
+        );
+    }
     let virt_base = (hhdm_offset + phys_base) as usize;
-    let size = (HEAP_PAGES * PAGE_SIZE) as usize;
+    let size = (pages * PAGE_SIZE) as usize;
 
     // Initialize the global allocator (bare-metal only): a freeing
     // free-list heap, so per-frame desktop allocations are returned.
@@ -6302,10 +6366,27 @@ impl FrameAllocator {
         self.reclaimed_len += 1;
     }
 
+    /// A contiguous run of `pages` frames, or `None`.
+    ///
+    /// A failed search used to walk the cursor to the end of the last range
+    /// and leave it there, so the allocator was exhausted by a request it
+    /// had *refused*: every later call returned None whatever its size. The
+    /// cursor is restored on failure, so asking for less after being told no
+    /// works, and so does an ordinary `allocate_frame` afterwards.
     fn allocate_contiguous(&mut self, pages: u64) -> Option<u64> {
         if pages == 0 {
             return None;
         }
+        let saved = (self.current, self.next);
+        let found = self.allocate_contiguous_inner(pages);
+        if found.is_none() {
+            self.current = saved.0;
+            self.next = saved.1;
+        }
+        found
+    }
+
+    fn allocate_contiguous_inner(&mut self, pages: u64) -> Option<u64> {
         let bytes = pages.saturating_mul(PAGE_SIZE);
         while self.current < self.len {
             let range = self.ranges[self.current];
@@ -6506,6 +6587,31 @@ mod tests {
         assert_eq!(a, 0x1000);
         assert_eq!(b, 0x2000);
         assert_eq!(c, 0x5000);
+    }
+
+    #[test]
+    fn a_refused_contiguous_request_does_not_exhaust_the_allocator() {
+        // A failed search walked the cursor to the end of the last range and
+        // left it there, so the allocator was spent by a request it had
+        // refused. The heap asked for 32 MiB, was told no, and every smaller
+        // size it tried afterwards was refused too -- not for lack of memory
+        // but because the first "no" had consumed the allocator.
+        let mut allocator = FrameAllocator::new();
+        allocator.add_range(0x10_0000, 0x40_0000); // 4 MiB
+        allocator.reset_cursor();
+
+        assert!(
+            allocator.allocate_contiguous(4096).is_none(),
+            "16 MiB cannot fit in 4 MiB"
+        );
+        assert!(
+            allocator.allocate_contiguous(256).is_some(),
+            "1 MiB must still be available after a larger request was refused"
+        );
+        assert!(
+            allocator.allocate_frame().is_some(),
+            "and single frames must still come out"
+        );
     }
 
     #[test]
