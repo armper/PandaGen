@@ -1203,7 +1203,10 @@ pub extern "C" fn rust_main() -> ! {
             kprintln!(
                 serial,
                 "Filesystem ready (backend: {}, {})",
-                fs.backend_name(),
+                {
+                    *STORAGE_BACKEND.lock() = fs.backend_name();
+                    fs.backend_name()
+                },
                 if fs.was_freshly_formatted() {
                     "formatted"
                 } else {
@@ -1596,7 +1599,22 @@ fn workspace_loop(
 
         // Service the network (ARP, ping, UDP echo, remote calls).
         #[cfg(all(not(test), target_os = "none"))]
-        remote_server.poll(&mut ctx, serial, command_channel, get_tick_count());
+        remote_server.poll(
+            &mut ctx,
+            serial,
+            command_channel,
+            bare_metal_net::SystemStatus {
+                cpus_online: CPUS.online(),
+                cpus_total: CPU_TOTAL.load(core::sync::atomic::Ordering::Relaxed),
+                uptime_ticks: get_tick_count(),
+                heap_used: GLOBAL_HEAP.stats().used,
+                heap_total: GLOBAL_HEAP.stats().total,
+                frames: gfx_telemetry.frames_rendered,
+                presents: gfx_telemetry.presents,
+                storage: *STORAGE_BACKEND.lock(),
+            },
+            get_tick_count(),
+        );
 
         // Try to receive response
         if let Some(message) = ctx.try_recv(workspace_response) {
@@ -3096,6 +3114,7 @@ impl RemoteCommandServer {
         ctx: &mut KernelContext,
         serial: &mut serial::SerialPort,
         command_channel: ChannelId,
+        status: bare_metal_net::SystemStatus,
         now: u64,
     ) {
         let Some(channel) = self.channel else {
@@ -3137,7 +3156,7 @@ impl RemoteCommandServer {
             let Some(net) = guard.as_mut() else {
                 return;
             };
-            net.service(&get_tick_count, serial)
+            net.service(&get_tick_count, status, serial)
         };
         let Some(request) = request else {
             return;
@@ -4366,6 +4385,9 @@ static BSP_LAPIC_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU
 
 /// Local APIC register window shared by every CPU (set once the HHDM is known).
 static LAPIC: hal_x86_64::SharedLapic = hal_x86_64::SharedLapic::new();
+
+/// Storage backend name, for the HTTP status page.
+static STORAGE_BACKEND: hal_x86_64::SpinLock<&'static str> = hal_x86_64::SpinLock::new("none");
 
 /// The network stack, once a virtio-net device has been found.
 #[cfg(all(not(test), target_os = "none"))]

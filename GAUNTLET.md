@@ -80,6 +80,7 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | FIXED (281) |
 | F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | FIXED (282) |
 | F7 | kernel/serial | `SERIAL_LOCK` is taken per `write_str` fragment, so one CPU's line splits another's; `write_byte` skips it entirely | FIXED (282) |
+| F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
 
 ## Rejected claims
@@ -123,9 +124,10 @@ the whole gauntlet suite passes.
 
 **Next: round 2.** Two things in parallel:
 
-1. Raise the bar. `net_stack/src/http.rs` is written and host-tested but not
-   yet wired into the kernel. Finish it so `curl` becomes a judge: a real
-   HTTP client is far harsher than any script I would write by hand.
-2. Dispatch fresh critics at areas round 1 never looked at: the storage stack
-   (`services_storage` plus virtio-blk, where a crash mid-transaction is the
-   interesting case), the graphics and compositor path, and the boot path.
+1. Done (Phase 283). PandaGen serves HTTP on port 8080 and `gauntlet:http_curl`
+   holds it to real `curl`. Pointing curl at it found F9 immediately.
+2. Storage and security critics are out. When they report, verify before
+   fixing, as always.
+
+Still unvisited by any critic: the graphics and compositor path, the boot
+path, and `services_*` above the kernel.

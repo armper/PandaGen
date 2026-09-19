@@ -197,10 +197,7 @@ pub fn write_headers(
     let len = write_usize(&mut len_buf, content_length)?;
     put(&len_buf[..len], &mut n)?;
     put(b"\r\nServer: PandaGen\r\nConnection: ", &mut n)?;
-    put(
-        if keep_alive { b"keep-alive" } else { b"close" },
-        &mut n,
-    )?;
+    put(if keep_alive { b"keep-alive" } else { b"close" }, &mut n)?;
     put(b"\r\n\r\n", &mut n)?;
     Some(n)
 }
@@ -309,7 +306,11 @@ mod tests {
         assert!(text.contains("Content-Length: 12345\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
-        assert_eq!(text.matches("\r\n\r\n").count(), 1, "exactly one blank line");
+        assert_eq!(
+            text.matches("\r\n\r\n").count(),
+            1,
+            "exactly one blank line"
+        );
 
         let n = write_headers(&mut out, 404, "text/html", 0, true).unwrap();
         let text = core::str::from_utf8(&out[..n]).unwrap();

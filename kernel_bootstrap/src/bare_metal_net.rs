@@ -27,6 +27,65 @@ pub const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 pub const TCP_ECHO_PORT: u16 = 7779;
 /// TCP port serving signed command lines (see `remote_ipc::line`).
 pub const TCP_COMMAND_PORT: u16 = remote_ipc::line::KERNEL_COMMAND_PORT;
+/// TCP port serving HTTP.
+pub const HTTP_PORT: u16 = 8080;
+/// Largest body `/bytes/N` will produce.
+const MAX_GENERATED_BODY: usize = 1 << 20;
+
+/// Live kernel numbers for the status page, supplied by the main loop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemStatus {
+    pub cpus_online: usize,
+    pub cpus_total: u32,
+    pub uptime_ticks: u64,
+    pub heap_used: usize,
+    pub heap_total: usize,
+    pub frames: u64,
+    pub presents: u64,
+    pub storage: &'static str,
+}
+
+/// A body this connection is still streaming out.
+#[derive(Clone, Copy, Default)]
+struct HttpStream {
+    remaining: usize,
+    offset: usize,
+    close_when_done: bool,
+}
+
+/// Formats into a fixed buffer; the HTTP path must not allocate, because it
+/// runs with the network lock held.
+struct FixedBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedBuf<N> {
+    fn new() -> Self {
+        Self {
+            buf: [0; N],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl<const N: usize> Write for FixedBuf<N> {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let bytes = text.as_bytes();
+        let room = N - self.len;
+        let take = bytes.len().min(room);
+        self.buf[self.len..self.len + take].copy_from_slice(&bytes[..take]);
+        self.len += take;
+        if take < bytes.len() {
+            return Err(core::fmt::Error);
+        }
+        Ok(())
+    }
+}
 
 /// A datagram received on `REMOTE_PORT`, handed to the kernel's remote
 /// command server.
@@ -74,6 +133,9 @@ pub struct NetStack {
     rx_frame: [u8; MAX_FRAME_LEN],
     tx_frame: [u8; MAX_FRAME_LEN],
     udp_echoed: u64,
+    http_requests: u64,
+    http_bytes: u64,
+    http_streams: [HttpStream; net_stack::tcp::MAX_CONNECTIONS],
     tcp_echoed_bytes: u64,
     tcp_accepted_seen: u64,
     /// How the address was obtained: "dhcp", "static", or "none".
@@ -120,14 +182,18 @@ impl NetStack {
         iface.bind(UDP_ECHO_PORT);
         iface.bind(REMOTE_PORT);
         iface.bind(DHCP_CLIENT_PORT);
-        iface.tcp_listen(TCP_ECHO_PORT);
-        iface.tcp_listen(TCP_COMMAND_PORT);
+        let _ = iface.tcp_listen(TCP_ECHO_PORT);
+        let _ = iface.tcp_listen(TCP_COMMAND_PORT);
+        let _ = iface.tcp_listen(HTTP_PORT);
         Some(Self {
             device,
             iface,
             rx_frame: [0; MAX_FRAME_LEN],
             tx_frame: [0; MAX_FRAME_LEN],
             udp_echoed: 0,
+            http_requests: 0,
+            http_bytes: 0,
+            http_streams: [HttpStream::default(); net_stack::tcp::MAX_CONNECTIONS],
             tcp_echoed_bytes: 0,
             tcp_accepted_seen: 0,
             address_source: "none",
@@ -391,6 +457,7 @@ impl NetStack {
     pub fn service(
         &mut self,
         clock: &dyn Fn() -> u64,
+        status: SystemStatus,
         log: &mut impl Write,
     ) -> Option<RemoteRequest> {
         self.iface.tcp_tick(clock());
@@ -410,6 +477,7 @@ impl NetStack {
                 Event::TcpReady { conn } => {
                     let port = self.iface.tcp().connection(conn).map(|c| c.local_port);
                     match port {
+                        Some(HTTP_PORT) => self.http_service(conn, status, log),
                         Some(TCP_COMMAND_PORT) => {
                             if let Some(line) = self.tcp_command_service(conn, log) {
                                 remote = Some(RemoteRequest::TcpLine { conn, line });
@@ -472,8 +540,205 @@ impl NetStack {
         if remote.is_none() {
             remote = self.buffered_command_line(log);
         }
+        // Top up any response still streaming out, then push everything.
+        self.pump_http();
         self.flush_tcp();
         remote
+    }
+
+    /// Serve one HTTP request on `conn`, if a complete head has arrived.
+    fn http_service(&mut self, conn: usize, status: SystemStatus, log: &mut impl Write) {
+        use net_stack::http::{self, Method, Parse};
+
+        enum Route {
+            Index,
+            Health,
+            Bytes(usize),
+            NotFound,
+            MethodNotAllowed,
+        }
+        enum Action {
+            Wait,
+            HeadTooLarge,
+            Malformed,
+            Serve {
+                head_len: usize,
+                keep_alive: bool,
+                route: Route,
+            },
+        }
+
+        // Decide while borrowing the receive buffer, act after releasing it.
+        let action = {
+            let Some(connection) = self.iface.tcp().connection(conn) else {
+                return;
+            };
+            let buffered = connection.peek();
+            match http::parse(buffered) {
+                Parse::Incomplete if buffered.len() >= http::MAX_HEAD_BYTES => Action::HeadTooLarge,
+                Parse::Incomplete => Action::Wait,
+                Parse::Malformed => Action::Malformed,
+                Parse::Complete(request) => {
+                    let path = request.path();
+                    let route = if request.method == Method::Other {
+                        Route::MethodNotAllowed
+                    } else if path == "/" {
+                        Route::Index
+                    } else if path == "/health" {
+                        Route::Health
+                    } else if let Some(count) = path
+                        .strip_prefix("/bytes/")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    {
+                        Route::Bytes(count.min(MAX_GENERATED_BODY))
+                    } else {
+                        Route::NotFound
+                    };
+                    Action::Serve {
+                        head_len: request.head_len,
+                        keep_alive: request.keep_alive,
+                        route,
+                    }
+                }
+            }
+        };
+
+        let (head_len, keep_alive, route) = match action {
+            Action::Wait => return,
+            Action::HeadTooLarge => {
+                self.http_drain(conn, usize::MAX);
+                self.http_respond(conn, 431, "text/plain", b"header too large\n", false);
+                return;
+            }
+            Action::Malformed => {
+                self.http_drain(conn, usize::MAX);
+                self.http_respond(conn, 400, "text/plain", b"bad request\n", false);
+                return;
+            }
+            Action::Serve {
+                head_len,
+                keep_alive,
+                route,
+            } => (head_len, keep_alive, route),
+        };
+
+        self.http_drain(conn, head_len);
+        self.http_requests += 1;
+
+        match route {
+            Route::Index => {
+                let mut body = FixedBuf::<1600>::new();
+                write_status_page(&mut body, status);
+                self.http_respond(
+                    conn,
+                    200,
+                    "text/html; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            Route::Health => self.http_respond(conn, 200, "text/plain", b"ok\n", keep_alive),
+            Route::Bytes(count) => {
+                let _ = writeln!(log, "net: http /bytes/{count} on conn{conn}");
+                self.http_begin_stream(conn, count, keep_alive);
+            }
+            Route::NotFound => self.http_respond(conn, 404, "text/plain", b"not found\n", false),
+            Route::MethodNotAllowed => {
+                self.http_respond(conn, 405, "text/plain", b"method not allowed\n", false)
+            }
+        }
+    }
+
+    /// Consume up to `count` buffered bytes.
+    fn http_drain(&mut self, conn: usize, count: usize) {
+        let mut sink = [0u8; 256];
+        let mut left = count;
+        while left > 0 {
+            let take = left.min(sink.len());
+            let got = self.iface.tcp_mut().read(conn, &mut sink[..take]);
+            if got == 0 {
+                break;
+            }
+            left -= got;
+        }
+    }
+
+    /// Headers plus a body small enough to hand over in one go.
+    fn http_respond(
+        &mut self,
+        conn: usize,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+        keep_alive: bool,
+    ) {
+        let mut head = [0u8; 256];
+        let Some(head_len) =
+            net_stack::http::write_headers(&mut head, status, content_type, body.len(), keep_alive)
+        else {
+            return;
+        };
+        self.iface.tcp_mut().write(conn, &head[..head_len]);
+        self.iface.tcp_mut().write(conn, body);
+        self.http_bytes += body.len() as u64;
+        if !keep_alive {
+            self.iface.tcp_mut().close(conn);
+        }
+    }
+
+    /// Headers for a body that will be produced over several passes.
+    fn http_begin_stream(&mut self, conn: usize, count: usize, keep_alive: bool) {
+        let mut head = [0u8; 256];
+        let Some(head_len) = net_stack::http::write_headers(
+            &mut head,
+            200,
+            "application/octet-stream",
+            count,
+            keep_alive,
+        ) else {
+            return;
+        };
+        self.iface.tcp_mut().write(conn, &head[..head_len]);
+        self.http_streams[conn] = HttpStream {
+            remaining: count,
+            offset: 0,
+            close_when_done: !keep_alive,
+        };
+    }
+
+    /// Feed every streaming response as much as its send buffer will take.
+    fn pump_http(&mut self) {
+        for conn in 0..self.http_streams.len() {
+            if self.http_streams[conn].remaining == 0 {
+                continue;
+            }
+            let Some(connection) = self.iface.tcp().connection(conn) else {
+                self.http_streams[conn] = HttpStream::default();
+                continue;
+            };
+            let room = connection.writable();
+            if room == 0 {
+                continue;
+            }
+            let stream = self.http_streams[conn];
+            let take = stream.remaining.min(room).min(512);
+            let mut chunk = [0u8; 512];
+            for (i, slot) in chunk.iter_mut().take(take).enumerate() {
+                // A recognisable, position-dependent pattern, so a client
+                // can tell truncation from corruption.
+                *slot = BODY_PATTERN[(stream.offset + i) % BODY_PATTERN.len()];
+            }
+            let wrote = self.iface.tcp_mut().write(conn, &chunk[..take]);
+            self.http_streams[conn].remaining -= wrote;
+            self.http_streams[conn].offset += wrote;
+            self.http_bytes += wrote as u64;
+            if self.http_streams[conn].remaining == 0 {
+                if stream.close_when_done {
+                    self.iface.tcp_mut().close(conn);
+                }
+                self.http_streams[conn] = HttpStream::default();
+            }
+        }
     }
 
     /// A complete command line already sitting in some command-port
@@ -774,4 +1039,40 @@ unsafe fn queue_memory(area: *mut u8, boot: StorageBootInfo) -> Option<QueueMemo
             used_phys: area_phys + layout.used_offset as u64,
         },
     })
+}
+
+/// A recognisable, position-dependent body so a client can tell truncation
+/// from corruption.
+const BODY_PATTERN: &[u8; 16] = b"PandaGen-stream\n";
+
+/// The HTML status page. Kept under the TCP send buffer so it goes out in
+/// one piece.
+fn write_status_page(out: &mut impl Write, status: SystemStatus) {
+    let seconds = status.uptime_ticks / 100;
+    let _ = write!(
+        out,
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<title>PandaGen</title><style>\
+:root{{color-scheme:dark}}body{{background:#0f1720;color:#d7e3ef;\
+font:14px/1.6 ui-monospace,Menlo,Consolas,monospace;margin:0;padding:2rem}}\
+h1{{font-size:1.1rem;letter-spacing:.08em;text-transform:uppercase;\
+color:#7fd6c2;margin:0 0 1.2rem}}table{{border-collapse:collapse}}\
+td{{padding:.2rem 1.4rem .2rem 0;vertical-align:top}}\
+td:first-child{{color:#7f93a8}}a{{color:#7fd6c2}}\
+</style></head><body><h1>PandaGen</h1><table>\
+<tr><td>uptime</td><td>{seconds} s</td></tr>\
+<tr><td>cpus</td><td>{} of {} online</td></tr>\
+<tr><td>heap</td><td>{} of {} KiB used</td></tr>\
+<tr><td>frames</td><td>{} rendered, {} presented</td></tr>\
+<tr><td>storage</td><td>{}</td></tr>\
+</table><p><a href=\"/health\">/health</a> &middot; \
+<a href=\"/bytes/65536\">/bytes/65536</a></p></body></html>",
+        status.cpus_online,
+        status.cpus_total,
+        status.heap_used / 1024,
+        status.heap_total / 1024,
+        status.frames,
+        status.presents,
+        status.storage,
+    );
 }

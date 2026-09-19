@@ -16,6 +16,7 @@ ECHO_PORT = int(os.environ.get("PANDAGEN_TCP_ECHO_PORT", "7779"))
 COMMAND_PORT = int(os.environ.get("PANDAGEN_TCP_COMMAND_PORT", "7780"))
 UDP_PORT = int(os.environ.get("PANDAGEN_UDP_PORT", "7777"))
 REMOTE_PORT = int(os.environ.get("PANDAGEN_REMOTE_PORT", "7778"))
+HTTP_PORT = int(os.environ.get("PANDAGEN_HTTP_PORT", "8080"))
 
 HOST = "127.0.0.1"
 

@@ -14,6 +14,8 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// so saturating the unauthenticated echo port cannot take the signed command
 /// port offline.
 pub const MAX_PER_PORT: usize = MAX_CONNECTIONS - 2;
+/// Listen ports served at once.
+pub const MAX_LISTEN_PORTS: usize = 4;
 /// Backstop for a half-open connection (100 Hz ticks). Retransmission
 /// normally abandons it first, after `MAX_RETRIES` attempts one `RTO_TICKS`
 /// apart; this only catches a connection the retransmit path somehow misses.
@@ -136,6 +138,18 @@ impl Connection {
         self.rx_len
     }
 
+    /// The buffered bytes without consuming them. A protocol whose message
+    /// boundary is not a newline (HTTP's blank line, for instance) needs to
+    /// inspect what has arrived before deciding to take it.
+    pub fn peek(&self) -> &[u8] {
+        &self.rx[..self.rx_len]
+    }
+
+    /// Room left in the send buffer.
+    pub fn writable(&self) -> usize {
+        BUFFER_BYTES - self.tx_len
+    }
+
     pub fn peer_closed(&self) -> bool {
         self.peer_closed
     }
@@ -146,7 +160,7 @@ impl Connection {
 }
 
 pub struct Tcp {
-    listen_ports: [Option<u16>; 2],
+    listen_ports: [Option<u16>; MAX_LISTEN_PORTS],
     conns: [Connection; MAX_CONNECTIONS],
     next_iss: u32,
     now: u64,
@@ -174,7 +188,7 @@ fn seq_lt(a: u32, b: u32) -> bool {
 impl Tcp {
     pub const fn new() -> Self {
         Self {
-            listen_ports: [None; 2],
+            listen_ports: [None; MAX_LISTEN_PORTS],
             conns: [const { Connection::closed() }; MAX_CONNECTIONS],
             next_iss: 0x1000,
             now: 0,
@@ -189,13 +203,19 @@ impl Tcp {
         }
     }
 
-    /// Accept connections on `port` (up to two ports).
-    pub fn listen(&mut self, port: u16) {
+    /// Accept connections on `port`. Returns false when there is no free
+    /// slot, so a caller cannot silently fail to listen: an unbound port
+    /// resets every client that reaches it.
+    pub fn listen(&mut self, port: u16) -> bool {
         if self.listen_ports.contains(&Some(port)) {
-            return;
+            return true;
         }
-        if let Some(slot) = self.listen_ports.iter_mut().find(|s| s.is_none()) {
-            *slot = Some(port);
+        match self.listen_ports.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(port);
+                true
+            }
+            None => false,
         }
     }
 
@@ -895,11 +915,13 @@ mod tests {
     #[test]
     fn read_line_waits_for_newline_and_two_ports_listen() {
         let mut tcp = Tcp::new();
-        tcp.listen(7779);
-        tcp.listen(7780);
-        tcp.listen(7781);
-        assert!(tcp.is_listening(7779) && tcp.is_listening(7780));
-        assert!(!tcp.is_listening(7781), "only two listen slots");
+        for (index, port) in (7779..7779 + MAX_LISTEN_PORTS as u16).enumerate() {
+            assert!(tcp.listen(port), "slot {index} should be free");
+            assert!(tcp.is_listening(port));
+        }
+        let overflow = 7779 + MAX_LISTEN_PORTS as u16;
+        assert!(!tcp.listen(overflow), "listen must report a full table");
+        assert!(!tcp.is_listening(overflow));
         let (index, snd) = handshake(&mut tcp);
         tcp.receive(seg(1001, snd, TCP_ACK | TCP_PSH, b"par"));
         let mut buf = [0u8; 32];
@@ -909,5 +931,41 @@ mod tests {
         assert_eq!(&buf[..8], b"partial\n");
         assert_eq!(tcp.read_line(index, &mut buf), None);
         assert_eq!(tcp.connection(index).unwrap().readable(), 4);
+    }
+
+    #[test]
+    fn peek_shows_buffered_bytes_without_consuming_them() {
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        let (index, snd) = handshake(&mut tcp);
+        tcp.receive(seg(1001, snd, TCP_ACK | TCP_PSH, b"GET / HTTP/1.1\r\n"));
+        let conn = tcp.connection(index).unwrap();
+        assert_eq!(conn.peek(), b"GET / HTTP/1.1\r\n");
+        assert_eq!(conn.readable(), 16);
+        // Peeking twice is stable, and a later read still sees everything.
+        assert_eq!(tcp.connection(index).unwrap().peek().len(), 16);
+        let mut out = [0u8; 32];
+        assert_eq!(tcp.read(index, &mut out), 16);
+        assert_eq!(&out[..16], b"GET / HTTP/1.1\r\n");
+        assert!(tcp.connection(index).unwrap().peek().is_empty());
+    }
+
+    #[test]
+    fn writable_tracks_the_send_buffer() {
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        let (index, _snd) = handshake(&mut tcp);
+        assert_eq!(tcp.connection(index).unwrap().writable(), BUFFER_BYTES);
+        let wrote = tcp.write(index, &[0u8; 100]);
+        assert_eq!(wrote, 100);
+        assert_eq!(
+            tcp.connection(index).unwrap().writable(),
+            BUFFER_BYTES - 100
+        );
+        // A write larger than the room left is accepted only in part, and
+        // `writable` is what says how much will fit.
+        let room = tcp.connection(index).unwrap().writable();
+        assert_eq!(tcp.write(index, &[1u8; BUFFER_BYTES]), room);
+        assert_eq!(tcp.connection(index).unwrap().writable(), 0);
     }
 }

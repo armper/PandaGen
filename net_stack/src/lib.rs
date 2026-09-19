@@ -5,6 +5,7 @@
 //! caller-provided buffer so the kernel can DMA it directly.
 
 pub mod dhcp;
+pub mod http;
 pub mod tcp;
 pub mod wire;
 
@@ -213,9 +214,9 @@ impl Interface {
         }
     }
 
-    /// Accept TCP connections on `port`.
-    pub fn tcp_listen(&mut self, port: u16) {
-        self.tcp.listen(port);
+    /// Accept TCP connections on `port`; false when no slot is free.
+    pub fn tcp_listen(&mut self, port: u16) -> bool {
+        self.tcp.listen(port)
     }
 
     pub fn tcp(&self) -> &tcp::Tcp {

@@ -79,6 +79,8 @@ const UDP_ECHO_PORT: u16 = 7777;
 const TCP_ECHO_PORT: u16 = 7779;
 /// Kernel signed-line command port over TCP.
 const TCP_COMMAND_PORT: u16 = remote_ipc::line::KERNEL_COMMAND_PORT;
+/// Kernel HTTP port.
+const HTTP_PORT: u16 = 8080;
 /// Kernel remote IPC port, forwarded from the host loopback by QEMU.
 const REMOTE_PORT: u16 = remote_ipc::KERNEL_REMOTE_PORT;
 
@@ -90,6 +92,7 @@ struct Ports {
     remote: u16,
     tcp_echo: u16,
     tcp_command: u16,
+    http: u16,
 }
 
 impl Ports {
@@ -99,14 +102,15 @@ impl Ports {
             remote: REMOTE_PORT + base,
             tcp_echo: TCP_ECHO_PORT + base,
             tcp_command: TCP_COMMAND_PORT + base,
+            http: HTTP_PORT + base,
         }
     }
 
     /// The guest always listens on its own fixed ports; only the host side moves.
     fn hostfwd(&self) -> String {
         format!(
-            "user,id=n0,hostfwd=udp:127.0.0.1:{}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_COMMAND_PORT}",
-            self.udp_echo, self.remote, self.tcp_echo, self.tcp_command
+            "user,id=n0,hostfwd=udp:127.0.0.1:{}-:{UDP_ECHO_PORT},hostfwd=udp:127.0.0.1:{}-:{REMOTE_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_ECHO_PORT},hostfwd=tcp:127.0.0.1:{}-:{TCP_COMMAND_PORT},hostfwd=tcp:127.0.0.1:{}-:{HTTP_PORT}",
+            self.udp_echo, self.remote, self.tcp_echo, self.tcp_command, self.http
         )
     }
 }
@@ -696,6 +700,7 @@ fn cmd_qemu_script(
                     .env("PANDAGEN_REMOTE_PORT", ports.remote.to_string())
                     .env("PANDAGEN_TCP_ECHO_PORT", ports.tcp_echo.to_string())
                     .env("PANDAGEN_TCP_COMMAND_PORT", ports.tcp_command.to_string())
+                    .env("PANDAGEN_HTTP_PORT", ports.http.to_string())
                     .output()?;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
