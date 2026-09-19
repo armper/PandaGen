@@ -9,7 +9,20 @@ use crate::wire::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
 use crate::Ipv4;
 
 /// Connections tracked at once.
-pub const MAX_CONNECTIONS: usize = 4;
+pub const MAX_CONNECTIONS: usize = 8;
+/// Most of the table one listen port may occupy. The remainder is reserved,
+/// so saturating the unauthenticated echo port cannot take the signed command
+/// port offline.
+pub const MAX_PER_PORT: usize = MAX_CONNECTIONS - 2;
+/// Backstop for a half-open connection (100 Hz ticks). Retransmission
+/// normally abandons it first, after `MAX_RETRIES` attempts one `RTO_TICKS`
+/// apart; this only catches a connection the retransmit path somehow misses.
+pub const SYN_TIMEOUT_TICKS: u64 = RTO_TICKS * (MAX_RETRIES as u64) + 300;
+/// An established connection that says nothing for this long is reaped. With
+/// a small table an idle peer is indistinguishable from a vanished one.
+pub const IDLE_TIMEOUT_TICKS: u64 = 12_000;
+/// A connection in a closing state is given this long to finish.
+pub const CLOSING_TIMEOUT_TICKS: u64 = 1_000;
 /// Receive and send buffer bytes per connection.
 pub const BUFFER_BYTES: usize = 2048;
 /// Largest payload we send in one segment.
@@ -79,6 +92,8 @@ pub struct Connection {
     tx_unacked: usize,
     /// Tick of the last transmission of the in-flight data or FIN.
     last_send_tick: u64,
+    /// Tick of the last segment exchanged either way, for reaping.
+    last_activity: u64,
     retries: u8,
     /// FIN queued by the application (after all data).
     fin_pending: bool,
@@ -104,6 +119,7 @@ impl Connection {
             tx_len: 0,
             tx_unacked: 0,
             last_send_tick: 0,
+            last_activity: 0,
             retries: 0,
             fin_pending: false,
             fin_sent: false,
@@ -141,6 +157,10 @@ pub struct Tcp {
     pub retransmits: u64,
     pub resets_sent: u64,
     pub accepted: u64,
+    /// Connections refused because the table (or this port's share) was full.
+    pub refused: u64,
+    /// Connections closed by the reaper or by exhausted retransmissions.
+    pub reaped: u64,
 }
 
 fn seq_le(a: u32, b: u32) -> bool {
@@ -164,6 +184,8 @@ impl Tcp {
             retransmits: 0,
             resets_sent: 0,
             accepted: 0,
+            refused: 0,
+            reaped: 0,
         }
     }
 
@@ -204,6 +226,27 @@ impl Tcp {
     /// Advance time (retransmission timers use it).
     pub fn set_now(&mut self, now: u64) {
         self.now = now;
+        self.reap();
+    }
+
+    /// Close connections that have gone quiet, so the table cannot be held
+    /// shut by peers that connect and never speak again.
+    fn reap(&mut self) {
+        let now = self.now;
+        let mut reaped = 0;
+        for conn in self.conns.iter_mut() {
+            let limit = match conn.state {
+                State::Closed => continue,
+                State::SynReceived => SYN_TIMEOUT_TICKS,
+                State::Established | State::CloseWait => IDLE_TIMEOUT_TICKS,
+                _ => CLOSING_TIMEOUT_TICKS,
+            };
+            if now.saturating_sub(conn.last_activity) >= limit {
+                conn.state = State::Closed;
+                reaped += 1;
+            }
+        }
+        self.reaped += reaped;
     }
 
     /// Feed a received segment. Returns the connection that gained
@@ -212,14 +255,21 @@ impl Tcp {
     pub fn receive(&mut self, seg: Segment<'_>) -> Option<usize> {
         self.segments_in += 1;
         match self.find(seg.src, seg.src_port, seg.dst_port) {
-            Some(index) => self.receive_on(index, seg),
+            Some(index) => {
+                self.conns[index].last_activity = self.now;
+                self.receive_on(index, seg)
+            }
             None => {
-                if seg.flags & TCP_SYN != 0
-                    && seg.flags & TCP_ACK == 0
-                    && self.is_listening(seg.dst_port)
-                {
-                    self.accept(seg)
-                } else if seg.flags & TCP_RST == 0 {
+                let opening = seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0;
+                if opening && self.is_listening(seg.dst_port) {
+                    if let Some(index) = self.accept(seg) {
+                        return Some(index);
+                    }
+                    // No room. Refuse with a reset so the client fails fast
+                    // rather than waiting out its own connect timeout.
+                    self.refused += 1;
+                }
+                if seg.flags & TCP_RST == 0 {
                     // Nothing listening here: reset the sender.
                     let (seq, ack, flags) = if seg.flags & TCP_ACK != 0 {
                         (seg.ack, 0, TCP_RST)
@@ -244,15 +294,22 @@ impl Tcp {
                         mss: None,
                     });
                     self.resets_sent += 1;
-                    None
-                } else {
-                    None
                 }
+                None
             }
         }
     }
 
     fn accept(&mut self, seg: Segment<'_>) -> Option<usize> {
+        // A single listen port may not consume the whole table.
+        let on_this_port = self
+            .conns
+            .iter()
+            .filter(|c| c.state != State::Closed && c.local_port == seg.dst_port)
+            .count();
+        if on_this_port >= MAX_PER_PORT {
+            return None;
+        }
         let index = self.conns.iter().position(|c| c.state == State::Closed)?;
         let iss = self.next_iss;
         self.next_iss = self
@@ -270,6 +327,7 @@ impl Tcp {
         conn.snd_nxt = iss.wrapping_add(1);
         conn.snd_wnd = seg.window;
         conn.last_send_tick = self.now;
+        conn.last_activity = self.now;
         self.reply = Some(Outgoing {
             peer: seg.src,
             peer_port: seg.src_port,
@@ -430,17 +488,36 @@ impl Tcp {
             if conn.state == State::Closed {
                 continue;
             }
-            let in_flight = conn.tx_unacked > 0 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
+            // An unacknowledged SYN|ACK is in flight too: without this a lost
+            // handshake reply is never resent and the slot is held forever.
+            let syn_pending = conn.state == State::SynReceived;
+            let in_flight = syn_pending
+                || conn.tx_unacked > 0
+                || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
             // Retransmit what is in flight after the timeout.
             if in_flight && self.now.saturating_sub(conn.last_send_tick) >= RTO_TICKS {
                 if conn.retries >= MAX_RETRIES {
                     conn.state = State::Closed;
+                    self.reaped += 1;
                     continue;
                 }
                 conn.retries += 1;
                 conn.last_send_tick = self.now;
                 self.retransmits += 1;
                 self.segments_out += 1;
+                if syn_pending {
+                    return Some(Outgoing {
+                        peer: conn.peer,
+                        peer_port: conn.peer_port,
+                        local_port: conn.local_port,
+                        seq: conn.snd_una,
+                        ack: conn.rcv_nxt,
+                        flags: TCP_SYN | TCP_ACK,
+                        window: conn.window(),
+                        payload: (0, 0),
+                        mss: Some(MSS),
+                    });
+                }
                 let fin = conn.fin_sent && conn.tx_unacked == conn.tx_len;
                 return Some(Outgoing {
                     peer: conn.peer,
@@ -706,18 +783,113 @@ mod tests {
         assert_eq!(rst.flags, TCP_RST);
         assert_eq!(rst.seq, 0);
         assert_eq!(tcp.resets_sent, 1);
-        // Fill the table; the next SYN is ignored.
-        for i in 0..MAX_CONNECTIONS as u16 {
+        // Fill this port's share; the next SYN is refused with a reset
+        // rather than silently ignored, so the client fails fast.
+        for i in 0..MAX_PER_PORT as u16 {
             let mut syn = seg(1, 0, TCP_SYN, &[]);
             syn.src_port = 50000 + i;
-            assert!(tcp.receive(syn).is_some());
+            assert!(tcp.receive(syn).is_some(), "SYN {i} should be accepted");
             tcp.take_reply();
         }
         let mut syn = seg(1, 0, TCP_SYN, &[]);
         syn.src_port = 60000;
         assert_eq!(tcp.receive(syn), None);
-        assert!(tcp.take_reply().is_none());
-        assert_eq!(tcp.connections().count(), MAX_CONNECTIONS);
+        let refusal = tcp
+            .take_reply()
+            .expect("a full port must refuse, not black-hole");
+        assert_ne!(refusal.flags & TCP_RST, 0);
+        assert_eq!(tcp.refused, 1);
+        assert_eq!(tcp.connections().count(), MAX_PER_PORT);
+    }
+
+    #[test]
+    fn a_saturated_port_cannot_starve_the_other() {
+        // The finding this guards: four idle connections to the
+        // unauthenticated echo port took the signed command port offline
+        // until reboot, because both shared one unreserved table.
+        const ECHO: u16 = 7779;
+        const COMMAND: u16 = 7780;
+        let mut tcp = Tcp::new();
+        tcp.listen(ECHO);
+        tcp.listen(COMMAND);
+
+        for i in 0..MAX_PER_PORT as u16 + 3 {
+            let mut syn = seg(1, 0, TCP_SYN, &[]);
+            syn.src_port = 40000 + i;
+            syn.dst_port = ECHO;
+            tcp.receive(syn);
+            tcp.take_reply();
+        }
+        let on_echo = tcp
+            .connections()
+            .filter(|(_, c)| c.local_port == ECHO)
+            .count();
+        assert_eq!(
+            on_echo, MAX_PER_PORT,
+            "the echo port is capped at its share"
+        );
+
+        let mut syn = seg(1, 0, TCP_SYN, &[]);
+        syn.src_port = 55555;
+        syn.dst_port = COMMAND;
+        let index = tcp
+            .receive(syn)
+            .expect("the command port must still accept while echo is saturated");
+        let reply = tcp.take_reply().expect("SYN|ACK");
+        assert_eq!(reply.flags, TCP_SYN | TCP_ACK);
+        assert_eq!(tcp.connection(index).unwrap().local_port, COMMAND);
+    }
+
+    #[test]
+    fn half_open_connections_are_retransmitted_then_abandoned() {
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        let index = tcp.receive(seg(1000, 0, TCP_SYN, &[])).unwrap();
+        assert_eq!(tcp.take_reply().unwrap().flags, TCP_SYN | TCP_ACK);
+        // The client never answers. The SYN|ACK must be resent, not dropped.
+        for attempt in 1..=MAX_RETRIES as u64 {
+            tcp.set_now(RTO_TICKS * attempt);
+            let again = tcp.poll().expect("SYN|ACK should be retransmitted");
+            assert_eq!(again.flags, TCP_SYN | TCP_ACK, "retransmit {attempt}");
+        }
+        // Then the slot comes back rather than being held forever.
+        tcp.set_now(RTO_TICKS * (MAX_RETRIES as u64 + 2));
+        assert!(tcp.poll().is_none());
+        assert!(
+            tcp.connection(index).is_none(),
+            "an unanswered handshake must not hold a slot"
+        );
+        assert!(tcp.reaped >= 1);
+    }
+
+    #[test]
+    fn idle_connections_are_reaped_and_the_slot_returns() {
+        let mut tcp = Tcp::new();
+        tcp.listen(PORT);
+        let (index, _snd) = handshake(&mut tcp);
+        assert_eq!(tcp.connection(index).unwrap().state, State::Established);
+
+        // Just short of the limit it survives.
+        tcp.set_now(IDLE_TIMEOUT_TICKS - 1);
+        assert!(tcp.connection(index).is_some(), "not yet idle enough");
+
+        tcp.set_now(IDLE_TIMEOUT_TICKS);
+        assert!(tcp.connection(index).is_none(), "an idle peer is reaped");
+        assert_eq!(tcp.reaped, 1);
+
+        // And traffic keeps a connection alive across the same span.
+        let (index, snd) = handshake(&mut tcp);
+        for step in 1..=4u64 {
+            tcp.set_now(step * IDLE_TIMEOUT_TICKS / 2);
+            tcp.receive(seg(1001, snd, TCP_ACK | TCP_PSH, b"x"));
+            tcp.take_reply();
+            let mut sink = [0u8; 8];
+            tcp.read(index, &mut sink);
+        }
+        assert!(
+            tcp.connection(index).is_some(),
+            "a talking peer must never be reaped"
+        );
     }
 
     #[test]

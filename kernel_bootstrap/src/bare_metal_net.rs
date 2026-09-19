@@ -364,10 +364,13 @@ impl NetStack {
         let t = self.iface.tcp();
         let _ = writeln!(
             out,
-            "net: tcp port {} conns={} accepted={} in={} out={} rexmit={} rst={} echoed={}B",
+            "net: tcp {}/{} conns={} accepted={} refused={} reaped={} in={} out={} rexmit={} rst={} echoed={}B",
             TCP_ECHO_PORT,
+            TCP_COMMAND_PORT,
             t.connections().count(),
             t.accepted,
+            t.refused,
+            t.reaped,
             t.segments_in,
             t.segments_out,
             t.retransmits,

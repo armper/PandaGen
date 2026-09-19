@@ -75,7 +75,7 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 |---|------|---------|--------|
 | F1 | kernel/dhcp | `maybe_renew` froze its own clock, so the reply wait `0 < 100` never ended and the boot CPU spun until reset | FIXED (278) |
 | F2 | kernel/tcp | Command port served one request per received packet, so a pipelined client stalled until unrelated traffic arrived (`cmd_pipeline`) | FIXED (278) |
-| F3 | net_stack/tcp | Four idle connections to the unauthenticated echo port take the signed command port offline permanently; no reaper, and a full table black-holes instead of resetting (`tcp_slots`) | OPEN |
+| F3 | net_stack/tcp | Four idle connections to the unauthenticated echo port take the signed command port offline permanently; no reaper, and a full table black-holes instead of resetting (`tcp_slots`) | FIXED (279) |
 | F4 | kernel/smp | One `WORK` queue with two independent owners that both call `reset()`; present bands and `smp run` jobs corrupt each other's ids and results | OPEN |
 | F5 | kernel/smp | `response_channel` is drained by both the console task and the workspace loop, so a GUI command's output can be consumed by whichever CPU gets there first and is lost | OPEN |
 | F6 | kernel/smp | `workspace_loop` holds `&mut Kernel` while every AP holds `&Kernel`; aliasing UB under the optimiser | OPEN |
@@ -118,7 +118,8 @@ result. Its positive findings are about shared state, not lock order.
 
 ## Resume here
 
-Round 1 critics have all reported. F1 and F2 are fixed and committed as Phase
-278. **Next: F3** (connection reaping plus a reset when the table is full),
-then F4, F5, F6 in that order. F3 has a failing test already
-(`gauntlet:tcp_slots`); the others need one written.
+Round 1 critics have all reported. F1, F2 fixed (Phase 278); F3 fixed (Phase
+279). **Next: F4** (the shared `WORK` queue with two owners), then F5
+(response channel drained twice), F6 (`&mut Kernel` aliasing), F7 (serial
+interleaving), F8 (virtio descriptor validation). None of F4-F8 has a failing
+test yet; each needs one written before it is fixed.
