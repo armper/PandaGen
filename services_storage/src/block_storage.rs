@@ -747,6 +747,66 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         self.read_data(&blocks, entry.size_bytes)
     }
+    /// The body of a commit. `taken` collects every block this attempt
+    /// removed from the free set, so the caller can give them back; `durable`
+    /// is set once the commit record has landed and the attempt can no longer
+    /// be undone or repeated.
+    fn write_pending(
+        &mut self,
+        id: TransactionId,
+        pending: &[PendingWrite],
+        taken: &mut Vec<u64>,
+        durable: &mut bool,
+    ) -> Result<(), TransactionError> {
+        let mut allocations_to_commit = Vec::new();
+
+        // Step 1: Write all data blocks
+        for write in pending {
+            let size_bytes = write.data.len() as u64;
+            let blocks = self
+                .allocate_blocks(size_bytes)
+                .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+            taken.extend_from_slice(&blocks);
+
+            // A zero-length object allocates no blocks. Indexing the
+            // empty list here aborted the kernel on an empty file.
+            let first_block = blocks.first().copied().unwrap_or(0);
+            self.write_data(&blocks, &write.data)
+                .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+
+            allocations_to_commit.push(AllocationEntry {
+                object_id: write.object_id,
+                version_id: write.version_id,
+                block_idx: first_block,
+                size_bytes,
+                extents: AllocationEntry::extents_of(&blocks),
+            });
+        }
+
+        // Step 2: Write commit record (atomic point of truth)
+        self.write_commit_record(id, allocations_to_commit.clone())
+            .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+
+        // Step 3: Update in-memory state (only after commit record is written)
+        for alloc in allocations_to_commit {
+            self.allocations
+                .insert((alloc.object_id, alloc.version_id), alloc.clone());
+            self.latest_versions
+                .insert(alloc.object_id, alloc.version_id);
+        }
+        *durable = true;
+
+        // Step 4: fold the map into the reserved region often enough that
+        // the commit ring never wraps past what the checkpoint covers.
+        // This must follow step 3, or the checkpoint omits the very
+        // commit that triggered it.
+        if self.checkpoint_due() {
+            self.write_checkpoint()
+                .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+        }
+
+        Ok(())
+    }
 }
 
 impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
@@ -805,51 +865,32 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
 
         // Write all pending writes to disk
         if let Some(pending) = self.pending.remove(&tx.id()) {
-            let mut allocations_to_commit = Vec::new();
-
-            // Step 1: Write all data blocks
-            for write in pending {
-                let size_bytes = write.data.len() as u64;
-                let blocks = self
-                    .allocate_blocks(size_bytes)
-                    .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
-
-                // A zero-length object allocates no blocks. Indexing the
-                // empty list here aborted the kernel on an empty file.
-                let first_block = blocks.first().copied().unwrap_or(0);
-                self.write_data(&blocks, &write.data)
-                    .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
-
-                let alloc = AllocationEntry {
-                    object_id: write.object_id,
-                    version_id: write.version_id,
-                    block_idx: first_block,
-                    size_bytes,
-                    extents: AllocationEntry::extents_of(&blocks),
-                };
-
-                allocations_to_commit.push(alloc);
-            }
-
-            // Step 2: Write commit record (atomic point of truth)
-            self.write_commit_record(tx.id(), allocations_to_commit.clone())
-                .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
-
-            // Step 3: Update in-memory state (only after commit record is written)
-            for alloc in allocations_to_commit {
-                self.allocations
-                    .insert((alloc.object_id, alloc.version_id), alloc.clone());
-                self.latest_versions
-                    .insert(alloc.object_id, alloc.version_id);
-            }
-
-            // Step 4: fold the map into the reserved region often enough that
-            // the commit ring never wraps past what the checkpoint covers.
-            // This must follow step 3, or the checkpoint omits the very
-            // commit that triggered it.
-            if self.checkpoint_due() {
-                self.write_checkpoint()
-                    .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+            let mut taken = Vec::new();
+            let mut durable = false;
+            match self.write_pending(tx.id(), &pending, &mut taken, &mut durable) {
+                Ok(()) => {}
+                Err(err) if durable => {
+                    // The commit record landed and the map has been updated,
+                    // so the data is on the disk whatever went wrong after.
+                    // Report the failure, but do not offer the writes again:
+                    // a retry would commit them a second time.
+                    return Err(err);
+                }
+                Err(err) => {
+                    // Nothing was committed. The transaction is still Active,
+                    // so the caller may retry -- and a retry used to find the
+                    // pending list already emptied, skip every step and
+                    // return Ok, telling the caller its data was safe when
+                    // not a byte of it had been recorded. Give the writes
+                    // back, and the blocks with them, or each failed attempt
+                    // would eat a little more of the disk and leave a hole in
+                    // the free list behind it.
+                    for block in taken {
+                        self.free_blocks.insert(block);
+                    }
+                    self.pending.insert(tx.id(), pending);
+                    return Err(err);
+                }
             }
         }
 
@@ -1199,6 +1240,84 @@ mod tests {
         let tx = storage.begin_transaction().unwrap();
         let version = storage.read(&tx, object).unwrap();
         assert_eq!(storage.read_object_data(object, version).unwrap(), body);
+    }
+
+    #[test]
+    fn a_commit_that_failed_is_not_reported_as_done_when_it_is_retried() {
+        // `commit` took the pending writes out of the map before the first
+        // step that can fail. The transaction stays Active on the error path,
+        // so a caller is entitled to retry -- and the retry found nothing
+        // pending, skipped straight to the end and returned Ok. The caller
+        // was told its data was committed. Nothing had been written.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+
+        let next_seq = storage.superblock.commit_sequence + 1;
+        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let record_block = storage.superblock.commit_log_start + log_slot;
+        storage
+            .device
+            .set_policy(FailurePolicy::OnBlocks(vec![record_block]));
+
+        let object = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(&mut tx, object, b"the data the caller wants")
+            .unwrap();
+        assert!(storage.commit(&mut tx).is_err(), "the commit must fail");
+
+        // The disk is healthy again and the caller retries, as it may.
+        storage.device.set_policy(FailurePolicy::Never);
+        let retry = storage.commit(&mut tx);
+
+        if retry.is_ok() {
+            let tx = storage.begin_transaction().unwrap();
+            let version = storage
+                .read(&tx, object)
+                .expect("commit returned Ok, so the object must be there");
+            assert_eq!(
+                storage.read_object_data(object, version).unwrap(),
+                b"the data the caller wants",
+                "commit returned Ok but the object holds something else"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_commit_gives_its_blocks_back() {
+        // Step 1 takes blocks out of the free set. Every later step can fail,
+        // and none of them put the blocks back, so each failed attempt ate
+        // the disk a little. It also punched a hole in the free list, which
+        // is how a later object came to read its neighbour's blocks.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+        let before = storage.free_blocks.len();
+
+        for attempt in 0..3 {
+            let next_seq = storage.superblock.commit_sequence + 1;
+            let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+            let record_block = storage.superblock.commit_log_start + log_slot;
+            storage
+                .device
+                .set_policy(FailurePolicy::OnBlocks(vec![record_block]));
+
+            let mut tx = storage.begin_transaction().unwrap();
+            storage
+                .write(&mut tx, ObjectId::new(), &[b'q'; BLOCK_SIZE * 2])
+                .unwrap();
+            assert!(storage.commit(&mut tx).is_err(), "attempt {attempt}");
+            storage.device.set_policy(FailurePolicy::Never);
+
+            assert_eq!(
+                storage.free_blocks.len(),
+                before,
+                "after {} failed commits the free set has lost {} blocks",
+                attempt + 1,
+                before - storage.free_blocks.len()
+            );
+        }
     }
 
     #[test]
