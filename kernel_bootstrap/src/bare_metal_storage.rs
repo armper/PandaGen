@@ -251,16 +251,21 @@ impl BareMetalFilesystem {
         self.fs.read_file(entry.object_id)
     }
 
-    /// Write content to a file (update existing or create new)
+    /// Write content to a file (update existing or create new).
+    ///
+    /// This used to unlink the name first, which left a window where the
+    /// file did not exist: if the write then failed -- a full disk is
+    /// enough -- the old content was unreachable and the new content had
+    /// never been written, so saving destroyed the file being saved.
+    /// `create_file` writes the content and only then rebinds the name, and
+    /// `link` replaces an existing entry in a single directory update, so
+    /// the name points at the old object or the new one and never at
+    /// nothing.
     pub fn write_file_by_name(
         &mut self,
         name: &str,
         content: &[u8],
     ) -> Result<ObjectId, TransactionError> {
-        // Try to unlink existing file first
-        let _ = self.fs.unlink(name, self.root_id, 0);
-
-        // Create new file
         self.create_file(name, content)
     }
 

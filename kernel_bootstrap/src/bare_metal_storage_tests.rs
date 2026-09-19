@@ -65,6 +65,28 @@ mod tests {
     }
 
     #[test]
+    fn a_save_that_cannot_fit_leaves_the_file_as_it_was() {
+        // `write_file_by_name` unlinked the name *before* writing the new
+        // content. Between the two the file did not exist, and if the write
+        // then failed -- a full disk is enough, no crash needed -- the old
+        // content was unreachable and the new content had never been
+        // written. Saving in the editor destroyed the file it was saving.
+        let mut fs = BareMetalFilesystem::new().unwrap();
+        fs.create_file("notes.txt", b"work worth keeping").unwrap();
+
+        // Fill the disk, then try to save something that cannot fit.
+        let huge = vec![b'x'; 1 << 20];
+        let failed = fs.write_file_by_name("notes.txt", &huge);
+        assert!(failed.is_err(), "the oversized save must fail");
+
+        assert_eq!(
+            fs.read_file_by_name("notes.txt").as_deref(),
+            Ok(&b"work worth keeping"[..]),
+            "a save that failed took the previous contents with it"
+        );
+    }
+
+    #[test]
     fn test_delete_file() {
         let mut fs = BareMetalFilesystem::new().unwrap();
 
