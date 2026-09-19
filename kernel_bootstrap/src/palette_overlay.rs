@@ -22,7 +22,7 @@ use services_command_palette::{CommandDescriptor, CommandId, CommandPalette};
 const MAX_QUERY_LEN: usize = 128;
 
 /// Maximum number of results to display
-const MAX_DISPLAYED_RESULTS: usize = 10;
+pub const MAX_DISPLAYED_RESULTS: usize = 10;
 
 /// Focus target for restoring focus when palette closes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,11 +151,24 @@ impl PaletteOverlayState {
     /// Select a displayed result directly (pointer hover/click). Out-of-range
     /// indices are clamped to the last result.
     pub fn set_selection(&mut self, index: usize) {
-        if self.results.is_empty() {
+        let shown = self.displayed_results().len();
+        if shown == 0 {
             self.selection_index = 0;
         } else {
-            self.selection_index = index.min(self.results.len() - 1);
+            self.selection_index = index.min(shown - 1);
         }
+    }
+
+    /// The result a click on content line `line` refers to, if that line
+    /// actually holds one.
+    ///
+    /// Clamping instead of refusing meant a click on the blank rows below
+    /// the last result selected and ran a command the user could not see --
+    /// the palette window is taller than the list it draws. The launcher a
+    /// few hundred lines away already gets this right with `get`.
+    pub fn result_at_line(&self, line: usize) -> Option<usize> {
+        let index = line.checked_sub(1)?;
+        (index < self.displayed_results().len()).then_some(index)
     }
 
     pub fn move_selection_up(&mut self) {
@@ -166,14 +179,20 @@ impl PaletteOverlayState {
 
     /// Moves selection down
     pub fn move_selection_down(&mut self) {
-        if !self.results.is_empty() && self.selection_index < self.results.len() - 1 {
+        // Bounded by what is drawn, not by what matched: the selection used
+        // to walk past the last rendered row, leaving no marker anywhere on
+        // screen while Enter still ran whatever it had landed on.
+        let shown = self.displayed_results().len();
+        if shown > 0 && self.selection_index + 1 < shown {
             self.selection_index += 1;
         }
     }
 
     /// Gets the currently selected command ID, if any
     pub fn selected_command(&self) -> Option<&CommandId> {
-        self.results.get(self.selection_index).map(|desc| &desc.id)
+        self.displayed_results()
+            .get(self.selection_index)
+            .map(|desc| &desc.id)
     }
 
     /// Gets the results to display (up to MAX_DISPLAYED_RESULTS)
@@ -373,6 +392,74 @@ mod tests {
         );
 
         palette
+    }
+
+    /// More commands than the palette will ever draw.
+    fn crowded_palette() -> CommandPalette {
+        let mut palette = CommandPalette::new();
+        for index in 0..MAX_DISPLAYED_RESULTS + 7 {
+            let id = format!("cmd{index}");
+            palette.register_command(
+                CommandDescriptor::new(
+                    id.clone(),
+                    format!("Command {index}"),
+                    "a command",
+                    vec![id],
+                ),
+                Box::new(|_| Ok(String::new())),
+            );
+        }
+        palette
+    }
+
+    #[test]
+    fn a_line_below_the_last_result_is_not_a_result() {
+        // The palette window is taller than the list it draws, so every blank
+        // row under the last result was still a clickable content line.
+        // `set_selection` clamped it onto the final *matched* command -- one
+        // the user could not see -- and the click ran it.
+        let mut state = PaletteOverlayState::new();
+        let palette = crowded_palette();
+        state.open(FocusTarget::None);
+        state.update_query(&palette, String::new());
+        let shown = state.displayed_results().len();
+        assert_eq!(shown, MAX_DISPLAYED_RESULTS);
+        assert!(state.result_count() > shown, "more matched than are drawn");
+
+        assert_eq!(state.result_at_line(1), Some(0), "the first drawn row");
+        assert_eq!(state.result_at_line(shown), Some(shown - 1), "the last one");
+        assert_eq!(
+            state.result_at_line(shown + 1),
+            None,
+            "a blank row below the list must not resolve to a command"
+        );
+        assert_eq!(
+            state.result_at_line(0),
+            None,
+            "the query row is not a result"
+        );
+    }
+
+    #[test]
+    fn the_selection_never_leaves_the_rows_that_are_drawn() {
+        // `move_selection_down` was bounded by everything that matched rather
+        // than by what is rendered, so past the last drawn row there was no
+        // marker anywhere on screen while Enter still ran whatever it had
+        // landed on.
+        let mut state = PaletteOverlayState::new();
+        let palette = crowded_palette();
+        state.open(FocusTarget::None);
+        state.update_query(&palette, String::new());
+        for _ in 0..state.result_count() + 5 {
+            state.move_selection_down();
+        }
+        assert!(
+            state.selection_index() < state.displayed_results().len(),
+            "selection {} is past the {} rows that are drawn",
+            state.selection_index(),
+            state.displayed_results().len()
+        );
+        assert!(state.selected_command().is_some());
     }
 
     #[test]

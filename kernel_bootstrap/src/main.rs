@@ -2860,7 +2860,11 @@ fn render_palette_overlay_vga(
     let overlay_width = 60.min(cols);
     let overlay_col = (cols - overlay_width) / 2;
     let results = palette.displayed_results();
-    let max_results = 4usize.min(rows.saturating_sub(4)); // One more row for context header
+    // Every result the palette is willing to display, as far as the screen
+    // allows. This drew four, while the selection could reach the tenth: from
+    // the fifth onwards there was no marker anywhere on screen and Enter ran
+    // a command the user could not see.
+    let max_results = crate::palette_overlay::MAX_DISPLAYED_RESULTS.min(rows.saturating_sub(4));
     let overlay_height = 3 + max_results + 1; // context header + query + results + help
     let overlay_start_row = (rows.saturating_sub(overlay_height)) / 2;
 
@@ -3375,6 +3379,24 @@ impl RemoteCommandServer {
     }
 }
 
+/// How long the boot CPU waits for another CPU to convert a present band
+/// before doing it itself.
+///
+/// This was 100,000,000 polls. Each poll is two atomic loads and a `pause`,
+/// so that is seconds of wall clock -- guarding a job that converts one band
+/// of a frame, tens of microseconds of work, six orders of magnitude apart.
+/// And the wait is paid per band, in order, so one frame could stall on
+/// several of them. The steady state makes it easy to hit: by design the APs
+/// run workspace commands while the boot CPU runs the display, so a busy AP
+/// is normal, not exceptional. The desktop stopped repainting for seconds at
+/// a time while keystrokes were still being accepted.
+///
+/// A present is paced at 100 Hz, so waiting longer than a frame is pointless
+/// -- past that the right answer is always to convert it here. Err small:
+/// giving up early only costs parallelism, while giving up late freezes what
+/// the user is looking at.
+const PRESENT_BAND_SPINS: u64 = 20_000;
+
 /// CPUs a present may be split across right now.
 fn present_workers() -> usize {
     if PARALLEL_PRESENT.load(core::sync::atomic::Ordering::Relaxed) {
@@ -3414,7 +3436,7 @@ fn run_present_bands(bands: &[framebuffer::PresentBand]) {
     // SAFETY: see `present_rgba8888_bands`.
     unsafe { framebuffer::convert_rgba_rows(&bands[0]) };
     for (i, id) in ids.iter().enumerate().take(bands.len()).skip(1) {
-        if *id == u64::MAX || WORK.wait(*id, 100_000_000).is_none() {
+        if *id == u64::MAX || WORK.wait(*id, PRESENT_BAND_SPINS).is_none() {
             PRESENT_FALLBACKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Nobody picked it up in time. Reclaim the ring slot if the job
             // is still queued, then convert the band here.
@@ -4614,12 +4636,26 @@ fn run_job(job: hal_x86_64::Job) -> u64 {
             // arg packs the present generation and the band index.
             let generation = job.arg >> 8;
             let index = (job.arg & 0xFF) as usize;
+            // Read the generation *with* the band, under the same lock, and
+            // again after. Checking it first and taking the lock afterwards
+            // left a window: a worker could pass the check, be preempted
+            // while the boot CPU timed out, converted the band itself, bumped
+            // the generation and published a later frame's buffers -- and
+            // then wake up and convert a band it was never authorised for.
+            // Harmless today only because the surfaces happen never to be
+            // reallocated; a resize or a renderer rebuild makes it corruption.
+            let band = {
+                let slots = PRESENT_BANDS.lock();
+                if generation != PRESENT_GENERATION.load(core::sync::atomic::Ordering::Acquire) {
+                    // The boot CPU gave up waiting and moved on; those buffers
+                    // may already describe a different frame.
+                    return 0;
+                }
+                slots[index % framebuffer::MAX_PRESENT_BANDS]
+            };
             if generation != PRESENT_GENERATION.load(core::sync::atomic::Ordering::Acquire) {
-                // The boot CPU gave up waiting and moved on; those buffers
-                // may already describe a different frame.
                 return 0;
             }
-            let band = PRESENT_BANDS.lock()[index % framebuffer::MAX_PRESENT_BANDS];
             if band.rows() > 0 {
                 // SAFETY: the generation still matches, so the boot CPU is
                 // inside the present that published these buffers.
@@ -6528,6 +6564,27 @@ mod tests {
                 "range {index} must report whether it was recorded"
             );
         }
+    }
+
+    #[test]
+    fn a_present_band_wait_gives_up_inside_a_frame() {
+        // The budget guards a job worth tens of microseconds and is paid once
+        // per band, serially, on the CPU that draws the screen. At
+        // 100,000,000 polls it was seconds. A present is paced at 100 Hz, so
+        // anything approaching 10 ms is already too long.
+        let queue = hal_x86_64::WorkQueue::<8>::new();
+        let id = queue.submit(1, 0).expect("the queue must accept a job");
+
+        let started = std::time::Instant::now();
+        // Nothing ever takes it, so this always runs the budget out.
+        assert!(queue.wait(id, PRESENT_BAND_SPINS).is_none());
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_millis(50),
+            "waiting out the budget took {waited:?}, which is longer than the \
+             frame it is meant to fit inside"
+        );
     }
 
     #[test]

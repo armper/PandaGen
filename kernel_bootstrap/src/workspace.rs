@@ -2044,8 +2044,7 @@ impl WorkspaceSession {
     /// Pointer hover over a picker entry. Returns true if the selection moved.
     pub fn picker_hover(&mut self, index: usize) -> bool {
         match self.file_picker.as_mut() {
-            Some(picker) if !picker.entries.is_empty() => {
-                let index = index.min(picker.entries.len() - 1);
+            Some(picker) if index < picker.entries.len() => {
                 let changed = picker.selection != index;
                 picker.selection = index;
                 changed
@@ -2079,6 +2078,15 @@ impl WorkspaceSession {
 
     /// Click on a picker entry: select and open it.
     pub fn picker_click(&mut self, index: usize, serial: &mut SerialPort) -> bool {
+        // Clicking the blank space below the list used to clamp onto the last
+        // entry and open it. A click that is not on an entry is not a click.
+        let on_an_entry = self
+            .file_picker
+            .as_ref()
+            .is_some_and(|picker| index < picker.entries.len());
+        if !on_an_entry {
+            return false;
+        }
         self.picker_hover(index);
         self.picker_open_selection(serial)
     }
@@ -2137,6 +2145,10 @@ impl WorkspaceSession {
         serial: &mut SerialPort,
     ) -> bool {
         if !self.palette_overlay.is_open() {
+            return false;
+        }
+        // A click must land on a result, not near one.
+        if index >= self.palette_overlay.displayed_results().len() {
             return false;
         }
         self.palette_overlay.set_selection(index);
