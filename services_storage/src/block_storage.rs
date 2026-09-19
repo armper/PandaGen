@@ -149,6 +149,47 @@ struct AllocationEntry {
     version_id: VersionId,
     block_idx: u64,
     size_bytes: u64,
+    /// Every block this version occupies, as `(start, count)` runs in order.
+    /// `allocate_blocks` takes the lowest free blocks one at a time and does
+    /// not promise they adjoin, so `block_idx` alone described the allocation
+    /// only when the free list happened to have no holes.
+    ///
+    /// Runs rather than a flat list because a commit record must fit in one
+    /// block: the ordinary contiguous allocation is a single pair however
+    /// large the object, and a fragmented one costs a pair per run. Absent on
+    /// disks written before this field existed, where the contiguous range is
+    /// the best guess available.
+    #[serde(default)]
+    extents: Vec<(u64, u64)>,
+}
+
+impl AllocationEntry {
+    /// Collapse an ordered block list into runs.
+    fn extents_of(blocks: &[u64]) -> Vec<(u64, u64)> {
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for &block in blocks {
+            match runs.last_mut() {
+                Some((start, count)) if *start + *count == block => *count += 1,
+                _ => runs.push((block, 1)),
+            }
+        }
+        runs
+    }
+
+    /// The blocks this version actually occupies.
+    fn block_list(&self) -> Vec<u64> {
+        if self.extents.is_empty() {
+            let needed = (self.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
+            return (self.block_idx..self.block_idx + needed).collect();
+        }
+        let mut blocks = Vec::new();
+        for &(start, count) in &self.extents {
+            for offset in 0..count {
+                blocks.push(start + offset);
+            }
+        }
+        blocks
+    }
 }
 
 /// Block-backed storage backend with crash-safe commits
@@ -465,18 +506,14 @@ impl<D: BlockDevice> BlockStorage<D> {
         };
 
         for alloc in &checkpoint.allocations {
-            let blocks_needed = (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
-            let fits = alloc
-                .block_idx
-                .checked_add(blocks_needed)
-                .is_some_and(|end| end <= self.superblock.total_blocks);
-            if !fits {
+            let blocks = alloc.block_list();
+            if blocks.iter().any(|b| *b >= self.superblock.total_blocks) {
                 continue;
             }
             self.allocations
                 .insert((alloc.object_id, alloc.version_id), alloc.clone());
-            for j in 0..blocks_needed {
-                self.free_blocks.remove(&(alloc.block_idx + j));
+            for block in blocks {
+                self.free_blocks.remove(&block);
             }
         }
         for (object, version) in checkpoint.latest {
@@ -539,12 +576,8 @@ impl<D: BlockDevice> BlockStorage<D> {
                 // A record is only as trustworthy as the disk it came from;
                 // its checksum is unkeyed. Refuse allocations that do not fit
                 // the device rather than looping over a forged size.
-                let blocks_needed = (alloc.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
-                let fits = alloc
-                    .block_idx
-                    .checked_add(blocks_needed)
-                    .is_some_and(|end| end <= self.superblock.total_blocks);
-                if !fits {
+                let blocks = alloc.block_list();
+                if blocks.iter().any(|b| *b >= self.superblock.total_blocks) {
                     discarded_transactions += 1;
                     continue;
                 }
@@ -552,8 +585,8 @@ impl<D: BlockDevice> BlockStorage<D> {
                     .insert((alloc.object_id, alloc.version_id), alloc.clone());
                 self.latest_versions
                     .insert(alloc.object_id, alloc.version_id);
-                for j in 0..blocks_needed {
-                    self.free_blocks.remove(&(alloc.block_idx + j));
+                for block in blocks {
+                    self.free_blocks.remove(&block);
                 }
             }
         }
@@ -710,9 +743,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             .get(&(object_id, version_id))
             .ok_or(BlockStorageError::ObjectNotFound)?;
 
-        // Calculate blocks needed
-        let blocks_needed = (entry.size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
-        let blocks: Vec<u64> = (entry.block_idx..entry.block_idx + blocks_needed).collect();
+        let blocks = entry.block_list();
 
         self.read_data(&blocks, entry.size_bytes)
     }
@@ -794,6 +825,7 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
                     version_id: write.version_id,
                     block_idx: first_block,
                     size_bytes,
+                    extents: AllocationEntry::extents_of(&blocks),
                 };
 
                 allocations_to_commit.push(alloc);
@@ -1035,6 +1067,141 @@ mod tests {
     }
 
     #[test]
+    fn an_object_whose_blocks_are_not_contiguous_still_reads_back_as_itself() {
+        // `allocate_blocks` hands out the lowest free blocks one at a time and
+        // makes no promise that they adjoin. The allocation record kept only
+        // the *first* block, and the reader rebuilt the list as
+        // `first..first + n`. As long as the free list had no holes the two
+        // agreed by accident. A hole is easy to make: a commit that fails
+        // after its data is written leaks those blocks, and the next mount
+        // rebuilds the free list from the records that survived, so the
+        // leaked blocks come back free with live blocks above them.
+        //
+        // The object then reads blocks it does not own -- here, the previous
+        // object's -- and nothing reports an error.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+
+        let first = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(&mut tx, first, &[b'1'; BLOCK_SIZE * 2])
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        // A commit that dies on its record: the data blocks are already
+        // written, and nothing will ever say they are in use.
+        let next_seq = storage.superblock.commit_sequence + 1;
+        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let record_block = storage.superblock.commit_log_start + log_slot;
+        storage
+            .device
+            .set_policy(FailurePolicy::OnBlocks(vec![record_block]));
+        let leaked = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(&mut tx, leaked, &[b'x'; BLOCK_SIZE * 2])
+            .unwrap();
+        assert!(storage.commit(&mut tx).is_err(), "the commit must fail");
+        storage.device.set_policy(FailurePolicy::Never);
+
+        // A third object lands above the hole and is recorded.
+        let third = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(&mut tx, third, &[b'3'; BLOCK_SIZE * 2])
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        // Remount: the free list is rebuilt from what survived, so the two
+        // leaked blocks are free again with `third`'s blocks above them.
+        let device = storage.device;
+        let mut storage = BlockStorage::open(device).unwrap();
+
+        // Three blocks now cannot be contiguous: two come from the hole and
+        // one from above `third`.
+        let fourth = ObjectId::new();
+        let body = [b'4'; BLOCK_SIZE * 3];
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, fourth, &body).unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let tx = storage.begin_transaction().unwrap();
+        let version = storage.read(&tx, fourth).unwrap();
+        let got = storage.read_object_data(fourth, version).unwrap();
+        assert_eq!(
+            got.len(),
+            body.len(),
+            "the object came back the wrong length"
+        );
+        let differs = got.iter().zip(body.iter()).filter(|(a, b)| a != b).count();
+        assert_eq!(
+            differs,
+            0,
+            "{differs} of {} bytes read back as something else; the first \
+             wrong byte is at {:?} and reads {:?}",
+            body.len(),
+            got.iter().zip(body.iter()).position(|(a, b)| a != b),
+            got.iter()
+                .zip(body.iter())
+                .find(|(a, b)| a != b)
+                .map(|(a, _)| *a as char)
+        );
+
+        // And the object whose blocks were read must be untouched.
+        let version = storage.read(&tx, third).unwrap();
+        let got = storage.read_object_data(third, version).unwrap();
+        assert!(
+            got.iter().all(|&b| b == b'3'),
+            "the third object's blocks were handed to a later write"
+        );
+    }
+
+    #[test]
+    fn extents_collapse_runs_and_survive_a_round_trip() {
+        assert_eq!(AllocationEntry::extents_of(&[]), Vec::new());
+        assert_eq!(AllocationEntry::extents_of(&[7]), vec![(7, 1)]);
+        assert_eq!(AllocationEntry::extents_of(&[7, 8, 9]), vec![(7, 3)]);
+        assert_eq!(
+            AllocationEntry::extents_of(&[7, 8, 11, 12, 40]),
+            vec![(7, 2), (11, 2), (40, 1)]
+        );
+
+        for blocks in [vec![], vec![3], vec![3, 4, 5], vec![3, 4, 9, 20, 21]] {
+            let entry = AllocationEntry {
+                object_id: ObjectId::new(),
+                version_id: VersionId::new(),
+                block_idx: blocks.first().copied().unwrap_or(0),
+                size_bytes: (blocks.len() * BLOCK_SIZE) as u64,
+                extents: AllocationEntry::extents_of(&blocks),
+            };
+            assert_eq!(entry.block_list(), blocks, "round trip lost blocks");
+        }
+    }
+
+    #[test]
+    fn a_large_contiguous_object_still_fits_in_one_commit_record() {
+        // A commit record must fit in a single block. Recording the block
+        // list as runs keeps the ordinary case to one pair no matter how big
+        // the object; a flat list of block numbers would have put a ceiling
+        // on object size that did not exist before.
+        let disk = RamDisk::with_capacity_mb(8);
+        let mut storage = BlockStorage::format(disk).unwrap();
+        let object = ObjectId::new();
+        let body = vec![b'z'; BLOCK_SIZE * 512];
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, object, &body).unwrap();
+        storage
+            .commit(&mut tx)
+            .expect("a 2 MiB contiguous object must still commit");
+
+        let tx = storage.begin_transaction().unwrap();
+        let version = storage.read(&tx, object).unwrap();
+        assert_eq!(storage.read_object_data(object, version).unwrap(), body);
+    }
+
+    #[test]
     fn test_crash_after_commit_record_before_superblock_update() {
         let disk = RamDisk::with_capacity_mb(1);
         let failing_disk = FailingBlockDevice::new(disk, FailurePolicy::Never);
@@ -1081,6 +1248,7 @@ mod tests {
             version_id: VersionId::new(),
             block_idx: 100,
             size_bytes: 128,
+            extents: vec![(100, 1)],
         };
 
         let mut record = CommitRecord::new(TransactionId::new(), 1, vec![alloc]);
