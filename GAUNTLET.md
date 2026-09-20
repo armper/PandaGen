@@ -115,6 +115,38 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | G4 | kernel/palette | The selection could walk past the last drawn row; text mode drew 4 of 10 | FIXED (298) |
 | G6 | kernel/present | The worker's generation guard was checked before the band was read, not after | FIXED (298) |
 | G8 | kernel/desktop_frame | A framebuffer past the backend's limit `expect`ed, which aborts the kernel | FIXED (301) |
+| R1 | services_storage | **My own regression.** A new `#[serde]` field changed the checksum of every commit record an older build wrote, so recovery discarded all of them: everything since the last checkpoint lost, silently, on upgrade | FIXED (307) |
+| R2 | services_storage | A commit reported as *failed* was durable anyway and its blocks were reused, so it came back after reboot holding another object's data | FIXED (308) |
+| R3 | services_storage | S9 half-fixed: superseded versions of a live object were never freed; 435 rewrites of a one-block directory filled a 512-block disk | FIXED (309) |
+| R4 | services_storage | Extents made a save fail with an opaque error on a fragmented disk that was 85% empty | FIXED (309) |
+| R5 | remote_ipc | The replay floor was shared, so clock skew or one caller's far-future nonces locked every other caller out for the boot | FIXED (310) |
+| R6 | services_editor_vi | Phase 304 fixed undo-dirty in `editor_core` and left it in the editor the workspace hosts, so a window became unclosable with nothing to save | FIXED (310) |
+| R7 | services_storage | A failed save kept the whole file in the heap for ever; forty failed megabyte saves held forty megabytes | FIXED (308) |
+| R8 | kernel/present | Phase 298's generation guard was still check-then-act; re-checking a value you act on outside the lock narrows a window, it does not remove one | FIXED (315) |
+| H1 | kernel/http | HEAD returned a body, so every conformant keep-alive client desynchronised | FIXED (311) |
+| H2 | kernel/http | A second request was served *into the middle* of a streaming body, and clobbered the stream state | FIXED (311) |
+| H3 | net_stack/http | Request smuggling: `Content-Length` was not parsed and the body became the next request; `Transfer-Encoding` was ignored | FIXED (311) |
+| H4 | kernel/http | No deadline on an incomplete head: six dribbling sockets took the whole machine off the network, unauthenticated | FIXED (311) |
+| H5 | net_stack/http | `MAX_HEAD_BYTES == tcp::BUFFER_BYTES` exactly, with nothing asserting it; raising either makes the 431 path unreachable and wedges the connection | FIXED (316) |
+| H6 | net_stack/http | A stray blank line before the request line was answered 400 | FIXED (311) |
+| D1 | net_stack/dhcp | A one-second lease spun the kernel twice a second with the network lock held; nothing validated the offered address or netmask; a request arriving in that window was lost for ever | FIXED (313) |
+| N1 | net_stack | An unresolved next hop consumed the segment it could not send, spent retransmissions on nothing, and never asked for the address | FIXED (312) |
+| N2 | net_stack | The ARP cache was poisoned by data-plane source addresses, and believed unsolicited replies | FIXED (312) |
+| N3 | net_stack | The machine answered broadcast echoes to a forged source: a one-packet reflector | FIXED (312) |
+| N4 | net_stack/wire | IPv4 fragments were processed as whole datagrams | FIXED (312) |
+| P1 | xtask | `remote:` steps written with no expectation asserted nothing — `reply.contains("")` is always true — and the canonical verification's only remote assertion was one of them | FIXED (307/315) |
+| P2 | xtask | Screendumps were never cleared and monitor errors discarded, so a refused screendump left the previous run's image and the run passed | FIXED (307/315) |
+| P3 | xtask | The gauntlet never started from a clean disk | FIXED (307/315) |
+| P4 | xtask | `--port-base` collided with adjacent bases, defeating its whole purpose | FIXED (307/315) |
+| P5 | xtask | `boot/limine.cfg` was staged verbatim with no remote token, so X1's fix rested on a Limine name precedence nothing pins | FIXED (307/315) |
+| C1 | distributed_storage | The leader demoted itself on every replication: a cluster committed exactly one entry, ever | FIXED (314) |
+| C2 | distributed_storage | `merge` duplicated on every re-sync and `compact` was non-deterministic, so two nodes with identical inputs disagreed about an object's contents | FIXED (314) |
+| C3 | distributed_storage | A `LogEntry` with index 0 off the wire panicked, or silently desynchronised every later index | FIXED (314) |
+| C4 | services_remote_ui_host | One dead viewer aborted the fan-out and was never removed, so the whole remote UI went dark for everyone, permanently | FIXED (314) |
+| C5 | pandagend | With no arguments it had no reachable exit: a spinning core, silently | FIXED (314) |
+| C6 | pandagend | The HAL input context was lost on any error, killing the keyboard for the life of the process — in code `cargo test --workspace` never compiled | FIXED (316) |
+| C7 | services_command_palette | The capability gate was declared, documented and read by nothing | FIXED (314) |
+| C8 | cli_console | Filesystem timestamps came from an unsynchronised `static mut` counter restarting at 1001 every run | FIXED (314) |
 | X4 | remote_ipc | The message-envelope path keeps the bounded window: a `MessageId` is a random UUID, so there is no order to compare against and a captured envelope still comes back into range | OPEN |
 | X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | FIXED (285) |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
@@ -216,19 +248,24 @@ writing, which is `:x` semantics under the name `wq`. The critic called it
 harmless in isolation and it is; changing it only adds a disk write to every
 `:wq`. Recorded so a later round does not re-raise it.
 
-**Next: round 4.** Three critics:
+**Round 4 is closed.** Thirty-one findings, Phases 307-316. Its three
+critics were the regression critic on this loop's own work, the HTTP and
+non-TCP network critic, and the host crates nobody had read.
 
-1. **A regression critic on this loop's own work** — Phases 278-306 changed
-   a great deal, fast. Fresh eyes on the fixes themselves, looking for what
-   they broke or half-fixed. This is the highest-value target now, and no
-   critic has ever been pointed at my own output.
-2. **The host binaries and remaining services** — `pandagend`, `cli_console`,
-   `services_remote_ui_host`, `text_renderer_host`, `distributed_storage`,
-   `services_command_palette`, `ipc`, `core_types`.
-3. **The HTTP server and net_stack's non-TCP protocols** — the HTTP server
-   arrived in Phase 283 and has never been reviewed adversarially, only held
-   to `curl`. DHCP, ARP, ICMP and the IPv4 parsers were fuzzed for panics
-   (a negative result) but never read for protocol correctness.
+**The regression critic was the single most valuable one so far** and should
+be repeated every few rounds. Eight findings, and its first was the worst
+defect this loop has produced: a field I added changed the checksum of every
+commit record written by an older build, so upgrading silently discarded
+everything committed since the last checkpoint.
+
+**Known and deliberately left:** `text_renderer_host::render_incremental`
+leaks cache entries for lines a shrinking buffer removed, so a deleted last
+line is never redrawn away — but it is called only from a perf demo binary,
+so the blast radius is zero. `core_types` identity types are sequential and
+predictable on the kernel (the documented no-`std` fallback); nothing should
+treat one as unguessable.
+
+**Next: round 5.** Not yet scoped; see the bottom of this file.
 
 **Areas a critic has cleared, which a later round should not re-read:** the
 rasterizer's pixel addressing, the glyph tables and cache, pointer clamping
@@ -236,6 +273,37 @@ and the PS/2 packet parser, `services_gui_host::layout`, the interrupt stub
 stack alignment, the PIC EOI paths, the AP bring-up window, LAPIC
 calibration arithmetic, virtqueue sizing, `mmio_map`, `fs_view::PathResolver`
 (no root escape), and `cli_console`'s line editing.
+
+### Round 4
+
+Three critics, thirty-one findings. Four method notes, all of them about
+how the loop itself goes wrong:
+
+**Point a critic at your own fixes.** Round 4's regression critic read
+Phases 278-306 as a body of work and found eight defects the individual
+verifications could not see, because each fix was checked against its own
+reproduction and nothing checked them against each other. R1 (a serde field
+invalidating every older commit record) and R2 (Phase 289's rollback undoing
+a commit that was already durable) were both *introduced* by fixes for other
+defects. Repeat this every few rounds.
+
+**A test that passes is not a test that works.** Several round-3 fixes
+shipped with tests I had not checked by reverting the fix. R3's existing
+test passed with the defect fully restored, because it exercised only the
+half of the fix that worked. Revert and re-run, every time.
+
+**The verification had holes that made it agree with me.** A `remote:` step
+with no expectation asserted nothing; a refused screendump left the previous
+run's image and still passed; the disk was never clean; a non-default
+feature was never compiled. Four separate ways for the canonical check to
+report success it had not established. The harness deserves a critic of its
+own, regularly.
+
+**Say what you could not prove, and then act on the reasoning.** D1's DHCP
+freeze needs a server the harness cannot provide; R8's race is a preemption
+between two instructions. Both are fixed, both commits say plainly that the
+fix rests on reasoning rather than a reproduction, and R8's says so *because
+the previous commit claimed a race was closed when it was not*.
 
 ### Round 3
 
