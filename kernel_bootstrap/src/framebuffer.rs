@@ -389,14 +389,20 @@ impl BareMetalFramebuffer {
             return None;
         }
 
-        // Determine pixel format based on bpp and mask info
-        // For now, assume RGB32 for 32bpp (most common)
-        let format = if boot_info.framebuffer_bpp == 32 {
-            PixelFormat::Rgb32
-        } else {
-            // Fallback to RGB32 for other formats too
-            PixelFormat::Rgb32
-        };
+        // The only format this renderer can address. `bpp` used to be read,
+        // discarded, and RGB32 assumed anyway: at 24 bpp every row offset
+        // and `cols()` would be computed as though pixels were four bytes
+        // wide, so the screen came up illegible with no diagnostic. Refusing
+        // here falls back cleanly to the VGA text console, which is readable.
+        let format = PixelFormat::Rgb32;
+        if boot_info.framebuffer_bpp as usize != format.bytes_per_pixel() * 8 {
+            return None;
+        }
+        // A pitch that is not a whole number of pixels would truncate
+        // `stride_pixels` and skew every row.
+        if boot_info.framebuffer_pitch as usize % format.bytes_per_pixel() != 0 {
+            return None;
+        }
 
         let info = FramebufferInfo {
             width: boot_info.framebuffer_width as usize,
@@ -1317,6 +1323,55 @@ fn vga_color(idx: u8) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A framebuffer the renderer can address, with one field overridden.
+    fn boot_info_with(bpp: u16, pitch: u64, pixels: &mut [u8]) -> BootInfo {
+        let mut boot = BootInfo::empty();
+        boot.framebuffer_addr = Some(pixels.as_mut_ptr());
+        boot.framebuffer_width = 16;
+        boot.framebuffer_height = 4;
+        boot.framebuffer_pitch = pitch;
+        boot.framebuffer_bpp = bpp;
+        boot
+    }
+
+    #[test]
+    fn a_format_this_renderer_cannot_address_is_refused() {
+        // `bpp` was read, discarded, and RGB32 assumed anyway. At 24 bpp
+        // every row offset and `cols()` would be computed as though pixels
+        // were four bytes wide, so the machine came up with an illegible
+        // screen and no diagnostic -- when returning None here falls back
+        // cleanly to the VGA text console, which is readable.
+        let mut pixels = [0u8; 16 * 4 * 4];
+
+        // SAFETY: the pointer is to the array above and outlives each call;
+        // each rejected case returns before the framebuffer slice is formed.
+        unsafe {
+            assert!(
+                BareMetalFramebuffer::from_boot_info(&boot_info_with(24, 16 * 3, &mut pixels))
+                    .is_none(),
+                "24 bpp must be refused, not addressed as if it were 32"
+            );
+            assert!(
+                BareMetalFramebuffer::from_boot_info(&boot_info_with(16, 16 * 2, &mut pixels))
+                    .is_none(),
+                "16 bpp likewise"
+            );
+            // A pitch that is not a whole number of pixels would truncate
+            // `stride_pixels` and skew every row.
+            assert!(
+                BareMetalFramebuffer::from_boot_info(&boot_info_with(32, 16 * 4 + 2, &mut pixels))
+                    .is_none(),
+                "a pitch that is not a multiple of the pixel size must be refused"
+            );
+            // And the ordinary case still works.
+            assert!(
+                BareMetalFramebuffer::from_boot_info(&boot_info_with(32, 16 * 4, &mut pixels))
+                    .is_some(),
+                "32 bpp with an aligned pitch must still be accepted"
+            );
+        }
+    }
     use super::*;
     use alloc::boxed::Box;
     use services_gui_host::{Compositor, DesktopWindow, SurfaceRect, SurfaceSize};
