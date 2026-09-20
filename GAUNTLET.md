@@ -197,6 +197,10 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | R6-17 | formal_verification | `src/lib.rs` -- nine `verify_*` functions and a report type -- was called by nothing, including this crate's own tests. The real model checking is in `tests/` and is much stronger | FIXED (330) |
 | R6-18 | contract_tests | "Golden" contract tests that depend on none of the services they name: every payload type is declared in the crate itself and round-tripped against itself, and the action strings appear nowhere else in the tree. Cannot fail when a service changes | DOCUMENTED (330) -- not fixable until a service dispatches on them |
 | R6-19 | services_pipeline_executor | No pipeline can complete a single stage against the real kernel: a channel is one queue, so `execute_stage_once` sends its request and receives that same request back. Every passing test in the crate passes because its mock fabricates the reply | OPEN -- reproduced in `tests/against_the_real_kernel.rs`; the error is now truthful, but closing it needs a service-side dispatch loop |
+| R6-20 | graphics_rasterizer | `draw_line` walked the whole segment, testing each point for being in bounds. `DrawOp::Line` carries `i32`, so one draw op from one view was 4_294_967_296 iterations -- measured at 7.9 s in an optimized build with the compositor frozen throughout | FIXED (331) |
+| R6-21 | graphics_rasterizer | `fill_rounded_rect` and `draw_rounded_border` looped `rect.height` times whatever the target's height was, and `DrawOp` carries height as a `u32` | FIXED (331) |
+| R6-22 | services_gui_host | A keyframe carried the producer's "what changed since the last frame" as its damage. A viewer honouring it repaints one rectangle of an otherwise blank surface | FIXED (331) |
+| R6-23 | services_remote_ui_host | `add_sink` did not force a keyframe, so a viewer that joined mid-stream decoded deltas against a scene it had never seen -- for up to `DEFAULT_KEYFRAME_INTERVAL` frames. `request_keyframe`'s own doc says "(a viewer joined)" and nothing called it there | FIXED (331) |
 
 ## Rejected claims
 
@@ -332,7 +336,7 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Round 6 is in progress.** Twenty-one findings so far, Phases 326-330. Its
+**Round 6 is in progress.** Twenty-five findings so far, Phases 326-331. Its
 critics were the `services_*` crates round 5 did not reach, a third
 regression pass, and the harness itself.
 
@@ -346,10 +350,13 @@ regression pass, and the harness itself.
 - **R6-18** -- `contract_tests` cannot detect drift. Its docs now say so in
   the first line. It becomes a real drift detector the moment a service
   depends on those types and dispatches on those action strings.
-- Compositor: unclamped `DrawOp` geometry, a keyframe that still carries
-  damage, `add_sink` not forcing a keyframe, keyboard focus reconciled only
-  on pointer events, duplicate and unstable view ids. **This is the largest
-  untouched block left in round 6.**
+- Compositor: four of the six are closed (R6-20 .. R6-23). Left: keyboard
+  focus reconciled only on some paths, and duplicate/unstable view ids.
+  `focus_component` does update both the focus manager and the layout, so
+  the obvious version of the focus claim does not reproduce; what remains is
+  `split_focused_tile` swallowing a policy denial with `let _ =` after the
+  layout has already moved, and `normalize()` moving `focused_tile` with no
+  focus-manager update at all. Not yet reproduced as a failing test.
 
 **Earlier candidates, still unscoped:** a third regression pass (it
 has been the most valuable role every time); the compositor and

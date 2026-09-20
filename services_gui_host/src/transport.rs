@@ -211,7 +211,17 @@ impl SceneEncoder {
         };
         let update = if need_keyframe {
             self.since_keyframe = 0;
-            SceneUpdate::Keyframe(scene.clone())
+            // A keyframe replaces the viewer's whole scene, so its damage is
+            // the whole surface. It used to carry `scene.damage` -- the
+            // producer's "what changed since the previous frame", which is
+            // meaningless to a viewer that has no previous frame. A viewer
+            // honouring it would repaint one small rectangle of an otherwise
+            // blank or stale surface and leave the rest wrong until
+            // something else happened to damage it.
+            let (w, h) = scene.pixel_size();
+            let mut scene = scene.clone();
+            scene.damage = Some(RasterRect::new(0, 0, w, h));
+            SceneUpdate::Keyframe(scene)
         } else {
             self.since_keyframe += 1;
             SceneUpdate::Delta(diff_scenes(self.last.as_ref().expect("checked"), scene))

@@ -96,6 +96,13 @@ impl RemoteUiHost {
 
     pub fn add_sink(&mut self, sink: Box<dyn SnapshotSink>) {
         self.sinks.push(sink);
+        // A viewer that joins mid-stream has no base scene, so the next
+        // desktop frame has to be a keyframe -- which is what
+        // `request_keyframe` is for, and its own doc comment says "(a viewer
+        // joined)". Nothing called it on the one path where a viewer joins.
+        // Until the cadence happened to come round, the new viewer was
+        // decoding deltas against a scene it had never seen.
+        self.request_keyframe();
     }
 
     pub fn push_snapshot(
@@ -509,7 +516,17 @@ mod tests {
         assert_eq!(sink.frames.len(), 1);
         assert_eq!(sink.desktop_frames.len(), 1);
         assert_eq!(sink.desktop_frames[0], frame);
-        assert_eq!(sink.desktop_frames[0].update, SceneUpdate::Keyframe(scene));
+        assert_eq!(sink.desktop_frames[0].update, as_keyframe(&scene));
+    }
+
+    /// `scene` as a keyframe carries it: a keyframe replaces the viewer's
+    /// whole surface, so its damage is the whole surface rather than
+    /// whatever the producer thought had changed.
+    fn as_keyframe(scene: &DesktopScene) -> SceneUpdate {
+        let (w, h) = scene.pixel_size();
+        let mut scene = scene.clone();
+        scene.damage = Some(graphics_rasterizer::RasterRect::new(0, 0, w, h));
+        SceneUpdate::Keyframe(scene)
     }
 
     #[test]
@@ -528,7 +545,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].1.action, REMOTE_DESKTOP_ACTION);
         let decoded: RemoteDesktopFrame = sent[0].1.payload.deserialize().unwrap();
-        assert_eq!(decoded.update, SceneUpdate::Keyframe(scene));
+        assert_eq!(decoded.update, as_keyframe(&scene));
     }
 
     #[test]
@@ -559,7 +576,7 @@ mod tests {
         match second {
             JsonLineRecord::Desktop(frame) => {
                 assert_eq!(frame.revision, 2);
-                assert_eq!(frame.update, SceneUpdate::Keyframe(scene));
+                assert_eq!(frame.update, as_keyframe(&scene));
             }
             other => panic!("{other:?}"),
         }
@@ -633,5 +650,97 @@ mod tests {
             assert_eq!(got.cursor, expected.cursor);
             assert_eq!(got.windows, expected.windows);
         }
+    }
+}
+
+#[cfg(test)]
+mod joining_viewer_tests {
+    use super::*;
+    use services_gui_host::transport::{SceneDecoder, SceneUpdate};
+    use services_gui_host::{DesktopScene, DesktopWindow, SurfaceSize};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Recorder(Arc<Mutex<Vec<RemoteDesktopFrame>>>);
+
+    impl SnapshotSink for Recorder {
+        fn send(&mut self, _frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
+            Ok(())
+        }
+        fn send_desktop(&mut self, frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+            self.0.lock().unwrap().push(frame);
+            Ok(())
+        }
+    }
+
+    fn scene(width: usize, windows: Vec<DesktopWindow>) -> DesktopScene {
+        DesktopScene {
+            size: SurfaceSize::new(width, 24),
+            windows,
+            cursor: None,
+            theme: None,
+            damage: None,
+        }
+    }
+
+    /// The finding: a viewer that joins mid-stream was sent the next frame as
+    /// a *delta*, against a scene it had never received. `request_keyframe`
+    /// existed for exactly this and nothing called it when a viewer joined,
+    /// so the new viewer decoded garbage until the keyframe cadence came
+    /// round -- up to `DEFAULT_KEYFRAME_INTERVAL` frames later.
+    #[test]
+    fn a_viewer_that_joins_mid_stream_gets_a_keyframe_first() {
+        let mut host = RemoteUiHost::new();
+        // Stream a few frames to an existing viewer, so the encoder has a
+        // base and would otherwise send deltas.
+        let first = Arc::new(Mutex::new(Vec::new()));
+        host.add_sink(Box::new(Recorder(first)));
+        host.push_desktop(scene(80, Vec::new()), 1).unwrap();
+        host.push_desktop(scene(80, Vec::new()), 2).unwrap();
+
+        let joined = Arc::new(Mutex::new(Vec::new()));
+        host.add_sink(Box::new(Recorder(joined.clone())));
+        host.push_desktop(scene(80, Vec::new()), 3).unwrap();
+
+        let frames = joined.lock().unwrap();
+        let first_seen = frames.first().expect("the new viewer received nothing");
+        assert!(
+            matches!(first_seen.update, SceneUpdate::Keyframe(_)),
+            "a viewer that just joined was sent a delta against a scene it \
+             has never seen"
+        );
+
+        // And it decodes, which is the consequence that matters.
+        let mut decoder = SceneDecoder::default();
+        decoder
+            .apply(&first_seen.update)
+            .expect("the first frame a new viewer sees must decode on its own");
+    }
+
+    /// A keyframe replaces the whole scene, so its damage must say so. It
+    /// used to carry the producer's "what changed since last frame", which a
+    /// viewer honouring damage would use to repaint one rectangle of an
+    /// otherwise blank surface.
+    #[test]
+    fn a_keyframes_damage_covers_the_whole_surface() {
+        let mut host = RemoteUiHost::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        host.add_sink(Box::new(Recorder(seen.clone())));
+
+        let mut narrow = scene(80, Vec::new());
+        // A producer that thinks only a small corner changed.
+        narrow.damage = Some(graphics_rasterizer::RasterRect::new(3, 4, 5, 6));
+        host.push_desktop(narrow.clone(), 1).unwrap();
+
+        let frames = seen.lock().unwrap();
+        let SceneUpdate::Keyframe(sent) = &frames[0].update else {
+            panic!("the first frame to a new viewer must be a keyframe");
+        };
+        let (w, h) = narrow.pixel_size();
+        assert_eq!(
+            sent.damage,
+            Some(graphics_rasterizer::RasterRect::new(0, 0, w, h)),
+            "a keyframe carried a partial damage rectangle"
+        );
     }
 }

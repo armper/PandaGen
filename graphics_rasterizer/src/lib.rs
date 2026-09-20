@@ -431,14 +431,42 @@ pub trait RenderTarget {
     ///
     /// Endpoints may lie outside the target; only in-bounds pixels are
     /// written, so callers can draw against a virtual coordinate space.
+    /// Bresenham, walking only the part of the segment that can land on the
+    /// target.
+    ///
+    /// This used to walk the whole segment, testing each point for being in
+    /// bounds and writing the ones that were. A `DrawOp::Line` carries `i32`
+    /// coordinates, so `Line { x0: i32::MIN, x1: i32::MAX }` -- one draw op
+    /// from one view -- was 4_294_967_296 iterations: measured at 7.9 seconds
+    /// in an optimized build, with the compositor frozen throughout, and
+    /// nothing stops a view sending a hundred of them.
+    ///
+    /// The walk is monotonic in both axes and steps its dominant axis exactly
+    /// once per iteration, so the iterations that can produce a pixel form a
+    /// contiguous range, and `line_skip` computes the state at the start of
+    /// that range in closed form. The pixels written are *identical* to the
+    /// full walk's -- `a_skipped_line_draws_what_the_full_walk_draws` checks
+    /// that against a reference implementation of the old loop.
     fn draw_line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, color: RgbaColor) {
         let (width, height) = (self.width() as i64, self.height() as i64);
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        // Nothing of the segment's bounding box reaches the target.
+        if x0.max(x1) < 0 || y0.max(y1) < 0 || x0.min(x1) >= width || y0.min(y1) >= height {
+            return;
+        }
+
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx: i64 = if x0 < x1 { 1 } else { -1 };
         let sy: i64 = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-        let (mut x, mut y) = (x0, y0);
+
+        let Some(start) = line_skip(x0, y0, x1, y1, width, height) else {
+            return;
+        };
+        let (mut x, mut y, mut err, mut remaining) = start;
+
         loop {
             if x >= 0 && y >= 0 && x < width && y < height {
                 self.write_pixel(x as usize, y as usize, color);
@@ -446,6 +474,12 @@ pub trait RenderTarget {
             if x == x1 && y == y1 {
                 break;
             }
+            // Past the last iteration that can produce a pixel. The walk is
+            // monotonic, so nothing after this re-enters the target.
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
             let twice = 2 * err;
             if twice >= dy {
                 err += dy;
@@ -465,7 +499,11 @@ pub trait RenderTarget {
             return;
         }
         let radius = clamp_radius(rect, radius);
-        for row in 0..rect.height {
+        // Only the rows that can land on the target. `rect.height` comes
+        // straight from a `DrawOp`'s `u32`, so this loop used to run up to
+        // four billion times on a target a few hundred pixels tall, every
+        // iteration past the bottom edge doing nothing but cost time.
+        for row in 0..visible_rows(rect, self.height()) {
             if let Some((start, end)) = rounded_row_span(rect, radius, row) {
                 self.fill_rect(RasterRect::new(start, rect.y + row, end - start, 1), color);
             }
@@ -495,7 +533,8 @@ pub trait RenderTarget {
         );
         let inner_radius = radius.saturating_sub(thickness);
 
-        for row in 0..rect.height {
+        // Bounded to the target for the same reason as `fill_rounded_rect`.
+        for row in 0..visible_rows(rect, self.height()) {
             let Some((outer_start, outer_end)) = rounded_row_span(rect, radius, row) else {
                 continue;
             };
@@ -589,6 +628,119 @@ pub trait RenderTarget {
 }
 
 /// Largest radius that still leaves the rectangle well-formed.
+/// Where a Bresenham walk from `(x0, y0)` to `(x1, y1)` should start and how
+/// many further iterations can matter, for a target of `width` x `height`.
+///
+/// Returns `(x, y, err, remaining)`: the walk's exact state at the first
+/// iteration whose dominant coordinate is inside the target, and the number
+/// of iterations after it that can still be. `None` when no iteration can
+/// produce a pixel.
+///
+/// The closed form: in the x-dominant case the walk steps x once per
+/// iteration, so after `n` iterations `x = x0 + n*sx`, and the number of y
+/// steps taken is
+///
+/// ```text
+/// m(n) = clamp(floor((-dx - 2*dy - 2*(n-1)*dy) / (2*dx)) + 1, 0, n)
+/// ```
+///
+/// from which `err = (dx + dy) + n*dy + m*dx`. The y-dominant case is the
+/// same with the axes exchanged. Both were checked against the full walk at
+/// nearly two million sample points before being written down.
+fn line_skip(
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+    width: i64,
+    height: i64,
+) -> Option<(i64, i64, i64, i64)> {
+    fn floor_div(a: i128, b: i128) -> i128 {
+        let q = a / b;
+        if (a % b != 0) && ((a < 0) != (b < 0)) {
+            q - 1
+        } else {
+            q
+        }
+    }
+
+    // The inclusive range of iteration counts for which `from + n*step` lies
+    // in `[0, limit)`, intersected with `[0, total]`.
+    fn window(from: i64, step: i64, limit: i64, total: i64) -> Option<(i64, i64)> {
+        let (lo, hi) = if step > 0 {
+            (-from, limit - 1 - from)
+        } else {
+            (from - limit + 1, from)
+        };
+        let lo = lo.max(0);
+        let hi = hi.min(total);
+        if lo > hi {
+            None
+        } else {
+            Some((lo, hi))
+        }
+    }
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx: i64 = if x0 < x1 { 1 } else { -1 };
+    let sy: i64 = if y0 < y1 { 1 } else { -1 };
+    let err0 = dx + dy;
+
+    // A single point: no stepping to skip.
+    if dx == 0 && dy == 0 {
+        return Some((x0, y0, err0, 0));
+    }
+
+    let x_dominant = dx >= -dy;
+    let (total, from, step, limit) = if x_dominant {
+        (dx, x0, sx, width)
+    } else {
+        (-dy, y0, sy, height)
+    };
+    let (lo, hi) = window(from, step, limit, total)?;
+
+    // Steps taken on the minor axis after `lo` iterations. Both cases are the
+    // same expression with the axes exchanged: the minor axis steps whenever
+    // the count so far is at or below
+    //
+    //     (2 * minor_delta * n - major_delta) / (2 * major_delta)
+    //
+    // which is monotonic in `n`, so the count after `lo` iterations is that
+    // bound at `lo - 1`, floored, plus one.
+    let (major_delta, minor_delta) = if x_dominant {
+        (dx as i128, (-dy) as i128)
+    } else {
+        ((-dy) as i128, dx as i128)
+    };
+    let minor = if lo == 0 || major_delta == 0 {
+        0i128
+    } else {
+        let num = 2 * minor_delta * (lo as i128) - major_delta;
+        (floor_div(num, 2 * major_delta) + 1).clamp(0, lo as i128)
+    };
+
+    let (n, m) = if x_dominant {
+        (lo as i128, minor)
+    } else {
+        (minor, lo as i128)
+    };
+    let x = x0 + (n as i64) * sx;
+    let y = y0 + (m as i64) * sy;
+    let err = err0 as i128 + n * (dy as i128) + m * (dx as i128);
+
+    Some((x, y, err as i64, hi - lo))
+}
+
+/// How many of `rect`'s rows can appear on a target `target_height` tall.
+///
+/// A rectangle's height is attacker-controlled -- `DrawOp` carries it as a
+/// `u32` -- while the target is a few hundred pixels. Row loops must be
+/// bounded by the target, not by the rectangle.
+fn visible_rows(rect: RasterRect, target_height: usize) -> usize {
+    target_height.saturating_sub(rect.y).min(rect.height)
+}
+
 fn clamp_radius(rect: RasterRect, radius: usize) -> usize {
     radius.min(rect.width / 2).min(rect.height / 2)
 }
@@ -1875,5 +2027,219 @@ mod tests {
         assert_eq!(buffer.pixel(2, 1), Some(DETAIL));
         assert_eq!(buffer.pixel(6, 2), Some(CLEAR));
         assert_eq!(buffer.pixel(3, 4), Some(CLEAR));
+    }
+}
+
+#[cfg(test)]
+mod line_bounds_tests {
+    use super::*;
+
+    /// A target that records exactly which pixels were written, in order.
+    struct Recorder {
+        width: usize,
+        height: usize,
+        written: Vec<(usize, usize)>,
+    }
+
+    impl RenderTarget for Recorder {
+        fn width(&self) -> usize {
+            self.width
+        }
+        fn height(&self) -> usize {
+            self.height
+        }
+        fn write_pixel(&mut self, x: usize, y: usize, _color: RgbaColor) {
+            self.written.push((x, y));
+        }
+        fn pixel(&self, _x: usize, _y: usize) -> Option<RgbaColor> {
+            None
+        }
+    }
+
+    /// The walk exactly as it was before the skip was added.
+    fn reference_walk(
+        x0: i64,
+        y0: i64,
+        x1: i64,
+        y1: i64,
+        width: i64,
+        height: i64,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx: i64 = if x0 < x1 { 1 } else { -1 };
+        let sy: i64 = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let (mut x, mut y) = (x0, y0);
+        loop {
+            if x >= 0 && y >= 0 && x < width && y < height {
+                out.push((x as usize, y as usize));
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let twice = 2 * err;
+            if twice >= dy {
+                err += dy;
+                x += sx;
+            }
+            if twice <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+        out
+    }
+
+    /// The skip must be invisible: same pixels, same order, for every line.
+    /// Coordinates well outside the target on both axes and in both
+    /// directions, so the entering, crossing, leaving and never-arriving
+    /// cases are all covered.
+    #[test]
+    fn a_skipped_line_draws_what_the_full_walk_draws() {
+        let (width, height) = (37usize, 23usize);
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for _ in 0..20_000 {
+            let span = 160i64;
+            let x0 = (rnd() % (span as u64 * 2)) as i64 - span;
+            let y0 = (rnd() % (span as u64 * 2)) as i64 - span;
+            let x1 = (rnd() % (span as u64 * 2)) as i64 - span;
+            let y1 = (rnd() % (span as u64 * 2)) as i64 - span;
+
+            let mut recorder = Recorder {
+                width,
+                height,
+                written: Vec::new(),
+            };
+            recorder.draw_line(x0, y0, x1, y1, RgbaColor::new(1, 2, 3, 255));
+            let expected = reference_walk(x0, y0, x1, y1, width as i64, height as i64);
+            assert_eq!(
+                recorder.written, expected,
+                "line ({x0},{y0}) -> ({x1},{y1}) drew different pixels after the skip"
+            );
+        }
+    }
+
+    /// The whole point: a line spanning the `i32` range must cost about as
+    /// much as one spanning the target. Before the skip this was 4.29 billion
+    /// iterations and about eight seconds.
+    #[test]
+    fn an_enormous_line_costs_what_a_small_one_costs() {
+        let mut recorder = Recorder {
+            width: 800,
+            height: 600,
+            written: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        recorder.draw_line(
+            i32::MIN as i64,
+            0,
+            i32::MAX as i64,
+            1,
+            RgbaColor::new(1, 2, 3, 255),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "an i32-spanning line took {elapsed:?}"
+        );
+        assert!(
+            !recorder.written.is_empty(),
+            "the line crosses the target, so it must still draw something"
+        );
+        assert!(
+            recorder.written.len() <= 800,
+            "wrote {} pixels on an 800-wide target",
+            recorder.written.len()
+        );
+    }
+
+    /// A `DrawOp`'s `u32` geometry against a target a few hundred pixels
+    /// tall: the row loops must cost what the target costs, not what the
+    /// rectangle claims. Both rounded shapes iterated `rect.height` times
+    /// regardless, even though `fill_rect` underneath them clamped and drew
+    /// nothing.
+    #[test]
+    fn an_enormous_rounded_rect_costs_what_the_target_costs() {
+        for huge in [
+            RasterRect::new(0, 0, u32::MAX as usize, u32::MAX as usize),
+            RasterRect::new(0, 0, 40, u32::MAX as usize),
+        ] {
+            let mut recorder = Recorder {
+                width: 37,
+                height: 23,
+                written: Vec::new(),
+            };
+            let color = RgbaColor::new(1, 2, 3, 255);
+
+            let started = std::time::Instant::now();
+            recorder.fill_rounded_rect(huge, 4, color);
+            recorder.draw_rounded_border(huge, 4, 2, color);
+            let elapsed = started.elapsed();
+
+            assert!(
+                elapsed < std::time::Duration::from_millis(200),
+                "rounded shapes of {huge:?} took {elapsed:?}"
+            );
+            assert!(
+                !recorder.written.is_empty(),
+                "the shape covers the target, so it must still draw"
+            );
+        }
+    }
+
+    /// Clamping the row loop must not change what a rectangle inside the
+    /// target draws.
+    #[test]
+    fn clamping_the_rows_does_not_change_a_shape_that_fits() {
+        let rect = RasterRect::new(2, 3, 20, 12);
+        let color = RgbaColor::new(1, 2, 3, 255);
+        let mut fill = Recorder {
+            width: 37,
+            height: 23,
+            written: Vec::new(),
+        };
+        fill.fill_rounded_rect(rect, 5, color);
+        assert!(
+            fill.written.iter().all(|&(x, y)| x < 37 && y < 23),
+            "a fitting shape drew outside the target"
+        );
+        // Every row of the rectangle contributes, so the clamp cannot have
+        // cut one off.
+        let rows: std::collections::BTreeSet<usize> =
+            fill.written.iter().map(|&(_, y)| y).collect();
+        assert_eq!(rows.len(), 12, "the clamp dropped rows that fit");
+    }
+
+    /// Vertical and horizontal lines are the dominant-axis edge cases, and a
+    /// zero-length one is the degenerate case the skip must not swallow.
+    #[test]
+    fn degenerate_lines_survive_the_skip() {
+        for (x0, y0, x1, y1) in [
+            (5i64, 5i64, 5i64, 5i64),
+            (5, -1000, 5, 1000),
+            (-1000, 5, 1000, 5),
+            (0, 0, 0, 0),
+        ] {
+            let mut recorder = Recorder {
+                width: 37,
+                height: 23,
+                written: Vec::new(),
+            };
+            recorder.draw_line(x0, y0, x1, y1, RgbaColor::new(1, 2, 3, 255));
+            assert_eq!(
+                recorder.written,
+                reference_walk(x0, y0, x1, y1, 37, 23),
+                "line ({x0},{y0}) -> ({x1},{y1})"
+            );
+        }
     }
 }
