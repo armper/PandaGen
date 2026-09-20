@@ -3467,6 +3467,12 @@ impl RemoteCommandServer {
 /// the user is looking at.
 const PRESENT_BAND_SPINS: u64 = 20_000;
 
+/// Workers currently inside `convert_rgba_rows` for the present in flight.
+/// The boot CPU waits for this to reach zero before it lets the surfaces
+/// those workers are writing to be reused.
+static PRESENT_WORKERS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// CPUs a present may be split across right now.
 fn present_workers() -> usize {
     if PARALLEL_PRESENT.load(core::sync::atomic::Ordering::Relaxed) {
@@ -3517,8 +3523,18 @@ fn run_present_bands(bands: &[framebuffer::PresentBand]) {
             unsafe { framebuffer::convert_rgba_rows(&bands[i]) };
         }
     }
-    // Any worker still holding a band job for this generation will now see a
-    // newer one and leave the buffers alone.
+    // Wait for any worker that already claimed a band to finish with these
+    // buffers. Bumping the generation only stops workers that have not yet
+    // claimed one; a worker already inside `convert_rgba_rows` is writing to
+    // the surfaces this frame published, and the next frame may reallocate
+    // them. Bounded, because a hung CPU must not stop the display for ever.
+    let mut spins = 0u64;
+    while PRESENT_WORKERS.load(core::sync::atomic::Ordering::Acquire) > 0
+        && spins < PRESENT_BAND_SPINS
+    {
+        spins += 1;
+        core::hint::spin_loop();
+    }
     PRESENT_GENERATION.fetch_add(1, core::sync::atomic::Ordering::Release);
 }
 
@@ -4746,6 +4762,14 @@ fn run_job(job: hal_x86_64::Job) -> u64 {
             // then wake up and convert a band it was never authorised for.
             // Harmless today only because the surfaces happen never to be
             // reallocated; a resize or a renderer rebuild makes it corruption.
+            // Claim the band under the lock, *and register as a worker
+            // while still holding it*. Checking the generation and then
+            // converting afterwards is check-then-act however many times it
+            // is re-checked: a worker can pass the last check, be preempted,
+            // and have the boot CPU time out, bump the generation and
+            // reallocate the surfaces before it touches them. The boot CPU
+            // waits for this count to fall to zero before it moves on, so
+            // there is no window left to lose.
             let band = {
                 let slots = PRESENT_BANDS.lock();
                 if generation != PRESENT_GENERATION.load(core::sync::atomic::Ordering::Acquire) {
@@ -4753,16 +4777,16 @@ fn run_job(job: hal_x86_64::Job) -> u64 {
                     // may already describe a different frame.
                     return 0;
                 }
+                PRESENT_WORKERS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
                 slots[index % framebuffer::MAX_PRESENT_BANDS]
             };
-            if generation != PRESENT_GENERATION.load(core::sync::atomic::Ordering::Acquire) {
-                return 0;
-            }
             if band.rows() > 0 {
-                // SAFETY: the generation still matches, so the boot CPU is
-                // inside the present that published these buffers.
+                // SAFETY: the generation was current when this band was
+                // claimed, and the boot CPU will not reuse those buffers
+                // until `PRESENT_WORKERS` returns to zero.
                 unsafe { framebuffer::convert_rgba_rows(&band) };
             }
+            PRESENT_WORKERS.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
             band.rows() as u64
         }
         _ => 0,
