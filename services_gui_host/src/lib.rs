@@ -1041,13 +1041,29 @@ fn draw_window(canvas: &mut [Vec<char>], window: &DesktopWindow) {
     let border = if window.focused { '#' } else { '+' };
     let rect = window.rect;
 
-    for dy in 0..rect.height {
+    // Bounded by the canvas, not by the rectangle. `SurfaceRect` is four
+    // `usize`s and `DesktopWindow` derives `Deserialize`: a `DesktopScene`
+    // arrives over the wire inside a keyframe, so a viewer rendering a
+    // decoded scene walked whatever height the producer claimed. 200 million
+    // rows on a 24-row canvas measured at 1.57 s, and `usize::MAX` does not
+    // finish at all -- every one of those iterations hit the `continue`
+    // below and drew nothing. This is the same clamp Phase 331 put in
+    // `graphics_rasterizer`'s rounded shapes; this is the text compositor,
+    // which is its sibling and did not get it.
+    //
+    // Exact rather than conservative: the rows and columns dropped are the
+    // ones the bounds checks already skipped, and `is_bottom`/`is_right`
+    // still compare against the rectangle's own extent, so the border is
+    // drawn in the same cells.
+    let rows = canvas.len().saturating_sub(rect.y).min(rect.height);
+    for dy in 0..rows {
         let y = rect.y + dy;
         if y >= canvas.len() {
             continue;
         }
 
-        for dx in 0..rect.width {
+        let cols = canvas[y].len().saturating_sub(rect.x).min(rect.width);
+        for dx in 0..cols {
             let x = rect.x + dx;
             if x >= canvas[y].len() {
                 continue;

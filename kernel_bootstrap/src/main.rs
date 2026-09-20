@@ -3200,7 +3200,17 @@ enum ReplyTarget {
         caller: RemoteToken,
     },
     /// A signed line answered on the same TCP connection.
-    Tcp { conn: usize },
+    ///
+    /// The peer is carried with the slot index because the index alone is
+    /// not an address: a command may take up to `TIMEOUT_TICKS` to run, and
+    /// if the caller's connection goes away inside that window the slot is
+    /// reused, so replying by index alone hands a signed command's output to
+    /// a stranger on whatever port they happened to connect to.
+    Tcp {
+        conn: usize,
+        peer: net_stack::Ipv4,
+        peer_port: u16,
+    },
 }
 
 struct RemoteInFlight {
@@ -3350,8 +3360,17 @@ impl RemoteCommandServer {
                 let command = core::str::from_utf8(&call.payload).unwrap_or("").trim();
                 (target, alloc::string::String::from(command))
             }
-            bare_metal_net::RemoteRequest::TcpLine { conn, line } => {
-                let target = ReplyTarget::Tcp { conn };
+            bare_metal_net::RemoteRequest::TcpLine {
+                conn,
+                peer,
+                peer_port,
+                line,
+            } => {
+                let target = ReplyTarget::Tcp {
+                    conn,
+                    peer,
+                    peer_port,
+                };
                 let text = core::str::from_utf8(&line).unwrap_or("");
                 let Some((nonce, caller, command)) = remote_ipc::line::verify(&keys, text) else {
                     self.denied += 1;
@@ -3442,10 +3461,14 @@ impl RemoteCommandServer {
                     }
                 }
             }
-            ReplyTarget::Tcp { conn } => {
+            ReplyTarget::Tcp {
+                conn,
+                peer,
+                peer_port,
+            } => {
                 let line = remote_ipc::line::reply(&result);
                 if let Some(net) = NET.lock().as_mut() {
-                    if !net.tcp_reply(conn, line.as_bytes()) {
+                    if !net.tcp_reply_to(conn, peer, peer_port, line.as_bytes()) {
                         let mut serial = serial::SerialPort::new(serial::COM1);
                         klog!(serial, "remote: tcp reply not sent\r\n");
                     }

@@ -222,9 +222,23 @@ impl Virtqueue {
     }
 
     /// Free a descriptor chain
-    pub fn free_desc(&mut self, head: u16) {
+    /// Returns the chain to the free list.
+    ///
+    /// Returns `false` when `head` is out of range. The used ring is
+    /// *device-writable* memory, so a descriptor id taken from it is an
+    /// untrusted number; `self.desc` is exactly `size` long and this
+    /// indexes it directly, which on a kernel that aborts on panic is a
+    /// dead machine. `poll_receive` validated its id and the two calls in
+    /// `transmit` did not, so the check lives here where every caller gets
+    /// it.
+    pub fn free_desc(&mut self, head: u16) -> bool {
+        if head as usize >= self.desc.len() {
+            return false;
+        }
         let mut desc_idx = head;
-        loop {
+        // The chain is driver-built, but a bound on the walk costs nothing
+        // and a corrupted `next` would otherwise loop for ever.
+        for _ in 0..self.desc.len() {
             let desc = &self.desc[desc_idx as usize];
             let next = desc.next;
             let has_next = (desc.flags & VIRTQ_DESC_F_NEXT) != 0;
@@ -234,10 +248,14 @@ impl Virtqueue {
             if !has_next {
                 self.desc[desc_idx as usize].next = self.free_head;
                 self.free_head = head;
-                break;
+                return true;
+            }
+            if next as usize >= self.desc.len() {
+                return false;
             }
             desc_idx = next;
         }
+        false
     }
 
     /// Add a buffer to the available ring

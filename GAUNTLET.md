@@ -203,6 +203,12 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | R6-23 | services_remote_ui_host | `add_sink` did not force a keyframe, so a viewer that joined mid-stream decoded deltas against a scene it had never seen -- for up to `DEFAULT_KEYFRAME_INTERVAL` frames. `request_keyframe`'s own doc says "(a viewer joined)" and nothing called it there | FIXED (331) |
 | R6-24 | services_workspace_manager | Two notions of focus: `window_layout.focused_tile` draws the ring, `focus_manager` delivers keys. Closing the focused component moved each independently and they landed on different components -- the user saw a highlighted window and typed into another | FIXED (332) |
 | R6-25 | services_gui_host | A scene with a repeated view id cannot be expressed as a delta (`changed` updates the first match, `removed` drops every match). Encoding one anyway produced a *different* scene at the viewer -- the update was lost and one window took another's content -- and every later delta built on that | FIXED (332) |
+| K1 | hal_x86_64/virtio | `poll_receive` validated the device-supplied descriptor id; `transmit` passed the same untrusted id from the same used ring straight to `free_desc`, which indexes the table. Reverting the guard gives `index out of bounds: the len is 8 but the index is 9999` -- a panic, i.e. a dead machine. Latent: needs a hostile or buggy device, which QEMU will not produce | FIXED (333) |
+| K2 | kernel/http + remote | `progress_matches_connection`'s doc says "Anything indexed by TCP slot has to ask this" and two siblings did not. An aborted download handed its remaining body to whoever landed in its slot next, whose own request was then never answered and whose connection was closed when the stranger's stream ended. And `ReplyTarget::Tcp { conn }` held a bare slot index across a command's execution, so a **signed privileged command's output could be written to an unauthenticated stranger** on any port | FIXED (333) |
+| K3 | kernel/http | `tcp::write` returns how many bytes fitted and every HTTP responder ignored it. Three pipelined `GET /` overflow the 2048-byte send buffer and the third response's own status line is cut in half; the client hangs until the 120 s reaper. `tcp_reply` on the command port checked its write; its siblings three functions away did not | FIXED (333) |
+| K4 | kernel/net | SC3's `keep_tcp_alive` reached three of the four spin loops; `ping`'s ARP wait is the fourth | FIXED (333) |
+| C1 | services_workspace_manager | **R6-24's own fix was incomplete.** `reconcile_focus` was wired only to the closing path. Launching a non-focusable component, or one whose focus the policy denies (the error is swallowed by `let _ =`), leaves the ring on the new window and the keys on the old one | FIXED (333) |
+| C2 | services_gui_host | **R6-21's own fix was incomplete.** The row clamp went into `graphics_rasterizer`'s rounded shapes and not into `draw_window`, the text compositor next door. `SurfaceRect` is four `usize`s off the wire: 200M rows on a 24-row canvas measured 1.57 s, and `usize::MAX` never finishes | FIXED (333) |
 
 ## Rejected claims
 
@@ -338,7 +344,12 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Round 6 is in progress.** Twenty-seven findings so far, Phases 326-332. Its
+**Round 6 is closed.** Twenty-seven findings, Phases 326-332.
+
+**Round 7 is in progress.** Three critics: the regression critic on this
+loop's own phases 326-332, the crates no previous critic had read, and the
+bare-metal kernel. Six findings fixed in Phase 333 (K1-K4, C1, C2), eight
+more from the service-crate critic in hand. Its
 critics were the `services_*` crates round 5 did not reach, a third
 regression pass, and the harness itself.
 

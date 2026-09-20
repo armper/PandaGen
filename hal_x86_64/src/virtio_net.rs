@@ -51,6 +51,9 @@ pub struct VirtioNetDevice<T: VirtioTransport> {
     /// Frames dropped because the device reported an impossible index or
     /// length.
     rx_errors: u64,
+    /// Transmit completions refused because the device reported a descriptor
+    /// id outside the table. Indexing on it would abort the kernel.
+    tx_errors: u64,
 }
 
 impl<T: VirtioTransport> VirtioNetDevice<T> {
@@ -85,6 +88,7 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
             frames_received: 0,
             frames_sent: 0,
             rx_errors: 0,
+            tx_errors: 0,
         };
         device.post_all_rx();
         Ok(device)
@@ -127,6 +131,10 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
     }
 
     /// Frames dropped because the device reported an impossible index or length.
+    pub fn tx_errors(&self) -> u64 {
+        self.tx_errors
+    }
+
     pub fn rx_errors(&self) -> u64 {
         self.rx_errors
     }
@@ -226,9 +234,13 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
         if frame.len() > MAX_FRAME_LEN {
             return Err(NetError::FrameTooLarge);
         }
-        // Reclaim any earlier completed transmit descriptors.
+        // Reclaim any earlier completed transmit descriptors. The id comes
+        // from the device-writable used ring, so it is checked the same way
+        // `poll_receive` checks its own.
         while let Some((id, _)) = self.tx.get_used() {
-            self.tx.free_desc(id as u16);
+            if id as usize >= self.tx.size as usize || !self.tx.free_desc(id as u16) {
+                self.tx_errors += 1;
+            }
         }
         let head = self.tx.alloc_desc(2).ok_or(NetError::QueueFull)?;
         let data = head + 1;
@@ -258,7 +270,10 @@ impl<T: VirtioTransport> VirtioNetDevice<T> {
         let mut spins = 0u32;
         loop {
             if let Some((id, _)) = self.tx.get_used() {
-                self.tx.free_desc(id as u16);
+                if id as usize >= self.tx.size as usize || !self.tx.free_desc(id as u16) {
+                    self.tx_errors += 1;
+                    continue;
+                }
                 if id == head as u32 {
                     self.frames_sent += 1;
                     return Ok(());
@@ -349,6 +364,14 @@ mod tests {
         /// would. The driver must not trust `id`.
         unsafe fn deliver_raw(&mut self, id: u32, len: u32) {
             let used = &mut *self.rx.used;
+            let uidx = used.idx.load(Ordering::Acquire);
+            used.ring[(uidx as usize) % self.size as usize] = VirtqUsedElem { id, len };
+            used.idx.store(uidx.wrapping_add(1), Ordering::Release);
+        }
+
+        /// As `deliver_raw`, but on the *transmit* queue.
+        unsafe fn deliver_tx_raw(&mut self, id: u32, len: u32) {
+            let used = &mut *self.tx.used;
             let uidx = used.idx.load(Ordering::Acquire);
             used.ring[(uidx as usize) % self.size as usize] = VirtqUsedElem { id, len };
             used.idx.store(uidx.wrapping_add(1), Ordering::Release);
@@ -504,6 +527,25 @@ mod tests {
             assert_eq!(out[0], i);
         }
         assert_eq!(dev.frames_received(), 50);
+    }
+
+    /// The transmit side of the receive guard above, which it did not have.
+    /// `transmit` reclaims completed descriptors from the same
+    /// device-writable used ring and passed the id straight to `free_desc`,
+    /// which indexes the descriptor table. A panic here is a dead machine.
+    #[test]
+    fn a_device_reported_transmit_id_out_of_range_is_dropped() {
+        let mut dev = device(2);
+        unsafe { dev.transport.deliver_tx_raw(9999, 0) };
+        let frame: alloc::vec::Vec<u8> = (0..60u8).collect();
+        assert!(dev.transmit(&frame).is_ok(), "the frame must still go out");
+        assert!(
+            dev.tx_errors() >= 1,
+            "the bad id must be counted, not ignored"
+        );
+
+        // And the driver is not wedged by it.
+        assert!(dev.transmit(&frame).is_ok());
     }
 
     #[test]

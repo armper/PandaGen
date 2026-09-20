@@ -1770,6 +1770,13 @@ impl WorkspaceManager {
         if config.focusable {
             let _ = self.focus_component(component_id);
         }
+        // `add_component_tab` made this the focused tile's active component
+        // -- which is what draws the ring -- whatever happened above. A
+        // component launched non-focusable never calls `focus_component` at
+        // all, and a focusable one whose focus the policy denies has its
+        // error swallowed by the `let _ =`. Both leave the ring on the new
+        // window and the keys on the old one, which is R6-24 again.
+        self.reconcile_focus();
 
         Ok(component_id)
     }
@@ -1936,8 +1943,13 @@ impl WorkspaceManager {
     /// choice is adopted instead.
     fn reconcile_focus(&mut self) {
         if let Some(component_id) = self.get_focused_component() {
-            self.window_layout.set_focused_component(component_id);
-            return;
+            // `set_focused_component` answers false when no tile holds this
+            // component -- it has no tab, so there is no ring to move and
+            // the layout's own choice has to stand. Fall through rather
+            // than leave them disagreeing.
+            if self.window_layout.set_focused_component(component_id) {
+                return;
+            }
         }
         if let Some(component_id) = self.window_layout.focused_active_component() {
             if self.is_focusable_running_component(component_id) {
@@ -4049,6 +4061,9 @@ impl WorkspaceManager {
         if let Some(focused) = snapshot.focused_component {
             let _ = self.focus_component(focused);
         }
+        // A snapshot with no focused component, or one whose focus is
+        // refused, restores a layout whose focused tile nothing agrees with.
+        self.reconcile_focus();
 
         Ok(())
     }

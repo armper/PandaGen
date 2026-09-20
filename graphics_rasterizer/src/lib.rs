@@ -2032,6 +2032,14 @@ mod tests {
 
 #[cfg(test)]
 mod line_bounds_tests {
+    //! Honest note on what discriminates here, so a later round does not
+    //! re-derive it: the three equivalence tests compare the new walk
+    //! against a verbatim copy of the old one, so by construction they pass
+    //! with the fix reverted. That is the right structure -- they exist to
+    //! catch a *change* in the pixels, not the cost. The two
+    //! `costs_what_..._costs` tests are the ones that fail without the fix,
+    //! and they fail by running for minutes rather than by asserting false.
+
     use super::*;
 
     /// A target that records exactly which pixels were written, in order.

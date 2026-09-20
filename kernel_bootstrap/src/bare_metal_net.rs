@@ -51,6 +51,17 @@ struct HttpStream {
     remaining: usize,
     offset: usize,
     close_when_done: bool,
+    /// Which connection this stream is for.
+    ///
+    /// Indexed by TCP slot, like `progress`, and for the same reason: the
+    /// slot is reused as soon as `accept` finds it Closed. Without this, a
+    /// client that aborted a large download handed its remaining body to
+    /// whoever landed in its slot next -- and that client's own request was
+    /// never answered, because `http_service` returns early while a stream
+    /// is running, and its connection was closed when the stranger's stream
+    /// finished.
+    peer: net_stack::Ipv4,
+    peer_port: u16,
 }
 
 /// How long a client may take to finish sending a request head or a command
@@ -128,6 +139,10 @@ pub enum RemoteRequest {
     /// One signed line on a `TCP_COMMAND_PORT` connection.
     TcpLine {
         conn: usize,
+        /// The connection the line arrived on, so the reply can be checked
+        /// against it after the command has run.
+        peer: net_stack::Ipv4,
+        peer_port: u16,
         line: alloc::vec::Vec<u8>,
     },
 }
@@ -545,7 +560,14 @@ impl NetStack {
                         Some(HTTP_PORT) => self.http_service(conn, status, log),
                         Some(TCP_COMMAND_PORT) => {
                             if let Some(line) = self.tcp_command_service(conn, log) {
-                                remote = Some(RemoteRequest::TcpLine { conn, line });
+                                if let Some((peer, peer_port)) = self.peer_of(conn) {
+                                    remote = Some(RemoteRequest::TcpLine {
+                                        conn,
+                                        peer,
+                                        peer_port,
+                                        line,
+                                    });
+                                }
                             }
                         }
                         _ => self.tcp_echo_service(conn, log),
@@ -695,7 +717,7 @@ impl NetStack {
         // stream state so the first body was truncated far below its
         // promised length. Leave the request buffered; `pump_http` will
         // finish, and the next segment re-enters here.
-        if self.http_streams[conn].remaining > 0 {
+        if self.stream_belongs_to_connection(conn) {
             return;
         }
 
@@ -881,7 +903,10 @@ impl NetStack {
         else {
             return;
         };
-        self.iface.tcp_mut().write(conn, &head[..head_len]);
+        if !self.http_write_whole(conn, &head[..head_len], &[]) {
+            self.iface.tcp_mut().close(conn);
+            return;
+        }
         if !keep_alive {
             self.iface.tcp_mut().close(conn);
         }
@@ -919,6 +944,34 @@ impl NetStack {
         count - left
     }
 
+    /// Write a complete response, or none of it.
+    ///
+    /// `tcp::write` returns how many bytes fitted and silently drops the
+    /// rest, and every one of these responders ignored the return. The send
+    /// buffer is 2048 bytes and the index page is 842 bytes of body under
+    /// 122 bytes of headers, so three pipelined `GET /` requests queue 964
+    /// twice and then find 120 bytes of room: the third response's own
+    /// status line was cut in half and its body never entered the buffer at
+    /// all. The client is left holding a partial header with no terminator
+    /// and hangs until the 120-second idle reaper.
+    ///
+    /// A truncated response cannot be repaired, so refuse to start one. The
+    /// caller closes the connection instead, which a client can see and act
+    /// on. `tcp_reply` on the command port already checked its write; this
+    /// is the sibling three functions away that did not.
+    fn http_write_whole(&mut self, conn: usize, head: &[u8], body: &[u8]) -> bool {
+        let room = match self.iface.tcp().connection(conn) {
+            Some(connection) => connection.writable(),
+            None => return false,
+        };
+        if room < head.len() + body.len() {
+            return false;
+        }
+        let wrote_head = self.iface.tcp_mut().write(conn, head);
+        let wrote_body = self.iface.tcp_mut().write(conn, body);
+        wrote_head == head.len() && wrote_body == body.len()
+    }
+
     /// Headers plus a body small enough to hand over in one go.
     fn http_respond(
         &mut self,
@@ -934,8 +987,12 @@ impl NetStack {
         else {
             return;
         };
-        self.iface.tcp_mut().write(conn, &head[..head_len]);
-        self.iface.tcp_mut().write(conn, body);
+        if !self.http_write_whole(conn, &head[..head_len], body) {
+            // No room for the whole thing. Better a connection the client
+            // sees end than a header it waits on for two minutes.
+            self.iface.tcp_mut().close(conn);
+            return;
+        }
         self.http_bytes += body.len() as u64;
         if !keep_alive {
             self.iface.tcp_mut().close(conn);
@@ -954,11 +1011,20 @@ impl NetStack {
         ) else {
             return;
         };
-        self.iface.tcp_mut().write(conn, &head[..head_len]);
+        if !self.http_write_whole(conn, &head[..head_len], &[]) {
+            self.iface.tcp_mut().close(conn);
+            return;
+        }
+        let (peer, peer_port) = match self.iface.tcp().connection(conn) {
+            Some(connection) => (connection.peer, connection.peer_port),
+            None => return,
+        };
         self.http_streams[conn] = HttpStream {
             remaining: count,
             offset: 0,
             close_when_done: !keep_alive,
+            peer,
+            peer_port,
         };
     }
 
@@ -966,6 +1032,9 @@ impl NetStack {
     fn pump_http(&mut self) {
         for conn in 0..self.http_streams.len() {
             if self.http_streams[conn].remaining == 0 {
+                continue;
+            }
+            if !self.stream_belongs_to_connection(conn) {
                 continue;
             }
             let Some(connection) = self.iface.tcp().connection(conn) else {
@@ -1076,6 +1145,36 @@ impl NetStack {
         }
     }
 
+    /// Who is on the other end of `conn`, if anyone still is.
+    fn peer_of(&self, conn: usize) -> Option<(net_stack::Ipv4, u16)> {
+        self.iface
+            .tcp()
+            .connection(conn)
+            .map(|connection| (connection.peer, connection.peer_port))
+    }
+
+    /// Whether the streaming response in `conn`'s slot belongs to the
+    /// connection now in it, clearing it when it does not.
+    ///
+    /// `progress_matches_connection`'s doc says anything indexed by TCP slot
+    /// has to ask. The stream state was the sibling that did not.
+    fn stream_belongs_to_connection(&mut self, conn: usize) -> bool {
+        if self.http_streams[conn].remaining == 0 {
+            return false;
+        }
+        let matches = match self.iface.tcp().connection(conn) {
+            Some(connection) => {
+                self.http_streams[conn].peer_port == connection.peer_port
+                    && self.http_streams[conn].peer == connection.peer
+            }
+            None => false,
+        };
+        if !matches {
+            self.http_streams[conn] = HttpStream::default();
+        }
+        matches
+    }
+
     /// Serve any HTTP connection with bytes already buffered.
     ///
     /// Only a received frame produces `TcpReady`, and a `TcpReady` raised
@@ -1133,7 +1232,13 @@ impl NetStack {
         }
         for &index in &pending[..count] {
             if let Some(line) = self.tcp_command_service(index, log) {
-                return Some(RemoteRequest::TcpLine { conn: index, line });
+                let (peer, peer_port) = self.peer_of(index)?;
+                return Some(RemoteRequest::TcpLine {
+                    conn: index,
+                    peer,
+                    peer_port,
+                    line,
+                });
             }
         }
         None
@@ -1176,6 +1281,27 @@ impl NetStack {
     }
 
     /// Send a reply line on a command connection.
+    /// Reply only if `conn` still holds the connection that asked.
+    ///
+    /// A command's reply target is a slot index held across the command's
+    /// execution -- up to `RemoteCommandServer::TIMEOUT_TICKS`. If the
+    /// authenticated caller's connection goes away inside that window and
+    /// the slot is reused, the output of a *signed, privileged* command was
+    /// written to whoever landed in the slot, on any port, unauthenticated.
+    pub fn tcp_reply_to(
+        &mut self,
+        conn: usize,
+        peer: net_stack::Ipv4,
+        peer_port: u16,
+        line: &[u8],
+    ) -> bool {
+        match self.iface.tcp().connection(conn) {
+            Some(connection) if connection.peer == peer && connection.peer_port == peer_port => {}
+            _ => return false,
+        }
+        self.tcp_reply(conn, line)
+    }
+
     pub fn tcp_reply(&mut self, conn: usize, line: &[u8]) -> bool {
         let written = self.iface.tcp_mut().write(conn, line);
         let ok = written == line.len() && self.iface.tcp_mut().write(conn, b"\n") == 1;
@@ -1406,6 +1532,13 @@ impl NetStack {
                     while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS
                         && self.iface.arp_cache().lookup(hop).is_none()
                     {
+                        // SC3's fix reached three of the four spin loops.
+                        // `poll_for_echo` discards every `TcpReady` it sees,
+                        // so without this the stack has no timer and no
+                        // flush for up to three attempts of
+                        // `REPLY_TIMEOUT_TICKS` -- three seconds on a cold
+                        // ARP cache.
+                        self.keep_tcp_alive(now);
                         let _ = self.poll_for_echo();
                         core::hint::spin_loop();
                     }
