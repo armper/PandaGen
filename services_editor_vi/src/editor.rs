@@ -507,12 +507,17 @@ impl Editor {
             self.state.set_status_message(result.message);
             Ok(result.new_version_id)
         } else if self.document.is_none() && self.io.is_none() {
-            // No document and no I/O - fallback to simple save (for tests)
-            let new_version = VersionId::new();
-            self.state.set_dirty(false);
+            // No document and no I/O. This used to report "Saved version N"
+            // and clear the dirty flag, having written nothing -- and since
+            // Phase 310 clearing the flag also rebases the undo baseline, so
+            // not even an undo could make the buffer look unsaved again. The
+            // next `:q` then threw the work away without complaint. That is
+            // E5, fixed in the kernel's editor at Phase 299 and left here.
             self.state
-                .set_status_message(format!("Saved version {}", new_version));
-            Ok(new_version)
+                .set_status_message("No filesystem: nothing was saved".to_string());
+            Err(EditorError::NotSupported(
+                "No I/O handler configured".to_string(),
+            ))
         } else if let (true, Some(path)) = (self.io.is_some(), self.pending_path.clone()) {
             // A file the user opened that did not exist yet: saving it means
             // creating it, under the name they asked for.
@@ -872,8 +877,14 @@ mod tests {
         editor.state_mut().append_to_command('w');
         let result = editor.process_input(press_key(KeyCode::Enter));
 
-        assert!(matches!(result, Ok(EditorAction::Saved(_))));
-        assert!(!editor.state().is_dirty());
+        // With no I/O handler there is nowhere to write. This used to report
+        // "Saved version N" and clear the dirty flag, so the next `:q`
+        // discarded the work without complaint.
+        assert!(result.is_err(), "a save with nowhere to write must fail");
+        assert!(
+            editor.state().is_dirty(),
+            "and must leave the buffer unsaved"
+        );
     }
 
     #[test]
@@ -914,10 +925,14 @@ mod tests {
 
         editor.state_mut().append_to_command('w');
         editor.state_mut().append_to_command('q');
-        let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+        let result = editor.process_input(press_key(KeyCode::Enter));
 
-        assert_eq!(result, EditorAction::Quit);
-        assert!(!editor.state().is_dirty());
+        // `:wq` must not quit when the write did not happen.
+        assert!(
+            !matches!(result, Ok(EditorAction::Quit)),
+            "the editor exited although nothing was written"
+        );
+        assert!(editor.state().is_dirty(), "and the work is still unsaved");
     }
 
     #[test]
@@ -946,10 +961,12 @@ mod tests {
             .process_input(press_key_shift(KeyCode::Semicolon))
             .unwrap();
         editor.state_mut().append_to_command('w');
-        let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
+        let result = editor.process_input(press_key(KeyCode::Enter));
 
-        assert!(matches!(result, EditorAction::Saved(_)));
-        assert!(!editor.state().is_dirty());
+        // No I/O handler in this session, so the save cannot happen and must
+        // not claim to have.
+        assert!(result.is_err());
+        assert!(editor.state().is_dirty());
     }
 
     #[test]

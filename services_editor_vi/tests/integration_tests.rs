@@ -83,8 +83,16 @@ fn press_key_shift(code: KeyCode) -> InputEvent {
 fn test_basic_insert_and_save() {
     // Test A: Basic insert + save
     // Type: i hello <Esc> :w <Enter> :q <Enter>
-
-    let mut editor = Editor::new();
+    //
+    // Over a real (fake) filesystem, so `:w` exercises the save path. With
+    // no I/O handler at all the editor used to report "Saved version N" and
+    // clear the dirty flag having written nothing, and this test asserted
+    // exactly that.
+    let files = fake_files(&[("notes.txt", "")]);
+    let mut editor = editor_over(&files);
+    editor
+        .open_with(OpenOptions::new().with_path("notes.txt"))
+        .unwrap();
 
     // Enter insert mode
     editor.process_input(press_key(KeyCode::I)).unwrap();
@@ -114,6 +122,11 @@ fn test_basic_insert_and_save() {
     assert!(matches!(result, EditorAction::Saved(_)));
     assert!(!editor.state().is_dirty());
     assert!(editor.state().status_message().contains("Saved"));
+    assert_eq!(
+        files.borrow().get("notes.txt").map(String::as_str),
+        Some("hello"),
+        "the file on disk must hold what was typed"
+    );
 
     // Enter command mode and quit
     editor
@@ -265,7 +278,11 @@ fn test_delete_char_in_normal_mode() {
 
 #[test]
 fn test_write_quit_combined() {
-    let mut editor = Editor::new();
+    let files = fake_files(&[("notes.txt", "")]);
+    let mut editor = editor_over(&files);
+    editor
+        .open_with(OpenOptions::new().with_path("notes.txt"))
+        .unwrap();
 
     // Make some edits
     editor.process_input(press_key(KeyCode::I)).unwrap();
@@ -285,9 +302,15 @@ fn test_write_quit_combined() {
     editor.state_mut().append_to_command('q');
     let result = editor.process_input(press_key(KeyCode::Enter)).unwrap();
 
-    // Should quit (and save happened internally)
+    // Should quit, and the save must really have happened -- not merely
+    // been reported. An editor with no I/O used to claim "Saved version N"
+    // and clear the dirty flag having written nothing.
     assert_eq!(result, EditorAction::Quit);
     assert!(!editor.state().is_dirty());
+    assert!(
+        files.borrow().contains_key("notes.txt"),
+        "`:wq` quit without writing the file"
+    );
 }
 
 #[test]

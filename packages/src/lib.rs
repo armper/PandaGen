@@ -19,9 +19,24 @@ pub struct PackageFormatVersion {
     pub minor: u32,
 }
 
+/// The manifest format this build understands.
+///
+/// `format_version` was carried on every manifest and read by nothing, so a
+/// manifest declaring `{"major": 99}` loaded and launched. A future format
+/// would have been half-understood rather than refused -- and a manifest is
+/// a thing the system launches components from.
+pub const SUPPORTED_FORMAT: PackageFormatVersion = PackageFormatVersion::new(1, 0);
+
 impl PackageFormatVersion {
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
+    }
+
+    /// Whether this build can read a manifest in this format. A newer major
+    /// version means fields whose meaning we do not know; a newer minor
+    /// means additions we can ignore.
+    pub const fn is_supported(&self) -> bool {
+        self.major == SUPPORTED_FORMAT.major
     }
 }
 
@@ -36,6 +51,12 @@ pub struct PackageManifest {
 
 impl PackageManifest {
     pub fn validate(&self) -> Result<(), PackageError> {
+        if !self.format_version.is_supported() {
+            return Err(PackageError::InvalidManifest(format!(
+                "manifest format {}.{} is not supported (this build reads {}.x)",
+                self.format_version.major, self.format_version.minor, SUPPORTED_FORMAT.major
+            )));
+        }
         if self.name.trim().is_empty() {
             return Err(PackageError::InvalidManifest(
                 "Package name cannot be empty".to_string(),

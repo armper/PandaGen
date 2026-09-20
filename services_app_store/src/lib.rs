@@ -10,6 +10,12 @@ pub struct AppListing {
     pub name: String,
     pub version: String,
     pub description: String,
+    /// The source this listing is for. The storefront used to plan an
+    /// install with an *empty* digest and let the registry hand back
+    /// whatever it had pinned, so nothing anywhere stated what was being
+    /// installed -- the lookup was by name and version alone, which is a
+    /// lookup and not a verification.
+    pub source_digest: String,
     pub default_budget: ResourceBudget,
 }
 
@@ -96,7 +102,7 @@ impl AppStorefront {
         let plan = package_registry::BuildPlan {
             name: listing.name.clone(),
             version: listing.version.clone(),
-            source_digest: "".to_string(),
+            source_digest: listing.source_digest.clone(),
             toolchain: "registry".to_string(),
             build_flags: vec![],
         };
@@ -125,13 +131,14 @@ mod tests {
             name: "demo".to_string(),
             version: "0.1.0".to_string(),
             source_digest: "abc".to_string(),
-        });
+        }).unwrap();
 
         let mut store = AppStorefront::new(index, Box::new(AllowAllPolicy));
         store.add_listing(AppListing {
             name: "demo".to_string(),
             version: "0.1.0".to_string(),
             description: "Demo app".to_string(),
+            source_digest: "abc".to_string(),
             default_budget: ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(10)),
         });
 
@@ -146,7 +153,7 @@ mod tests {
             name: "heavy".to_string(),
             version: "0.1.0".to_string(),
             source_digest: "abc".to_string(),
-        });
+        }).unwrap();
 
         let mut store = AppStorefront::new(
             index,
@@ -158,10 +165,47 @@ mod tests {
             name: "heavy".to_string(),
             version: "0.1.0".to_string(),
             description: "Heavy app".to_string(),
+            source_digest: "abc".to_string(),
             default_budget: ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(10)),
         });
 
         let result = store.plan_install("heavy", "0.1.0");
         assert!(matches!(result, Err(StoreError::PolicyDenied(_))));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use resources::CpuTicks;
+
+    #[test]
+    fn a_listing_whose_source_is_not_the_pinned_one_cannot_be_installed() {
+        // The storefront planned an install with an empty source digest and
+        // let the registry hand back whatever it had pinned, so nothing
+        // anywhere stated what was being installed: the lookup was by name
+        // and version, which is a lookup and not a verification.
+        let mut index = RegistryIndex::default();
+        index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "GENUINE".to_string(),
+            })
+            .unwrap();
+
+        let mut store = AppStorefront::new(index, Box::new(AllowAllPolicy));
+        store.add_listing(AppListing {
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Demo app".to_string(),
+            source_digest: "ATTACKER".to_string(),
+            default_budget: ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(10)),
+        });
+
+        assert!(
+            store.plan_install("demo", "0.1.0").is_err(),
+            "a listing for source the registry does not pin was installable"
+        );
     }
 }

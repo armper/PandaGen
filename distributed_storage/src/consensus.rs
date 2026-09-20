@@ -125,6 +125,16 @@ impl ConsensusNode {
         }
     }
 
+    /// How many entries are in the log.
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
+    /// One entry by position (not by index).
+    pub fn log_entry(&self, at: usize) -> Option<&LogEntry> {
+        self.log.get(at)
+    }
+
     pub fn last_log_index(&self) -> u64 {
         self.log.last().map(|entry| entry.index).unwrap_or(0)
     }

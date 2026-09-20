@@ -305,19 +305,75 @@ mod consistency_tests {
         // every later index for the life of the node.
         use crate::consensus::{AppendEntriesRequest, ConsensusNode, ConsensusNodeId, LogEntry};
         let mut node = ConsensusNode::new(ConsensusNodeId::new());
-        let response = node.handle_append_entries(AppendEntriesRequest {
+        let leader = ConsensusNodeId::new();
+
+        // One good entry first, so there is something to desynchronise.
+        node.handle_append_entries(AppendEntriesRequest {
             term: 1,
-            leader_id: ConsensusNodeId::new(),
+            leader_id: leader,
             prev_log_index: 0,
             prev_log_term: 0,
             entries: vec![LogEntry {
                 term: 1,
-                index: 0,
-                payload: b"x".to_vec(),
+                index: 1,
+                payload: b"first".to_vec(),
                 timestamp_ns: 1,
             }],
-            leader_commit: 0,
+            leader_commit: 1,
         });
-        let _ = response;
+        assert_eq!(node.log_len(), 1);
+
+        // Then the hostile one. The previous version of this test ended
+        // `let _ = response;` and asserted nothing at all -- not that the
+        // entry was refused, not that the log was intact -- so it passed in
+        // release with the guard removed, which is the case the commit
+        // described as "pushed at the wrong slot, desynchronising every
+        // later index".
+        node.handle_append_entries(AppendEntriesRequest {
+            term: 1,
+            leader_id: leader,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![LogEntry {
+                term: 1,
+                index: 0,
+                payload: b"hostile".to_vec(),
+                timestamp_ns: 2,
+            }],
+            leader_commit: 1,
+        });
+
+        assert_eq!(
+            node.log_len(),
+            1,
+            "an entry with index 0 was accepted into the log"
+        );
+        assert_eq!(
+            node.log_entry(0).map(|entry| entry.payload.as_slice()),
+            Some(&b"first"[..]),
+            "the existing entry was overwritten"
+        );
+
+        // And the log still accepts the next legitimate entry at the right
+        // place.
+        node.handle_append_entries(AppendEntriesRequest {
+            term: 1,
+            leader_id: leader,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![LogEntry {
+                term: 1,
+                index: 2,
+                payload: b"second".to_vec(),
+                timestamp_ns: 3,
+            }],
+            leader_commit: 2,
+        });
+        assert_eq!(node.log_len(), 2);
+        assert_eq!(
+            node.log_entry(1).map(|entry| entry.index),
+            Some(2),
+            "index and position disagree"
+        );
     }
 }

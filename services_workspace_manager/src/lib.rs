@@ -1827,18 +1827,23 @@ impl WorkspaceManager {
                 IdentityKind::Component,
                 TrustDomain::user(),
             )
-            .with_focusable(spec.focusable)
-            .with_metadata("package.name", manifest.name.clone())
-            .with_metadata("package.version", manifest.version.clone())
-            .with_metadata("package.entry", component_entry.clone());
+            .with_focusable(spec.focusable);
 
             if let Some(budget) = spec.budget {
                 config = config.with_budget(budget);
             }
 
+            // The component's own metadata first, then the keys derived from
+            // the manifest. The other order let a component declare its own
+            // `package.entry` and overwrite the derived one, picking a
+            // different host handler than the entry it declared.
             for (key, value) in spec.metadata {
                 config = config.with_metadata(key, value);
             }
+            config = config
+                .with_metadata("package.name", manifest.name.clone())
+                .with_metadata("package.version", manifest.version.clone())
+                .with_metadata("package.entry", component_entry.clone());
 
             match self.launch_component(config) {
                 Ok(component_id) => report.created_component_ids.push(component_id),
@@ -2442,12 +2447,16 @@ impl WorkspaceManager {
             self.key_routing_debug.consumed_by_global = false;
         }
 
-        // Check global keybindings first
+        // Check global keybindings first. A bound key is consumed because
+        // it is bound, not because the action succeeded -- those are
+        // different questions, and conflating them meant a Save that
+        // reported failure passed Ctrl+S through to the focused component,
+        // which then received it as a literal keystroke.
         let global_consumed = if let Some(action) = self.key_binding_manager.get_action(key_event) {
             // Clone action to avoid borrow checker issues
             let action = action.clone();
-            // Execute the action
-            self.execute_action(&action)
+            let _ = self.execute_action(&action);
+            true
         } else {
             false
         };
@@ -5097,15 +5106,20 @@ mod tests {
 
         workspace.launch_component(config).unwrap();
 
-        // Execute Save action
+        // Execute Save action. There is no filesystem behind this editor,
+        // so the save cannot happen -- and must say so rather than report a
+        // version it did not write. The editor used to answer "Saved version
+        // N" with nothing written and the dirty flag cleared, so the next
+        // quit discarded the work.
         let result = workspace.execute_action(&Action::Save);
-        assert!(result);
+        assert!(!result, "a save with nowhere to write must not report success");
 
-        // Check that status was updated
         let status = &workspace.workspace_status.last_action;
-        assert!(status.is_some());
-        let status_text = status.as_ref().unwrap();
-        assert!(status_text.contains("Saved") || status_text.contains("saved"));
+        let status_text = status.as_ref().expect("the failure must be reported");
+        assert!(
+            status_text.contains("Save failed"),
+            "expected a failure message, got {status_text:?}"
+        );
     }
 
     #[test]
@@ -5131,13 +5145,19 @@ mod tests {
             panic!("Expected editor instance");
         }
 
+        // With no filesystem the save cannot happen, so the buffer must
+        // stay dirty. Clearing it was how the work got thrown away by the
+        // next quit.
         let result = workspace.execute_action(&Action::Save);
-        assert!(result);
+        assert!(!result);
 
         if let Some(ComponentInstance::Editor(editor)) =
             workspace.component_instances.get(&editor_id)
         {
-            assert!(!editor.state().is_dirty());
+            assert!(
+                editor.state().is_dirty(),
+                "a save that did not happen cleared the dirty flag"
+            );
         } else {
             panic!("Expected editor instance");
         }

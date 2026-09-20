@@ -18,8 +18,15 @@ pub struct RegistryIndex {
 }
 
 impl RegistryIndex {
-    pub fn add(&mut self, entry: PackageEntry) {
+    /// Pin a package version. Refuses a second entry for the same
+    /// `name@version`: `find` returns the first match, so a duplicate is a
+    /// second, unreachable pin that makes the index mean two things.
+    pub fn add(&mut self, entry: PackageEntry) -> Result<(), RegistryError> {
+        if self.find(&entry.name, &entry.version).is_some() {
+            return Err(RegistryError::DuplicateEntry(entry.name, entry.version));
+        }
         self.packages.push(entry);
+        Ok(())
     }
 
     pub fn find(&self, name: &str, version: &str) -> Option<&PackageEntry> {
@@ -67,6 +74,17 @@ pub struct RegistryLock {
 pub enum RegistryError {
     #[error("Package not found: {0}@{1}")]
     NotFound(String, String),
+
+    #[error("Source digest for {name}@{version} does not match the registry: plan says {plan}, registry pins {pinned}")]
+    DigestMismatch {
+        name: String,
+        version: String,
+        plan: String,
+        pinned: String,
+    },
+
+    #[error("Registry already pins {0}@{1}")]
+    DuplicateEntry(String, String),
 }
 
 pub struct RegistryResolver {
@@ -83,6 +101,21 @@ impl RegistryResolver {
             .index
             .find(&plan.name, &plan.version)
             .ok_or_else(|| RegistryError::NotFound(plan.name.clone(), plan.version.clone()))?;
+
+        // The one thing this registry exists to do. `source_digest` was
+        // looked up by name and version and then ignored entirely: the lock
+        // carried the *index's* digest while `build_hash` was computed over
+        // the *plan's*, so the lock and its hash described two different
+        // sources and nothing noticed. A build plan for arbitrary source
+        // resolved cleanly and produced a clean supply-chain report.
+        if entry.source_digest != plan.source_digest {
+            return Err(RegistryError::DigestMismatch {
+                name: plan.name.clone(),
+                version: plan.version.clone(),
+                plan: plan.source_digest.clone(),
+                pinned: entry.source_digest.clone(),
+            });
+        }
 
         let build_hash = plan.reproducible_hash();
         Ok(RegistryLock {
@@ -167,5 +200,71 @@ mod tests {
         let lock = resolver.resolve(&plan).unwrap();
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "demo");
+    }
+}
+
+#[cfg(test)]
+mod supply_chain_tests {
+    use super::*;
+
+    fn plan(name: &str, version: &str, digest: &str) -> BuildPlan {
+        BuildPlan {
+            name: name.to_string(),
+            version: version.to_string(),
+            source_digest: digest.to_string(),
+            toolchain: "rustc-1.0".to_string(),
+            build_flags: vec![],
+        }
+    }
+
+    #[test]
+    fn a_plan_for_different_source_does_not_resolve() {
+        // `source_digest` was looked up by name and version and then ignored.
+        // The lock carried the *index's* digest while `build_hash` was
+        // computed over the *plan's*, so the lock and its hash described two
+        // different sources and nothing noticed: a build plan for arbitrary
+        // source resolved cleanly and produced a clean supply-chain report
+        // for a package it had never built.
+        let mut index = RegistryIndex::default();
+        index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "GENUINE".to_string(),
+            })
+            .unwrap();
+        let resolver = RegistryResolver::new(index);
+
+        let err = resolver
+            .resolve(&plan("demo", "0.1.0", "ATTACKER"))
+            .expect_err("a plan whose source is not the pinned one must not resolve");
+        assert!(matches!(err, RegistryError::DigestMismatch { .. }));
+
+        // The genuine source still resolves, and the lock agrees with it.
+        let lock = resolver
+            .resolve(&plan("demo", "0.1.0", "GENUINE"))
+            .expect("the pinned source must resolve");
+        assert_eq!(lock.packages[0].source_digest, "GENUINE");
+    }
+
+    #[test]
+    fn the_index_cannot_pin_one_version_twice() {
+        // `find` returns the first match, so a duplicate is a second,
+        // unreachable pin that makes the index mean two things at once.
+        let mut index = RegistryIndex::default();
+        index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "GENUINE".to_string(),
+            })
+            .unwrap();
+        assert!(index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "ATTACKER".to_string(),
+            })
+            .is_err());
     }
 }
