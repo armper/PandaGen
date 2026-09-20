@@ -15,6 +15,13 @@ pub struct Instant {
 }
 
 impl Instant {
+    /// The furthest point this clock can represent.
+    ///
+    /// Arithmetic saturates here rather than wrapping, so a deadline that
+    /// overflows is one that never arrives -- which is the safe way for a
+    /// deadline to be wrong.
+    pub const MAX: Instant = Instant { nanos: u64::MAX };
+
     /// Creates an instant from nanoseconds
     pub fn from_nanos(nanos: u64) -> Self {
         Self { nanos }
@@ -34,8 +41,17 @@ impl Instant {
 impl Add<Duration> for Instant {
     type Output = Instant;
 
+    /// Saturating, to match `Sub`.
+    ///
+    /// This was a plain `+`: it panicked in a debug build and *wrapped* in a
+    /// release one, and the kernel ships optimized. A deadline computed as
+    /// `now + duration` could land before `now`, so every `>= deadline` test
+    /// against it fired immediately and every `<` test never did. Time
+    /// running backwards is the worst possible failure for a scheduler, and
+    /// it was the one case this file did not handle -- subtraction already
+    /// saturated.
     fn add(self, duration: Duration) -> Self::Output {
-        Instant::from_nanos(self.nanos + duration.as_nanos())
+        Instant::from_nanos(self.nanos.saturating_add(duration.as_nanos()))
     }
 }
 
@@ -66,21 +82,30 @@ impl Duration {
     /// Creates a duration from microseconds
     pub const fn from_micros(micros: u64) -> Self {
         Self {
-            nanos: micros * 1_000,
+            // Saturating: `Duration::from_secs(u64::MAX)` wrapped to a few
+            // hundred milliseconds, so the longest timeout expressible became
+            // one of the shortest.
+            nanos: micros.saturating_mul(1_000),
         }
     }
 
     /// Creates a duration from milliseconds
     pub const fn from_millis(millis: u64) -> Self {
         Self {
-            nanos: millis * 1_000_000,
+            // Saturating: `Duration::from_secs(u64::MAX)` wrapped to a few
+            // hundred milliseconds, so the longest timeout expressible became
+            // one of the shortest.
+            nanos: millis.saturating_mul(1_000_000),
         }
     }
 
     /// Creates a duration from seconds
     pub const fn from_secs(secs: u64) -> Self {
         Self {
-            nanos: secs * 1_000_000_000,
+            // Saturating: `Duration::from_secs(u64::MAX)` wrapped to a few
+            // hundred milliseconds, so the longest timeout expressible became
+            // one of the shortest.
+            nanos: secs.saturating_mul(1_000_000_000),
         }
     }
 
@@ -108,8 +133,9 @@ impl Duration {
 impl Add for Duration {
     type Output = Duration;
 
+    /// Saturating, to match `Sub`. See `Add<Duration> for Instant`.
     fn add(self, other: Duration) -> Self::Output {
-        Duration::from_nanos(self.nanos + other.nanos)
+        Duration::from_nanos(self.nanos.saturating_add(other.nanos))
     }
 }
 
@@ -176,5 +202,59 @@ mod tests {
 
         assert_eq!(i + d, Instant::from_nanos(1500));
         assert_eq!(i - d, Instant::from_nanos(500));
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// The finding: `+` on these types was unchecked, so in the optimized
+    /// build the kernel ships, time wrapped. Subtraction already saturated,
+    /// which is what made the asymmetry easy to miss.
+    #[test]
+    fn time_saturates_rather_than_running_backwards() {
+        let late = Instant::from_nanos(u64::MAX - 5);
+        let after = late + Duration::from_secs(1);
+        assert!(
+            after >= late,
+            "an instant moved backwards under addition: {after:?} < {late:?}"
+        );
+        assert_eq!(after, Instant::MAX);
+
+        let long = Duration::from_nanos(u64::MAX - 5) + Duration::from_secs(1);
+        assert_eq!(
+            long.as_nanos(),
+            u64::MAX,
+            "a duration wrapped to nearly zero"
+        );
+
+        // And the constructors, where the multiply was the overflow.
+        assert_eq!(Duration::from_secs(u64::MAX).as_nanos(), u64::MAX);
+        assert_eq!(Duration::from_millis(u64::MAX).as_nanos(), u64::MAX);
+        assert_eq!(Duration::from_micros(u64::MAX).as_nanos(), u64::MAX);
+
+        // The ordinary cases are untouched.
+        assert_eq!(Duration::from_secs(2).as_nanos(), 2_000_000_000);
+        assert_eq!(
+            (Instant::from_nanos(10) + Duration::from_nanos(5)).as_nanos(),
+            15
+        );
+    }
+
+    /// A saturated deadline must never be one that has already passed, which
+    /// is the consequence that mattered.
+    #[test]
+    fn a_deadline_that_overflows_never_arrives() {
+        let now = Instant::from_nanos(u64::MAX - 1);
+        let deadline = now + Duration::from_secs(3600);
+        assert!(
+            now < deadline || deadline == Instant::MAX,
+            "the deadline is already in the past"
+        );
+        assert!(
+            !(deadline < now),
+            "an overflowed deadline fires immediately, for ever"
+        );
     }
 }

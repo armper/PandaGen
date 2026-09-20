@@ -43,12 +43,19 @@ pub enum TaskState {
 }
 
 /// Scheduler configuration
+///
+/// `max_steps_per_tick` used to live here, documented as a "guard against
+/// infinite loops" and defaulting to `Some(1000)`. Nothing ever read it. It
+/// was set at ten call sites, six of them to `None`, by people who had every
+/// reason to believe they were choosing whether a guard was active. The one
+/// bound that does exist is `SimulatedKernel::run_until_idle`'s own
+/// `MAX_ITERATIONS`, which is unrelated to it. A knob that reads as a safety
+/// property and is never consulted is worse than no knob, so it is gone
+/// rather than wired up to a "step" this scheduler does not have.
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
     /// Number of ticks a task can run before being preempted
     pub quantum_ticks: u64,
-    /// Maximum steps per tick to guard against infinite loops (optional)
-    pub max_steps_per_tick: Option<u64>,
     /// Real-time scheduling policy
     pub realtime_policy: RealTimePolicy,
 }
@@ -57,7 +64,6 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             quantum_ticks: 10, // Small quantum for testing
-            max_steps_per_tick: Some(1000),
             realtime_policy: RealTimePolicy::None,
         }
     }
@@ -847,7 +853,6 @@ mod tests {
     fn test_quantum_preemption() {
         let config = SchedulerConfig {
             quantum_ticks: 10,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -876,7 +881,6 @@ mod tests {
     fn test_preempt_and_reenqueue() {
         let config = SchedulerConfig {
             quantum_ticks: 5,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -984,7 +988,6 @@ mod tests {
     fn test_quantum_reset_on_dequeue() {
         let config = SchedulerConfig {
             quantum_ticks: 10,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -1090,7 +1093,6 @@ mod tests {
     fn test_audit_log_interleaving() {
         let config = SchedulerConfig {
             quantum_ticks: 5,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::None,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -1234,7 +1236,6 @@ mod tests {
     fn test_edf_orders_by_deadline() {
         let config = SchedulerConfig {
             quantum_ticks: 10,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -1273,7 +1274,6 @@ mod tests {
     fn test_real_time_budget_blocks_until_deadline() {
         let config = SchedulerConfig {
             quantum_ticks: 10,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
         };
         let mut scheduler = Scheduler::with_config(config);
@@ -1312,7 +1312,6 @@ mod catch_up_tests {
     fn realtime_scheduler(period: u64, budget: u64) -> (Scheduler, TaskId) {
         let config = SchedulerConfig {
             quantum_ticks: 10,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
         };
         let mut scheduler = Scheduler::with_config(config);

@@ -288,14 +288,12 @@ impl NotificationService {
 
     /// Advances the logical time (for testing and determinism)
     pub fn advance_time(&mut self, delta_ns: u64) {
-        self.current_time_ns += delta_ns;
-        self.expire_old_notifications();
+        self.current_time_ns = self.current_time_ns.saturating_add(delta_ns);
     }
 
     /// Sets the current time (for testing and determinism)
     pub fn set_time(&mut self, time_ns: u64) {
         self.current_time_ns = time_ns;
-        self.expire_old_notifications();
     }
 
     /// Returns the current time
@@ -370,12 +368,21 @@ impl NotificationService {
         self.notifications.clear();
     }
 
-    /// Expires old notifications (removes expired ones)
-    fn expire_old_notifications(&mut self) {
-        // Only keep non-expired or status notifications
-        self.notifications.retain(|n| {
-            n.notification_type == NotificationType::Status || !n.is_expired(self.current_time_ns)
-        });
+    /// Whether `id` is still in the history.
+    ///
+    /// Expiry used to *delete*: advancing the clock past a toast's TTL
+    /// removed it from `notifications`, which is not a display list but the
+    /// notification history that `get_recent_notifications` and
+    /// `get_notifications_by_level` read. A user who looked away for six
+    /// seconds lost the error that had just been raised, and the log had no
+    /// record that anything had been raised at all.
+    ///
+    /// Nothing needed the deletion: `get_active_toasts` already filters by
+    /// `is_expired`, so a toast stops being shown the moment its TTL passes
+    /// whether or not it is still in the history. The history's bound is
+    /// `MAX_NOTIFICATION_HISTORY`, applied in `notify`.
+    pub fn contains(&self, id: NotificationId) -> bool {
+        self.notifications.iter().any(|n| n.id == id)
     }
 
     /// Returns the total number of notifications in history
@@ -615,5 +622,60 @@ mod tests {
         service.advance_time(3000);
         assert_eq!(service.current_time(), 7000);
         assert_eq!(service.get_active_toasts().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    /// The finding: a toast's TTL deleted it from the history, so an error
+    /// raised and not read within its display time left no trace.
+    #[test]
+    fn an_expired_toast_stops_showing_but_stays_in_the_history() {
+        let mut service = NotificationService::new();
+        service.set_time(1000);
+
+        let notification = Notification::error("Disk write failed", 1000).with_ttl(5000);
+        let id = notification.id;
+        service.notify(notification);
+        assert_eq!(service.get_active_toasts().len(), 1);
+
+        service.set_time(6001);
+
+        assert_eq!(
+            service.get_active_toasts().len(),
+            0,
+            "an expired toast must stop being displayed"
+        );
+        assert!(
+            service.contains(id),
+            "the expired notification was deleted from the history"
+        );
+        assert_eq!(
+            service.get_recent_notifications(10).len(),
+            1,
+            "the history lost the notification"
+        );
+        assert_eq!(
+            service
+                .get_notifications_by_level(NotificationLevel::Error)
+                .len(),
+            1,
+            "an error disappeared from the error log by timing out"
+        );
+    }
+
+    /// The history is still bounded -- the deletion was not what bounded it,
+    /// but that is worth holding down.
+    #[test]
+    fn the_history_stays_bounded_without_the_deletion() {
+        let mut service = NotificationService::new();
+        service.set_time(1000);
+        for i in 0..(MAX_NOTIFICATION_HISTORY * 3) {
+            service.notify(Notification::info(alloc::format!("n{i}"), 1000).with_ttl(1));
+        }
+        service.set_time(1_000_000);
+        assert_eq!(service.notification_count(), MAX_NOTIFICATION_HISTORY);
     }
 }

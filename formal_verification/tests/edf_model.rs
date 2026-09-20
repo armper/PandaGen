@@ -297,7 +297,6 @@ impl Harness {
     fn new(tasks: usize) -> Self {
         let config = SchedulerConfig {
             quantum_ticks: QUANTUM,
-            max_steps_per_tick: None,
             realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
         };
         Self {
