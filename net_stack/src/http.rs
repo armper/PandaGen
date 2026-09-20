@@ -27,6 +27,15 @@ pub struct Request<'a> {
     pub head_len: usize,
     /// True when the client asked to keep the connection open.
     pub keep_alive: bool,
+    /// Bytes of body the client says follow the head.
+    ///
+    /// This was not parsed at all, and the caller drained exactly `head_len`
+    /// -- so a declared body stayed in the receive buffer and was parsed as
+    /// the next request on a keep-alive connection. One request produced two
+    /// responses, and a partial body fused with the next real request into
+    /// something that parsed as a different method entirely. Behind any
+    /// proxy that is a textbook request smuggle.
+    pub body_len: usize,
 }
 
 impl Request<'_> {
@@ -51,6 +60,12 @@ pub enum Parse<'a> {
     Complete(Request<'a>),
     /// Unparseable: answer 400 and close.
     Malformed,
+    /// Framing this server does not implement: answer 501 and close.
+    ///
+    /// `Transfer-Encoding` was ignored entirely, so a chunked request's
+    /// framing bytes were read as the next request. Refusing is the only
+    /// honest answer from a server that does not decode it.
+    Unsupported,
 }
 
 /// Find the end of the request head (the blank line after the headers).
@@ -82,10 +97,16 @@ pub fn parse(buf: &[u8]) -> Parse<'_> {
         return Parse::Malformed;
     };
     let mut lines = text.split('\n');
-    let Some(request_line) = lines.next() else {
-        return Parse::Malformed;
-    };
-    let request_line = request_line.trim_end_matches('\r');
+    // RFC 9112 2.2: a server should ignore at least one empty line before
+    // the request line. Clients and proxies emit a stray CRLF after a body,
+    // and answering 400 to it is a needless failure.
+    let mut request_line = "";
+    for line in lines.by_ref() {
+        request_line = line.trim_end_matches('\r');
+        if !request_line.is_empty() {
+            break;
+        }
+    }
     let mut parts = request_line.split(' ');
     let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
     else {
@@ -107,6 +128,8 @@ pub fn parse(buf: &[u8]) -> Parse<'_> {
     };
     // Connection defaults to keep-alive on 1.1 and close on 1.0.
     let mut keep_alive = minor_version >= 1;
+    let mut body_len = 0usize;
+    let mut seen_length = false;
     for line in lines {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
@@ -115,13 +138,27 @@ pub fn parse(buf: &[u8]) -> Parse<'_> {
         let Some((name, value)) = line.split_once(':') else {
             return Parse::Malformed;
         };
+        let value = value.trim();
         if name.eq_ignore_ascii_case("connection") {
-            let value = value.trim();
             if value.eq_ignore_ascii_case("close") {
                 keep_alive = false;
             } else if value.eq_ignore_ascii_case("keep-alive") {
                 keep_alive = true;
             }
+        } else if name.eq_ignore_ascii_case("content-length") {
+            let Ok(declared) = value.parse::<usize>() else {
+                return Parse::Malformed;
+            };
+            // Two different lengths is the classic smuggling primitive.
+            if seen_length && declared != body_len {
+                return Parse::Malformed;
+            }
+            seen_length = true;
+            body_len = declared;
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            // Not decoded here, so it cannot be accepted. A request that
+            // carries both is a smuggling attempt by construction.
+            return Parse::Unsupported;
         }
     }
     Parse::Complete(Request {
@@ -130,6 +167,7 @@ pub fn parse(buf: &[u8]) -> Parse<'_> {
         minor_version,
         head_len,
         keep_alive,
+        body_len,
     })
 }
 
@@ -332,6 +370,62 @@ mod tests {
             let n = write_usize(&mut out, value).unwrap();
             let text = core::str::from_utf8(&out[..n]).unwrap();
             assert_eq!(text.parse::<usize>().unwrap(), value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    fn parse_str(text: &str) -> Parse<'_> {
+        parse(text.as_bytes())
+    }
+
+    #[test]
+    fn a_declared_body_is_reported_so_the_caller_can_skip_it() {
+        // `Content-Length` was not parsed, and the caller drained exactly
+        // the head -- so the body stayed in the receive buffer and was
+        // parsed as the next request. One request produced two responses.
+        let raw = "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 33\r\n\r\n\
+                   GET /health HTTP/1.1\r\nHost: x\r\n\r\n";
+        let Parse::Complete(request) = parse_str(raw) else {
+            panic!("must parse");
+        };
+        assert_eq!(request.body_len, 33, "the declared body must be reported");
+        assert!(request.keep_alive);
+    }
+
+    #[test]
+    fn two_disagreeing_content_lengths_are_refused() {
+        let raw = "GET / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 9\r\n\r\n";
+        assert_eq!(parse_str(raw), Parse::Malformed);
+        // The same value twice is redundant but not ambiguous.
+        let raw = "GET / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+        assert!(matches!(parse_str(raw), Parse::Complete(_)));
+    }
+
+    #[test]
+    fn transfer_encoding_this_server_cannot_decode_is_refused() {
+        // Ignoring it meant the chunked framing bytes were read as the next
+        // request. A server that does not decode chunked must say so.
+        let raw = "GET / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert_eq!(parse_str(raw), Parse::Unsupported);
+    }
+
+    #[test]
+    fn a_stray_blank_line_before_the_request_is_tolerated() {
+        // Clients and proxies emit a CRLF after a body; answering 400 to it
+        // is a needless failure. RFC 9112 2.2.
+        for raw in [
+            "\r\nGET /health HTTP/1.1\r\nHost: x\r\n\r\n",
+            "\nGET /health HTTP/1.1\r\nHost: x\r\n\r\n",
+        ] {
+            let Parse::Complete(request) = parse_str(raw) else {
+                panic!("must parse: {raw:?}");
+            };
+            assert_eq!(request.target, "/health");
+            assert_eq!(request.head_len, raw.len());
         }
     }
 }

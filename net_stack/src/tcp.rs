@@ -223,6 +223,13 @@ impl Tcp {
         self.listen_ports.contains(&Some(port))
     }
 
+    /// The tick the caller last set. Services need it to run deadlines of
+    /// their own -- TCP's reaper only asks whether a segment arrived, which
+    /// says nothing about whether a request is making progress.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
     pub fn connection(&self, index: usize) -> Option<&Connection> {
         self.conns.get(index).filter(|c| c.state != State::Closed)
     }

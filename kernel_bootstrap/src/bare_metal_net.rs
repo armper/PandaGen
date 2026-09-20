@@ -53,6 +53,24 @@ struct HttpStream {
     close_when_done: bool,
 }
 
+/// How long a client may take to finish sending a request head, in ticks
+/// (100 Hz), before the connection is closed.
+///
+/// The TCP reaper's rule is "a segment was exchanged", not "the request made
+/// progress", so one byte a minute held a slot for ever. Eight slots serve
+/// every port on this machine and six per port, so six dribbling sockets
+/// took the whole machine off the network -- including the signed command
+/// port -- with no authentication and almost no traffic. nginx and Apache
+/// both carry a separate head deadline for exactly this.
+const HTTP_HEAD_DEADLINE_TICKS: u64 = 1_000;
+
+/// When a connection's current request head started arriving.
+#[derive(Clone, Copy, Default)]
+struct HttpProgress {
+    /// Tick at which the first byte of this head arrived, or 0 for idle.
+    started: u64,
+}
+
 /// Formats into a fixed buffer; the HTTP path must not allocate, because it
 /// runs with the network lock held.
 struct FixedBuf<const N: usize> {
@@ -134,8 +152,11 @@ pub struct NetStack {
     tx_frame: [u8; MAX_FRAME_LEN],
     udp_echoed: u64,
     http_requests: u64,
+    /// Requests closed for taking too long to send their head.
+    http_timeouts: u64,
     http_bytes: u64,
     http_streams: [HttpStream; net_stack::tcp::MAX_CONNECTIONS],
+    http_progress: [HttpProgress; net_stack::tcp::MAX_CONNECTIONS],
     tcp_echoed_bytes: u64,
     tcp_accepted_seen: u64,
     /// How the address was obtained: "dhcp", "static", or "none".
@@ -196,8 +217,10 @@ impl NetStack {
             tx_frame: [0; MAX_FRAME_LEN],
             udp_echoed: 0,
             http_requests: 0,
+            http_timeouts: 0,
             http_bytes: 0,
             http_streams: [HttpStream::default(); net_stack::tcp::MAX_CONNECTIONS],
+            http_progress: [HttpProgress::default(); net_stack::tcp::MAX_CONNECTIONS],
             tcp_echoed_bytes: 0,
             tcp_accepted_seen: 0,
             address_source: "none",
@@ -579,11 +602,27 @@ impl NetStack {
             Wait,
             HeadTooLarge,
             Malformed,
+            Unsupported,
             Serve {
+                /// Head plus any declared body: everything to consume before
+                /// the next request begins.
                 head_len: usize,
                 keep_alive: bool,
+                method: Method,
                 route: Route,
             },
+        }
+
+        // Not while a response is still streaming. `http_service` runs on
+        // any segment, including the client's ACK of the headers, so a
+        // pipelined request used to be answered *into the middle* of the
+        // body already being written: the new status line landed inside the
+        // declared Content-Length, and `http_begin_stream` overwrote the
+        // stream state so the first body was truncated far below its
+        // promised length. Leave the request buffered; `pump_http` will
+        // finish, and the next segment re-enters here.
+        if self.http_streams[conn].remaining > 0 {
+            return;
         }
 
         // Decide while borrowing the receive buffer, act after releasing it.
@@ -596,6 +635,7 @@ impl NetStack {
                 Parse::Incomplete if buffered.len() >= http::MAX_HEAD_BYTES => Action::HeadTooLarge,
                 Parse::Incomplete => Action::Wait,
                 Parse::Malformed => Action::Malformed,
+                Parse::Unsupported => Action::Unsupported,
                 Parse::Complete(request) => {
                     let path = request.path();
                     let route = if request.method == Method::Other {
@@ -613,16 +653,42 @@ impl NetStack {
                         Route::NotFound
                     };
                     Action::Serve {
-                        head_len: request.head_len,
+                        // The declared body is drained with the head, or it
+                        // stays in the buffer and is parsed as the next
+                        // request -- one request producing two responses,
+                        // and a partial body fusing with the next real
+                        // request into a different method entirely.
+                        head_len: request.head_len.saturating_add(request.body_len),
                         keep_alive: request.keep_alive,
+                        method: request.method,
                         route,
                     }
                 }
             }
         };
 
-        let (head_len, keep_alive, route) = match action {
+        let (head_len, keep_alive, method, route) = match action {
             Action::Wait => {
+                // A head that never finishes. Give it a deadline of its own:
+                // TCP's idle reaper only asks whether a segment arrived, so
+                // a client sending one byte a minute looked perfectly alive
+                // and held its slot for ever.
+                let now = self.iface.tcp().now();
+                let started = self.http_progress[conn].started;
+                if started == 0 {
+                    self.http_progress[conn].started = now.max(1);
+                } else if now.saturating_sub(started) >= HTTP_HEAD_DEADLINE_TICKS {
+                    self.http_timeouts += 1;
+                    self.http_progress[conn] = HttpProgress::default();
+                    // `abort`, not `close`. A polite FIN leaves the slot in
+                    // FinWait until the closing timeout, so the client that
+                    // would not finish its request goes on holding it for
+                    // another ten seconds -- which is the whole attack. A
+                    // client that has not managed a request head in ten
+                    // seconds gets a reset and the slot back at once.
+                    self.iface.tcp_mut().abort(conn);
+                    return;
+                }
                 // Nothing to parse yet. If the peer has also hung up, there
                 // never will be: every HTTP client closes its keep-alive
                 // connection this way, and a server that does not close its
@@ -651,37 +717,113 @@ impl NetStack {
                 self.http_respond(conn, 400, "text/plain", b"bad request\n", false);
                 return;
             }
+            Action::Unsupported => {
+                self.http_drain(conn, usize::MAX);
+                self.http_respond(conn, 501, "text/plain", b"not implemented\n", false);
+                return;
+            }
             Action::Serve {
                 head_len,
                 keep_alive,
+                method,
                 route,
-            } => (head_len, keep_alive, route),
+            } => (head_len, keep_alive, method, route),
         };
 
         self.http_drain(conn, head_len);
         self.http_requests += 1;
+        // This request finished; the next one starts its own clock.
+        self.http_progress[conn] = HttpProgress::default();
+
+        // HEAD gets the headers a GET would get and none of the body. The
+        // method was parsed and then used only to pick 405, so HEAD fell
+        // through to the same writes as GET: `HEAD /bytes/200000` answered
+        // with `Content-Length: 200000` *and* 200,000 bytes, which a
+        // conformant client treats as the start of the next response.
+        // `curl -I /health` never noticed, because it discards three spare
+        // bytes without complaint.
+        let body_allowed = method != Method::Head;
 
         match route {
             Route::Index => {
                 let mut body = FixedBuf::<1600>::new();
                 write_status_page(&mut body, status);
-                self.http_respond(
+                self.http_respond_maybe_body(
                     conn,
                     200,
                     "text/html; charset=utf-8",
                     body.as_bytes(),
                     keep_alive,
+                    body_allowed,
                 );
             }
-            Route::Health => self.http_respond(conn, 200, "text/plain", b"ok\n", keep_alive),
+            Route::Health => self.http_respond_maybe_body(
+                conn,
+                200,
+                "text/plain",
+                b"ok\n",
+                keep_alive,
+                body_allowed,
+            ),
             Route::Bytes(count) => {
                 let _ = writeln!(log, "net: http /bytes/{count} on conn{conn}");
-                self.http_begin_stream(conn, count, keep_alive);
+                if body_allowed {
+                    self.http_begin_stream(conn, count, keep_alive);
+                } else {
+                    // Headers describing the body a GET would send.
+                    self.http_head_only(conn, 200, "application/octet-stream", count, keep_alive);
+                }
             }
-            Route::NotFound => self.http_respond(conn, 404, "text/plain", b"not found\n", false),
+            Route::NotFound => self.http_respond_maybe_body(
+                conn,
+                404,
+                "text/plain",
+                b"not found\n",
+                false,
+                body_allowed,
+            ),
             Route::MethodNotAllowed => {
                 self.http_respond(conn, 405, "text/plain", b"method not allowed\n", false)
             }
+        }
+    }
+
+    /// Status line and headers only, with `Content-Length` describing the
+    /// body a GET would have sent. For HEAD.
+    fn http_head_only(
+        &mut self,
+        conn: usize,
+        status: u16,
+        content_type: &str,
+        body_len: usize,
+        keep_alive: bool,
+    ) {
+        let mut head = [0u8; 256];
+        let Some(head_len) =
+            net_stack::http::write_headers(&mut head, status, content_type, body_len, keep_alive)
+        else {
+            return;
+        };
+        self.iface.tcp_mut().write(conn, &head[..head_len]);
+        if !keep_alive {
+            self.iface.tcp_mut().close(conn);
+        }
+    }
+
+    /// As `http_respond`, but omits the body when the method forbids one.
+    fn http_respond_maybe_body(
+        &mut self,
+        conn: usize,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+        keep_alive: bool,
+        body_allowed: bool,
+    ) {
+        if body_allowed {
+            self.http_respond(conn, status, content_type, body, keep_alive);
+        } else {
+            self.http_head_only(conn, status, content_type, body.len(), keep_alive);
         }
     }
 
