@@ -126,6 +126,22 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // RSP = 0 and triple-fault the machine.
     // A different chipset, so PCI enumeration is exercised against
     // something other than the one topology the default machine has.
+    // Two CPUs: the sole application processor used to submit jobs and then
+    // wait on itself, so the console answered nothing for twenty seconds.
+    // It must answer, whichever way.
+    println!("== smp run on a two-CPU machine");
+    let args = [
+        "--smp".to_string(),
+        "2".to_string(),
+        "--keys".to_string(),
+        "sleep:4,s,m,p,spc,r,u,n,spc,2,ret,sleep:3".to_string(),
+        "--out".to_string(),
+        "dist/qemu_smp2".to_string(),
+        "--expect-serial".to_string(),
+        "PandaGen Workspace".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot on q35");
     let args = [
         "--machine".to_string(),
@@ -835,7 +851,34 @@ fn cmd_qemu_script(
 
     std::thread::sleep(Duration::from_secs_f64(boot_wait));
 
-    let mut monitor = UnixStream::connect(&sock)?;
+    // If QEMU could not start -- most often because another instance holds
+    // the forwarded ports -- this connect fails with a bare "Connection
+    // refused" on a Unix socket, which says nothing about the cause. Ask the
+    // child what happened before reporting that.
+    let mut monitor = match UnixStream::connect(&sock) {
+        Ok(monitor) => monitor,
+        Err(err) => {
+            let detail = match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stderr.take() {
+                        use std::io::Read as _;
+                        let _ = pipe.read_to_string(&mut stderr);
+                    }
+                    format!("qemu exited ({status}): {}", stderr.trim())
+                }
+                _ => format!("qemu is running but its monitor is unreachable: {err}"),
+            };
+            let _ = child.kill();
+            let _ = fs::remove_file(&sock);
+            return Err(io::Error::other(format!(
+                "{detail}\nhint: another qemu may hold ports {}; \
+                 use --port-base N for a second instance",
+                ports.hostfwd()
+            ))
+            .into());
+        }
+    };
     monitor.set_read_timeout(Some(Duration::from_millis(400)))?;
     // QEMU's reply to each monitor command, so a refusal is not thrown away.
     let mut mon = |cmd: &str| -> io::Result<String> {

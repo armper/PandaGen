@@ -3467,6 +3467,12 @@ impl RemoteCommandServer {
 /// the user is looking at.
 const PRESENT_BAND_SPINS: u64 = 20_000;
 
+/// How long `smp run` waits for one job. These sum a few thousand squares --
+/// microseconds -- and the wait is paid per job, serially, on the CPU the
+/// console is talking to. This was 200,000,000 polls, about five seconds
+/// each: the same defect Phase 298 fixed for present bands and left here.
+const SMP_JOB_SPINS: u64 = 1_000_000;
+
 /// Workers currently inside `convert_rgba_rows` for the present in flight.
 /// The boot CPU waits for this to reach zero before it lets the surfaces
 /// those workers are writing to be reused.
@@ -5819,8 +5825,29 @@ impl CommandService {
 
     /// `smp run <n>`: queue `n` jobs, wake the other CPUs, report who ran what.
     fn run_smp_jobs(&mut self, output: &mut FixedBuffer<RESPONSE_MAX>, jobs: u32) {
-        if CPUS.online() < 2 {
-            let _ = writeln!(output, "smp: no application processors online");
+        // Only application processors take jobs; the boot CPU never calls
+        // `WORK.take`. And unless `BSP_RUNS_COMMANDS` is set, *this command
+        // is itself running on an AP* -- which then blocks in `wait`. So the
+        // question is not "is there an AP" but "is there an AP other than
+        // the one about to wait".
+        //
+        // Asking the former meant that on a two-CPU machine the sole AP
+        // submitted jobs, woke a boot CPU that does not take them, and then
+        // waited on itself. Every job ran out its timeout, serially: the
+        // console answered nothing for twenty seconds on `smp run 4`, and
+        // for two and a half minutes on `smp run 32`, while the desktop kept
+        // repainting so it looked like the shell had hung.
+        let online = CPUS.online();
+        let takers = if BSP_RUNS_COMMANDS.load(core::sync::atomic::Ordering::Relaxed) {
+            online.saturating_sub(1)
+        } else {
+            online.saturating_sub(2)
+        };
+        if takers == 0 {
+            let _ = writeln!(
+                output,
+                "smp: no application processor free to run jobs ({online} online)"
+            );
             return;
         }
         let before = hal_x86_64::lapic::IPI_COUNT.load(core::sync::atomic::Ordering::Relaxed);
@@ -5845,7 +5872,7 @@ impl CommandService {
                 let _ = writeln!(lines, "  job{i} not queued");
                 continue;
             }
-            match WORK.wait(*id, 200_000_000) {
+            match WORK.wait(*id, SMP_JOB_SPINS) {
                 Some(r) => {
                     done += 1;
                     let expected = run_job(hal_x86_64::Job {

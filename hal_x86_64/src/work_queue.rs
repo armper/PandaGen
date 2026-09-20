@@ -141,7 +141,18 @@ impl<const N: usize> WorkQueue<N> {
 
     /// Publish a job's result. A result for a job whose slot has already
     /// been recycled is dropped rather than attributed to the new owner.
+    ///
+    /// Held against `submit`, which is the only thing that recycles a slot.
+    /// The check and the publish used to happen outside any lock, so a
+    /// worker preempted between them -- and an application processor takes
+    /// a timer interrupt every 10 ms plus a wake IPI on every present --
+    /// could wake to find its slot handed to a different job, and publish
+    /// its value with `done` set. The new job's waiter then accepted it: a
+    /// present band reported as converted by nobody, leaving a stripe of
+    /// the previous frame on screen, or an `smp run` answered with a band's
+    /// row count.
     pub fn complete(&self, id: u64, cpu: u32, value: u64) {
+        let _recycling = self.pending.lock();
         let slot = &self.results[Self::slot_of(id)];
         if slot.id.load(Ordering::Acquire) != id {
             return;
@@ -342,5 +353,52 @@ mod tests {
             assert!(r.cpu < 4);
         }
         assert_eq!(q.pending(), 0);
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+
+    #[test]
+    fn a_result_is_never_attributed_to_a_job_that_did_not_produce_it() {
+        // `complete` checked the slot id and then published outside any
+        // lock. A worker preempted between the two -- an AP takes a timer
+        // interrupt every 10 ms plus a wake IPI on every present -- could
+        // wake to find its slot handed to a different job and publish its
+        // value with `done` set, and the new job's waiter accepted it.
+        //
+        // The race itself needs a scheduler seam to force deterministically.
+        // This asserts the invariant it violated: a result for a job whose
+        // slot has been recycled publishes nothing.
+        let queue = WorkQueue::<4>::new();
+        let stale = queue.submit(1, 111).unwrap();
+        assert_eq!(queue.take().map(|job| job.id), Some(stale));
+
+        // Four more submissions recycle the slot `stale` used.
+        let mut ids = alloc::vec::Vec::new();
+        for _ in 0..4 {
+            ids.push(queue.submit(1, 222).unwrap());
+        }
+        let owner = ids
+            .iter()
+            .copied()
+            .find(|id| id % 4 == stale % 4)
+            .expect("one of them must land in the same slot");
+
+        // The old worker finally finishes and publishes.
+        queue.complete(stale, 7, 0xDEAD);
+
+        assert!(
+            queue.result(owner).is_none(),
+            "a job that has not run reported a result belonging to another job"
+        );
+        assert!(queue.result(stale).is_none(), "and the stale job has none");
+
+        // The slot's real owner still works normally.
+        queue.complete(owner, 3, 0xBEEF);
+        let got = queue.result(owner).expect("the real owner publishes");
+        assert_eq!(got.value, 0xBEEF);
+        assert_eq!(got.cpu, 3);
     }
 }
