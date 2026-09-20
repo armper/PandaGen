@@ -43,12 +43,48 @@ impl RasterRect {
         }
     }
 
+    /// Saturating, because the dimensions come from a `Deserialize` struct.
+    ///
+    /// `DesktopWindow`'s rect arrives over the wire, and `usize::MAX` for a
+    /// height made this overflow: a panic in debug, and in release a
+    /// `bottom()` that wraps *below* `y`, so `contains` answers false for
+    /// every pixel and the window renders as nothing with no error at all.
+    /// Saturating means an absurd rectangle covers everything rather than
+    /// nothing, which is the failure a viewer can see.
     pub const fn right(&self) -> usize {
-        self.x + self.width
+        self.x.saturating_add(self.width)
     }
 
     pub const fn bottom(&self) -> usize {
-        self.y + self.height
+        self.y.saturating_add(self.height)
+    }
+
+    /// This rectangle cut down to a `width` x `height` surface.
+    ///
+    /// A rect built from a `Deserialize` struct can name coordinates no
+    /// surface has, and every piece of arithmetic downstream of it then has
+    /// to defend itself separately -- `services_gui_host`'s pixel compositor
+    /// alone does twenty additions on `rect.x` and `rect.y`. Clamping once,
+    /// at the renderer's door, is one guard instead of twenty.
+    pub const fn clamped_to(&self, width: usize, height: usize) -> Self {
+        let x = if self.x > width { width } else { self.x };
+        let y = if self.y > height { height } else { self.y };
+        let max_width = width - x;
+        let max_height = height - y;
+        Self {
+            x,
+            y,
+            width: if self.width > max_width {
+                max_width
+            } else {
+                self.width
+            },
+            height: if self.height > max_height {
+                max_height
+            } else {
+                self.height
+            },
+        }
     }
 
     pub const fn is_empty(&self) -> bool {
@@ -396,7 +432,7 @@ pub trait RenderTarget {
         self.fill_rect(
             RasterRect::new(
                 rect.x,
-                rect.y + rect.height.saturating_sub(thickness),
+                rect.y.saturating_add(rect.height.saturating_sub(thickness)),
                 rect.width,
                 thickness,
             ),
@@ -408,7 +444,7 @@ pub trait RenderTarget {
         );
         self.fill_rect(
             RasterRect::new(
-                rect.x + rect.width.saturating_sub(thickness),
+                rect.x.saturating_add(rect.width.saturating_sub(thickness)),
                 rect.y,
                 thickness,
                 rect.height,
@@ -752,7 +788,7 @@ fn rounded_row_span(rect: RasterRect, radius: usize, row: usize) -> Option<(usiz
         return None;
     }
     if radius == 0 {
-        return Some((rect.x, rect.x + rect.width));
+        return Some((rect.x, rect.right()));
     }
     // Distance of this row from the nearest corner-arc centre row, or zero
     // when the row is in the straight middle section.
@@ -776,7 +812,7 @@ fn rounded_row_span(rect: RasterRect, radius: usize, row: usize) -> Option<(usiz
         radius - (dx as usize).min(radius)
     };
     let start = rect.x + inset;
-    let end = rect.x + rect.width - inset;
+    let end = rect.right().saturating_sub(inset);
     if end <= start {
         None
     } else {

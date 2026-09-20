@@ -151,3 +151,67 @@ fn the_queues_have_a_ceiling() {
         "a caller minting a fresh interface id per send grew the map for ever"
     );
 }
+
+/// A ceiling you cannot come back from is worse than the leak it replaced.
+///
+/// The first version of the interface ceiling never removed a drained
+/// queue, so sixty-four ephemeral ids -- each used once and fully read --
+/// refused every later interface for the life of the process, with zero
+/// packets queued anywhere.
+#[test]
+fn a_drained_interface_gives_its_slot_back() {
+    let mut service = NetworkService::new(Box::new(AllowAll));
+    let mut budget = NoBudget;
+    let execution = ExecutionId::new();
+
+    for n in 0..(NetworkService::MAX_INTERFACES * 4) {
+        let interface = NetworkInterfaceId::new();
+        service
+            .send_packet(&mut budget, execution, interface, packet(n as u8))
+            .unwrap_or_else(|err| {
+                panic!("interface {n} refused with {err:?} though every earlier one was drained")
+            });
+        service
+            .receive_packet(&mut budget, execution, interface)
+            .unwrap()
+            .expect("the packet just sent");
+    }
+}
+
+/// A send the budget refuses must not consume an interface slot either.
+#[test]
+fn a_refused_send_does_not_claim_an_interface() {
+    struct NeverAllows;
+    impl PacketBudget for NeverAllows {
+        fn consume_packet(
+            &mut self,
+            _execution_id: ExecutionId,
+            _operation: PacketOperation,
+        ) -> Result<(), kernel_api::KernelError> {
+            Err(kernel_api::KernelError::ResourceBudgetExhausted {
+                resource_type: "PacketCount".to_string(),
+                limit: 0,
+                usage: 1,
+                identity: "test".to_string(),
+                operation: "send".to_string(),
+            })
+        }
+    }
+
+    let mut service = NetworkService::new(Box::new(AllowAll));
+    let execution = ExecutionId::new();
+    for n in 0..(NetworkService::MAX_INTERFACES * 4) {
+        let _ = service.send_packet(
+            &mut NeverAllows,
+            execution,
+            NetworkInterfaceId::new(),
+            packet(n as u8),
+        );
+    }
+
+    // Nothing was ever queued, so nothing should have been claimed.
+    let mut budget = NoBudget;
+    service
+        .send_packet(&mut budget, execution, NetworkInterfaceId::new(), packet(0))
+        .expect("refused sends claimed the interface table");
+}

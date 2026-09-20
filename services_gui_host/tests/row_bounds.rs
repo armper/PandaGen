@@ -36,6 +36,32 @@ fn compose_desktop_cost_is_bounded_by_the_canvas() {
     }
 }
 
+/// The *pixel* compositor is the third renderer of the same untrusted rect,
+/// and the one the row clamp did not reach. Its problem is not cost but
+/// arithmetic: `RasterRect::bottom()` was `self.y + self.height`, which
+/// panics in debug on `usize::MAX` and in release wraps to below `y`, so
+/// `contains` answers false for every pixel and the window renders as
+/// nothing with no error at all.
+#[test]
+fn the_pixel_compositor_survives_an_absurd_rectangle() {
+    use graphics_rasterizer::{RgbaBuffer, RgbaColor};
+
+    let compositor = Compositor::new();
+    for rect in [
+        SurfaceRect::new(1, 1, 4, usize::MAX),
+        SurfaceRect::new(1, 1, usize::MAX, 4),
+        SurfaceRect::new(usize::MAX, usize::MAX, 4, 4),
+    ] {
+        let mut target = RgbaBuffer::new(200, 100, RgbaColor::new(0, 0, 0, 255));
+        let started = std::time::Instant::now();
+        compositor.render_desktop_to_target(&mut target, vec![window(rect)]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "rendering {rect:?} took too long"
+        );
+    }
+}
+
 /// The clamp is exact: a window that fits is drawn exactly as before.
 #[test]
 fn a_window_that_fits_is_drawn_unchanged() {

@@ -26,23 +26,26 @@ impl Line {
         }
     }
 
-    /// Create a line from text, truncating to `cols` bytes on a character
-    /// boundary.
+    /// Create a line from text, keeping the first `cols` characters.
     ///
-    /// This truncated by raw bytes, and `as_str` returns `""` for invalid
-    /// UTF-8 -- so a line whose right margin fell inside a multi-byte
-    /// character displayed as *nothing at all*, losing the whole line rather
-    /// than the one character that did not fit. Cut on a boundary instead.
+    /// Two bugs lived here in turn, and the second was mine. First this
+    /// truncated by raw bytes while `as_str` returned `""` for invalid
+    /// UTF-8, so a line whose right margin fell inside a multi-byte
+    /// character displayed as *nothing at all*. The fix cut on a character
+    /// boundary -- and kept counting bytes, while `cols` means display
+    /// columns everywhere else in this file, including the doc two fields
+    /// up. So a 9-column line of two-byte characters kept four of them, and
+    /// a line of box-drawing or CJK text showed a third of itself. "The
+    /// whole line vanished" became "most of the line vanished".
+    ///
+    /// `cols` is a column count. One character, one column.
     pub fn from_text(text: &str, cols: usize) -> Self {
-        let end = text
-            .char_indices()
-            .map(|(index, _)| index)
-            .chain(core::iter::once(text.len()))
-            .take_while(|index| *index <= cols)
-            .last()
-            .unwrap_or(0);
         Self {
-            text: text.as_bytes()[..end].to_vec(),
+            text: text
+                .chars()
+                .take(cols)
+                .collect::<alloc::string::String>()
+                .into_bytes(),
         }
     }
 
@@ -76,7 +79,13 @@ impl Line {
         self.text.clear();
     }
 
-    /// Append a character to the line (if space available)
+    /// Append one byte to the line, if there is room.
+    ///
+    /// Byte-level, unlike [`Self::from_text`], because the console feeds it
+    /// one byte at a time from a serial-style stream and a multi-byte
+    /// character arrives in pieces. `max_cols` is therefore a byte ceiling
+    /// here, which for the ASCII path this is used on is the same number.
+    /// [`Self::as_str`] copes with a sequence cut off part-way.
     pub fn push(&mut self, ch: u8, max_cols: usize) -> bool {
         if self.text.len() < max_cols {
             self.text.push(ch);

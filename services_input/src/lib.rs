@@ -155,11 +155,7 @@ impl InputService {
             return Err(InputServiceError::SubscriptionAlreadyExists(task_id));
         }
 
-        // Reclaim this task's revoked records. Without this, a subscribe /
-        // revoke cycle leaves one dead record behind every time and nothing
-        // ever removes them.
-        self.subscriptions
-            .retain(|_, subscription| subscription.active || subscription.cap.task_id != task_id);
+        self.reclaim_revoked_records(task_id);
 
         let id = self.next_subscription_id;
         self.next_subscription_id += 1;
@@ -171,6 +167,46 @@ impl InputService {
         self.task_subscriptions.insert(task_id, id);
 
         Ok(cap)
+    }
+
+    /// The most revoked-but-not-yet-reclaimed records kept.
+    ///
+    /// A revoked record stays so `total_subscription_count` can still see it
+    /// -- that is the difference between `revoke` and `unsubscribe`. But the
+    /// first version of this reclaimed only the *re-subscribing* task's
+    /// records, so the ordinary case (a task subscribes, is revoked, and
+    /// exits) left one dead record behind for ever and nothing removed it.
+    /// Its test looped a thousand times on one `TaskId`, which is exactly
+    /// the case the reclaim handled: a test tuned to the fix rather than to
+    /// the property.
+    const MAX_REVOKED_RECORDS: usize = 256;
+
+    /// Drops `task_id`'s revoked records, and the oldest of everyone else's
+    /// once there are more than `MAX_REVOKED_RECORDS`.
+    fn reclaim_revoked_records(&mut self, task_id: TaskId) {
+        self.subscriptions
+            .retain(|_, subscription| subscription.active || subscription.cap.task_id != task_id);
+
+        let revoked = self
+            .subscriptions
+            .values()
+            .filter(|subscription| !subscription.active)
+            .count();
+        if revoked <= Self::MAX_REVOKED_RECORDS {
+            return;
+        }
+        // Subscription ids are allocated in order, so the smallest are the
+        // oldest.
+        let mut stale: Vec<u64> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, subscription)| !subscription.active)
+            .map(|(id, _)| *id)
+            .collect();
+        stale.sort_unstable();
+        for id in stale.into_iter().take(revoked - Self::MAX_REVOKED_RECORDS) {
+            self.subscriptions.remove(&id);
+        }
     }
 
     /// Revokes a subscription
@@ -206,6 +242,10 @@ impl InputService {
         if self.task_subscriptions.get(&task_id) == Some(&cap.id) {
             self.task_subscriptions.remove(&task_id);
         }
+        // Bound the revoked records here too: a task that is revoked and
+        // never subscribes again -- the ordinary case -- would otherwise
+        // never be reclaimed by anyone.
+        self.reclaim_revoked_records(TaskId::new());
         Ok(())
     }
 

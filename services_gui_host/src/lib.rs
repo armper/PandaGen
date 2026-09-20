@@ -1128,7 +1128,15 @@ fn raster_window(
     damage_rect: Option<RasterRect>,
     theme: &Theme,
 ) -> bool {
-    let rect = pixel_rect(window.rect);
+    // Cut the window down to the surface before anything is computed from
+    // it. `DesktopWindow` derives `Deserialize`, so `rect` arrives over the
+    // wire and `pixel_rect` only saturates the multiply -- a `usize::MAX`
+    // height stays `usize::MAX`, and the twenty `rect.x + ..` and
+    // `rect.y + ..` expressions below each had to survive it on their own.
+    // They did not: `RasterRect::bottom()` overflowed, which panics in debug
+    // and in release wraps to *below* `y`, so `contains` answered false for
+    // every pixel and the window rendered as nothing with no error at all.
+    let rect = pixel_rect(window.rect).clamped_to(target.width(), target.height());
     if rect.width == 0 || rect.height == 0 {
         return false;
     }
@@ -1245,7 +1253,7 @@ fn raster_title_bar(
     // chrome rectangle: a damage region that misses the chrome row must
     // still restore it.
     let separator_y = rect.y + RASTER_CELL_HEIGHT;
-    if separator_y < rect.y + rect.height {
+    if separator_y < rect.y.saturating_add(rect.height) {
         let mut line_target = ScissorTarget::new(target, clipped_rect);
         line_target.draw_hline(
             rect.x + RASTER_BORDER_THICKNESS,
@@ -1323,7 +1331,7 @@ fn window_content_rect_for(rect: RasterRect, chrome: bool) -> Option<RasterRect>
         return window_content_rect(rect);
     }
     let y = rect.y + RASTER_BORDER_THICKNESS;
-    let bottom = rect.y + rect.height;
+    let bottom = rect.y.saturating_add(rect.height);
     if y >= bottom {
         return None;
     }
@@ -1337,7 +1345,7 @@ fn window_content_rect_for(rect: RasterRect, chrome: bool) -> Option<RasterRect>
 
 fn window_content_rect(rect: RasterRect) -> Option<RasterRect> {
     let y = rect.y + RASTER_CELL_HEIGHT + RASTER_BORDER_THICKNESS;
-    let bottom = rect.y + rect.height;
+    let bottom = rect.y.saturating_add(rect.height);
     if y >= bottom {
         return None;
     }

@@ -148,8 +148,10 @@ impl EditorCore {
 
     /// Helper to insert a character in insert mode
     fn insert_char_in_insert_mode(&mut self, ch: char) -> CoreOutcome {
-        self.save_undo_snapshot();
+        // Snapshot first, push only if the edit landed. See `Key::Backspace`.
+        let before = self.buffer_snapshot();
         if self.buffer.insert_char(self.cursor, ch) {
+            self.push_undo(before);
             self.cursor.col += 1;
             self.dirty = true;
             CoreOutcome::Changed
@@ -295,8 +297,9 @@ impl EditorCore {
             Key::N => self.insert_char_in_insert_mode('n'),
             Key::Space => self.insert_char_in_insert_mode(' '),
             Key::Enter => {
-                self.save_undo_snapshot();
+                let before = self.buffer_snapshot();
                 if self.buffer.insert_newline(self.cursor) {
+                    self.push_undo(before);
                     self.cursor.row += 1;
                     self.cursor.col = 0;
                     self.dirty = true;
@@ -306,8 +309,22 @@ impl EditorCore {
                 }
             }
             Key::Backspace => {
-                self.save_undo_snapshot();
+                // Take the snapshot, then push it only if the edit landed.
+                //
+                // This called `save_undo_snapshot()` unconditionally, and
+                // `backspace` returns `None` at row 0 column 0 -- so holding
+                // Backspace at the top of a file pushed one dead snapshot per
+                // keypress into a stack bounded at 100 that drops from the
+                // front. A hundred and fifty keystrokes that changed nothing
+                // made the user's original text permanently unreachable by
+                // undo.
+                //
+                // E7 is the same defect, and its fix is ten lines above this
+                // on `Key::X` and `Key::D`, with a comment explaining it.
+                // Three siblings in the same `match` went without.
+                let before = self.buffer_snapshot();
                 if let Some(new_pos) = self.buffer.backspace(self.cursor) {
+                    self.push_undo(before);
                     self.cursor = new_pos;
                     self.dirty = true;
                     CoreOutcome::Changed

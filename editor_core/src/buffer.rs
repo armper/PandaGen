@@ -29,6 +29,9 @@ impl Position {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextBuffer {
     lines: Vec<String>,
+    /// Whether the text this buffer was loaded from ended with a newline,
+    /// so saving it back does not quietly remove one.
+    trailing_newline: bool,
 }
 
 /// The largest character boundary at or before `col`.
@@ -51,20 +54,46 @@ impl TextBuffer {
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
+            trailing_newline: false,
         }
     }
 
+    /// Load `content`, remembering how it ended.
+    ///
+    /// This used `str::lines()`, which discards the final newline that every
+    /// text file ends with *and* strips a `\r` from the end of every line.
+    /// So opening a file in the kernel's editor and saving it -- without
+    /// typing anything -- wrote it back a byte shorter, and a CRLF file came
+    /// back with every line ending rewritten.
+    ///
+    /// E8 fixed exactly this in `services_editor_vi::TextBuffer` and left the
+    /// buffer next door, which is the one `kernel_bootstrap`'s editor writes
+    /// to disk. Splitting on `\n` rather than using `lines()` keeps the
+    /// `\r`; the flag keeps the last newline.
     pub fn from_string(content: String) -> Self {
+        let trailing_newline = content.ends_with('\n');
         let lines = if content.is_empty() {
             vec![String::new()]
         } else {
-            content.lines().map(|s| s.into()).collect()
+            let body = if trailing_newline {
+                &content[..content.len() - 1]
+            } else {
+                &content[..]
+            };
+            body.split('\n').map(String::from).collect()
         };
-        Self { lines }
+        Self {
+            lines,
+            trailing_newline,
+        }
     }
 
     pub fn as_string(&self) -> String {
-        self.lines.join("\n")
+        let mut text = self.lines.join("\n");
+        if self.trailing_newline {
+            text.push('\n');
+        }
+        text
     }
 
     pub fn line_count(&self) -> usize {

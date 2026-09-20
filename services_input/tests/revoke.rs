@@ -28,6 +28,8 @@ fn a_revoked_task_can_subscribe_again() {
 /// leave one dead record behind every time with nothing to remove them.
 #[test]
 fn revoked_records_do_not_accumulate() {
+    // One task, over and over. This is the case the first version of the
+    // reclaim handled, so on its own it is a test tuned to the fix.
     let mut service = InputService::new();
     let task = TaskId::new();
     for _ in 0..1000 {
@@ -36,7 +38,22 @@ fn revoked_records_do_not_accumulate() {
     }
     assert!(
         service.total_subscription_count() <= 2,
-        "1000 subscribe/revoke cycles left {} records",
+        "1000 subscribe/revoke cycles on one task left {} records",
+        service.total_subscription_count()
+    );
+
+    // And the ordinary case: a different task each time, each revoked and
+    // never seen again. Nothing reclaimed these at all.
+    let mut service = InputService::new();
+    for _ in 0..1000 {
+        let cap = service
+            .subscribe_keyboard(TaskId::new(), ChannelId::new())
+            .unwrap();
+        service.revoke_subscription(&cap).unwrap();
+    }
+    assert!(
+        service.total_subscription_count() <= 512,
+        "1000 tasks that each subscribed once and were revoked left {} records",
         service.total_subscription_count()
     );
 }

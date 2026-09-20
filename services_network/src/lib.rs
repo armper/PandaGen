@@ -454,11 +454,19 @@ impl NetworkService {
         // minting a fresh id per send grew the map for ever while every
         // packet was accepted with `Ok(())` and went nowhere. The
         // `PacketCount` budget bounds sends per execution, not memory.
-        if !self.queues.contains_key(&interface_id) && self.queues.len() >= Self::MAX_INTERFACES {
+        // Decide before creating anything. The first version of this
+        // ceiling used `entry(..).or_default()` to measure the depth, so a
+        // send that was then refused by the budget left a permanent empty
+        // queue behind -- a call that did nothing consuming one of the
+        // sixty-four slots.
+        let depth = self
+            .queues
+            .get(&interface_id)
+            .map_or(0, |queue| queue.len());
+        if depth >= Self::MAX_QUEUED_PACKETS {
             return Err(NetworkError::QueueFull(interface_id));
         }
-        let queue = self.queues.entry(interface_id).or_default();
-        if queue.len() >= Self::MAX_QUEUED_PACKETS {
+        if !self.queues.contains_key(&interface_id) && self.queues.len() >= Self::MAX_INTERFACES {
             return Err(NetworkError::QueueFull(interface_id));
         }
 
@@ -503,9 +511,19 @@ impl NetworkService {
         budget.consume_packet(execution_id, PacketOperation::Receive)?;
 
         // Only now is the packet ours to take.
-        self.queues
-            .get_mut(&interface_id)
-            .and_then(|queue| queue.pop_front());
+        if let Some(queue) = self.queues.get_mut(&interface_id) {
+            queue.pop_front();
+            // An interface with nothing queued is an interface that is not
+            // there. Without this, draining a queue left the entry behind and
+            // the ceiling above counted it for ever: sixty-four ephemeral ids
+            // that had each been fully drained still refused every later
+            // interface, permanently, with zero packets queued anywhere. A
+            // ceiling that cannot be recovered from is worse than the leak it
+            // replaced.
+            if queue.is_empty() {
+                self.queues.remove(&interface_id);
+            }
+        }
 
         Ok(Some(packet))
     }

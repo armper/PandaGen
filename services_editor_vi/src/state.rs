@@ -148,7 +148,16 @@ impl TextBuffer {
         let lines = if content.is_empty() {
             vec![String::new()]
         } else {
-            content.lines().map(|s| s.to_string()).collect()
+            // E8 caught the *last* newline and not the `\r` at the end of
+            // every other line: `str::lines()` strips those too, so a CRLF
+            // file was silently rewritten to LF by opening and saving it.
+            // Split on `\n` and keep whatever precedes it.
+            let body = if trailing_newline {
+                &content[..content.len() - 1]
+            } else {
+                &content[..]
+            };
+            body.split('\n').map(|s| s.to_string()).collect()
         };
         Self {
             lines,
