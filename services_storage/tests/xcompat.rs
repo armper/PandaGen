@@ -7,9 +7,16 @@
 //! corrupt. Everything committed since the last checkpoint is lost, silently,
 //! the first time a user upgrades.
 //!
-//! `/tmp/xcompat/old.img` is written by `tests/mkoldimage.rs` compiled
-//! against the pre-288 sources; see the phase commit for the recipe. The test
-//! skips when the image is absent so an ordinary checkout is not blocked.
+//! `tests/fixtures/pre288.sparse` is a real image written by the Phase 287
+//! sources -- `git show 5b295aa:services_storage/src/block_storage.rs` into a
+//! scratch tree, write six files, keep the bytes. It is stored sparsely (a
+//! block count, then the non-zero blocks) because the disk is mostly zeroes.
+//!
+//! It is checked in deliberately. The first version of this test read an
+//! image from /tmp and *returned quietly* when it was absent -- and nothing
+//! in the tree created it, so on every machine but the one that wrote it,
+//! the only end-to-end guard against silent upgrade loss was a no-op that
+//! printed a line and passed.
 
 use hal::{BlockDevice, BlockError, BLOCK_SIZE};
 use services_storage::{ObjectId, PersistentFilesystem};
@@ -17,7 +24,24 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const ROOT: ObjectId = ObjectId::from_bytes(*b"PANDAGEN-ROOT-01");
-const IMAGE: &str = "/tmp/xcompat/old.img";
+const FIXTURE: &[u8] = include_bytes!("fixtures/pre288.sparse");
+
+/// Rebuild the full image from the sparse fixture.
+fn pre288_image() -> Vec<u8> {
+    let word = |at: usize| u32::from_le_bytes(FIXTURE[at..at + 4].try_into().unwrap()) as usize;
+    let blocks = word(0);
+    let present = word(4);
+    let mut image = vec![0u8; blocks * BLOCK_SIZE];
+    let mut at = 8;
+    for _ in 0..present {
+        let index = word(at);
+        at += 4;
+        image[index * BLOCK_SIZE..(index + 1) * BLOCK_SIZE]
+            .copy_from_slice(&FIXTURE[at..at + BLOCK_SIZE]);
+        at += BLOCK_SIZE;
+    }
+    image
+}
 
 #[derive(Clone)]
 struct Disk {
@@ -52,10 +76,7 @@ impl BlockDevice for Disk {
 
 #[test]
 fn a_disk_written_by_an_older_build_keeps_its_files() {
-    let Ok(bytes) = std::fs::read(IMAGE) else {
-        eprintln!("skipping: {IMAGE} not present");
-        return;
-    };
+    let bytes = pre288_image();
     let blocks = (bytes.len() / BLOCK_SIZE) as u64;
     let disk = Disk {
         bytes: Rc::new(RefCell::new(bytes)),

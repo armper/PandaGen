@@ -1787,6 +1787,16 @@ impl SimulatedKernel {
 
             // Phase 11: Validate budget inheritance
             if let Some(parent_identity) = self.identity_table.get(&parent) {
+                // A child that names no budget inherits its parent's rather
+                // than running unmetered. This path never sets one -- it
+                // takes no budget argument -- so without this the child was
+                // always unbounded and the check below could never fail:
+                // dead code guarding the one thing it was written to stop.
+                if metadata.budget.is_none() {
+                    if let Some(inherited) = parent_identity.budget.clone() {
+                        metadata = metadata.with_budget(inherited);
+                    }
+                }
                 if !metadata.budget_inherits_from(parent_identity) {
                     return Err(KernelError::InsufficientAuthority(
                         "Budget inheritance violation: child budget exceeds parent".to_string(),

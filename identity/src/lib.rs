@@ -242,10 +242,18 @@ impl IdentityMetadata {
     ///
     /// Returns true if this identity's budget is a subset of the parent's budget,
     /// or if either has no budget (no constraint).
+    /// Whether this identity's budget is within its parent's.
+    ///
+    /// No budget means *unmetered*, so a child that declares none under a
+    /// metered parent is an escalation, not an absence of constraint -- the
+    /// budgets are enforced only where a limit is present, so "no budget"
+    /// buys unlimited CPU, messages, storage operations and pipeline
+    /// stages. This used to return true for that case.
     pub fn budget_inherits_from(&self, parent: &IdentityMetadata) -> bool {
         match (&self.budget, &parent.budget) {
-            (Some(child_budget), Some(parent_budget)) => child_budget.is_subset_of(parent_budget),
-            _ => true, // No constraint if either has no budget
+            (Some(child), Some(parent)) => child.is_subset_of(parent),
+            (None, Some(_)) => false,
+            (Some(_), None) | (None, None) => true,
         }
     }
 }
@@ -635,11 +643,34 @@ mod tests {
             IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now)
                 .with_budget(parent_budget);
 
-        // Child has no budget - valid (no constraint)
+        // A child that names no budget is *unmetered*, because a budget is
+        // enforced only where a limit is present. Under a metered parent
+        // that is an escalation, not an absence of constraint -- this test
+        // used to assert the opposite, in as many words ("valid (no
+        // constraint)"). The spawn path gives such a child its parent's
+        // budget rather than letting it run unbounded.
         let child =
             IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
                 .with_parent(parent.execution_id);
 
+        assert!(
+            !child.budget_inherits_from(&parent),
+            "a child with no budget under a metered parent runs unmetered"
+        );
+
+        // And once it has inherited, it does.
+        let child = child.with_budget(parent.budget.clone().unwrap());
+        assert!(child.budget_inherits_from(&parent));
+    }
+
+    #[test]
+    fn a_child_with_no_budget_under_an_unmetered_parent_is_fine() {
+        let now = 1000u64;
+        let parent =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "parent", now);
+        let child =
+            IdentityMetadata::new(IdentityKind::Component, TrustDomain::core(), "child", now)
+                .with_parent(parent.execution_id);
         assert!(child.budget_inherits_from(&parent));
     }
 }

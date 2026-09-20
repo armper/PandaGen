@@ -1517,6 +1517,22 @@ impl WorkspaceManager {
 
         if let Some(budget) = config.budget {
             identity = identity.with_budget(budget);
+        } else if let Some(inherited) = self.workspace_identity.budget.clone() {
+            // A component that names no budget is unmetered, so under a
+            // metered workspace it inherits rather than escaping.
+            identity = identity.with_budget(inherited);
+        }
+        // A budget from the caller -- and for `launch_package`, straight from
+        // the package manifest -- was applied with no comparison against the
+        // workspace's own. A manifest declaring a million CPU ticks launched
+        // cleanly under a workspace metered at one.
+        if !identity.budget_inherits_from(&self.workspace_identity) {
+            return Err(WorkspaceError::LaunchDenied {
+                reason: format!(
+                    "requested budget exceeds the workspace's for component '{}'",
+                    config.name
+                ),
+            });
         }
 
         // Check policy if configured
@@ -1525,8 +1541,22 @@ impl WorkspaceManager {
                 PolicyContext::for_spawn(self.workspace_identity.clone(), identity.clone());
             let decision = policy.evaluate(PolicyEvent::OnSpawn, &context);
 
-            if let PolicyDecision::Deny { reason } = decision {
-                return Err(WorkspaceError::LaunchDenied { reason });
+            // `Require` means the policy wants explicit approval, and there
+            // is nothing here that can ask for it -- so it is a refusal.
+            // Matching only on `Deny` let it fall through to the allow path
+            // silently. `sim_kernel` and `services_pipeline_executor` both
+            // treat `Require` as a refusal, so the same contract was being
+            // enforced two different ways in one workspace.
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    return Err(WorkspaceError::LaunchDenied { reason })
+                }
+                PolicyDecision::Require { action } => {
+                    return Err(WorkspaceError::LaunchDenied {
+                        reason: format!("requires explicit approval: {action}"),
+                    })
+                }
+                PolicyDecision::Allow { .. } => {}
             }
         }
 
@@ -1849,8 +1879,23 @@ impl WorkspaceManager {
             );
             let decision = policy.evaluate(PolicyEvent::OnCapabilityDelegate, &context);
 
-            if let PolicyDecision::Deny { reason } = decision {
-                return Err(WorkspaceError::FocusDenied { reason });
+            // As above, and this is the one that matters most:
+            // `TrustDomainPolicy` expresses its *only* cross-trust-domain
+            // guard as `Require`, and this is its enforcement point. Falling
+            // through handed a sandboxed component the input subscription --
+            // keyboard focus -- across the trust boundary, with the
+            // policy's approval requirement discarded and no record that it
+            // had been skipped.
+            match decision {
+                PolicyDecision::Deny { reason } => {
+                    return Err(WorkspaceError::FocusDenied { reason })
+                }
+                PolicyDecision::Require { action } => {
+                    return Err(WorkspaceError::FocusDenied {
+                        reason: format!("requires explicit approval: {action}"),
+                    })
+                }
+                PolicyDecision::Allow { .. } => {}
             }
         }
 
@@ -4355,6 +4400,99 @@ mod tests {
             first.metadata.get("package.entry"),
             Some(&"services_editor_vi".to_string())
         );
+    }
+
+    #[test]
+    fn a_policy_that_requires_approval_is_not_an_allow() {
+        // Both enforcement points matched only on `Deny`, so `Require` fell
+        // through to the allow path -- silently, with no record that the
+        // policy's approval requirement had been skipped. `TrustDomainPolicy`
+        // expresses its only cross-trust-domain guard as `Require`, and
+        // `sim_kernel` and `services_pipeline_executor` both treat it as a
+        // refusal, so one contract was enforced two ways in one workspace.
+        use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent};
+
+        struct RequireEverything;
+        impl PolicyEngine for RequireEverything {
+            fn evaluate(&self, _event: PolicyEvent, _context: &PolicyContext) -> PolicyDecision {
+                PolicyDecision::Require {
+                    action: "explicit approval".to_string(),
+                }
+            }
+            fn name(&self) -> &str {
+                "RequireEverything"
+            }
+        }
+
+        let workspace_identity =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "ws", 0);
+        let mut workspace =
+            WorkspaceManager::new(workspace_identity).with_policy(Box::new(RequireEverything));
+
+        let err = workspace
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                "editor",
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .expect_err("a policy that requires approval must not launch");
+        assert!(matches!(err, WorkspaceError::LaunchDenied { .. }));
+    }
+
+    #[test]
+    fn a_component_cannot_ask_for_a_bigger_budget_than_the_workspace_has() {
+        // The budget came straight from `LaunchConfig` -- and for
+        // `launch_package`, straight from the package manifest -- and was
+        // applied with no comparison against the workspace's own.
+        use resources::{CpuTicks, ResourceBudget};
+
+        let workspace_identity =
+            IdentityMetadata::new(IdentityKind::Service, TrustDomain::core(), "ws", 0)
+                .with_budget(ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(100)));
+        let mut workspace = WorkspaceManager::new(workspace_identity);
+
+        let greedy = LaunchConfig::new(
+            ComponentType::Editor,
+            "greedy",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_budget(ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(1_000_000)));
+        assert!(
+            workspace.launch_component(greedy).is_err(),
+            "a component asked for ten thousand times the workspace's budget and got it"
+        );
+
+        // Unmetered is the same escalation, because a budget is only
+        // enforced where a limit is present.
+        let unmetered = LaunchConfig::new(
+            ComponentType::Editor,
+            "unmetered",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        )
+        .with_budget(ResourceBudget::unlimited());
+        assert!(workspace.launch_component(unmetered).is_err());
+
+        // And a component that names no budget inherits the workspace's.
+        let ordinary = LaunchConfig::new(
+            ComponentType::Editor,
+            "ordinary",
+            IdentityKind::Component,
+            TrustDomain::user(),
+        );
+        let id = workspace
+            .launch_component(ordinary)
+            .expect("a component that asks for nothing must still launch");
+        let budget = workspace
+            .get_component(id)
+            .unwrap()
+            .identity
+            .budget
+            .clone()
+            .expect("and must be metered, not unmetered");
+        assert_eq!(budget.cpu_ticks, Some(CpuTicks::new(100)));
     }
 
     #[test]

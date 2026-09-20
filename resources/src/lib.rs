@@ -371,61 +371,34 @@ impl ResourceBudget {
         self
     }
 
-    /// Checks if this budget is a subset of (less than or equal to) another budget
+    /// Whether this budget grants no more than `other` on every resource.
     ///
-    /// Returns true if all limits in this budget are ≤ corresponding limits in other.
-    /// If either budget has None for a resource, that resource is not constrained.
+    /// `None` means *unlimited*, so it is the widest value a field can hold,
+    /// not a neutral one. Each field used to be examined only when `self`
+    /// had a limit, so a child with `None` against a parent with `Some`
+    /// skipped the comparison and the whole predicate returned true: a task
+    /// spawned under a hundred-tick parent could declare itself unmetered
+    /// and run unmetered, because the budgets are genuinely enforced only
+    /// where a `Some` is present.
     pub fn is_subset_of(&self, other: &ResourceBudget) -> bool {
-        // For each resource, if self has a limit, other must have a limit >= self's limit
-        if let Some(self_cpu) = self.cpu_ticks {
-            match other.cpu_ticks {
-                Some(other_cpu) if self_cpu <= other_cpu => {}
-                None => {} // No limit in parent is OK
-                _ => return false,
+        /// One resource: `None` is unlimited, so it is a subset only of
+        /// unlimited.
+        fn within<T: PartialOrd>(mine: Option<T>, theirs: Option<T>) -> bool {
+            match (mine, theirs) {
+                // Unlimited under a limit is exactly the escalation.
+                (None, Some(_)) => false,
+                (None, None) => true,
+                (Some(_), None) => true,
+                (Some(mine), Some(theirs)) => mine <= theirs,
             }
         }
 
-        if let Some(self_mem) = self.memory_units {
-            match other.memory_units {
-                Some(other_mem) if self_mem <= other_mem => {}
-                None => {}
-                _ => return false,
-            }
-        }
-
-        if let Some(self_msg) = self.message_count {
-            match other.message_count {
-                Some(other_msg) if self_msg <= other_msg => {}
-                None => {}
-                _ => return false,
-            }
-        }
-
-        if let Some(self_pkt) = self.packet_count {
-            match other.packet_count {
-                Some(other_pkt) if self_pkt <= other_pkt => {}
-                None => {}
-                _ => return false,
-            }
-        }
-
-        if let Some(self_storage) = self.storage_ops {
-            match other.storage_ops {
-                Some(other_storage) if self_storage <= other_storage => {}
-                None => {}
-                _ => return false,
-            }
-        }
-
-        if let Some(self_stages) = self.pipeline_stages {
-            match other.pipeline_stages {
-                Some(other_stages) if self_stages <= other_stages => {}
-                None => {}
-                _ => return false,
-            }
-        }
-
-        true
+        within(self.cpu_ticks, other.cpu_ticks)
+            && within(self.memory_units, other.memory_units)
+            && within(self.message_count, other.message_count)
+            && within(self.packet_count, other.packet_count)
+            && within(self.storage_ops, other.storage_ops)
+            && within(self.pipeline_stages, other.pipeline_stages)
     }
 
     /// Returns the minimum of two budgets (most restrictive)
@@ -1113,5 +1086,78 @@ mod tests {
         assert!(display.contains("CPU ticks exceeded"));
         assert!(display.contains("limit=1000"));
         assert!(display.contains("usage=1001"));
+    }
+}
+
+#[cfg(test)]
+mod inheritance_tests {
+    use super::*;
+
+    #[test]
+    fn an_unlimited_budget_is_not_a_subset_of_a_metered_one() {
+        // `None` means unlimited, so it is the widest value a field can
+        // hold. Each field was examined only when `self` had a limit, so a
+        // child with `None` against a parent with `Some` skipped the
+        // comparison and the predicate returned true -- a task spawned under
+        // a hundred-tick parent could declare itself unmetered and run
+        // unmetered, because a budget is only enforced where a `Some` is.
+        let tight = ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(100));
+        assert!(
+            !ResourceBudget::unlimited().is_subset_of(&tight),
+            "an unlimited child inherited from a metered parent"
+        );
+
+        // Every other direction still behaves.
+        assert!(ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(50))
+            .is_subset_of(&tight));
+        assert!(ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(100))
+            .is_subset_of(&tight));
+        assert!(!ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(101))
+            .is_subset_of(&tight));
+        assert!(
+            ResourceBudget::unlimited()
+                .with_cpu_ticks(CpuTicks::new(1_000_000))
+                .is_subset_of(&ResourceBudget::unlimited()),
+            "any limit is within no limit"
+        );
+        assert!(ResourceBudget::unlimited().is_subset_of(&ResourceBudget::unlimited()));
+    }
+
+    #[test]
+    fn a_child_cannot_be_unlimited_in_any_single_resource() {
+        // One unmetered field is enough; the escalation does not need all of
+        // them.
+        let parent = ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(100))
+            .with_memory_units(MemoryUnits::new(100))
+            .with_message_count(MessageCount::new(100))
+            .with_packet_count(PacketCount::new(100))
+            .with_storage_ops(StorageOps::new(100))
+            .with_pipeline_stages(PipelineStages::new(100));
+        let full = ResourceBudget::unlimited()
+            .with_cpu_ticks(CpuTicks::new(1))
+            .with_memory_units(MemoryUnits::new(1))
+            .with_message_count(MessageCount::new(1))
+            .with_packet_count(PacketCount::new(1))
+            .with_storage_ops(StorageOps::new(1))
+            .with_pipeline_stages(PipelineStages::new(1));
+        assert!(full.is_subset_of(&parent));
+
+        for widen in [
+            ResourceBudget { cpu_ticks: None, ..full.clone() },
+            ResourceBudget { memory_units: None, ..full.clone() },
+            ResourceBudget { message_count: None, ..full.clone() },
+            ResourceBudget { packet_count: None, ..full.clone() },
+            ResourceBudget { storage_ops: None, ..full.clone() },
+            ResourceBudget { pipeline_stages: None, ..full.clone() },
+        ] {
+            assert!(
+                !widen.is_subset_of(&parent),
+                "a child unmetered in one resource inherited from a metered parent: {widen:?}"
+            );
+        }
     }
 }

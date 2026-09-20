@@ -82,6 +82,22 @@ struct CheckpointHeader {
 const SUPERBLOCK_MAGIC: u64 = 0x50414E44_47454E00; // "PANDAGEN\0"
 const STORAGE_VERSION: u32 = 2; // Bumped for crash-safe storage
 
+/// The bytes a commit record was checksummed over: its own JSON with the
+/// value of `"checksum"` replaced by zero, exactly as the writer had it.
+fn zero_checksum_field(raw: &[u8]) -> Option<Vec<u8>> {
+    let text = core::str::from_utf8(raw).ok()?;
+    let key = "\"checksum\":";
+    let at = text.rfind(key)?;
+    let value_start = at + key.len();
+    let rest = &text[value_start..];
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..value_start]);
+    out.push('0');
+    out.push_str(&rest[end..]);
+    Some(out.into_bytes())
+}
+
 /// Commit record for crash-safe transactions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommitRecord {
@@ -164,10 +180,35 @@ impl CommitRecord {
         crc32fast::hash(&data)
     }
 
-    /// Validate checksum
+    /// Validate checksum by re-serialising.
+    ///
+    /// Only correct while this build's field set is exactly the writer's.
+    /// Prefer `is_valid_on_disk`, which does not depend on that.
     fn is_valid(&self) -> bool {
         let computed = self.compute_checksum();
         computed == self.checksum
+    }
+
+    /// Validate against the bytes this record was read from.
+    ///
+    /// The writer checksummed its own JSON with the checksum field set to
+    /// zero. Reproducing those bytes by re-serialising works only while the
+    /// struct has exactly the fields the writer had -- which is why adding
+    /// one silently invalidated every record an older build wrote, twice:
+    /// once in Phase 288 and again in Phase 307's own fix, which restored
+    /// compatibility with builds before 288 and broke it for the twenty
+    /// phases in between.
+    ///
+    /// Rebuilding the checksummed bytes from the raw text instead works for
+    /// any field set, past or future, so the next field to be added or
+    /// removed is not another silent-data-loss event.
+    fn is_valid_on_disk(&self, raw: &[u8]) -> bool {
+        match zero_checksum_field(raw) {
+            Some(bytes) => crc32fast::hash(&bytes) == self.checksum,
+            // Not something this writer produced; fall back rather than
+            // rejecting a record we might still be able to verify.
+            None => self.is_valid(),
+        }
     }
 }
 
@@ -601,13 +642,15 @@ impl<D: BlockDevice> BlockStorage<D> {
                     if json_end == 0 {
                         continue;
                     }
-                    match serde_json::from_slice::<CommitRecord>(&block[..json_end]) {
+                    let raw = &block[..json_end];
+                    match serde_json::from_slice::<CommitRecord>(raw) {
                         Ok(record)
-                            if record.is_valid() && record.sequence > checkpoint_sequence =>
+                            if record.is_valid_on_disk(raw)
+                                && record.sequence > checkpoint_sequence =>
                         {
                             records.push(record)
                         }
-                        Ok(record) if record.is_valid() => {
+                        Ok(record) if record.is_valid_on_disk(raw) => {
                             // Already covered by the checkpoint.
                             let _ = record;
                         }
@@ -936,27 +979,31 @@ impl<D: BlockDevice> BlockStorage<D> {
             return Ok(());
         }
 
-        // The record goes down first: if it fails, nothing has changed and
-        // the blocks stay where they are.
+        // The record first. `landed` was assigned by the callee and then
+        // thrown away by the `?`, which is exactly the defect Phase 308
+        // fixed one function below and missed here: when the record's block
+        // write succeeded and the flush or superblock write failed, this
+        // returned Err with the release already on the platter. The caller
+        // was told the delete failed and the file was still listed -- and it
+        // was gone after the next reboot.
         let mut landed = false;
-        self.write_commit_record_with(
+        let written = self.write_commit_record_with(
             TransactionId::new(),
             Vec::new(),
             alloc::vec![object_id],
             Vec::new(),
             &mut landed,
-        )?;
+        );
 
-        for key in doomed {
-            if let Some(entry) = self.allocations.remove(&key) {
-                for block in entry.block_list() {
-                    if block < self.superblock.total_blocks {
-                        self.free_blocks.insert(block);
-                    }
-                }
+        // Apply whenever the record landed, so memory agrees with the disk
+        // rather than with the error being reported.
+        if landed {
+            for key in doomed {
+                self.free_allocation(&key);
             }
+            self.latest_versions.remove(&object_id);
         }
-        self.latest_versions.remove(&object_id);
+        written?;
 
         // A release consumes a ring slot without going through `commit`, so
         // without this a run of releases could wrap the ring past what the
@@ -1454,6 +1501,60 @@ mod tests {
     }
 
     #[test]
+    fn a_record_written_by_any_other_field_set_still_validates() {
+        // The checksum covers the record's own JSON with the checksum field
+        // zeroed. Reproducing those bytes by re-serialising works only while
+        // this build's fields are exactly the writer's -- so Phase 288's new
+        // field invalidated every record written before it, and Phase 307's
+        // fix for *that* restored compatibility with pre-288 builds while
+        // breaking it for the twenty phases in between, which wrote
+        // `"released":[]` on every record. Same silent loss, different
+        // twenty phases.
+        //
+        // Validating against the bytes as read works for any field set, so
+        // this is the last time.
+        let record = CommitRecord::new(
+            TransactionId::new(),
+            7,
+            alloc::vec![AllocationEntry {
+                object_id: ObjectId::from_serial(3),
+                version_id: VersionId::from_serial(4),
+                block_idx: 12,
+                size_bytes: 40,
+                extents: alloc::vec![(12, 1)],
+            }],
+        );
+
+        // What a build between Phases 291 and 306 wrote: the same record
+        // with an empty `released` that this build omits.
+        let mut zeroed = record.clone();
+        zeroed.checksum = 0;
+        let now = serde_json::to_string(&zeroed).unwrap();
+        let older = now.replace(",\"checksum\":0", ",\"released\":[],\"checksum\":0");
+        assert_ne!(older, now, "the older form must actually differ");
+        let crc = crc32fast::hash(older.as_bytes());
+        let on_disk = older.replace(",\"checksum\":0", &alloc::format!(",\"checksum\":{crc}"));
+
+        let parsed: CommitRecord = serde_json::from_str(&on_disk).unwrap();
+        assert!(
+            parsed.is_valid_on_disk(on_disk.as_bytes()),
+            "a record written by a build with a different field set was \
+             discarded as corrupt"
+        );
+
+        // A record this build wrote validates too, and a corrupted one does
+        // not.
+        let mine = serde_json::to_string(&record).unwrap();
+        assert!(record.is_valid_on_disk(mine.as_bytes()));
+        let tampered = mine.replace("\"block_idx\":12", "\"block_idx\":13");
+        let parsed: CommitRecord = serde_json::from_str(&tampered).unwrap();
+        assert!(
+            !parsed.is_valid_on_disk(tampered.as_bytes()),
+            "a tampered record must still be refused"
+        );
+    }
+
+    #[test]
     fn a_commit_record_with_no_new_fields_serialises_as_it_always_did() {
         // The checksum covers the serialised struct, so any field that shows
         // up in the JSON changes the checksum of *every* record an older
@@ -1732,6 +1833,47 @@ mod tests {
         assert!(
             data.iter().all(|&b| b == b'L'),
             "the live object's blocks were handed to a commit that had failed"
+        );
+    }
+
+    #[test]
+    fn a_delete_whose_record_landed_is_not_reported_as_failed_and_then_done() {
+        // `release_object` assigned `landed` and threw it away with the `?`
+        // -- the same defect Phase 308 fixed in `write_pending` and missed
+        // one function above. When the record's block write succeeded and
+        // the superblock write failed, this returned Err with the release
+        // already on the platter: the user was told the delete failed and
+        // the file was still listed, and it was gone after the next reboot.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+
+        let victim = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, victim, b"still wanted").unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        // Fail only the superblock, so the release record itself lands.
+        storage.device.set_policy(FailurePolicy::OnBlocks(vec![0]));
+        let reported = storage.release_object(victim);
+        storage.device.set_policy(FailurePolicy::Never);
+
+        let session_has_it = {
+            let tx = storage.begin_transaction().unwrap();
+            storage.read(&tx, victim).is_ok()
+        };
+        let device = storage.device;
+        let mut storage = BlockStorage::open(device).unwrap();
+        let tx = storage.begin_transaction().unwrap();
+        let after_reboot_has_it = storage.read(&tx, victim).is_ok();
+
+        assert_eq!(
+            session_has_it, after_reboot_has_it,
+            "the delete was reported as {} and the object is {} in this \
+             session but {} after a remount",
+            if reported.is_ok() { "done" } else { "failed" },
+            if session_has_it { "present" } else { "gone" },
+            if after_reboot_has_it { "present" } else { "gone" }
         );
     }
 
