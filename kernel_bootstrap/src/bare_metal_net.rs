@@ -396,8 +396,13 @@ impl NetStack {
         ) {
             Ok(len) => self.device.transmit(&self.tx_frame[..len]).is_ok(),
             Err(SendError::NeedArp) => {
+                // Clear after transmitting, or the next caller that reads
+                // `pending_frame_len` sends this frame's bytes again -- the
+                // TCP flush does exactly that, emitting the first 60 bytes
+                // of an unrelated frame.
                 let len = self.iface.pending_frame_len();
                 let _ = self.device.transmit(&self.tx_frame[..len]);
+                self.iface.clear_pending_frame();
                 false
             }
             Err(_) => false,
@@ -587,6 +592,7 @@ impl NetStack {
                         Err(SendError::NeedArp) => {
                             let n = self.iface.pending_frame_len();
                             let _ = self.device.transmit(&self.tx_frame[..n]);
+                            self.iface.clear_pending_frame();
                         }
                         Err(_) => {}
                     }
@@ -640,6 +646,16 @@ impl NetStack {
             },
         }
 
+        // Whose request this slot is serving. `http_progress` learned this
+        // in Phase 320 and `http_owed`, added by the same commit, did not --
+        // so a client that declared a body and left handed its unpaid
+        // remainder to whoever landed in the slot next, whose request was
+        // then drained as body bytes and never answered. Six of those and
+        // the server answers nobody.
+        if !self.progress_matches_connection(conn) {
+            self.http_owed[conn] = 0;
+        }
+
         // Not while a declared body is still owed. Whatever arrives next on
         // this connection is that body, not a request.
         if self.http_owed[conn] > 0 {
@@ -647,8 +663,24 @@ impl NetStack {
             let taken = self.http_drain(conn, owed);
             self.http_owed[conn] = owed - taken;
             if self.http_owed[conn] > 0 {
-                // Still owed: a client that stops mid-body holds the slot,
-                // so it is under the same deadline as an unfinished head.
+                // The peer has gone, so the rest of the body never arrives:
+                // let the slot go rather than holding it to a deadline that
+                // cannot be met. Without this the abandoned connection kept
+                // its own slot until the deadline, and six of them filled
+                // the port.
+                if self
+                    .iface
+                    .tcp()
+                    .connection(conn)
+                    .is_some_and(|c| c.peer_closed())
+                {
+                    self.http_owed[conn] = 0;
+                    self.clear_progress(conn);
+                    self.iface.tcp_mut().close(conn);
+                    return;
+                }
+                // Still owed and still connected: a client that stops
+                // mid-body is under the same deadline as an unfinished head.
                 self.enforce_progress_deadline(conn);
                 return;
             }
@@ -767,7 +799,15 @@ impl NetStack {
         // buffered, which for a `Content-Length` above the 2 KiB receive
         // buffer is every body.
         let drained = self.http_drain(conn, head_len);
-        self.http_owed[conn] = head_len.saturating_sub(drained);
+        // Only worth tracking when another request may follow. If this
+        // response closes the connection there is no next request to
+        // protect, and owing bytes on a closing connection kept its slot
+        // alive to no purpose.
+        self.http_owed[conn] = if keep_alive {
+            head_len.saturating_sub(drained)
+        } else {
+            0
+        };
         self.http_requests += 1;
         // This request finished; the next one starts its own clock.
         self.clear_progress(conn);
@@ -1013,6 +1053,27 @@ impl NetStack {
     /// Mark this connection as having made progress.
     fn clear_progress(&mut self, conn: usize) {
         self.progress[conn] = ConnProgress::default();
+        if let Some(connection) = self.iface.tcp().connection(conn) {
+            // Keep the identity, so per-slot state stays attributable to the
+            // connection it belongs to.
+            self.progress[conn].peer_port = connection.peer_port;
+            self.progress[conn].peer = connection.peer;
+        }
+    }
+
+    /// Whether the per-slot state belongs to the connection in that slot.
+    ///
+    /// Anything indexed by TCP slot has to ask this: the slot is reused as
+    /// soon as `accept` finds it Closed, and state left behind by the
+    /// previous occupant is state applied to a stranger.
+    fn progress_matches_connection(&self, conn: usize) -> bool {
+        match self.iface.tcp().connection(conn) {
+            Some(connection) => {
+                self.progress[conn].peer_port == connection.peer_port
+                    && self.progress[conn].peer == connection.peer
+            }
+            None => false,
+        }
     }
 
     /// Serve any HTTP connection with bytes already buffered.
@@ -1024,14 +1085,40 @@ impl NetStack {
     fn buffered_http(&mut self, status: SystemStatus, log: &mut impl Write) {
         let mut pending = [usize::MAX; net_stack::tcp::MAX_CONNECTIONS];
         let mut count = 0;
+        let mut finished = [usize::MAX; net_stack::tcp::MAX_CONNECTIONS];
+        let mut done = 0;
         for (index, conn) in self.iface.tcp().connections() {
-            if conn.local_port == HTTP_PORT && conn.readable() > 0 && count < pending.len() {
-                pending[count] = index;
-                count += 1;
+            if conn.local_port != HTTP_PORT {
+                continue;
+            }
+            if conn.readable() > 0 {
+                if count < pending.len() {
+                    pending[count] = index;
+                    count += 1;
+                }
+            } else if conn.peer_closed() && done < finished.len() {
+                // The peer has gone and there is nothing left to read, so
+                // nothing more will ever arrive on this connection. Closing
+                // our half is what releases the slot.
+                //
+                // `http_service` does this too, but only on paths that reach
+                // its `Wait` arm -- and the declared-body check added in
+                // Phase 320 returns before it, so a keep-alive request that
+                // promised a body and then hung up sat in CloseWait holding
+                // a slot until the idle reaper. Six of those fill the port.
+                // A sweep rather than an event, so no early return can skip
+                // it.
+                finished[done] = index;
+                done += 1;
             }
         }
         for &index in &pending[..count] {
             self.http_service(index, status, log);
+        }
+        for &index in &finished[..done] {
+            self.http_owed[index] = 0;
+            self.clear_progress(index);
+            self.iface.tcp_mut().close(index);
         }
     }
 
@@ -1226,6 +1313,7 @@ impl NetStack {
                 Err(SendError::NeedArp) => {
                     let len = self.iface.pending_frame_len();
                     let _ = self.device.transmit(&self.tx_frame[..len]);
+                    self.iface.clear_pending_frame();
                     let hop = self.iface.config().next_hop(target);
                     let start = now();
                     while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS
@@ -1307,7 +1395,9 @@ impl NetStack {
                 }
                 Err(SendError::NeedArp) => {
                     let len = self.iface.pending_frame_len();
-                    if self.device.transmit(&self.tx_frame[..len]).is_err() {
+                    let sent = self.device.transmit(&self.tx_frame[..len]);
+                    self.iface.clear_pending_frame();
+                    if sent.is_err() {
                         let _ = writeln!(out, "net: arp transmit failed");
                         return false;
                     }

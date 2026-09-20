@@ -88,6 +88,18 @@ impl FocusManager {
         }
     }
 
+    /// Longest audit trail kept. It records every focus transfer, so on a
+    /// long session it grew without bound on a machine that boots in 12 MiB.
+    const MAX_AUDIT_EVENTS: usize = 256;
+
+    /// Record an event, dropping the oldest once the trail is full.
+    fn record(&mut self, event: FocusEvent) {
+        if self.audit_trail.len() >= Self::MAX_AUDIT_EVENTS {
+            self.audit_trail.remove(0);
+        }
+        self.audit_trail.push(event);
+    }
+
     /// Requests focus for a subscription
     ///
     /// Pushes the subscription onto the focus stack and grants it focus.
@@ -106,19 +118,27 @@ impl FocusManager {
             }
 
             // Transfer focus
-            self.audit_trail.push(FocusEvent::Transferred {
+            self.record(FocusEvent::Transferred {
                 from_subscription_id: current.id,
                 to_subscription_id: cap.id,
                 timestamp_ns: timestamp,
             });
         } else {
             // Grant initial focus
-            self.audit_trail.push(FocusEvent::Granted {
+            self.record(FocusEvent::Granted {
                 subscription_id: cap.id,
                 timestamp_ns: timestamp,
             });
         }
 
+        // A subscription appears at most once. Only the *front* was checked
+        // before, so alternating focus between two components pushed a new
+        // entry every time -- and `remove_subscription` removes one
+        // position, so terminating both left the first one still on the
+        // stack and still `current_focus()`. Input then went to a component
+        // that had been closed. The stack also grew without bound: a
+        // thousand alternations left two thousand entries.
+        self.focus_stack.retain(|existing| existing.id != cap.id);
         self.focus_stack.push_front(cap);
         Ok(())
     }
@@ -131,7 +151,7 @@ impl FocusManager {
         let cap = self.focus_stack.pop_front().ok_or(FocusError::EmptyStack)?;
 
         let timestamp = self.next_timestamp();
-        self.audit_trail.push(FocusEvent::Released {
+        self.record(FocusEvent::Released {
             subscription_id: cap.id,
             timestamp_ns: timestamp,
         });
@@ -150,11 +170,14 @@ impl FocusManager {
             .position(|c| c.id == cap.id)
             .ok_or(FocusError::SubscriptionNotFound)?;
 
-        // Remove at that position
-        self.focus_stack.remove(pos);
+        // Remove at that position. `retain` in `request_focus` keeps this a
+        // single entry, but remove every match anyway: a stack built before
+        // that invariant existed must not leave one behind.
+        let _ = pos;
+        self.focus_stack.retain(|existing| existing.id != cap.id);
 
         let timestamp = self.next_timestamp();
-        self.audit_trail.push(FocusEvent::Released {
+        self.record(FocusEvent::Released {
             subscription_id: cap.id,
             timestamp_ns: timestamp,
         });
@@ -516,5 +539,59 @@ mod tests {
         manager.release_focus().unwrap();
         let target4 = manager.route_event(&event).unwrap();
         assert!(target4.is_none());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_entry_tests {
+    use super::*;
+    use core_types::TaskId;
+    use ipc::ChannelId;
+
+    fn cap(id: u64) -> InputSubscriptionCap {
+        InputSubscriptionCap::new(id, TaskId::new(), ChannelId::new())
+    }
+
+    #[test]
+    fn a_subscription_appears_on_the_stack_at_most_once() {
+        // Only the *front* was checked before pushing, so alternating focus
+        // between two components pushed a new entry every time -- and
+        // `remove_subscription` removed one position. Terminating both left
+        // the first still on the stack and still `current_focus()`, so the
+        // workspace resolved that subscription back to a component it had
+        // closed and delivered keystrokes to it.
+        let a = cap(1);
+        let b = cap(2);
+        let mut manager = FocusManager::new();
+        manager.request_focus(a).unwrap();
+        manager.request_focus(b).unwrap();
+        manager.request_focus(a).unwrap();
+        assert_eq!(manager.stack_depth(), 2, "A is on the stack twice");
+
+        manager.remove_subscription(&a).unwrap();
+        manager.remove_subscription(&b).unwrap();
+        assert!(
+            manager.current_focus().is_none(),
+            "a terminated component still holds focus"
+        );
+    }
+
+    #[test]
+    fn the_focus_stack_and_its_audit_trail_are_bounded() {
+        // A thousand alternations left two thousand stack entries and two
+        // thousand audit events, on a machine that boots in 12 MiB.
+        let a = cap(1);
+        let b = cap(2);
+        let mut manager = FocusManager::new();
+        for _ in 0..1_000 {
+            manager.request_focus(a).unwrap();
+            manager.request_focus(b).unwrap();
+        }
+        assert_eq!(manager.stack_depth(), 2);
+        assert!(
+            manager.audit_trail().len() <= FocusManager::MAX_AUDIT_EVENTS,
+            "the audit trail grew to {}",
+            manager.audit_trail().len()
+        );
     }
 }

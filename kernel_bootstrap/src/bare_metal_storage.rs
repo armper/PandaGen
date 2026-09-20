@@ -354,6 +354,7 @@ impl BareMetalFilesystem {
 
     /// Delete a file
     pub fn delete_file(&mut self, name: &str) -> Result<(), TransactionError> {
+        self.assert_boot_cpu();
         if let Some(entry) = self.fs.unlink(name, self.root_id, 0)? {
             // Deleting used to remove the name and keep the blocks.
             let _ = self.fs.release_object(entry.object_id);
@@ -363,6 +364,7 @@ impl BareMetalFilesystem {
 
     /// Read file by object ID
     pub fn read_file(&mut self, object_id: ObjectId) -> Result<Vec<u8>, TransactionError> {
+        self.assert_boot_cpu();
         self.fs.read_file(object_id)
     }
 
@@ -372,6 +374,7 @@ impl BareMetalFilesystem {
         _object_id: ObjectId,
         content: &[u8],
     ) -> Result<ObjectId, TransactionError> {
+        self.assert_boot_cpu();
         // For now, we need to replace the file entirely
         // In a full implementation, we'd update the version
         let file_id = self.fs.write_file(content)?;

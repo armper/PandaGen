@@ -268,6 +268,15 @@ impl Interface {
             // every port waited behind it.
             let mut peers = [[0u8; 4]; tcp::MAX_CONNECTIONS];
             let count = self.tcp.peers_with_work(&mut peers);
+            // Nothing to send. This used to fall through to `peers.first()?`
+            // on a *fixed-size array*, which is never `None`, so an idle
+            // stack built a broadcast ARP request for `next_hop([0,0,0,0])`
+            // on every single poll -- and Phase 319's other half then
+            // transmitted it. Phase 324 put that flush inside the ping and
+            // DHCP spin loops, turning it into a CPU-rate broadcast flood.
+            if count == 0 {
+                return None;
+            }
             let mut found = None;
             for peer in &peers[..count] {
                 let hop = self.config.next_hop(*peer);
@@ -287,7 +296,7 @@ impl Interface {
                 // Nobody is reachable. Ask about the first, and leave every
                 // connection's state untouched so nothing is spent.
                 None => {
-                    let hop = self.config.next_hop(*peers.first()?);
+                    let hop = self.config.next_hop(peers[0]);
                     return self.ask_for(hop, out);
                 }
             }
@@ -512,8 +521,9 @@ impl Interface {
         // Ours: our address, or (while unconfigured) anything unicast to our
         // MAC, which is how DHCP replies arrive.
         let broadcast = ip.dst == [255, 255, 255, 255];
-        let for_us =
-            ip.dst == self.config.ip || broadcast || (!self.config.is_configured() && eth_dst_is_ours);
+        let for_us = ip.dst == self.config.ip
+            || broadcast
+            || (!self.config.is_configured() && eth_dst_is_ours);
         if !for_us {
             return Event::None;
         }

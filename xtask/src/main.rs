@@ -38,8 +38,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// looking at the status, so this exists to make that mistake unavailable.
 /// Judges are discovered from the gauntlet directory rather than listed, so
 /// a new one is included the moment it is written.
+/// Held for the duration of a gauntlet run.
+///
+/// Every stage of the suite writes the same three paths -- `dist/pandagen.iso`,
+/// `dist/pandagen.disk` and the forwarded host ports -- so two runs at once
+/// silently corrupt one another: one reformats the disk the other is booting
+/// from, and the loser fails somewhere unrelated with an error that names
+/// none of this. A wrong answer from the verifier is worse than no answer,
+/// so refuse the second run instead of letting it interleave.
+struct GauntletLock(PathBuf);
+
+impl GauntletLock {
+    fn acquire(root: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = root.join("dist/.gauntlet.lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                let _ = writeln!(file, "{}", std::process::id());
+                Ok(Self(path))
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                let holder = fs::read_to_string(&path).unwrap_or_default();
+                Err(format!(
+                    "another gauntlet run is in progress (pid {}); \
+                     it owns dist/pandagen.iso, dist/pandagen.disk and the \
+                     forwarded ports. Wait for it, or remove {} if no run is \
+                     alive.",
+                    holder.trim(),
+                    path.display()
+                )
+                .into())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+impl Drop for GauntletLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
+    let _lock = GauntletLock::acquire(&root)?;
 
     println!("== cargo test --workspace");
     let status = Command::new("cargo")
@@ -219,8 +269,13 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "sleep:4,s,m,p,spc,r,u,n,spc,2,ret,sleep:3".to_string(),
         "--out".to_string(),
         "dist/qemu_smp2".to_string(),
+        // The banner alone is not an assertion: it is printed long before
+        // the command runs, so the step passed whether `smp run` answered
+        // or hung for its full timeout. Require the answer.
         "--expect-serial".to_string(),
         "PandaGen Workspace".to_string(),
+        "--expect-serial".to_string(),
+        "smp: no application processor free to run jobs".to_string(),
     ];
     cmd_qemu_script(args.into_iter())?;
 
@@ -929,7 +984,18 @@ fn cmd_qemu_script(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|err| {
+            // A bare `NotFound` here names neither qemu nor the file it could
+            // not find, and this is the one call in the run that can fail
+            // that way for three different reasons.
+            io::Error::other(format!(
+                "could not start qemu-system-x86_64 (machine {machine}, iso \
+                 {}, disk {}): {err}",
+                iso.display(),
+                disk.display()
+            ))
+        })?;
 
     std::thread::sleep(Duration::from_secs_f64(boot_wait));
 

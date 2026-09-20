@@ -422,3 +422,60 @@ fn rewriting_one_directory_does_not_consume_the_disk() {
     assert_eq!(names.len(), 1, "the directory holds one name throughout");
     assert_eq!(fs.read_file(names[0].1.object_id).unwrap(), b"small");
 }
+
+#[test]
+fn a_damaged_checkpoint_is_refused_rather_than_silently_losing_the_disk() {
+    // The commit ring is bounded, so everything older than it lives only in
+    // the checkpoint. `load_checkpoint` returned 0 for every failure --
+    // a read error, a bad CRC, an unparseable header -- which is
+    // indistinguishable from "there is no checkpoint". Recovery then
+    // replayed the ring alone, and the mount reported success with zero
+    // discarded transactions while most of the filesystem was gone.
+    let disk = SharedDisk::new(512);
+    let victim;
+    {
+        let mut fs = PersistentFilesystem::format_with_root(disk.clone(), "test", ROOT).unwrap();
+        victim = fs.write_file(b"the oldest thing here").unwrap();
+        fs.link("old.txt", ROOT, victim, ObjectKind::Blob, 0)
+            .unwrap();
+        // Push the ring well past the victim's record, so only the
+        // checkpoint still accounts for it.
+        for index in 0..120 {
+            let id = fs.write_file(format!("filler {index}").as_bytes()).unwrap();
+            fs.link(format!("f{index}"), ROOT, id, ObjectKind::Blob, 0)
+                .unwrap();
+        }
+    }
+
+    // Intact, it survives.
+    {
+        let mut fs = PersistentFilesystem::open(disk.clone(), ROOT).expect("must mount");
+        assert_eq!(fs.read_file(victim).unwrap(), b"the oldest thing here");
+    }
+
+    // Find the checkpoint header block and corrupt one byte of it.
+    let superblock = disk.read_raw(0);
+    let text =
+        String::from_utf8_lossy(&superblock[..superblock.iter().position(|&b| b == 0).unwrap()])
+            .to_string();
+    let start: u64 = text
+        .split("\"bitmap_start\":")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .expect("the superblock must name bitmap_start");
+    disk.poke(start, 0, b"X");
+
+    match PersistentFilesystem::open(disk, ROOT) {
+        Err(_) => {}
+        Ok(mut fs) => {
+            // Mounting anyway is only acceptable if nothing was lost.
+            assert_eq!(
+                fs.read_file(victim).unwrap_or_default(),
+                b"the oldest thing here",
+                "a damaged checkpoint block destroyed the filesystem and the \
+                 mount reported success"
+            );
+        }
+    }
+}

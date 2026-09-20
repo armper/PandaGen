@@ -289,6 +289,10 @@ pub struct BlockStorage<D: BlockDevice> {
     /// currently recorded on disk.
     serial_next: u64,
     serial_limit: u64,
+    /// Set when a checkpoint exists on disk and could not be read. The ring
+    /// alone covers only the last 256 commits, so this is not a degraded
+    /// mount -- it is most of the filesystem missing.
+    checkpoint_failed: bool,
     /// Map object versions to their block locations
     allocations: BTreeMap<(ObjectId, VersionId), AllocationEntry>,
     /// Track the latest version for each object
@@ -315,6 +319,10 @@ pub enum BlockStorageError {
     NoFreeSpace,
     ObjectNotFound,
     SerializationError,
+    /// A checkpoint exists on disk and could not be read. The commit ring
+    /// alone covers only the last few hundred commits, so mounting anyway
+    /// presents a filesystem that has silently lost everything older.
+    CheckpointUnreadable,
 }
 
 impl From<BlockError> for BlockStorageError {
@@ -392,6 +400,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             device,
             serial_next: superblock.next_serial,
             serial_limit: superblock.next_serial,
+            checkpoint_failed: false,
             superblock,
             allocations: BTreeMap::new(),
             latest_versions: BTreeMap::new(),
@@ -464,6 +473,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             device,
             serial_next: superblock.next_serial,
             serial_limit: superblock.next_serial,
+            checkpoint_failed: false,
             superblock,
             allocations: BTreeMap::new(),
             latest_versions: BTreeMap::new(),
@@ -474,7 +484,15 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         // Perform crash recovery
         let recovery_report = storage.perform_recovery()?;
+        let checkpoint_lost = !recovery_report.success;
         storage.recovery_report = Some(recovery_report);
+
+        // Refuse the mount rather than presenting a filesystem that has
+        // silently lost everything older than the commit ring. The caller
+        // can still read the report to say why.
+        if checkpoint_lost {
+            return Err(BlockStorageError::CheckpointUnreadable);
+        }
 
         Ok(storage)
     }
@@ -560,8 +578,24 @@ impl<D: BlockDevice> BlockStorage<D> {
         Ok(())
     }
 
+    /// Record that a checkpoint exists on disk and could not be read, and
+    /// return 0 so recovery falls back to the ring. The caller turns this
+    /// into a failed mount rather than a silent, successful-looking one.
+    fn checkpoint_unreadable(&mut self) -> u64 {
+        self.checkpoint_failed = true;
+        0
+    }
+
     /// Load the checkpoint, if there is an intact one. Returns the sequence
-    /// it covers.
+    /// it covers, and sets `checkpoint_failed` when there was one to load
+    /// and it could not be read.
+    ///
+    /// Every failure used to return 0 and look identical to "there is no
+    /// checkpoint": a read error, a bad CRC, an unparseable header. Recovery
+    /// then replayed the commit ring alone -- and the ring is 256 blocks, so
+    /// everything older than that is only in the checkpoint. A single
+    /// damaged block in the reserved region destroyed the filesystem, and
+    /// the mount reported `success: true` with `discarded_transactions: 0`.
     fn load_checkpoint(&mut self) -> u64 {
         if self.superblock.bitmap_blocks < 2 || self.superblock.checkpoint_sequence == 0 {
             return 0;
@@ -572,15 +606,15 @@ impl<D: BlockDevice> BlockStorage<D> {
             .read_block(self.superblock.bitmap_start, &mut block)
             .is_err()
         {
-            return 0;
+            return self.checkpoint_unreadable();
         }
         let json_end = block.iter().position(|&b| b == 0).unwrap_or(BLOCK_SIZE);
         let Ok(header) = serde_json::from_slice::<CheckpointHeader>(&block[..json_end]) else {
-            return 0;
+            return self.checkpoint_unreadable();
         };
         let payload_blocks = (header.bytes as usize).div_ceil(BLOCK_SIZE) as u64;
         if payload_blocks + 1 > self.superblock.bitmap_blocks {
-            return 0;
+            return self.checkpoint_unreadable();
         }
         let mut payload = Vec::with_capacity(header.bytes as usize);
         for index in 0..payload_blocks {
@@ -590,16 +624,16 @@ impl<D: BlockDevice> BlockStorage<D> {
                 .read_block(self.superblock.bitmap_start + 1 + index, &mut chunk)
                 .is_err()
             {
-                return 0;
+                return self.checkpoint_unreadable();
             }
             let take = (header.bytes as usize - payload.len()).min(BLOCK_SIZE);
             payload.extend_from_slice(&chunk[..take]);
         }
         if crc32fast::hash(&payload) != header.checksum {
-            return 0;
+            return self.checkpoint_unreadable();
         }
         let Ok(checkpoint) = serde_json::from_slice::<Checkpoint>(&payload) else {
-            return 0;
+            return self.checkpoint_unreadable();
         };
 
         for alloc in &checkpoint.allocations {
@@ -723,33 +757,34 @@ impl<D: BlockDevice> BlockStorage<D> {
         // ring and silently destroy an already-committed object.
         self.superblock.commit_sequence = self.superblock.commit_sequence.max(last_sequence);
 
+        // A checkpoint that exists and could not be read is not a degraded
+        // mount: the ring covers only the last few hundred commits, so
+        // everything older is gone. Reporting success for that is how a
+        // single damaged block in the reserved region destroyed a
+        // filesystem quietly.
+        let (success, error) = if self.checkpoint_failed {
+            (
+                false,
+                Some(alloc::string::String::from(
+                    "the checkpoint could not be read; everything older than \
+                     the commit ring is missing",
+                )),
+            )
+        } else {
+            (true, None)
+        };
+
         Ok(StorageRecoveryReport {
             recovered_commits,
             discarded_transactions,
             last_sequence,
-            success: true,
-            error: None,
+            success,
+            error,
         })
     }
 
     pub fn recovery_report(&self) -> Option<&StorageRecoveryReport> {
         self.recovery_report.as_ref()
-    }
-
-    /// Write commit record to commit log
-    fn write_commit_record(
-        &mut self,
-        transaction_id: TransactionId,
-        allocations: Vec<AllocationEntry>,
-    ) -> Result<(), BlockStorageError> {
-        let mut landed = false;
-        self.write_commit_record_with(
-            transaction_id,
-            allocations,
-            Vec::new(),
-            Vec::new(),
-            &mut landed,
-        )
     }
 
     /// Write one commit record.
@@ -776,13 +811,8 @@ impl<D: BlockDevice> BlockStorage<D> {
         let sequence = self.superblock.commit_sequence;
 
         // Create commit record with checksum
-        let record = CommitRecord::full(
-            transaction_id,
-            sequence,
-            allocations,
-            released,
-            superseded,
-        );
+        let record =
+            CommitRecord::full(transaction_id, sequence, allocations, released, superseded);
 
         // Serialize commit record
         let record_json =
@@ -1828,7 +1858,9 @@ mod tests {
                  object's blocks"
             );
         }
-        let version = storage.read(&tx, live).expect("the live object must be there");
+        let version = storage
+            .read(&tx, live)
+            .expect("the live object must be there");
         let data = storage.read_object_data(live, version).unwrap();
         assert!(
             data.iter().all(|&b| b == b'L'),
@@ -1868,12 +1900,17 @@ mod tests {
         let after_reboot_has_it = storage.read(&tx, victim).is_ok();
 
         assert_eq!(
-            session_has_it, after_reboot_has_it,
+            session_has_it,
+            after_reboot_has_it,
             "the delete was reported as {} and the object is {} in this \
              session but {} after a remount",
             if reported.is_ok() { "done" } else { "failed" },
             if session_has_it { "present" } else { "gone" },
-            if after_reboot_has_it { "present" } else { "gone" }
+            if after_reboot_has_it {
+                "present"
+            } else {
+                "gone"
+            }
         );
     }
 

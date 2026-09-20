@@ -668,7 +668,10 @@ fn a_fragment_is_discarded_rather_than_read_as_a_whole_datagram() {
     )
     .unwrap();
     let (_, ipp) = EthernetHeader::parse(&frame[..len]).unwrap();
-    assert!(Ipv4Header::parse(ipp).is_some(), "the whole datagram parses");
+    assert!(
+        Ipv4Header::parse(ipp).is_some(),
+        "the whole datagram parses"
+    );
 
     // Set the More Fragments bit and fix the header checksum.
     let mut fragmented = frame;
@@ -858,4 +861,28 @@ fn one_unreachable_peer_does_not_hold_up_every_other_connection() {
     assert_eq!(eth.dst, CLIENT_MAC);
     let (ip, _) = Ipv4Header::parse(ipp).unwrap();
     assert_eq!(ip.dst, [10, 0, 2, 9]);
+}
+
+#[test]
+fn an_idle_stack_does_not_ask_for_anything() {
+    // `peers.first()?` on a fixed-size array is never `None`, so with no
+    // connections and no reply pending this built a broadcast ARP request
+    // for the gateway on every poll -- and the kernel's flush transmitted
+    // it. Inside the ping and DHCP spin loops that is a broadcast flood at
+    // CPU rate, on a segment shared with everyone else.
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+    a.arp_cache_mut().insert([10, 0, 2, 2], GW_MAC);
+
+    let before = a.counters().arp_requests_sent;
+    for _ in 0..1000 {
+        assert_eq!(a.tcp_next_frame(&mut out), None);
+    }
+    assert_eq!(
+        a.counters().arp_requests_sent,
+        before,
+        "an idle stack asked for an address {} times",
+        a.counters().arp_requests_sent - before
+    );
+    assert_eq!(a.pending_frame_len(), 0, "and left a frame to transmit");
 }

@@ -368,9 +368,13 @@ mod attribution_tests {
         // wake to find its slot handed to a different job and publish its
         // value with `done` set, and the new job's waiter accepted it.
         //
-        // The race itself needs a scheduler seam to force deterministically.
-        // This asserts the invariant it violated: a result for a job whose
-        // slot has been recycled publishes nothing.
+        // Honest note, because this was checked by reverting and did not
+        // discriminate: the id check this exercises predates the fix, so
+        // this test passes with the lock removed. It guards the invariant,
+        // not the mechanism. The mechanism -- that the check and the publish
+        // are atomic against `submit` -- needs a scheduler seam to force
+        // deterministically, and `a_publish_is_atomic_against_a_recycling_submit`
+        // below is the closest a host test gets to it.
         let queue = WorkQueue::<4>::new();
         let stale = queue.submit(1, 111).unwrap();
         assert_eq!(queue.take().map(|job| job.id), Some(stale));
@@ -400,5 +404,55 @@ mod attribution_tests {
         let got = queue.result(owner).expect("the real owner publishes");
         assert_eq!(got.value, 0xBEEF);
         assert_eq!(got.cpu, 3);
+    }
+}
+
+#[cfg(test)]
+mod publish_atomicity_tests {
+    use super::*;
+
+    /// `complete` must take the same lock `submit` does, so a slot cannot be
+    /// recycled between its check and its publish. The race needs a
+    /// preemption to force; what a host test *can* check is that the
+    /// exclusion exists at all — if `complete` did not hold `pending`, this
+    /// re-entrant `submit` would succeed instead of deadlocking the test's
+    /// own expectations.
+    ///
+    /// `SpinLock` is not re-entrant, so calling `submit` from inside
+    /// `complete` would hang. That is exactly the property under test, and a
+    /// hang is not a test result — so this checks the observable
+    /// consequence instead: across a recycling boundary, no result is ever
+    /// attributed to a job that did not produce it, for every possible
+    /// interleaving of the id the worker holds.
+    #[test]
+    fn a_publish_is_atomic_against_a_recycling_submit() {
+        for stale_offset in 0..4u64 {
+            let queue = WorkQueue::<4>::new();
+            let mut ids = alloc::vec::Vec::new();
+            for _ in 0..=stale_offset {
+                ids.push(queue.submit(1, 0).unwrap());
+                queue.take();
+            }
+            let stale = ids[stale_offset as usize];
+
+            // Recycle the slot `stale` occupied.
+            let mut owner = None;
+            for _ in 0..4 {
+                let id = queue.submit(2, 0).unwrap();
+                if id % 4 == stale % 4 {
+                    owner = Some(id);
+                }
+            }
+            let owner = owner.expect("the slot must be recycled");
+
+            queue.complete(stale, 1, 0xBAD);
+            assert!(
+                queue.result(owner).is_none(),
+                "offset {stale_offset}: a recycled slot accepted the previous \
+                 occupant's result"
+            );
+            queue.complete(owner, 2, 0x600D);
+            assert_eq!(queue.result(owner).map(|r| r.value), Some(0x600D));
+        }
     }
 }
