@@ -154,6 +154,27 @@ pub fn diff_scenes(prev: &DesktopScene, next: &DesktopScene) -> SceneDelta {
     }
 }
 
+/// Whether any two windows in `scene` share a view id.
+///
+/// A delta identifies windows by view id -- `changed` updates the first
+/// match and `removed` drops every match -- so a scene with a repeated id
+/// cannot be described by one. Encoding it anyway silently produced a
+/// *different* scene at the viewer, and since every later delta builds on
+/// that, the stream never recovers.
+fn has_duplicate_view_ids(scene: &DesktopScene) -> bool {
+    // `ViewId` is not `Ord`, and the window count is small, so compare the
+    // uuids directly rather than add an ordering to the wire type for this.
+    let mut seen = alloc::vec::Vec::new();
+    for window in &scene.windows {
+        let id = window.frame.view_id.as_uuid();
+        if seen.contains(&id) {
+            return true;
+        }
+        seen.push(id);
+    }
+    false
+}
+
 /// Apply `delta` to `base`, producing the next scene. Changed windows keep
 /// their position in the list when they already exist, so ordering stays
 /// stable for equal z-keys.
@@ -207,6 +228,12 @@ impl SceneEncoder {
             Some(last) => {
                 last.size != scene.size
                     || (self.keyframe_interval > 0 && self.since_keyframe >= self.keyframe_interval)
+                    // A repeated view id cannot be expressed as a delta, so
+                    // send the scene itself rather than something the viewer
+                    // will decode into a different picture and then build
+                    // every later frame on.
+                    || has_duplicate_view_ids(last)
+                    || has_duplicate_view_ids(scene)
             }
         };
         let update = if need_keyframe {
@@ -589,5 +616,86 @@ mod tests {
         assert_eq!(again, scenes);
         assert_eq!(replay.position(), live.len());
         assert!(replay.step().is_none());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_view_id_tests {
+    use super::*;
+    use crate::{DesktopWindow, SurfaceRect, SurfaceSize};
+    use view_types::{ViewContent, ViewFrame, ViewId, ViewKind};
+
+    fn window(view_id: ViewId, line: &str) -> DesktopWindow {
+        let frame = ViewFrame::new(
+            view_id,
+            ViewKind::TextBuffer,
+            1,
+            ViewContent::text_buffer(vec![line.to_string()]),
+            0,
+        );
+        DesktopWindow::new(frame, SurfaceRect::new(0, 0, 10, 5))
+    }
+
+    fn scene(windows: Vec<DesktopWindow>) -> DesktopScene {
+        DesktopScene {
+            size: SurfaceSize::new(40, 12),
+            windows,
+            cursor: None,
+            theme: None,
+            damage: None,
+        }
+    }
+
+    /// A scene arriving over the wire is not trusted to have distinct view
+    /// ids, and `apply_delta` keys on them: `removed` drops every window with
+    /// a matching id while `changed` updates only the first. Whatever the
+    /// decoder does with a duplicate, it must be something stable -- a scene
+    /// that decodes differently depending on how many copies of an id it
+    /// already holds makes every later delta wrong too.
+    #[test]
+    fn a_duplicate_view_id_does_not_desynchronise_the_stream() {
+        let shared = ViewId::new();
+        let base = scene(vec![window(shared, "first"), window(shared, "second")]);
+
+        let mut next = base.clone();
+        next.windows[0] = window(shared, "updated");
+
+        // Through the real encoder and decoder, which is the path a viewer
+        // is on.
+        let mut encoder = SceneEncoder::new(0);
+        let mut decoder = SceneDecoder::new();
+        decoder.apply(&encoder.encode(&base)).unwrap();
+        let applied = decoder.apply(&encoder.encode(&next)).unwrap().clone();
+
+        // Whatever the rule is, applying the encoder's own delta to the
+        // encoder's own base has to reproduce the scene the encoder was
+        // describing. Otherwise the viewer and the producer disagree from
+        // here on, and no later delta can repair it.
+        assert_eq!(
+            applied.windows.len(),
+            next.windows.len(),
+            "the window count changed: base {:?}, applied {:?}",
+            next.windows
+                .iter()
+                .map(|w| &w.frame.content)
+                .collect::<Vec<_>>(),
+            applied
+                .windows
+                .iter()
+                .map(|w| &w.frame.content)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            applied
+                .windows
+                .iter()
+                .map(|w| &w.frame.content)
+                .collect::<Vec<_>>(),
+            next.windows
+                .iter()
+                .map(|w| &w.frame.content)
+                .collect::<Vec<_>>(),
+            "the decoded scene is not the scene the delta described"
+        );
     }
 }

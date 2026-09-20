@@ -201,6 +201,8 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | R6-21 | graphics_rasterizer | `fill_rounded_rect` and `draw_rounded_border` looped `rect.height` times whatever the target's height was, and `DrawOp` carries height as a `u32` | FIXED (331) |
 | R6-22 | services_gui_host | A keyframe carried the producer's "what changed since the last frame" as its damage. A viewer honouring it repaints one rectangle of an otherwise blank surface | FIXED (331) |
 | R6-23 | services_remote_ui_host | `add_sink` did not force a keyframe, so a viewer that joined mid-stream decoded deltas against a scene it had never seen -- for up to `DEFAULT_KEYFRAME_INTERVAL` frames. `request_keyframe`'s own doc says "(a viewer joined)" and nothing called it there | FIXED (331) |
+| R6-24 | services_workspace_manager | Two notions of focus: `window_layout.focused_tile` draws the ring, `focus_manager` delivers keys. Closing the focused component moved each independently and they landed on different components -- the user saw a highlighted window and typed into another | FIXED (332) |
+| R6-25 | services_gui_host | A scene with a repeated view id cannot be expressed as a delta (`changed` updates the first match, `removed` drops every match). Encoding one anyway produced a *different* scene at the viewer -- the update was lost and one window took another's content -- and every later delta built on that | FIXED (332) |
 
 ## Rejected claims
 
@@ -336,7 +338,7 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Round 6 is in progress.** Twenty-five findings so far, Phases 326-331. Its
+**Round 6 is in progress.** Twenty-seven findings so far, Phases 326-332. Its
 critics were the `services_*` crates round 5 did not reach, a third
 regression pass, and the harness itself.
 
@@ -350,13 +352,13 @@ regression pass, and the harness itself.
 - **R6-18** -- `contract_tests` cannot detect drift. Its docs now say so in
   the first line. It becomes a real drift detector the moment a service
   depends on those types and dispatches on those action strings.
-- Compositor: four of the six are closed (R6-20 .. R6-23). Left: keyboard
-  focus reconciled only on some paths, and duplicate/unstable view ids.
-  `focus_component` does update both the focus manager and the layout, so
-  the obvious version of the focus claim does not reproduce; what remains is
-  `split_focused_tile` swallowing a policy denial with `let _ =` after the
-  layout has already moved, and `normalize()` moving `focused_tile` with no
-  focus-manager update at all. Not yet reproduced as a failing test.
+- Compositor: **all six are closed** (R6-20 .. R6-25). Note for a later
+  round: the *unstable* half of the view-id finding is real but was not
+  judged a defect. Restoring a workspace from a snapshot mints fresh view
+  ids and remaps frames onto them, so every window looks new to a remote
+  viewer. Nothing today keys per-view state on the id across a restore, so
+  there is no consequence to point at -- but anything that starts to will
+  find this waiting.
 
 **Earlier candidates, still unscoped:** a third regression pass (it
 has been the most valuable role every time); the compositor and

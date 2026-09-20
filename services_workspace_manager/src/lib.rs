@@ -1918,6 +1918,34 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// Makes the focus ring and the keyboard agree.
+    ///
+    /// There are two notions of focus. `window_layout.focused_tile` decides
+    /// which window is *drawn* with the ring; `focus_manager` decides which
+    /// component *receives keys*. `focus_component` sets both, which is why
+    /// the ordinary path is fine -- but closing a component moves each of
+    /// them independently. The focus manager drops the dead subscription and
+    /// falls back to the previous holder on its stack; the layout removes
+    /// the component and picks a tile by index. They landed on different
+    /// components, so the user saw a highlighted window and typed into a
+    /// different one.
+    ///
+    /// The focus manager wins where it can, because its stack is the user's
+    /// own focus history rather than an index that happened to survive. When
+    /// it holds nothing -- the last focusable component closed -- the layout's
+    /// choice is adopted instead.
+    fn reconcile_focus(&mut self) {
+        if let Some(component_id) = self.get_focused_component() {
+            self.window_layout.set_focused_component(component_id);
+            return;
+        }
+        if let Some(component_id) = self.window_layout.focused_active_component() {
+            if self.is_focusable_running_component(component_id) {
+                let _ = self.focus_component(component_id);
+            }
+        }
+    }
+
     fn is_focusable_running_component(&self, component_id: ComponentId) -> bool {
         self.components
             .get(&component_id)
@@ -2168,6 +2196,7 @@ impl WorkspaceManager {
         // Clean up component instance
         self.component_instances.remove(&component_id);
         self.window_layout.remove_component(component_id);
+        self.reconcile_focus();
 
         // Record event
         let timestamp = self.next_timestamp();
@@ -6215,6 +6244,101 @@ impl<P: WorkspacePlatform> WorkspaceRuntime<P> {
                         .set_last_action(format!("Boot profile (kiosk) failed: {}", err)),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_agreement_tests {
+    use super::*;
+    use identity::{IdentityKind, IdentityMetadata, TrustDomain};
+
+    fn workspace() -> WorkspaceManager {
+        WorkspaceManager::new(IdentityMetadata::new(
+            IdentityKind::Service,
+            TrustDomain::core(),
+            "focus-agreement",
+            0,
+        ))
+    }
+
+    fn launch(manager: &mut WorkspaceManager, name: &str) -> ComponentId {
+        manager
+            .launch_component(LaunchConfig::new(
+                ComponentType::Editor,
+                name,
+                IdentityKind::Component,
+                TrustDomain::user(),
+            ))
+            .unwrap()
+    }
+
+    /// The invariant the two focus notions must keep: the tile drawn with the
+    /// focus ring holds the component that keys are delivered to.
+    ///
+    /// `window_layout.focused_tile` decides what is *drawn* focused;
+    /// `focus_manager` decides what *receives keys*. They are separate, and
+    /// `focus_component` is the only place that sets both.
+    fn drawn_focus_matches_key_focus(manager: &WorkspaceManager, after: &str) {
+        let snapshot = manager.window_layout_snapshot();
+        let drawn = snapshot
+            .tiles
+            .iter()
+            .find(|tile| tile.is_focused)
+            .and_then(|tile| tile.active_component);
+        let keys = manager.get_focused_component();
+        match (drawn, keys) {
+            (Some(drawn), Some(keys)) => assert_eq!(
+                drawn, keys,
+                "after {after}: the focus ring is on {drawn} but keys go to {keys}"
+            ),
+            (drawn, keys) => panic!(
+                "after {after}: drawn focus {drawn:?}, key focus {keys:?} -- one \
+                 of them has no component at all"
+            ),
+        }
+    }
+
+    #[test]
+    fn closing_the_focused_component_leaves_the_ring_where_the_keys_go() {
+        let mut manager = workspace();
+        let first = launch(&mut manager, "first");
+        let second = launch(&mut manager, "second");
+        let third = launch(&mut manager, "third");
+
+        manager.split_focused_tile(SplitAxis::Vertical).unwrap();
+        manager.focus_component(second).unwrap();
+        drawn_focus_matches_key_focus(&manager, "focusing the second component");
+
+        manager
+            .terminate_component_forced(second, ExitReason::Normal)
+            .unwrap();
+        drawn_focus_matches_key_focus(&manager, "closing the focused component");
+
+        manager
+            .terminate_component_forced(third, ExitReason::Normal)
+            .unwrap();
+        drawn_focus_matches_key_focus(&manager, "closing a second component");
+
+        assert!(manager.get_component(first).is_some());
+    }
+
+    /// Splitting moves the layout's focus before asking the focus manager
+    /// and swallows the answer with `let _ =`, which looked like the same
+    /// defect. Honest note, because this was checked by reverting: it passes
+    /// with and without the fix -- `split_focused_tile` re-focuses through
+    /// `focus_component`, which sets both. It stays as a regression guard on
+    /// a path that is one swallowed error away from the bug above.
+    #[test]
+    fn splitting_leaves_the_ring_where_the_keys_go() {
+        let mut manager = workspace();
+        let first = launch(&mut manager, "first");
+        manager.focus_component(first).unwrap();
+        for axis in [SplitAxis::Vertical, SplitAxis::Horizontal] {
+            let extra = launch(&mut manager, "extra");
+            manager.focus_component(extra).unwrap();
+            manager.split_focused_tile(axis).unwrap();
+            drawn_focus_matches_key_focus(&manager, "splitting the focused tile");
         }
     }
 }
