@@ -1,6 +1,8 @@
 //! Storage service contract tests
 //!
-//! These tests define the stable contract for the Storage service.
+//! The proposed message shape for the Storage service. Nothing dispatches
+//! on these yet, so these tests cannot detect drift -- see the crate
+//! docs in `lib.rs`.
 
 use ipc::SchemaVersion;
 use serde::{Deserialize, Serialize};

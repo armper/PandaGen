@@ -5,12 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
-[dependencies]
-core_types = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
+# No library dependencies: the library is documentation. See src/lib.rs.
 
 [dev-dependencies]
+core_types = { workspace = true }
 sim_kernel = { workspace = true }
 kernel_api = { workspace = true }
 ipc = { workspace = true }

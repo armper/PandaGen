@@ -188,6 +188,15 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | R6-10 | workspace_manager/boot_profile | The same defect for the stored boot profile, found by grepping for R6-9's siblings | FIXED (327) |
 | G5 | harness | Two assertions that passed with their fix reverted: the `--smp 2` case asserted only a banner printed before the command ran, and the work-queue test asserted an id check that predates the fix | FIXED (326) |
 | G6 | harness | Two gauntlet runs at once silently corrupt each other -- same ISO, same disk, same ports -- and the loser failed with a bare `NotFound` naming none of it. A verifier that can produce a wrong answer is worse than none | FIXED (326) |
+| R6-11 | sim_kernel/scheduler | A late periodic task was caught up one period at a time, one audit event each: a task with `period_ticks == 1` a million ticks behind spent tens of ms and a million allocations, long enough to fall further behind | FIXED (328) |
+| R6-12 | sim_kernel/scheduler | The audit log had no bound at all -- one entry per task selection, for as long as the machine stays up | FIXED (328) |
+| R6-13 | sim_kernel/syscall_gate | The gate took `caller` on every syscall and only wrote it down. An identity the kernel had cancelled kept making syscalls, each recorded `Invoked` then `Completed`. `default_trap` carried the comment "All syscalls must go through the gate" directly above a direct call into the kernel | FIXED (328) |
+| R6-14 | kernel_api/time | `Instant + Duration` and `Duration + Duration` were unchecked: wrapping in the optimized build the kernel ships, so a deadline could land before `now`. `Duration::from_secs(u64::MAX)` wrapped to a few hundred ms. Subtraction already saturated, which hid the asymmetry | FIXED (329) |
+| R6-15 | services_notification | Expiry *deleted*: a toast's TTL removed it from the history that `get_recent_notifications` reads, so an error not read within six seconds left no trace | FIXED (329) |
+| R6-16 | sim_kernel/scheduler | `max_steps_per_tick` was documented as a guard against infinite loops, defaulted to `Some(1000)`, was set at ten call sites and read by nothing | FIXED (329) |
+| R6-17 | formal_verification | `src/lib.rs` -- nine `verify_*` functions and a report type -- was called by nothing, including this crate's own tests. The real model checking is in `tests/` and is much stronger | FIXED (330) |
+| R6-18 | contract_tests | "Golden" contract tests that depend on none of the services they name: every payload type is declared in the crate itself and round-tripped against itself, and the action strings appear nowhere else in the tree. Cannot fail when a service changes | DOCUMENTED (330) -- not fixable until a service dispatches on them |
+| R6-19 | services_pipeline_executor | No pipeline can complete a single stage against the real kernel: a channel is one queue, so `execute_stage_once` sends its request and receives that same request back. Every passing test in the crate passes because its mock fabricates the reply | OPEN -- reproduced in `tests/against_the_real_kernel.rs`; the error is now truthful, but closing it needs a service-side dispatch loop |
 
 ## Rejected claims
 
@@ -323,22 +332,24 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Round 6 is in progress.** Twelve findings so far, Phases 326-327. Its
+**Round 6 is in progress.** Twenty-one findings so far, Phases 326-330. Its
 critics were the `services_*` crates round 5 did not reach, a third
 regression pass, and the harness itself.
 
 **Still open from round 6's critics, not yet fixed:**
 
-- Scheduler unbounded deadline catch-up (`sim_kernel/src/scheduler.rs:669`):
-  a late deadline replays every missed tick, 1M audit events in 27 ms.
-- `SyscallGate` validates nothing; `contract_tests` depends on nothing it
-  tests; `formal_verification/src/lib.rs` is dead code;
-  `PipelineExecutor::execute` cannot work against the real kernel;
-  `max_steps_per_tick` is a dead guard; `kernel_api` time overflow;
-  notification expiry deletes history.
+- **R6-19** -- the pipeline executor cannot complete a stage against the
+  real kernel. Reproduced and committed as a passing test that asserts the
+  *failure*; the error now says what happened instead of blaming a handler
+  that does not exist. Closing it properly needs a service-side dispatch
+  loop, which is a feature, not a fix.
+- **R6-18** -- `contract_tests` cannot detect drift. Its docs now say so in
+  the first line. It becomes a real drift detector the moment a service
+  depends on those types and dispatches on those action strings.
 - Compositor: unclamped `DrawOp` geometry, a keyframe that still carries
   damage, `add_sink` not forcing a keyframe, keyboard focus reconciled only
-  on pointer events, duplicate and unstable view ids.
+  on pointer events, duplicate and unstable view ids. **This is the largest
+  untouched block left in round 6.**
 
 **Earlier candidates, still unscoped:** a third regression pass (it
 has been the most valuable role every time); the compositor and

@@ -1,6 +1,8 @@
 //! Process Manager service contract tests
 //!
-//! These tests define the stable contract for the ProcessManager service.
+//! The proposed message shape for the ProcessManager service. Nothing dispatches
+//! on these yet, so these tests cannot detect drift -- see the crate
+//! docs in `lib.rs`.
 
 use core_types::ServiceId;
 use ipc::SchemaVersion;

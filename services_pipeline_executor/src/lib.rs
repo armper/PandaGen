@@ -628,6 +628,21 @@ impl PipelineExecutor {
             ExecutorError::KernelError(format!("Failed to receive stage response: {}", e))
         })?;
 
+        // A channel is one queue, in both directions. With no handler running
+        // to consume the request, a receive on the same channel pops the
+        // request back -- which the correlation check below catches, but
+        // reports as a protocol violation by a handler that does not exist.
+        // Say what actually happened.
+        if response.id == request_id {
+            return Err(ExecutorError::HandlerNotFound(format!(
+                "{}: the request came back off the channel unread, so nothing \
+                 is serving this stage. A stage needs a handler consuming the \
+                 channel and replying with a correlation id; the kernel does \
+                 not run one.",
+                stage.handler
+            )));
+        }
+
         if response.correlation_id != Some(request_id) {
             return Err(ExecutorError::KernelError(format!(
                 "Stage response correlation mismatch: expected {}, got {:?}",

@@ -16,3 +16,9 @@ identity = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# So at least one test drives the executor against the real kernel rather
+# than a mock that always answers.
+sim_kernel = { workspace = true }
+lifecycle = { workspace = true }

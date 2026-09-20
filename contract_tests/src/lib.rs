@@ -1,21 +1,31 @@
-//! # Service Contract Tests
+//! # Service Contract Schemas
 //!
-//! This crate provides "golden" tests for service contracts to ensure
-//! they don't drift accidentally over time.
+//! **These tests cannot fail when a service changes.** Read that before
+//! treating anything here as coverage.
 //!
-//! ## Philosophy
+//! The crate depends on `core_types`, `ipc`, `serde` and `serde_json` -- and
+//! on none of the services whose contracts it names. Every payload type in
+//! these modules (`CreateObjectRequest`, `RouteIntentRequest`, and the rest)
+//! is declared here, in this crate, and the tests serialize those local
+//! declarations and deserialize them back. They assert that this crate
+//! agrees with itself, which it always will.
 //!
-//! - **Explicit over implicit**: Service contracts are written as code
-//! - **Testability first**: Contract tests fail when interfaces change
-//! - **Mechanism not policy**: Define what must be stable, not how to use it
+//! The action identifiers have the same problem from the other end:
+//! `"storage.create_object"` and its siblings appear nowhere else in the
+//! workspace. No service dispatches on them, because the services are called
+//! through their Rust APIs rather than through message envelopes. There is
+//! no wire contract for these to be the golden copy of.
 //!
-//! ## Structure
+//! So what this crate is, honestly, is a written-down proposal for a
+//! message interface that does not exist yet, plus round-trip tests that
+//! confirm the proposal is serializable. That is worth keeping -- it is the
+//! clearest statement of the intended shape anywhere in the tree -- but it
+//! is not a drift detector, and the previous version of this comment
+//! ("Contract tests fail when interfaces change") said it was.
 //!
-//! Each service has a module with contract tests that verify:
-//! - Message envelope structure
-//! - Action identifiers
-//! - Schema versions
-//! - Payload field contracts
+//! To make it one: have a service depend on these types and dispatch on
+//! these action strings, then the tests start meaning something. Until then,
+//! changing `services_storage` will not turn anything here red.
 
 pub mod intent_router;
 pub mod process_manager;
