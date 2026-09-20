@@ -282,6 +282,8 @@ pub struct EditorState {
     buffer: TextBuffer,
     cursor: Cursor,
     dirty: bool,
+    /// The text as it stands on disk, so undoing back to it counts as clean.
+    saved_text: String,
     command_buffer: String,
     status_message: String,
     document_label: Option<String>,
@@ -306,6 +308,7 @@ impl EditorState {
             buffer: TextBuffer::new(),
             cursor: Cursor::new(),
             dirty: false,
+            saved_text: String::new(),
             command_buffer: String::new(),
             status_message: String::new(),
             document_label: None,
@@ -352,8 +355,25 @@ impl EditorState {
         self.dirty
     }
 
+    /// Whether the buffer differs from what is on disk.
+    ///
+    /// `undo` and `redo` marked it dirty unconditionally. Phase 304 fixed
+    /// that in `editor_core` and left it here -- and this is the editor the
+    /// workspace hosts, whose dirty flag Phase 300 uses to refuse closing a
+    /// window. Open a file, press `x`, press `u`: the buffer is character
+    /// for character the file on disk, and the window cannot be closed and
+    /// has nothing to save.
+    fn recompute_dirty(&mut self) {
+        self.dirty = self.buffer.as_string() != self.saved_text;
+    }
+
     pub fn set_dirty(&mut self, dirty: bool) {
         self.dirty = dirty;
+        if !dirty {
+            // Saving makes the buffer the new baseline, so a later undo can
+            // tell whether it has come back to it.
+            self.saved_text = self.buffer.as_string();
+        }
     }
 
     pub fn mark_dirty(&mut self) {
@@ -438,6 +458,7 @@ impl EditorState {
     /// user had only looked at.
     pub fn load_content(&mut self, content: String) {
         self.buffer = TextBuffer::from_string(content);
+        self.saved_text = self.buffer.as_string();
         self.cursor = Cursor::new();
         self.dirty = false;
         self.undo_stack.clear();
@@ -582,7 +603,7 @@ impl EditorState {
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;
-            self.mark_dirty();
+            self.recompute_dirty();
             true
         } else {
             false
@@ -602,7 +623,7 @@ impl EditorState {
             // Restore snapshot
             self.buffer = snapshot.buffer;
             self.cursor = snapshot.cursor;
-            self.mark_dirty();
+            self.recompute_dirty();
             true
         } else {
             false

@@ -251,6 +251,120 @@ pub mod sha256 {
     }
 }
 
+/// One replay window per caller.
+///
+/// A single shared window has two failures that a per-caller one does not.
+/// The floor is the oldest nonce still remembered, and nonces carry the
+/// *sender's* clock -- so a second host whose clock is a few seconds behind
+/// is refused outright, and the kernel logs it as a replay, indistinguishable
+/// from an attack. Worse, one authenticated caller could fill the window with
+/// far-future nonces and raise the floor past every real clock, locking every
+/// other caller out for the life of the boot.
+///
+/// Separated per caller, each only has to be monotonic with respect to
+/// itself, which it trivially is, and no caller can affect another. Callers
+/// are identified by a hash of their name; a collision merges two windows,
+/// which only makes the floor stricter for one legitimate caller and is
+/// never a way in. The table is small and evicts the least recently used
+/// caller -- which only somebody who already holds the master secret can
+/// provoke, since every entry needs a valid signature to be created.
+pub struct CallerReplayGuard<const CALLERS: usize, const N: usize> {
+    slots: [CallerSlot<N>; CALLERS],
+    clock: u64,
+}
+
+struct CallerSlot<const N: usize> {
+    /// Hash of the caller name, or 0 for an unused slot.
+    name: u64,
+    /// When this slot was last used, for eviction.
+    used: u64,
+    guard: ReplayGuard<N>,
+}
+
+impl<const N: usize> CallerSlot<N> {
+    const fn new() -> Self {
+        Self {
+            name: 0,
+            used: 0,
+            guard: ReplayGuard::new(),
+        }
+    }
+}
+
+/// FNV-1a, so a caller name becomes a slot key without allocating.
+fn caller_hash(caller: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in caller.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // 0 marks an unused slot.
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+impl<const CALLERS: usize, const N: usize> CallerReplayGuard<CALLERS, N> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { CallerSlot::new() }; CALLERS],
+            clock: 0,
+        }
+    }
+
+    fn slot_for(&mut self, caller: &str) -> &mut CallerSlot<N> {
+        let name = caller_hash(caller);
+        self.clock += 1;
+        let clock = self.clock;
+
+        if let Some(index) = self.slots.iter().position(|slot| slot.name == name) {
+            self.slots[index].used = clock;
+            return &mut self.slots[index];
+        }
+        // An unused slot, or the least recently used one.
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| slot.name == 0)
+            .unwrap_or_else(|| {
+                let mut oldest = 0usize;
+                for (i, slot) in self.slots.iter().enumerate() {
+                    if slot.used < self.slots[oldest].used {
+                        oldest = i;
+                    }
+                }
+                oldest
+            });
+        self.slots[index] = CallerSlot::new();
+        self.slots[index].name = name;
+        self.slots[index].used = clock;
+        &mut self.slots[index]
+    }
+
+    /// Accept an ordered nonce from `caller`.
+    pub fn accept_key(&mut self, caller: &str, key: u128) -> bool {
+        self.slot_for(caller).guard.accept_key(key)
+    }
+
+    /// Accept an ordered message id from `caller`.
+    pub fn accept_ordered(&mut self, caller: &str, id: MessageId) -> bool {
+        self.slot_for(caller).guard.accept_ordered(id)
+    }
+
+    /// How many callers currently have a window.
+    pub fn tracked_callers(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.name != 0).count()
+    }
+}
+
+impl<const CALLERS: usize, const N: usize> Default for CallerReplayGuard<CALLERS, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Remembers the last `N` accepted message ids so a captured, correctly
 /// signed request cannot simply be sent again.
 ///
@@ -276,8 +390,6 @@ pub struct ReplayGuard<const N: usize> {
     seen: [u128; N],
     next: usize,
     len: usize,
-    /// Highest nonce accepted through `accept_key`.
-    high: u128,
 }
 
 impl<const N: usize> ReplayGuard<N> {
@@ -286,7 +398,6 @@ impl<const N: usize> ReplayGuard<N> {
             seen: [0; N],
             next: 0,
             len: 0,
-            high: 0,
         }
     }
 
@@ -333,13 +444,7 @@ impl<const N: usize> ReplayGuard<N> {
                 return false;
             }
         }
-        if !self.record_key(key) {
-            return false;
-        }
-        if key > self.high {
-            self.high = key;
-        }
-        true
+        self.record_key(key)
     }
 
     /// Record a nonce in the window; false if it was already there.
@@ -1026,6 +1131,46 @@ mod tests {
         assert!(sha256::tags_equal(b"ab", b"ab"));
         assert!(!sha256::tags_equal(b"ab", b"ac"));
         assert!(!sha256::tags_equal(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn one_callers_clock_cannot_lock_another_caller_out() {
+        // A single shared window put every caller behind the same floor, and
+        // the floor is the oldest nonce still remembered -- carrying the
+        // *sender's* clock. So a second host a few seconds behind was
+        // refused, and logged as a replay; and one authenticated caller
+        // could fill the window with far-future nonces and lock every other
+        // caller out for the life of the boot, since the guard is in RAM.
+        const NOW: u128 = 1_700_000_000_000_000_000u128 << 64;
+        const YEAR: u128 = 31_536_000_000_000_000u128 << 64;
+        let mut guard = CallerReplayGuard::<4, 8>::new();
+
+        // A hostile-but-authenticated caller fills its window with nonces
+        // from a decade hence.
+        for step in 0..12u128 {
+            assert!(guard.accept_key("greedy", NOW + YEAR * 10 + (step << 64)));
+        }
+
+        // An honest caller, whose clock is merely correct, is unaffected.
+        assert!(
+            guard.accept_key("honest", NOW),
+            "another caller's clock must not be able to lock this one out"
+        );
+
+        // And a caller whose clock is seconds behind the first is fine too.
+        assert!(guard.accept_key("slow-clock", NOW - (30u128 << 64) * 1_000_000_000));
+
+        // Replay protection still holds per caller.
+        let captured = NOW + (1u128 << 64);
+        assert!(guard.accept_key("honest", captured));
+        assert!(!guard.accept_key("honest", captured), "an immediate replay");
+        for step in 2..20u128 {
+            assert!(guard.accept_key("honest", NOW + (step << 64) * 1_000_000));
+        }
+        assert!(
+            !guard.accept_key("honest", captured),
+            "a captured request must not come back once the window rolls"
+        );
     }
 
     #[test]

@@ -3295,15 +3295,16 @@ impl RemoteCommandServer {
                     klog!(serial, "remote: caller {:?} not allowed\r\n", caller);
                     return;
                 }
-                let caller = RemoteToken::from_str(&caller);
                 // `accept_ordered`, not `accept`: envelope ids are minted
                 // from the sender's clock, so a captured datagram goes stale
                 // instead of coming back into range when the window rolls.
-                if !REMOTE_REPLAY.lock().accept_ordered(envelope.id) {
+                // Per caller, so one caller's clock cannot lock out another.
+                if !REMOTE_REPLAY.lock().accept_ordered(&caller, envelope.id) {
                     self.denied += 1;
                     klog!(serial, "remote: replayed message dropped\r\n");
                     return;
                 }
+                let caller = RemoteToken::from_str(&caller);
                 let call = match remote_ipc::authorize_call(
                     &envelope,
                     &[remote_ipc::CAP_KERNEL_COMMAND],
@@ -3358,7 +3359,7 @@ impl RemoteCommandServer {
                     self.respond(target, Err(alloc::string::String::from("unauthorized")));
                     return;
                 }
-                if !REMOTE_REPLAY.lock().accept_key(nonce) {
+                if !REMOTE_REPLAY.lock().accept_key(caller, nonce) {
                     self.denied += 1;
                     klog!(serial, "remote: tcp line rejected (replay)\r\n");
                     self.respond(target, Err(alloc::string::String::from("unauthorized")));
@@ -4589,8 +4590,11 @@ static NET: hal_x86_64::SpinLock<Option<bare_metal_net::NetStack>> =
 
 /// Recently accepted remote message ids, so a captured datagram cannot be
 /// replayed.
-static REMOTE_REPLAY: hal_x86_64::SpinLock<remote_ipc::ReplayGuard<256>> =
-    hal_x86_64::SpinLock::new(remote_ipc::ReplayGuard::new());
+/// Eight callers, 128 nonces each. Per caller, because a shared window let
+/// one caller's clock -- or one caller's far-future nonces -- lock every
+/// other caller out for the life of the boot.
+static REMOTE_REPLAY: hal_x86_64::SpinLock<remote_ipc::CallerReplayGuard<8, 128>> =
+    hal_x86_64::SpinLock::new(remote_ipc::CallerReplayGuard::new());
 
 /// Callers admitted to the remote command ports (`remote_callers=a,b` on the
 /// command line); empty means any caller with a valid key.

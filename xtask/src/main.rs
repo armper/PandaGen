@@ -458,9 +458,11 @@ fn remote_replay_check(
 /// A fresh nonce for the signed line protocol.
 ///
 /// Nanoseconds since the epoch in the top 64 bits, uniqueness in the bottom
-/// 64. The order matters: the kernel refuses a nonce that has fallen behind
-/// the newest one it has seen, so a captured request goes stale instead of
-/// coming back into range once the replay window rolls over.
+/// 64. The order matters: the kernel keeps a window per caller and refuses a
+/// nonce older than every nonce still in *this caller's* window, so a
+/// captured request goes stale instead of coming back into range once the
+/// window rolls over. Only monotonicity with respect to this caller's own
+/// earlier requests is required; other callers' clocks are irrelevant.
 fn fresh_nonce() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);

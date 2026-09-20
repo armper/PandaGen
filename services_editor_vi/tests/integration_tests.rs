@@ -947,3 +947,29 @@ fn a_cursor_inside_a_multi_byte_character_does_not_kill_the_machine() {
     editor.state_mut().append_to_search('o');
     editor.state_mut().find_next(true);
 }
+
+#[test]
+fn undoing_back_to_the_saved_text_lets_the_window_close() {
+    // `undo` marked the buffer dirty whatever it restored. Phase 304 fixed
+    // that in `editor_core` and left it here -- and this is the editor the
+    // workspace hosts, whose dirty flag the workspace uses to refuse closing
+    // a window. Open a file, press `x`, press `u`: the buffer is character
+    // for character the file on disk, and the window could not be closed and
+    // had nothing to save.
+    let files = fake_files(&[("notes.txt", "saved")]);
+    let mut editor = editor_over(&files);
+    editor
+        .open_with(OpenOptions::new().with_path("notes.txt"))
+        .unwrap();
+    assert!(!editor.state().is_dirty());
+
+    editor.process_input(press_key(KeyCode::X)).unwrap();
+    assert!(editor.state().is_dirty(), "an edit must make it dirty");
+
+    editor.process_input(press_key(KeyCode::U)).unwrap();
+    assert_eq!(editor.get_content(), "saved");
+    assert!(
+        !editor.state().is_dirty(),
+        "the buffer matches the file on disk, so the window must be closable"
+    );
+}
