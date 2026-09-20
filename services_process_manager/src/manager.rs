@@ -96,6 +96,13 @@ impl ProcessManager {
         kernel: &mut K,
         source: &mut S,
     ) -> Result<(), ProcessManagerError> {
+        // Whatever happens to one notification, the rest of the batch is
+        // still processed. `drain_exit_notifications` has already consumed
+        // them all, so abandoning the loop on the first refused restart --
+        // which is what `?` did here -- threw away every notification behind
+        // it: those services stayed recorded as Running and no notification
+        // for them would ever arrive again.
+        let mut failure = None;
         for notification in source.drain_exit_notifications() {
             let Some(task_id) = notification.task_id else {
                 continue;
@@ -108,6 +115,21 @@ impl ProcessManager {
                 continue;
             };
 
+            // Only the task this service is actually running.
+            //
+            // `task_to_service` never forgot a dead generation: `restart_service`
+            // inserted the new task id and left the old one pointing at the
+            // same service. So a duplicated or delayed notification naming a
+            // task that died two restarts ago resolved, marked the *live*
+            // service Failed, and restarted a healthy task. `TaskId` is a
+            // sequential counter on the kernel, so recycling is a live
+            // concern rather than a theoretical one. The map also grew one
+            // stale entry per restart, for ever.
+            if service.handle.task_id != task_id {
+                self.task_to_service.remove(&task_id);
+                continue;
+            }
+
             service.handle.set_state(match notification.reason {
                 ExitReason::Normal => LifecycleState::Stopped,
                 ExitReason::Failure { .. } => LifecycleState::Failed,
@@ -116,15 +138,27 @@ impl ProcessManager {
             });
 
             if Self::should_restart(service, &notification.reason) {
-                let restarted = Self::restart_service(kernel, service)?;
-                if restarted {
-                    self.task_to_service
-                        .insert(service.handle.task_id, service_id);
+                let dead_task = service.handle.task_id;
+                match Self::restart_service(kernel, service) {
+                    Ok(true) => {
+                        self.task_to_service.remove(&dead_task);
+                        self.task_to_service
+                            .insert(service.handle.task_id, service_id);
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        // Remember it and carry on with the rest of the
+                        // batch; report it once at the end.
+                        failure.get_or_insert(err);
+                    }
                 }
             }
         }
 
-        Ok(())
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn should_restart(service: &ManagedService, reason: &ExitReason) -> bool {
@@ -150,7 +184,17 @@ impl ProcessManager {
             capabilities: service.descriptor.capabilities.clone(),
         };
         let handle = kernel.spawn_task(task_desc)?;
-        service.handle = ServiceHandle::new(handle.task_id, LifecycleState::Running);
+        // Carry the restart count across. `ServiceHandle::new` sets it to
+        // zero, and this line replaced the handle on every restart -- so
+        // `restart_count`, which is the number `service_handle()` hands out
+        // and `status_summary()` prints, was always 0. A service that had
+        // crashlooped fifty times reported no restarts at all. The count the
+        // policy uses, `ManagedService::restart_attempts`, lived somewhere
+        // else entirely, and `increment_restart_count` was called by nothing
+        // in the tree.
+        let mut fresh = ServiceHandle::new(handle.task_id, LifecycleState::Running);
+        fresh.restart_count = service.restart_attempts;
+        service.handle = fresh;
         Ok(true)
     }
 }

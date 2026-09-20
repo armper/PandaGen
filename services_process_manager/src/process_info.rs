@@ -1,6 +1,14 @@
-//! # Process Information and Control
+//! # Process Information
 //!
-//! This module provides user-facing commands for process management (ps, kill).
+//! The `ps` half. There is no `kill`: `KillSignal` and `KillResult` below
+//! are constructed nowhere outside their own tests, `ProcessList` has no
+//! `kill` and `ProcessManager` has no `stop_service`.
+//!
+//! `ProcessList` is also never populated from `ProcessManager` by anything
+//! in the tree -- two process tables with nothing keeping them in step, which
+//! is the shape that produced the stale `task_to_service` entries next
+//! door. Treat the types here as a proposed interface, not as the running
+//! system's view of itself.
 
 use crate::{LifecycleState, RestartPolicy, ServiceHandle};
 use core_types::{ServiceId, TaskId};
