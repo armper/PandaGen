@@ -167,7 +167,27 @@ impl BlockDevice for StorageBackend {
     }
 }
 
-/// Bare-metal filesystem wrapper
+/// Bare-metal filesystem wrapper.
+///
+/// # Single-CPU confinement
+///
+/// The virtio descriptor ring, the available and used rings, and the DMA
+/// staging area are `static mut` with no lock. That is **correct today and
+/// only by confinement**: this filesystem is moved into the workspace, the
+/// workspace runs only in `workspace_loop` on the boot CPU, and no kernel
+/// task holds a filesystem handle. There is exactly one owner.
+///
+/// It is one line from being wrong. Kernel tasks run on application
+/// processors, so the moment anything on an AP gains filesystem access -- a
+/// background checkpointer, an HTTP route that serves a file, a remote
+/// `cat` -- two CPUs share one virtqueue, one available ring and one DMA
+/// buffer with no synchronisation. That is device-level corruption, not a
+/// lost update.
+///
+/// If you are about to give a task a handle to this: wrap it in a
+/// `SpinLock` first. The debug assertion below is a tripwire, not a
+/// guarantee -- it only fires in a debug build, and only once the damage
+/// would already be possible.
 pub struct BareMetalFilesystem {
     pub(crate) fs: PersistentFilesystem<StorageBackend>,
     root_id: ObjectId,
@@ -254,11 +274,28 @@ impl BareMetalFilesystem {
     }
 
     /// Create a file with content
+    /// Trip if this is ever touched from anywhere but the boot CPU.
+    ///
+    /// The virtqueue and DMA area behind this are `static mut` with no lock;
+    /// see the type's documentation. Debug builds only, and it fires after
+    /// the fact rather than preventing anything -- it is a tripwire for the
+    /// change that would make the confinement false, not a guarantee.
+    #[inline]
+    fn assert_boot_cpu(&self) {
+        #[cfg(all(debug_assertions, not(test), target_os = "none"))]
+        debug_assert!(
+            crate::current_cpu_index() == Some(0),
+            "the filesystem was used from an application processor; its \
+             virtqueue and DMA area are unsynchronised"
+        );
+    }
+
     pub fn create_file(
         &mut self,
         name: &str,
         content: &[u8],
     ) -> Result<ObjectId, TransactionError> {
+        self.assert_boot_cpu();
         let file_id = self.fs.write_file(content)?;
         let displaced = self.fs.link(
             name,
@@ -282,6 +319,7 @@ impl BareMetalFilesystem {
 
     /// Read a file by name
     pub fn read_file_by_name(&mut self, name: &str) -> Result<Vec<u8>, TransactionError> {
+        self.assert_boot_cpu();
         let dir = self.fs.read_directory(self.root_id)?;
         let entry = dir
             .get_entry(name)
@@ -309,6 +347,7 @@ impl BareMetalFilesystem {
 
     /// List files in root directory
     pub fn list_files(&mut self) -> Result<Vec<String>, TransactionError> {
+        self.assert_boot_cpu();
         let entries = self.fs.list(self.root_id)?;
         Ok(entries.into_iter().map(|(name, _)| name).collect())
     }

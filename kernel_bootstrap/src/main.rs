@@ -668,8 +668,14 @@ extern "C" fn timer_irq_handler() {
 #[cfg(not(test))]
 #[no_mangle]
 extern "C" fn keyboard_irq_handler() {
+    // `UnlockedSerial`, as `exception_handler` uses. `writeln!` on a
+    // `SerialPort` takes SERIAL_LOCK, and this handler can preempt a CPU
+    // that already holds it -- `SpinLock` does not mask interrupts -- so
+    // flipping KBD_DEBUG_LOG to true would have been an instant
+    // self-deadlock. It is compiled out today, which is the only reason
+    // nobody has hit it.
     if KBD_DEBUG_LOG {
-        let mut serial = serial::SerialPort::new(serial::COM1);
+        let mut serial = serial::UnlockedSerial(serial::SerialPort::new(serial::COM1));
         let _ = writeln!(serial, "kbd irq fired");
     }
 
@@ -685,14 +691,14 @@ extern "C" fn keyboard_irq_handler() {
             let scancode = inb(0x60);
             let dropped = KEYBOARD_EVENT_QUEUE.push(scancode);
             if KBD_DEBUG_LOG {
-                let mut serial = serial::SerialPort::new(serial::COM1);
+                let mut serial = serial::UnlockedSerial(serial::SerialPort::new(serial::COM1));
                 if dropped {
                     let _ = writeln!(serial, "kbd queue overflow (dropped oldest)");
                 }
                 let _ = writeln!(serial, "kbd scancode={:#x}", scancode);
             }
         } else if KBD_DEBUG_LOG {
-            let mut serial = serial::SerialPort::new(serial::COM1);
+            let mut serial = serial::UnlockedSerial(serial::SerialPort::new(serial::COM1));
             let _ = writeln!(serial, "kbd irq no-data status={:#x}", status);
         }
 
@@ -5055,10 +5061,21 @@ impl KeyboardEventQueue {
         let new_write = self.write_pos.load(Ordering::Relaxed).wrapping_add(1);
         self.write_pos.store(new_write, Ordering::Release);
 
-        // If we've caught up to read position, advance it (drop oldest)
+        // If we've caught up to the read position, advance it (drop
+        // oldest). A plain load-then-store raced with `pop`, which also
+        // writes `read_pos` from the main loop: the IRQ can preempt `pop`
+        // between its load and its store, and one of the two writes is then
+        // lost -- a scancode delivered twice or skipped. Only reachable when
+        // the queue is already overflowing, so the blast radius is one
+        // keystroke, but a compare-exchange costs nothing here.
         let read = self.read_pos.load(Ordering::Acquire);
         if new_write.wrapping_sub(read) >= KEYBOARD_QUEUE_SIZE as u64 {
-            self.read_pos.store(read.wrapping_add(1), Ordering::Release);
+            let _ = self.read_pos.compare_exchange(
+                read,
+                read.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
             true
         } else {
             false
@@ -5077,7 +5094,23 @@ impl KeyboardEventQueue {
 
         let read_idx = (read % KEYBOARD_QUEUE_SIZE as u64) as usize;
         let scancode = self.buffer[read_idx].load(Ordering::Acquire);
-        self.read_pos.store(read.wrapping_add(1), Ordering::Release);
+        // Compare-exchange for the same reason as `push`: the IRQ handler
+        // also writes `read_pos` when the queue overflows, and it can
+        // preempt this between the load above and this store. If it did,
+        // that entry was dropped and this read is stale, so leaving
+        // `read_pos` where the handler put it is the right answer.
+        if self
+            .read_pos
+            .compare_exchange(
+                read,
+                read.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return None;
+        }
 
         Some(scancode)
     }
@@ -6968,8 +7001,10 @@ pub mod serial {
         }
     }
 
-    /// Serial writer for the exception handler: never blocks on the lock a
-    /// faulting CPU might itself hold.
+    /// Serial writer for interrupt and exception context: never blocks on
+    /// the lock the interrupted CPU might itself hold. `SpinLock` does not
+    /// mask interrupts, so anything that can preempt a lock holder must use
+    /// this rather than `SerialPort`'s `Write`.
     pub struct UnlockedSerial(pub SerialPort);
 
     impl fmt::Write for UnlockedSerial {
