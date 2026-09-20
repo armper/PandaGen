@@ -154,6 +154,16 @@ because it is the one that lets every other shape through.
 
 11. **A refusal that is also a loss.** Work consumed before the decision to
     refuse it. *N2 (receive_packet pops before the policy runs).*
+12. **A validator that covers one field of a record of several**, where the
+    uncovered fields are the ones that matter. Distinct from shape 2: the
+    guard is not missing from a sibling *call site*, it is missing from
+    sibling *fields of the same struct at the one call site that has it* --
+    which makes it invisible to "grep for every caller".
+    *A1 (`ResourceBudget` in `spawn_task`) → 7a (`BudgetCapPolicy`, one of
+    six) → 5a (the additive budget check, in two of five budget paths).*
+    Grep: find the struct, list its fields, check the validator names each
+    one. `None`-means-unlimited fields are the ones it forgets first.
+
 
 ## Findings
 
@@ -306,6 +316,12 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | N6 | core_types | `test_core_service_ids_stable` restated the function body. Setting `CONSOLE_SERVICE_ID` to `0xdead_beef...` left the crate's 54 tests green -- a tautology in the shape of a guarantee, over the four constants that are the wire identity of the core services | FIXED (334) |
 | N7 | console_fb | `Line::from_text` truncated by bytes and `as_str` returns `""` for invalid UTF-8, so a line whose right margin fell inside a multi-byte character displayed as **nothing at all** -- the whole line lost, not the character | FIXED (334) |
 | N8 | core_types::memory | 675 lines of memory-authority model with no references outside the file, whose `add_region` doc promises an error it cannot return and whose type doc defers enforcement to a kernel that does not enforce it | DOCUMENTED (334) |
+| V9 | services_view_host | The header said "Publishing and subscribing require capabilities"; reading took a bare `ViewId` and `ViewSubscriptionCap` was minted, stored and read by nothing at all | FIXED (340) |
+| V10 | services_view_host | Subscriptions were unbounded, undeduplicated and impossible to end -- there was no `unsubscribe`. And `list_views` iterated a `HashMap` (E9's shape) | FIXED (340) |
+| V11 | services_storage | `JournaledStorage` -- the backend `pandagend` hands the editor -- kept every version of every object and every journal entry for ever. 200 saves of a 64 KiB file retained 13 MB of journal and 13 MB again in `objects`, on a kernel whose heap floor is 12 MiB. R3's shape, in the sibling backend R3's fix never touched | FIXED (340) |
+| V12 | services_storage | `Capability` is documented "unforgeable" and `Capability::new` is `pub`, while `check_access` compared only the fields of the struct it was handed: anyone could mint themselves `Own` on another principal's object. A7's defect, in the module A7's fix never touched | FIXED (340) |
+| S8-1 | services_fs_view | `test_cannot_traverse_through_blob` passed with its guard deleted -- the blob's id is absent from `directories` so the next lookup answers `NotFound`, which `assert!(is_err())` accepts. Shape 0 | FIXED (341) |
+| S11b | services_input_hal_bridge | `poll_packet` consumes the packet and `translate` advances the button state, then a `?` mid-batch dropped every later event for ever: a release for a button never seen pressed, or a stuck drag nothing retries | FIXED (341) |
 
 ## Rejected claims
 
@@ -443,17 +459,24 @@ treat one as unguessable.
 
 **Round 6 is closed.** Twenty-seven findings, Phases 326-332.
 
-**Round 7 is in progress.** Three critics: the regression critic on this
-loop's own phases 326-332, the crates no previous critic had read, and the
-bare-metal kernel. Fourteen findings fixed across Phases 333 and 334
-(K1-K4, C1, C2, N1-N8).
+**Round 8 is closed.** Twenty-four findings, Phases 335-341. Three
+critics: the regression critic on phases 333-334, a **shapes sweep** that ran
+the eleven known patterns across the whole tree rather than reading for
+novelty, and a critic on the crates a user's data passes through.
+
+The sweep is the format to repeat. It confirmed shape 1 is now genuinely
+absent from the tree, verified that eight past shape-2 fixes are complete
+today, and still found the round's most serious defect -- a CPU budget guard
+defeated by asking for more than it could add.
+
+**Round 7 is closed.** Fourteen findings, Phases 333-334 (K1-K4, C1, C2,
+N1-N8). Three critics: the regression critic on this loop's own phases
+326-332, the crates no previous critic had read, and the bare-metal kernel.
 
 The round's most useful output was not a finding at all. Five of the eight
 service-crate findings were repeats of shapes this loop had already fixed
 elsewhere, so **the shapes are now written down** in their own section above,
-and every critic prompt carries them. Its
-critics were the `services_*` crates round 5 did not reach, a third
-regression pass, and the harness itself.
+and every critic prompt carries them.
 
 **Still open from round 6's critics, not yet fixed:**
 

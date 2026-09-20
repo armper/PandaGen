@@ -7,7 +7,7 @@
 //! - Immutability guarantees
 
 use fs_view::DirectoryView;
-use services_fs_view::{FileSystemOperations, FileSystemViewService};
+use services_fs_view::{FileSystemOperations, FileSystemViewService, OperationError};
 use services_storage::{ObjectId, ObjectKind};
 
 #[test]
@@ -114,19 +114,40 @@ fn test_nested_directory_traversal() {
 
 #[test]
 fn test_cannot_traverse_through_blob() {
+    // This test passed with the `ObjectKind::Map` guard in `resolve_parent`
+    // deleted, because the blob's id is simply absent from `directories` and
+    // the next lookup answers `NotFound` -- which `assert!(result.is_err())`
+    // accepts. Shape 0: a test that fails for a different reason than the one
+    // it names.
+    //
+    // `register_directory` accepts any id, so a blob and a directory can
+    // share one. That is the case that can see the guard, and the assertion
+    // now names the error it expects rather than accepting any.
     let mut service = FileSystemViewService::new();
     let root_id = ObjectId::new();
     let mut root = DirectoryView::new(root_id);
 
-    // Create a file (blob)
+    // A blob whose id also has a directory registered against it.
     let file_id = ObjectId::new();
     service
         .link(&mut root, "file.txt", file_id, ObjectKind::Blob)
         .unwrap();
+    service.register_directory(DirectoryView::new(file_id));
 
-    // Try to traverse through the blob (should fail)
     let result = service.open(&root, "file.txt/something");
-    assert!(result.is_err());
+    let err = result.expect_err("traversed through a blob");
+    assert!(
+        matches!(err, OperationError::NotADirectory(_)),
+        "refused for the wrong reason: {err:?}"
+    );
+
+    // And the ordinary case, where no directory is registered, is still
+    // refused.
+    let plain = ObjectId::new();
+    service
+        .link(&mut root, "plain.txt", plain, ObjectKind::Blob)
+        .unwrap();
+    assert!(service.open(&root, "plain.txt/something").is_err());
 }
 
 #[test]

@@ -350,22 +350,49 @@ impl PointerHalBridge {
         self.packets_seen += 1;
         let batch = self.translator.translate(packet, self.modifiers);
 
+        // Every event in the batch is attempted, whatever happens to one of
+        // them.
+        //
+        // `poll_packet` has already consumed the packet and `translate` has
+        // already advanced the translator's own button state, so a `?` here
+        // dropped the rest of the batch for ever -- and this crate's own doc
+        // says each event "is delivered separately so consumers see one fact
+        // per message". A press whose release is lost is a stuck drag that
+        // nothing will retry, because the bridge's state already says the
+        // button is up; a release whose press is lost is a consumer told a
+        // button came up that it never saw go down. A refusal that is also a
+        // loss, and the button state makes it unrecoverable.
         let mut delivered_any = false;
+        let mut failure = None;
         for event in batch.iter() {
             let input_event = InputEvent::pointer(*event);
-            let active = input_service
-                .deliver_event(&self.subscription, &input_event)
-                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
+            let active = match input_service.deliver_event(&self.subscription, &input_event) {
+                Ok(active) => active,
+                Err(err) => {
+                    failure.get_or_insert(BridgeError::InputServiceError(err.to_string()));
+                    continue;
+                }
+            };
             if !active {
                 continue;
             }
-            let envelope = build_input_event_envelope(&input_event, Some(self.task_id))
-                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
-            kernel
-                .send(self.subscription.channel, envelope)
-                .map_err(InputHalBridge::map_kernel_error)?;
+            let envelope = match build_input_event_envelope(&input_event, Some(self.task_id)) {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    failure.get_or_insert(BridgeError::InputServiceError(err.to_string()));
+                    continue;
+                }
+            };
+            if let Err(err) = kernel.send(self.subscription.channel, envelope) {
+                failure.get_or_insert(InputHalBridge::map_kernel_error(err));
+                continue;
+            }
             self.events_delivered += 1;
             delivered_any = true;
+        }
+
+        if let Some(err) = failure {
+            return Err(err);
         }
 
         Ok(if delivered_any {
@@ -387,16 +414,26 @@ impl PointerHalBridge {
         self.packets_seen += 1;
         let batch = self.translator.translate(packet, self.modifiers);
 
+        // As in `poll`: the whole batch is attempted, and the first failure
+        // is reported after it.
         let mut delivered_any = false;
+        let mut failure = None;
         for event in batch.iter() {
             let input_event = InputEvent::pointer(*event);
-            let delivered = input_service
-                .deliver_event_with(&self.subscription, &input_event, sink)
-                .map_err(|err| BridgeError::InputServiceError(err.to_string()))?;
-            if delivered {
-                self.events_delivered += 1;
-                delivered_any = true;
+            match input_service.deliver_event_with(&self.subscription, &input_event, sink) {
+                Ok(true) => {
+                    self.events_delivered += 1;
+                    delivered_any = true;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    failure.get_or_insert(BridgeError::InputServiceError(err.to_string()));
+                }
             }
+        }
+
+        if let Some(err) = failure {
+            return Err(err);
         }
 
         Ok(if delivered_any {
@@ -753,6 +790,59 @@ mod tests {
             self.events.push(event.clone());
             Ok(())
         }
+    }
+
+    /// Refuses one event and accepts the rest.
+    struct SinkThatRefusesOnce {
+        refuse_at: usize,
+        seen: usize,
+        delivered: Vec<InputEvent>,
+    }
+
+    impl services_input::InputEventSink for SinkThatRefusesOnce {
+        fn send_event(
+            &mut self,
+            _cap: &services_input::InputSubscriptionCap,
+            event: &InputEvent,
+        ) -> Result<(), services_input::InputServiceError> {
+            let index = self.seen;
+            self.seen += 1;
+            if index == self.refuse_at {
+                return Err(services_input::InputServiceError::InvalidCapability);
+            }
+            self.delivered.push(event.clone());
+            Ok(())
+        }
+    }
+
+    /// The finding: `poll_packet` has already consumed the packet and
+    /// `translate` has already advanced the translator's button state, so a
+    /// `?` mid-batch dropped every later event for ever. The consumer was
+    /// left holding a release for a button it never saw pressed -- or a
+    /// press whose release never came, which is a stuck drag that nothing
+    /// retries, because the bridge's own state says the button is up.
+    ///
+    /// The crate's doc promises each event "is delivered separately so
+    /// consumers see one fact per message".
+    #[test]
+    fn one_refused_event_does_not_drop_the_rest_of_the_batch() {
+        // A packet that both moves and presses, so the batch has two events.
+        let (mut bridge, input_service) =
+            pointer_bridge(vec![hal::HalPointerPacket::new(5, 5, 1, 0)]);
+        let mut sink = SinkThatRefusesOnce {
+            refuse_at: 0,
+            seen: 0,
+            delivered: Vec::new(),
+        };
+
+        let outcome = bridge.poll_with_sink(&input_service, &mut sink);
+        assert!(outcome.is_err(), "sanity: the sink refused an event");
+        assert!(
+            sink.seen >= 2,
+            "the batch stopped at the first refusal: the sink saw {} of at \
+             least 2 events",
+            sink.seen
+        );
     }
 
     fn pointer_bridge(packets: Vec<hal::HalPointerPacket>) -> (PointerHalBridge, InputService) {
