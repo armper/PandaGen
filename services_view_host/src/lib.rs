@@ -5,7 +5,17 @@
 //! ## Philosophy
 //!
 //! - **Views, not streams**: Components publish structured views, not byte streams
-//! - **Capability-based**: Publishing and subscribing require capabilities
+//! - **Capability-based**: publishing requires a `ViewHandleCap`, and reading
+//!   through [`ViewHost::read_subscribed`] requires a live
+//!   `ViewSubscriptionCap`.
+//!
+//!   [`ViewHost::get_latest`] and [`ViewHost::list_views`] are **not** gated:
+//!   they take a bare `ViewId` and return any view's contents. That is
+//!   deliberate and it is the host's own door -- the compositor holds the
+//!   `ViewHost` and has to read every view to composite them. It is not a
+//!   door to hand to a component. Until this comment said so, the header
+//!   read "subscribing requires capabilities" while `ViewSubscriptionCap`
+//!   was minted, pushed onto a list and never read by anything.
 //! - **Immutable frames**: View frames are immutable; updates replace by revision
 //! - **Monotonic revisions**: Revisions must strictly increase
 //! - **Host-managed**: The host decides layout and presentation
@@ -94,6 +104,12 @@ pub enum ViewHostError {
 
     #[error("Unauthorized access to view: {0}")]
     Unauthorized(ViewId),
+
+    #[error("Subscription is not live for view: {0}")]
+    InvalidSubscription(ViewId),
+
+    #[error("Too many subscriptions for view: {0}")]
+    TooManySubscriptions(ViewId),
 
     #[error("Revision not monotonic: expected > {expected}, got {actual}")]
     RevisionNotMonotonic { expected: u64, actual: u64 },
@@ -254,6 +270,9 @@ impl ViewHost {
         Ok(())
     }
 
+    /// The most live subscriptions one view will hold.
+    pub const MAX_SUBSCRIPTIONS_PER_VIEW: usize = 256;
+
     /// Subscribes to a view
     ///
     /// Returns a subscription capability that can be used to receive updates.
@@ -268,6 +287,21 @@ impl ViewHost {
             .get_mut(&view_id)
             .ok_or(ViewHostError::ViewNotFound(view_id))?;
 
+        // One live subscription per task per view, and a ceiling on the
+        // rest. This pushed unconditionally with no dedup, no cap and no
+        // `unsubscribe`, so a task could hold a hundred thousand
+        // subscriptions to one view and nothing could ever release them.
+        if let Some(existing) = record
+            .subscriptions
+            .iter()
+            .find(|sub| sub.task_id == task_id && sub.channel == channel)
+        {
+            return Ok(*existing);
+        }
+        if record.subscriptions.len() >= Self::MAX_SUBSCRIPTIONS_PER_VIEW {
+            return Err(ViewHostError::TooManySubscriptions(view_id));
+        }
+
         // Generate subscription token
         let token = self.next_subscription_token;
         self.next_subscription_token += 1;
@@ -278,7 +312,47 @@ impl ViewHost {
         Ok(subscription)
     }
 
-    /// Gets the latest frame for a view
+    /// Ends a subscription.
+    ///
+    /// There was no way to do this at all: a subscription, once taken, was
+    /// held for the life of the host.
+    pub fn unsubscribe(&mut self, subscription: &ViewSubscriptionCap) -> Result<(), ViewHostError> {
+        let record = self
+            .views
+            .get_mut(&subscription.view_id)
+            .ok_or(ViewHostError::ViewNotFound(subscription.view_id))?;
+        let before = record.subscriptions.len();
+        record.subscriptions.retain(|sub| sub != subscription);
+        if record.subscriptions.len() == before {
+            return Err(ViewHostError::InvalidSubscription(subscription.view_id));
+        }
+        Ok(())
+    }
+
+    /// Reads a view's latest frame against a subscription that is still live.
+    ///
+    /// This is what `ViewSubscriptionCap` is *for*. Before it existed, the
+    /// capability was minted, stored and never read by anything, so the
+    /// header's promise that subscribing required a capability rested on
+    /// nothing.
+    pub fn read_subscribed(
+        &self,
+        subscription: &ViewSubscriptionCap,
+    ) -> Result<Option<ViewFrame>, ViewHostError> {
+        let record = self
+            .views
+            .get(&subscription.view_id)
+            .ok_or(ViewHostError::ViewNotFound(subscription.view_id))?;
+        if !record.subscriptions.iter().any(|sub| sub == subscription) {
+            return Err(ViewHostError::InvalidSubscription(subscription.view_id));
+        }
+        Ok(record.latest_frame.clone())
+    }
+
+    /// Gets the latest frame for a view, with no capability at all.
+    ///
+    /// The host's own door -- the compositor has to read every view to
+    /// composite them. Components read through [`Self::read_subscribed`].
     ///
     /// Returns None if no frames have been published yet.
     pub fn get_latest(&self, view_id: ViewId) -> Result<Option<ViewFrame>, ViewHostError> {
@@ -306,9 +380,16 @@ impl ViewHost {
         Ok(())
     }
 
-    /// Lists all view IDs
+    /// Lists all view IDs, with no capability at all. See
+    /// [`Self::get_latest`].
+    ///
+    /// Sorted, because `views` is a `HashMap` and the unsorted order shuffled
+    /// between calls -- E9's defect, which showed up as `ls` output that
+    /// changed for no reason.
     pub fn list_views(&self) -> Vec<ViewId> {
-        self.views.keys().copied().collect()
+        let mut ids: Vec<ViewId> = self.views.keys().copied().collect();
+        ids.sort_by_key(|id| id.as_uuid());
+        ids
     }
 
     /// Gets view metadata (kind, owner, etc.) without the frame content

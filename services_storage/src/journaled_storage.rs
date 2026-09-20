@@ -55,6 +55,68 @@ impl JournaledStorage {
     }
 
     /// Returns the journal entries (for testing).
+    /// The most versions of one object kept.
+    ///
+    /// Only the newest is ever read; the rest are history nothing consults.
+    pub const MAX_VERSIONS_PER_OBJECT: usize = 4;
+
+    /// The journal length that triggers compaction.
+    pub const MAX_JOURNAL_ENTRIES: usize = 512;
+
+    /// The journal size that triggers compaction.
+    ///
+    /// The entry count is the wrong thing to bound on its own: the journal
+    /// holds a full copy of every write's bytes, so two hundred saves of a
+    /// 64 KiB file is only four hundred entries and thirteen *megabytes* --
+    /// on a kernel whose heap floor is twelve. The first version of this
+    /// bound counted entries alone and never fired.
+    pub const MAX_JOURNAL_BYTES: usize = 1024 * 1024;
+
+    /// Rewrites the journal as the shortest sequence that recovers the
+    /// current state: one write and one commit per object.
+    ///
+    /// `recover` clears `objects` and replays the journal, so a journal
+    /// holding the latest version of each object recovers exactly what a
+    /// full history would. Everything before that is a record of writes
+    /// that have already been superseded.
+    pub fn compact(&mut self) {
+        let mut journal = Vec::with_capacity(self.objects.len() * 2);
+        for (object_id, versions) in &self.objects {
+            let Some(latest) = versions.last() else {
+                continue;
+            };
+            let tx_id = TransactionId::new();
+            journal.push(JournalEntry::Write {
+                tx_id,
+                object_id: *object_id,
+                version_id: latest.version_id,
+                data: latest.data.clone(),
+            });
+            journal.push(JournalEntry::Commit { tx_id });
+        }
+        self.journal = journal;
+    }
+
+    /// The bytes the journal is holding on to.
+    pub fn journal_bytes(&self) -> usize {
+        self.journal
+            .iter()
+            .map(|entry| match entry {
+                JournalEntry::Write { data, .. } => data.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Compacts once the journal has grown past either ceiling.
+    fn compact_if_large(&mut self) {
+        if self.journal.len() > Self::MAX_JOURNAL_ENTRIES
+            || self.journal_bytes() > Self::MAX_JOURNAL_BYTES
+        {
+            self.compact();
+        }
+    }
+
     pub fn journal_entries(&self) -> &[JournalEntry] {
         &self.journal
     }
@@ -215,17 +277,26 @@ impl TransactionalStorage for JournaledStorage {
 
         if let Some(pending) = self.pending.remove(&tx.id()) {
             for write in pending {
-                self.objects
-                    .entry(write.object_id)
-                    .or_default()
-                    .push(VersionEntry {
-                        version_id: write.version_id,
-                        data: write.data,
-                    });
+                let versions = self.objects.entry(write.object_id).or_default();
+                versions.push(VersionEntry {
+                    version_id: write.version_id,
+                    data: write.data,
+                });
+                // Only `versions.last()` is ever read -- there is no
+                // `read_version` and no `list_versions` in this backend --
+                // so every earlier version was a full copy of the file kept
+                // for nobody. R3 freed superseded versions in the block
+                // layer and left this one, which is the storage `pandagend`
+                // hands the editor.
+                if versions.len() > Self::MAX_VERSIONS_PER_OBJECT {
+                    let overflow = versions.len() - Self::MAX_VERSIONS_PER_OBJECT;
+                    versions.drain(..overflow);
+                }
             }
         }
 
         self.journal.push(JournalEntry::Commit { tx_id: tx.id() });
+        self.compact_if_large();
         tx.commit()?;
         Ok(())
     }

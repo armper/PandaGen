@@ -13,7 +13,7 @@
 //! 3. **Clear error messages**: Explain WHY access failed, not just "no"
 //! 4. **Typed access**: Read/Write/Execute are distinct capabilities
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use core::fmt;
 use core_types::new_uuid;
@@ -194,6 +194,9 @@ impl Ownership {
 /// Reason why access was denied
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessDenialReason {
+    /// The capability was not issued by this checker, so it proves nothing.
+    NotIssued { capability_id: Uuid },
+
     /// No capability for this operation
     MissingCapability {
         required: CapabilityKind,
@@ -229,6 +232,12 @@ pub enum AccessDenialReason {
 impl fmt::Display for AccessDenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AccessDenialReason::NotIssued { capability_id } => {
+                write!(
+                    f,
+                    "capability {capability_id} was not issued by this checker"
+                )
+            }
             AccessDenialReason::MissingCapability {
                 required,
                 object_id,
@@ -284,6 +293,17 @@ impl fmt::Display for AccessDenialReason {
 pub struct PermissionChecker {
     /// Map of object ID to ownership
     ownership: BTreeMap<ObjectId, Ownership>,
+
+    /// Capability ids this checker issued.
+    ///
+    /// `Capability::new` is public and takes the object, the kind and the
+    /// holder as plain arguments, so anyone could mint a token granting
+    /// themselves `Own` on someone else's object -- and `check_access`
+    /// compared only the fields of the struct it was handed. A token
+    /// anybody can construct proves nothing; the issuer has to remember
+    /// what it issued. This is A7's defect in the crate A7's fix never
+    /// touched.
+    issued: BTreeSet<Uuid>,
 }
 
 impl PermissionChecker {
@@ -291,6 +311,7 @@ impl PermissionChecker {
     pub fn new() -> Self {
         Self {
             ownership: BTreeMap::new(),
+            issued: BTreeSet::new(),
         }
     }
 
@@ -300,6 +321,25 @@ impl PermissionChecker {
     }
 
     /// Checks if a capability is valid for an operation
+    /// Issues a capability and remembers it.
+    ///
+    /// The only way to obtain a token `check_access` will accept.
+    pub fn issue(
+        &mut self,
+        object_id: ObjectId,
+        kind: CapabilityKind,
+        holder: PrincipalId,
+    ) -> Capability {
+        let capability = Capability::new(object_id, kind, holder);
+        self.issued.insert(capability.id());
+        capability
+    }
+
+    /// Withdraws a capability this checker issued.
+    pub fn revoke(&mut self, capability: &Capability) -> bool {
+        self.issued.remove(&capability.id())
+    }
+
     pub fn check_access(
         &self,
         capability: &Capability,
@@ -307,6 +347,14 @@ impl PermissionChecker {
         required_kind: CapabilityKind,
         principal: PrincipalId,
     ) -> Result<(), AccessDenialReason> {
+        // Only a token this checker issued. Everything below compares the
+        // fields of the struct it was handed, which a forger fills in.
+        if !self.issued.contains(&capability.id()) {
+            return Err(AccessDenialReason::NotIssued {
+                capability_id: capability.id(),
+            });
+        }
+
         // Check if object exists
         if !self.ownership.contains_key(&object_id) {
             return Err(AccessDenialReason::ObjectNotFound { object_id });
@@ -439,7 +487,7 @@ mod tests {
 
         checker.register_object(obj_id, ownership);
 
-        let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
+        let cap = checker.issue(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal);
 
         assert!(result.is_ok());
@@ -455,7 +503,7 @@ mod tests {
 
         checker.register_object(obj_id2, ownership);
 
-        let cap = Capability::new(obj_id1, CapabilityKind::Read, principal);
+        let cap = checker.issue(obj_id1, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id2, CapabilityKind::Read, principal);
 
         assert!(result.is_err());
@@ -475,7 +523,7 @@ mod tests {
 
         checker.register_object(obj_id, ownership);
 
-        let cap = Capability::new(obj_id, CapabilityKind::Read, principal1);
+        let cap = checker.issue(obj_id, CapabilityKind::Read, principal1);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal2);
 
         assert!(result.is_err());
@@ -494,7 +542,7 @@ mod tests {
 
         checker.register_object(obj_id, ownership);
 
-        let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
+        let cap = checker.issue(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Write, principal);
 
         assert!(result.is_err());
@@ -514,7 +562,7 @@ mod tests {
         checker.register_object(obj_id, ownership);
 
         // Own capability should grant all access
-        let cap = Capability::new(obj_id, CapabilityKind::Own, principal);
+        let cap = checker.issue(obj_id, CapabilityKind::Own, principal);
 
         assert!(checker
             .check_access(&cap, obj_id, CapabilityKind::Read, principal)
@@ -529,11 +577,11 @@ mod tests {
 
     #[test]
     fn test_permission_checker_object_not_found() {
-        let checker = PermissionChecker::new();
+        let mut checker = PermissionChecker::new();
         let obj_id = ObjectId::new();
         let principal = PrincipalId::new();
 
-        let cap = Capability::new(obj_id, CapabilityKind::Read, principal);
+        let cap = checker.issue(obj_id, CapabilityKind::Read, principal);
         let result = checker.check_access(&cap, obj_id, CapabilityKind::Read, principal);
 
         assert!(result.is_err());
