@@ -317,10 +317,13 @@ impl Scheduler {
             self.current_task = Some(task_id);
 
             // Record audit event
-            self.audit_log.push(ScheduleEvent::TaskSelected {
-                task_id,
-                timestamp_ticks: self.current_ticks,
-            });
+            Self::record(
+                &mut self.audit_log,
+                ScheduleEvent::TaskSelected {
+                    task_id,
+                    timestamp_ticks: self.current_ticks,
+                },
+            );
 
             Some(task_id)
         } else {
@@ -462,11 +465,14 @@ impl Scheduler {
                             let wake_tick = realtime.next_deadline;
                             task_info.state = TaskState::Blocked { wake_tick };
                             task_info.ticks_in_quantum = 0;
-                            self.audit_log.push(ScheduleEvent::TaskPreempted {
-                                task_id,
-                                reason: PreemptionReason::BudgetExhausted,
-                                timestamp_ticks: self.current_ticks,
-                            });
+                            Self::record(
+                                &mut self.audit_log,
+                                ScheduleEvent::TaskPreempted {
+                                    task_id,
+                                    reason: PreemptionReason::BudgetExhausted,
+                                    timestamp_ticks: self.current_ticks,
+                                },
+                            );
                             return true;
                         }
                     }
@@ -476,11 +482,14 @@ impl Scheduler {
                     self.enqueue_runnable(task_id);
 
                     // Record audit event
-                    self.audit_log.push(ScheduleEvent::TaskPreempted {
-                        task_id,
-                        reason: PreemptionReason::QuantumExpired,
-                        timestamp_ticks: self.current_ticks,
-                    });
+                    Self::record(
+                        &mut self.audit_log,
+                        ScheduleEvent::TaskPreempted {
+                            task_id,
+                            reason: PreemptionReason::QuantumExpired,
+                            timestamp_ticks: self.current_ticks,
+                        },
+                    );
 
                     return true;
                 }
@@ -550,11 +559,14 @@ impl Scheduler {
         }
 
         // Record audit event
-        self.audit_log.push(ScheduleEvent::TaskExited {
-            task_id,
-            reason: ExitReason::Normal,
-            timestamp_ticks: self.current_ticks,
-        });
+        Self::record(
+            &mut self.audit_log,
+            ScheduleEvent::TaskExited {
+                task_id,
+                reason: ExitReason::Normal,
+                timestamp_ticks: self.current_ticks,
+            },
+        );
     }
 
     /// Marks a task as cancelled
@@ -577,11 +589,14 @@ impl Scheduler {
         }
 
         // Record audit event
-        self.audit_log.push(ScheduleEvent::TaskExited {
-            task_id,
-            reason: ExitReason::ResourceExhaustion,
-            timestamp_ticks: self.current_ticks,
-        });
+        Self::record(
+            &mut self.audit_log,
+            ScheduleEvent::TaskExited {
+                task_id,
+                reason: ExitReason::ResourceExhaustion,
+                timestamp_ticks: self.current_ticks,
+            },
+        );
     }
 
     /// Returns the currently running task
@@ -607,6 +622,23 @@ impl Scheduler {
     /// Returns true if there are runnable tasks
     pub fn has_runnable_tasks(&self) -> bool {
         !self.run_queue.is_empty()
+    }
+
+    /// The most scheduling events kept.
+    ///
+    /// The log had no bound at all: one entry per task selection, for as long
+    /// as the scheduler runs. On a machine that stays up, that is the whole
+    /// history of every context switch held in memory for ever. Keep the
+    /// recent tail, which is what an audit trail is read for.
+    const MAX_AUDIT_EVENTS: usize = 4096;
+
+    /// Appends one event, dropping the oldest once the log is full.
+    fn record(log: &mut Vec<ScheduleEvent>, event: ScheduleEvent) {
+        if log.len() >= Self::MAX_AUDIT_EVENTS {
+            let overflow = log.len() + 1 - Self::MAX_AUDIT_EVENTS;
+            log.drain(..overflow);
+        }
+        log.push(event);
     }
 
     /// Returns a reference to the audit log
@@ -649,6 +681,19 @@ impl Scheduler {
         }
     }
 
+    /// The most `DeadlineMissed` events one `refresh_deadlines` will record
+    /// for one task.
+    ///
+    /// `current_ticks` moves by however much time passed, and a periodic task
+    /// with a short period can be many thousands of periods behind after a
+    /// single long stall. Recording one event per missed period made the
+    /// catch-up cost proportional to the length of the stall: a task with
+    /// `period_ticks == 1` that fell a million ticks behind spent 27 ms
+    /// pushing a million audit events, which is itself long enough to fall
+    /// further behind. The misses are still counted exactly in
+    /// `deadline_misses`; only the per-miss log entries are capped.
+    const MAX_DEADLINE_MISS_EVENTS: u64 = 64;
+
     fn refresh_deadlines(&mut self) {
         let current_ticks = self.current_ticks;
         // Visit tasks in a fixed order so the audit log is deterministic
@@ -672,16 +717,40 @@ impl Scheduler {
                 if realtime.params.period_ticks == 0 {
                     continue;
                 }
+                let mut events = 0u64;
                 while current_ticks >= realtime.next_deadline {
                     if realtime.remaining_budget > 0 {
                         realtime.deadline_misses += 1;
-                        self.audit_log.push(ScheduleEvent::DeadlineMissed {
-                            task_id,
-                            deadline_tick: realtime.next_deadline,
-                            timestamp_ticks: current_ticks,
-                        });
+                        if events < Self::MAX_DEADLINE_MISS_EVENTS {
+                            events += 1;
+                            let event = ScheduleEvent::DeadlineMissed {
+                                task_id,
+                                deadline_tick: realtime.next_deadline,
+                                timestamp_ticks: current_ticks,
+                            };
+                            Self::record(&mut self.audit_log, event);
+                        }
                     }
                     realtime.reset_for_next_period();
+
+                    // Past the cap there is nothing left to record, so the
+                    // remaining periods are skipped arithmetically rather than
+                    // one iteration at a time.
+                    if events >= Self::MAX_DEADLINE_MISS_EVENTS
+                        && current_ticks >= realtime.next_deadline
+                    {
+                        let behind = current_ticks - realtime.next_deadline;
+                        let periods = behind / realtime.params.period_ticks + 1;
+                        if realtime.remaining_budget > 0 {
+                            realtime.deadline_misses =
+                                realtime.deadline_misses.saturating_add(periods);
+                        }
+                        realtime.next_deadline = realtime
+                            .next_deadline
+                            .saturating_add(periods.saturating_mul(realtime.params.period_ticks));
+                        realtime.remaining_budget = realtime.params.budget_ticks;
+                        break;
+                    }
                 }
             }
         }
@@ -1233,5 +1302,123 @@ mod tests {
 
         scheduler.on_tick_advanced(15);
         assert_eq!(scheduler.task_state(task), Some(TaskState::Runnable));
+    }
+}
+
+#[cfg(test)]
+mod catch_up_tests {
+    use super::*;
+
+    fn realtime_scheduler(period: u64, budget: u64) -> (Scheduler, TaskId) {
+        let config = SchedulerConfig {
+            quantum_ticks: 10,
+            max_steps_per_tick: None,
+            realtime_policy: RealTimePolicy::EarliestDeadlineFirst,
+        };
+        let mut scheduler = Scheduler::with_config(config);
+        let task = TaskId::new();
+        scheduler.enqueue(task);
+        scheduler
+            .set_real_time_params(
+                task,
+                RealTimeParams {
+                    period_ticks: period,
+                    budget_ticks: budget,
+                },
+            )
+            .unwrap();
+        (scheduler, task)
+    }
+
+    /// The finding: a periodic task that falls a long way behind used to be
+    /// caught up one period at a time, pushing one audit event per missed
+    /// deadline. A task with `period_ticks == 1` a million ticks behind spent
+    /// tens of milliseconds and a million allocations doing it -- long enough
+    /// to fall further behind, which is the shape of a livelock.
+    #[test]
+    fn a_long_stall_costs_the_same_as_a_short_one() {
+        let (mut scheduler, task) = realtime_scheduler(1, 1);
+        scheduler.clear_audit_log();
+
+        let stall = 4_000_000u64;
+        let started = std::time::Instant::now();
+        scheduler.on_tick_advanced(stall);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "catching up {stall} ticks took {elapsed:?}; the cost is still \
+             proportional to the stall"
+        );
+        assert!(
+            scheduler.audit_log().len() <= Scheduler::MAX_DEADLINE_MISS_EVENTS as usize,
+            "one event per missed period is back: {} events",
+            scheduler.audit_log().len()
+        );
+
+        // The count is still exact, which is the part that must not be lost
+        // by capping the log.
+        let misses = scheduler
+            .tasks
+            .get(&task)
+            .and_then(|info| info.realtime.as_ref())
+            .map(|rt| rt.deadline_misses)
+            .unwrap();
+        assert_eq!(
+            misses, stall,
+            "the miss count must survive the cap on the log"
+        );
+
+        // And the task is left in a sane place: its next deadline is ahead of
+        // now, not behind it, so the next tick does not catch up all over
+        // again.
+        let next = scheduler
+            .tasks
+            .get(&task)
+            .and_then(|info| info.realtime.as_ref())
+            .map(|rt| rt.next_deadline)
+            .unwrap();
+        assert!(
+            next > scheduler.current_ticks(),
+            "next deadline {next} is not ahead of tick {}",
+            scheduler.current_ticks()
+        );
+    }
+
+    /// A short catch-up must still record every miss individually -- the cap
+    /// is for stalls, not for ordinary lateness.
+    #[test]
+    fn a_short_stall_still_logs_every_missed_deadline() {
+        let (mut scheduler, _task) = realtime_scheduler(10, 5);
+        scheduler.clear_audit_log();
+        scheduler.on_tick_advanced(35);
+        let missed = scheduler
+            .audit_log()
+            .iter()
+            .filter(|e| matches!(e, ScheduleEvent::DeadlineMissed { .. }))
+            .count();
+        assert_eq!(missed, 3, "three deadlines passed and three must be logged");
+    }
+
+    /// The audit log had no bound at all: one entry per task selection, kept
+    /// for as long as the scheduler runs.
+    #[test]
+    fn the_audit_log_is_bounded() {
+        let mut scheduler = Scheduler::new();
+        let task = TaskId::new();
+        for _ in 0..(Scheduler::MAX_AUDIT_EVENTS * 3) {
+            scheduler.enqueue(task);
+            scheduler.dequeue_next();
+        }
+        assert!(
+            scheduler.audit_log().len() <= Scheduler::MAX_AUDIT_EVENTS,
+            "the log grew to {}",
+            scheduler.audit_log().len()
+        );
+        // The tail is what is kept, so the most recent event is still there.
+        assert!(matches!(
+            scheduler.audit_log().last(),
+            Some(ScheduleEvent::TaskSelected { .. })
+        ));
     }
 }

@@ -153,13 +153,63 @@ impl SyscallAuditLog {
 pub struct SyscallGate {
     /// Audit log for syscall operations
     audit_log: SyscallAuditLog,
+
+    /// Execution identities whose syscalls are refused.
+    ///
+    /// The gate used to take `caller` on every syscall and do nothing with it
+    /// but write it to the log: an identity the kernel had already cancelled
+    /// went on making syscalls, each one dutifully recorded as `Invoked` and
+    /// then `Completed`. An audit trail that records an operation it did not
+    /// prevent is a record of the breach, not a boundary.
+    revoked: std::collections::HashSet<ExecutionId>,
 }
 
 impl SyscallGate {
     pub fn new() -> Self {
         Self {
             audit_log: SyscallAuditLog::new(),
+            revoked: std::collections::HashSet::new(),
         }
+    }
+
+    /// Refuses all further syscalls from `caller`.
+    ///
+    /// Called by the kernel when it cancels an execution identity, so that
+    /// the boundary and the kernel agree about who is still allowed to ask
+    /// for anything.
+    pub fn revoke(&mut self, caller: ExecutionId) {
+        self.revoked.insert(caller);
+    }
+
+    /// Whether `caller` has been revoked.
+    pub fn is_revoked(&self, caller: ExecutionId) -> bool {
+        self.revoked.contains(&caller)
+    }
+
+    /// Records and refuses a syscall from a revoked identity.
+    ///
+    /// Returns `true` when the syscall must not proceed. Both doors into the
+    /// kernel call this -- [`Self::execute`] and
+    /// `user_task::default_trap` -- because a check on one of them is not a
+    /// boundary.
+    pub fn refuse_if_revoked(
+        &mut self,
+        caller: ExecutionId,
+        syscall_name: &str,
+        timestamp_nanos: u64,
+    ) -> Option<KernelError> {
+        if !self.is_revoked(caller) {
+            return None;
+        }
+        self.record_rejected(
+            caller,
+            syscall_name.to_string(),
+            "execution identity revoked".to_string(),
+            timestamp_nanos,
+        );
+        Some(KernelError::InsufficientAuthority(
+            "execution identity has been cancelled".to_string(),
+        ))
     }
 
     /// Returns the audit log (test-only)
@@ -174,8 +224,12 @@ impl SyscallGate {
 
     /// Executes a syscall on behalf of a user task.
     ///
-    /// This is the ONLY entry point from user space to kernel.
-    /// It validates the caller's identity and executes the requested operation.
+    /// Refuses callers whose execution identity the kernel has revoked, then
+    /// executes the requested operation.
+    ///
+    /// This is not the only entry point: `user_task::default_trap` is the one
+    /// the running kernel uses, and it applies the same refusal. Anything
+    /// added to one belongs in the other.
     pub fn execute(
         &mut self,
         kernel: &mut dyn KernelApi,
@@ -191,6 +245,10 @@ impl SyscallGate {
             syscall_name: syscall_name.clone(),
             timestamp_nanos,
         });
+
+        if let Some(err) = self.refuse_if_revoked(caller, &syscall_name, timestamp_nanos) {
+            return Err(err);
+        }
 
         // Execute the syscall
         let result = match syscall {

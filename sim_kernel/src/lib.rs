@@ -698,6 +698,9 @@ impl SimulatedKernel {
     fn cancel_identity(&mut self, execution_id: ExecutionId, reason: String) {
         self.cancelled_identities
             .insert(execution_id, reason.clone());
+        // The boundary has to know too, or it keeps serving an identity the
+        // kernel has cancelled.
+        self.syscall_gate.revoke(execution_id);
 
         // Record in resource audit
         self.resource_audit.record_event(

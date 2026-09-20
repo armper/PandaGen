@@ -42,6 +42,26 @@ pub enum UserSyscallResult {
 pub type TrapEntry =
     fn(&mut crate::SimulatedKernel, ExecutionId, Syscall) -> Result<SyscallResult, KernelError>;
 
+/// The gate's name for a syscall, used for the refusal record made before
+/// the syscall is dispatched.
+fn syscall_name_of(syscall: &Syscall) -> &'static str {
+    match syscall {
+        Syscall::SpawnTask { .. } => "SpawnTask",
+        Syscall::CreateChannel => "CreateChannel",
+        Syscall::Send { .. } => "Send",
+        Syscall::Recv { .. } => "Recv",
+        Syscall::Sleep { .. } => "Sleep",
+        Syscall::Now => "Now",
+        Syscall::Yield => "Yield",
+        Syscall::Grant { .. } => "Grant",
+        Syscall::RegisterService { .. } => "RegisterService",
+        Syscall::LookupService { .. } => "LookupService",
+        Syscall::CreateAddressSpace => "CreateAddressSpace",
+        Syscall::AllocateRegion { .. } => "AllocateRegion",
+        Syscall::AccessRegion { .. } => "AccessRegion",
+    }
+}
+
 /// Default trap handler for user tasks (Phase 61: uses syscall gate).
 pub fn default_trap(
     kernel: &mut crate::SimulatedKernel,
@@ -50,7 +70,19 @@ pub fn default_trap(
 ) -> Result<SyscallResult, KernelError> {
     let timestamp_nanos = kernel.now().as_nanos();
 
-    // All syscalls must go through the gate - this enforces the isolation boundary
+    // The caller is checked here, before anything is dispatched. Until this
+    // existed the gate was a logger: this function recorded `Invoked`, called
+    // straight into the kernel, and recorded the result -- so a cancelled
+    // identity's syscalls were written down and then carried out.
+    let syscall_name = syscall_name_of(&syscall);
+    if let Some(err) =
+        kernel
+            .syscall_gate_mut()
+            .refuse_if_revoked(caller, syscall_name, timestamp_nanos)
+    {
+        return Err(err);
+    }
+
     match syscall {
         Syscall::CreateChannel => {
             kernel.syscall_gate_mut().record_invoked(
@@ -247,5 +279,77 @@ mod tests {
         // Verify syscall gate recorded events
         let audit = kernel.syscall_gate().audit_log();
         assert!(audit.events().len() >= 2); // At least Send and Recv
+    }
+}
+
+#[cfg(test)]
+mod revoked_identity_tests {
+    use super::*;
+    use crate::syscall_gate::SyscallEvent;
+    use kernel_api::{KernelApi, TaskDescriptor};
+    use resources::{CpuTicks, ResourceBudget};
+
+    /// The finding: the gate took `caller` on every syscall and did nothing
+    /// with it but write it to the log. An identity the kernel had already
+    /// cancelled for blowing its budget went on making syscalls, each one
+    /// recorded as `Invoked` and then `Completed`. An audit trail that
+    /// records an operation it did not prevent is a record of the breach.
+    #[test]
+    fn a_cancelled_identity_cannot_keep_making_syscalls() {
+        let mut kernel = crate::SimulatedKernel::new();
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("user".to_string()))
+            .unwrap();
+        let task_id = handle.task_id;
+        let exec_id = kernel.get_task_identity(task_id).unwrap();
+
+        let ctx = UserTaskContext::new(task_id, exec_id, 256, 256, default_trap);
+
+        // While it is in good standing, the syscall works.
+        ctx.syscall(&mut kernel, Syscall::CreateChannel)
+            .expect("a live identity must be served");
+
+        // Blow the CPU budget, which cancels the identity.
+        if let Some(identity) = kernel.get_identity_mut(exec_id) {
+            identity.budget = Some(ResourceBudget::unlimited().with_cpu_ticks(CpuTicks::new(10)));
+        }
+        assert!(kernel.try_consume_cpu_ticks(exec_id, 11).is_err());
+
+        kernel.syscall_gate_mut().clear_audit_log();
+        let refused = ctx.syscall(&mut kernel, Syscall::CreateChannel);
+        assert!(
+            matches!(refused, Err(KernelError::InsufficientAuthority(_))),
+            "a cancelled identity was served: {refused:?}"
+        );
+
+        // And the refusal is what the log says, not a completion.
+        let audit = kernel.syscall_gate().audit_log();
+        assert!(
+            audit.has_event(|e| matches!(e, SyscallEvent::Rejected { .. })),
+            "the refusal was not recorded"
+        );
+        assert!(
+            !audit.has_event(|e| matches!(e, SyscallEvent::Completed { .. })),
+            "a cancelled identity's syscall completed"
+        );
+    }
+
+    /// The same refusal on the gate's other door, because a guard given to one
+    /// call site is half a fix.
+    #[test]
+    fn the_gates_own_execute_refuses_a_revoked_identity_too() {
+        let mut kernel = crate::SimulatedKernel::new();
+        let caller = ExecutionId::new();
+        let mut gate = crate::syscall_gate::SyscallGate::new();
+
+        gate.execute(&mut kernel, caller, Syscall::CreateChannel, 0)
+            .expect("an unrevoked caller must be served");
+
+        gate.revoke(caller);
+        let refused = gate.execute(&mut kernel, caller, Syscall::CreateChannel, 1);
+        assert!(
+            matches!(refused, Err(KernelError::InsufficientAuthority(_))),
+            "execute served a revoked identity: {refused:?}"
+        );
     }
 }
