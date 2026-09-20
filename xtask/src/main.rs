@@ -173,6 +173,21 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // contiguous frames and gave up if it could not have it, then carried on
     // for ten more steps and died in the global allocator. It must either
     // run on a smaller heap or refuse legibly -- never abort.
+    // A ping to an unreachable address holds the network lock while it
+    // spins. The machine must keep serving and must not wedge.
+    println!("== serve while a ping is in flight");
+    let args = [
+        "--keys".to_string(),
+        "sleep:4,n,e,t,spc,p,i,n,g,spc,1,0,dot,9,9,dot,9,9,dot,9,9,ret,\
+         gauntlet:http_health,remote-tcp:cpus;online=,sleep:6"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_ping".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot on a small machine");
     let args = [
         "--memory".to_string(),

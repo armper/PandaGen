@@ -316,6 +316,11 @@ impl NetStack {
         }
         let start = now();
         while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS {
+            // The renewal path runs on every `service()` call and spins here
+            // for up to a second with the network lock held. Keep TCP's
+            // timers turning and its queued output moving, or established
+            // connections go silent for the duration.
+            self.keep_tcp_alive(now);
             while let Some(rx_len) = self.device.poll_receive(&mut self.rx_frame) {
                 match self
                     .iface
@@ -1226,6 +1231,7 @@ impl NetStack {
                     while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS
                         && self.iface.arp_cache().lookup(hop).is_none()
                     {
+                        self.keep_tcp_alive(now);
                         let _ = self.poll_for_echo();
                         core::hint::spin_loop();
                     }
@@ -1246,6 +1252,21 @@ impl NetStack {
 
     /// Ping `target`, writing progress lines to `out`. `now` returns the
     /// kernel tick. Returns true on a reply.
+    /// Keep the rest of the stack alive while something else is waiting.
+    ///
+    /// `ping` and the DHCP exchange both spin for up to a second at a time
+    /// with the network lock held, and their wait loops drained TCP events
+    /// and threw them away. Nothing was lost -- the data stays in the
+    /// receive buffer and the buffered sweeps pick it up -- but for those
+    /// seconds no TCP timer advanced and nothing queued was transmitted, so
+    /// `net ping` to an unreachable address took the whole stack off the air
+    /// for up to six seconds and connections went quiet long enough to look
+    /// dead.
+    fn keep_tcp_alive(&mut self, now: &dyn Fn() -> u64) {
+        self.iface.tcp_tick(now());
+        self.flush_tcp();
+    }
+
     pub fn ping(&mut self, target: Ipv4, now: &dyn Fn() -> u64, out: &mut impl Write) -> bool {
         const PAYLOAD: &[u8] = b"PandaGen ping";
         // Resolve the next hop first (bounded retries).
@@ -1259,6 +1280,7 @@ impl NetStack {
                     }
                     let start = now();
                     while now().saturating_sub(start) < REPLY_TIMEOUT_TICKS {
+                        self.keep_tcp_alive(now);
                         if let Some(event) = self.poll_for_echo() {
                             if let Event::EchoReply {
                                 from,
