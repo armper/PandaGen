@@ -339,10 +339,7 @@ impl HostRuntime {
     }
 
     #[cfg(feature = "hal_mode")]
-    fn pump_hal_input_with(
-        &mut self,
-        hal: &mut HalInputContext,
-    ) -> Result<(), HostRuntimeError> {
+    fn pump_hal_input_with(&mut self, hal: &mut HalInputContext) -> Result<(), HostRuntimeError> {
         let poll_result = {
             hal.bridge
                 .poll(&hal.input_service, &mut self.kernel)

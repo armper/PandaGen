@@ -563,7 +563,10 @@ mod hostile_server_tests {
         // keep the machine in that loop for as long as it liked. A lease of
         // zero disabled renewal entirely, so the kernel kept an address the
         // server had since given to someone else.
-        assert_eq!(1u32.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS), MIN_LEASE_SECONDS);
+        assert_eq!(
+            1u32.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS),
+            MIN_LEASE_SECONDS
+        );
         assert_eq!(
             u32::MAX.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS),
             MAX_LEASE_SECONDS

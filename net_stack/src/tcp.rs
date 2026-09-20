@@ -700,9 +700,8 @@ impl Tcp {
             return false;
         }
         let syn_pending = conn.state == State::SynReceived;
-        let in_flight = syn_pending
-            || conn.tx_unacked > 0
-            || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
+        let in_flight =
+            syn_pending || conn.tx_unacked > 0 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
         if in_flight {
             return now.saturating_sub(conn.last_send_tick) >= RTO_TICKS;
         }

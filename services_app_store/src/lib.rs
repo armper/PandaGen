@@ -127,11 +127,13 @@ mod tests {
     #[test]
     fn test_storefront_plan_install() {
         let mut index = RegistryIndex::default();
-        index.add(PackageEntry {
-            name: "demo".to_string(),
-            version: "0.1.0".to_string(),
-            source_digest: "abc".to_string(),
-        }).unwrap();
+        index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "abc".to_string(),
+            })
+            .unwrap();
 
         let mut store = AppStorefront::new(index, Box::new(AllowAllPolicy));
         store.add_listing(AppListing {
@@ -149,11 +151,13 @@ mod tests {
     #[test]
     fn test_storefront_policy_denied() {
         let mut index = RegistryIndex::default();
-        index.add(PackageEntry {
-            name: "heavy".to_string(),
-            version: "0.1.0".to_string(),
-            source_digest: "abc".to_string(),
-        }).unwrap();
+        index
+            .add(PackageEntry {
+                name: "heavy".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "abc".to_string(),
+            })
+            .unwrap();
 
         let mut store = AppStorefront::new(
             index,

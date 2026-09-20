@@ -322,9 +322,15 @@ mod tests {
         // no network, with only "no virtio-net device" to explain it.
         let mut io = FakePortIo::new();
         // Bus 0, slot 0: a PCI-to-PCI bridge (header type 1) to bus 1.
-        script_function(&mut io, (0x0001u32 << 16) | 0x8086, 0x0604_0000, 0x0001_0000, 0);
+        script_function(
+            &mut io,
+            (0x0001u32 << 16) | 0x8086,
+            0x0604_0000,
+            0x0001_0000,
+            0,
+        );
         io.script_read32(PCI_CONFIG_DATA, 0x0000_0100); // 0x18: secondary bus 1
-        // Bus 0, slots 1..31: empty.
+                                                        // Bus 0, slots 1..31: empty.
         for _ in 1..32 {
             script_function(&mut io, 0xFFFF_FFFF, 0, 0, 0);
         }
@@ -349,7 +355,13 @@ mod tests {
         let mut io = FakePortIo::new();
         // Bus 0, slot 0, function 0: multifunction (header bit 7), not what
         // we want.
-        script_function(&mut io, (0x0001u32 << 16) | 0x8086, 0x0600_0000, 0x0080_0000, 0);
+        script_function(
+            &mut io,
+            (0x0001u32 << 16) | 0x8086,
+            0x0600_0000,
+            0x0080_0000,
+            0,
+        );
         // Function 1: the virtio-net device.
         script_function(
             &mut io,

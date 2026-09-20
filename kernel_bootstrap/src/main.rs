@@ -3482,8 +3482,7 @@ const SMP_JOB_SPINS: u64 = 1_000_000;
 /// Workers currently inside `convert_rgba_rows` for the present in flight.
 /// The boot CPU waits for this to reach zero before it lets the surfaces
 /// those workers are writing to be reused.
-static PRESENT_WORKERS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static PRESENT_WORKERS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// CPUs a present may be split across right now.
 fn present_workers() -> usize {
@@ -4507,11 +4506,11 @@ fn init_heap(
     // Below this there is no point continuing; the machine cannot build a
     // console, let alone a desktop.
     const MIN_HEAP_PAGES: u64 = 512; // 2 MiB
-    // This asked for 32 MiB of *contiguous* memory and gave up if it could
-    // not have it -- then boot carried on for ten more steps past a
-    // condition it had already printed as fatal, and died in the global
-    // allocator with "ALLOCATION ERROR: size=16". A smaller machine can run
-    // a smaller heap; take what is there.
+                                     // This asked for 32 MiB of *contiguous* memory and gave up if it could
+                                     // not have it -- then boot carried on for ten more steps past a
+                                     // condition it had already printed as fatal, and died in the global
+                                     // allocator with "ALLOCATION ERROR: size=16". A smaller machine can run
+                                     // a smaller heap; take what is there.
     let mut pages = HEAP_PAGES;
     let phys_base = loop {
         if let Some(base) = allocator.allocate_contiguous(pages) {

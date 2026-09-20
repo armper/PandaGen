@@ -1147,12 +1147,30 @@ mod inheritance_tests {
         assert!(full.is_subset_of(&parent));
 
         for widen in [
-            ResourceBudget { cpu_ticks: None, ..full.clone() },
-            ResourceBudget { memory_units: None, ..full.clone() },
-            ResourceBudget { message_count: None, ..full.clone() },
-            ResourceBudget { packet_count: None, ..full.clone() },
-            ResourceBudget { storage_ops: None, ..full.clone() },
-            ResourceBudget { pipeline_stages: None, ..full.clone() },
+            ResourceBudget {
+                cpu_ticks: None,
+                ..full.clone()
+            },
+            ResourceBudget {
+                memory_units: None,
+                ..full.clone()
+            },
+            ResourceBudget {
+                message_count: None,
+                ..full.clone()
+            },
+            ResourceBudget {
+                packet_count: None,
+                ..full.clone()
+            },
+            ResourceBudget {
+                storage_ops: None,
+                ..full.clone()
+            },
+            ResourceBudget {
+                pipeline_stages: None,
+                ..full.clone()
+            },
         ] {
             assert!(
                 !widen.is_subset_of(&parent),

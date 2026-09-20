@@ -4425,7 +4425,11 @@ mod spawn_capability_tests {
                 .is_err(),
             "two tasks were given the same live capability"
         );
-        assert_eq!(kernel.task_count(), before, "a half-built task was left behind");
+        assert_eq!(
+            kernel.task_count(),
+            before,
+            "a half-built task was left behind"
+        );
         assert!(kernel.is_capability_valid(77, first.task_id));
     }
 }

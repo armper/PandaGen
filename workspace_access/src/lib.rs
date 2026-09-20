@@ -308,6 +308,8 @@ mod escalation_tests {
         let second = acl.add_user("second");
         acl.grant_admin(admin, second).unwrap();
         acl.revoke_admin(admin, second).unwrap();
-        assert!(acl.check_scope(second, &Scope("anything".to_string())).is_err());
+        assert!(acl
+            .check_scope(second, &Scope("anything".to_string()))
+            .is_err());
     }
 }

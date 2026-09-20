@@ -115,7 +115,8 @@ impl RemoteUiHost {
         // never saw that frame -- and the dead one was never removed, so
         // every later push failed at the same index and the whole remote UI
         // went dark for everyone because one viewer closed its window.
-        self.sinks.retain_mut(|sink| sink.send(frame.clone()).is_ok());
+        self.sinks
+            .retain_mut(|sink| sink.send(frame.clone()).is_ok());
 
         Ok(frame)
     }

@@ -245,7 +245,11 @@ mod ordering_tests {
                 ObjectKind::Blob,
             ));
         }
-        let second: Vec<String> = other.list_entries().iter().map(|e| e.name.clone()).collect();
+        let second: Vec<String> = other
+            .list_entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
         assert_eq!(first, second, "the order must not depend on insertion");
     }
 }
