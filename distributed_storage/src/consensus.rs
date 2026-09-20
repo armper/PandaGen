@@ -211,6 +211,14 @@ impl ConsensusNode {
         }
 
         for entry in request.entries.into_iter() {
+            // `index` comes off the wire. Zero underflowed here: a debug
+            // build panicked and a release build wrapped to usize::MAX, then
+            // pushed the entry at the wrong slot and desynchronised
+            // `entry.index` from its position for the rest of the node's
+            // life. Log indices are one-based.
+            if entry.index == 0 {
+                continue;
+            }
             if let Some(existing) = self.log.get((entry.index - 1) as usize) {
                 if existing.term != entry.term {
                     self.log.truncate((entry.index - 1) as usize);
@@ -324,8 +332,28 @@ impl ConsensusCluster {
             leader_commit: index,
         };
 
+        // The leader does not append to itself through this path -- it has
+        // the entry already -- and `handle_append_entries` unconditionally
+        // makes the receiver a Follower. Iterating over every node therefore
+        // demoted the leader on its own first replication, and the second
+        // `replicate_entry` returned LeaderRequired: the cluster committed
+        // exactly one entry and then refused every write until a fresh
+        // election. The crate's own test replicated once, which is why this
+        // had never shown up.
+        // The leader appends its own copy directly. Going through
+        // `handle_append_entries` also made it a Follower, so it demoted
+        // itself on its first replication and the next `replicate_entry`
+        // returned LeaderRequired.
         let mut successes = 0usize;
-        for node in self.nodes.values_mut() {
+        if let Some(leader) = self.nodes.get_mut(&leader_id) {
+            leader.log.push(entry.clone());
+            leader.commit_index = index;
+            successes += 1;
+        }
+        for (id, node) in self.nodes.iter_mut() {
+            if *id == leader_id {
+                continue;
+            }
             let response = node.handle_append_entries(request.clone());
             if response.success {
                 successes += 1;

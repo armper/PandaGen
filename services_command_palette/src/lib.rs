@@ -321,10 +321,25 @@ impl CommandPalette {
 
     /// Filters commands by query and returns them sorted by relevance
     /// Deterministic sorting: score (desc) > name (asc)
+    /// Commands matching `query` that a caller holding no capabilities may
+    /// run. See `execute_command`.
     pub fn filter_commands(&self, query: &str) -> Vec<CommandDescriptor> {
+        self.filter_commands_for(query, &[])
+    }
+
+    /// Commands matching `query` that a caller holding `capabilities` may run.
+    pub fn filter_commands_for(
+        &self,
+        query: &str,
+        capabilities: &[String],
+    ) -> Vec<CommandDescriptor> {
         let mut matches: Vec<_> = self
             .commands
             .iter()
+            .filter(|cmd| match &cmd.descriptor.required_capability {
+                Some(required) => capabilities.iter().any(|held| held == required),
+                None => true,
+            })
             .filter(|cmd| cmd.descriptor.matches(query))
             .map(|cmd| {
                 let score = cmd.descriptor.relevance_score(query);
@@ -342,10 +357,34 @@ impl CommandPalette {
     }
 
     /// Executes a command by ID with the given arguments
+    /// Run a command as a caller holding no capabilities.
+    ///
+    /// `required_capability` was declared, settable, documented in this
+    /// crate's header as "commands only appear if you have the required
+    /// capability" -- and read by nothing at all, anywhere in the workspace.
+    /// There was no caller parameter for a capability to be checked against.
+    /// This now fails closed: a command that names a capability cannot be
+    /// run through the un-authenticated entry point. Callers that do have
+    /// capabilities use `execute_command_as`.
     pub fn execute_command(&self, id: &CommandId, args: &[String]) -> CommandResult {
+        self.execute_command_as(id, args, &[])
+    }
+
+    /// Run a command as a caller holding `capabilities`.
+    pub fn execute_command_as(
+        &self,
+        id: &CommandId,
+        args: &[String],
+        capabilities: &[String],
+    ) -> CommandResult {
         if let Some(cmd) = self.commands.iter().find(|cmd| cmd.descriptor.id == *id) {
             if !cmd.descriptor.enabled {
                 return Err("Command is disabled".to_string());
+            }
+            if let Some(required) = &cmd.descriptor.required_capability {
+                if !capabilities.iter().any(|held| held == required) {
+                    return Err(format!("Command requires capability: {}", required));
+                }
             }
             (cmd.handler)(args)
         } else {
@@ -741,5 +780,68 @@ mod tests {
 
         assert!(desc.requires_args);
         assert_eq!(desc.prompt_pattern, Some("open editor ".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod capability_gate_tests {
+    use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn palette_with_a_gated_command() -> CommandPalette {
+        let mut palette = CommandPalette::new();
+        palette.register_command(
+            CommandDescriptor::new("wipe_disk", "Wipe Disk", "Erase everything", vec![])
+                .with_capability("fs_admin"),
+            Box::new(|_| Ok("wiped".to_string())),
+        );
+        palette.register_command(
+            CommandDescriptor::new("help", "Help", "Show help", vec![]),
+            Box::new(|_| Ok("help".to_string())),
+        );
+        palette
+    }
+
+    #[test]
+    fn a_command_that_names_a_capability_is_not_listed_without_it() {
+        // The crate header promises "commands only appear if you have the
+        // required capability". `required_capability` was settable,
+        // documented, and read by nothing anywhere in the workspace.
+        let palette = palette_with_a_gated_command();
+        let listed: Vec<String> = palette
+            .filter_commands("")
+            .into_iter()
+            .map(|d| d.id.to_string())
+            .collect();
+        assert!(
+            !listed.iter().any(|id| id == "wipe_disk"),
+            "a gated command was offered to a caller with no capabilities: {listed:?}"
+        );
+        assert!(listed.iter().any(|id| id == "help"));
+
+        // And it is listed for a caller that holds the capability.
+        let held = vec!["fs_admin".to_string()];
+        let listed: Vec<String> = palette
+            .filter_commands_for("", &held)
+            .into_iter()
+            .map(|d| d.id.to_string())
+            .collect();
+        assert!(listed.iter().any(|id| id == "wipe_disk"));
+    }
+
+    #[test]
+    fn a_command_that_names_a_capability_cannot_be_run_without_it() {
+        let palette = palette_with_a_gated_command();
+        let id = CommandId::new("wipe_disk");
+        assert!(
+            palette.execute_command(&id, &[]).is_err(),
+            "a gated command ran for a caller holding nothing"
+        );
+        assert_eq!(
+            palette.execute_command_as(&id, &[], &["fs_admin".to_string()]),
+            Ok("wiped".to_string())
+        );
     }
 }

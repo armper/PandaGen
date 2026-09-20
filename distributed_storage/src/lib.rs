@@ -49,6 +49,11 @@ impl DeviceId {
     pub fn new() -> Self {
         Self(new_uuid())
     }
+
+    /// The inner UUID, so callers can order devices deterministically.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,28 +99,62 @@ impl SyncState {
         Ok(())
     }
 
+    /// Union of two sync states.
+    ///
+    /// This concatenated both sides' entries with no dedup, so re-syncing
+    /// with a peer you had already merged duplicated every shared entry and
+    /// a device's log grew multiplicatively with the number of sync rounds.
+    /// A merge is a union: merging the same peer twice must be the same as
+    /// merging it once.
     pub fn merge(&self, other: &SyncState) -> SyncState {
         let mut merged: HashMap<DeviceId, Vec<VersionedObject>> = HashMap::new();
         for log in self.logs.iter().chain(other.logs.iter()) {
-            merged
-                .entry(log.device_id)
-                .or_default()
-                .extend(log.entries.clone());
+            let entries = merged.entry(log.device_id).or_default();
+            for entry in &log.entries {
+                if !entries
+                    .iter()
+                    .any(|seen: &VersionedObject| seen.version_id == entry.version_id)
+                {
+                    entries.push(entry.clone());
+                }
+            }
         }
 
-        let logs = merged
+        // Sorted, so two nodes with the same inputs produce the same state
+        // rather than whatever order a HashMap happened to iterate in.
+        let mut logs: Vec<DeviceLog> = merged
             .into_iter()
-            .map(|(device_id, entries)| DeviceLog { device_id, entries })
+            .map(|(device_id, mut entries)| {
+                entries.sort_by(|a, b| {
+                    a.timestamp_ns
+                        .cmp(&b.timestamp_ns)
+                        .then_with(|| a.version_id.as_uuid().cmp(&b.version_id.as_uuid()))
+                });
+                DeviceLog { device_id, entries }
+            })
             .collect();
+        logs.sort_by(|a, b| a.device_id.as_uuid().cmp(&b.device_id.as_uuid()));
 
         SyncState { logs }
     }
 
+    /// The latest version of each object.
+    ///
+    /// The tie-break used to be `>=` on the timestamp alone, over entries in
+    /// whatever order a HashMap iterated, so two devices writing the same
+    /// object at the same nanosecond left the surviving payload up to the
+    /// hasher: two nodes with identical inputs converged on *different*
+    /// contents for the same object, which is precisely the property the
+    /// word "consistency" is supposed to name. The version id breaks the tie
+    /// the same way everywhere.
     pub fn compact(&self) -> HashMap<ObjectId, VersionedObject> {
         let mut latest: HashMap<ObjectId, VersionedObject> = HashMap::new();
         for entry in self.all_entries() {
             let replace = match latest.get(&entry.object_id) {
-                Some(current) => entry.timestamp_ns >= current.timestamp_ns,
+                Some(current) => {
+                    (entry.timestamp_ns, entry.version_id.as_uuid())
+                        > (current.timestamp_ns, current.version_id.as_uuid())
+                }
                 None => true,
             };
             if replace {
@@ -181,5 +220,104 @@ mod tests {
         let compacted = merged.compact();
         assert_eq!(compacted.len(), 1);
         assert_eq!(compacted.get(&object).unwrap().payload, b"v2".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod consistency_tests {
+    use super::*;
+
+    fn entry(object: ObjectId, payload: &[u8], timestamp_ns: u64) -> VersionedObject {
+        VersionedObject {
+            object_id: object,
+            version_id: VersionId::new(),
+            payload: payload.to_vec(),
+            timestamp_ns,
+        }
+    }
+
+    #[test]
+    fn merging_the_same_peer_twice_is_the_same_as_merging_it_once() {
+        // `merge` concatenated both sides' entries with no dedup, so
+        // re-syncing with a peer you had already merged duplicated every
+        // shared entry: a device's log grew multiplicatively with the number
+        // of sync rounds.
+        let device = DeviceId::new();
+        let object = ObjectId::new();
+
+        let mut a = SyncState::default();
+        a.add_device(device);
+        a.append(device, entry(object, b"AAA", 10)).unwrap();
+
+        let mut b = SyncState::default();
+        b.add_device(device);
+        b.append(device, entry(object, b"BBB", 20)).unwrap();
+
+        let once = a.merge(&b);
+        assert_eq!(once.all_entries().len(), 2);
+        let twice = once.merge(&b);
+        assert_eq!(
+            twice.all_entries().len(),
+            2,
+            "merging a peer we have already merged duplicated its entries"
+        );
+    }
+
+    #[test]
+    fn two_nodes_with_the_same_inputs_agree_on_the_contents() {
+        // The tie-break was `>=` on the timestamp alone, over entries in
+        // whatever order a HashMap iterated. Two devices writing the same
+        // object at the same nanosecond left the surviving payload up to the
+        // hasher -- two nodes with identical inputs converged on *different*
+        // contents for the same object.
+        let first = DeviceId::new();
+        let second = DeviceId::new();
+        let object = ObjectId::new();
+        let left = entry(object, b"AAA", 1_000);
+        let right = entry(object, b"BBB", 1_000);
+
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let mut a = SyncState::default();
+            a.add_device(first);
+            a.append(first, left.clone()).unwrap();
+
+            let mut b = SyncState::default();
+            b.add_device(second);
+            b.append(second, right.clone()).unwrap();
+
+            let merged = a.merge(&b);
+            let winner = merged.compact().remove(&object).unwrap();
+            seen.insert(winner.payload);
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the same inputs produced more than one answer: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_entry_with_index_zero_does_not_panic() {
+        // `index` comes off the wire and `(index - 1) as usize` had no
+        // guard: a debug build panicked, and a release build wrapped to
+        // usize::MAX and pushed the entry at the wrong slot, desynchronising
+        // every later index for the life of the node.
+        use crate::consensus::{AppendEntriesRequest, ConsensusNode, ConsensusNodeId, LogEntry};
+        let mut node = ConsensusNode::new(ConsensusNodeId::new());
+        let response = node.handle_append_entries(AppendEntriesRequest {
+            term: 1,
+            leader_id: ConsensusNodeId::new(),
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![LogEntry {
+                term: 1,
+                index: 0,
+                payload: b"x".to_vec(),
+                timestamp_ns: 1,
+            }],
+            leader_commit: 0,
+        });
+        let _ = response;
     }
 }

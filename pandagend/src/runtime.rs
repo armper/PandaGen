@@ -245,11 +245,17 @@ impl HostRuntime {
 
             // Check if script is exhausted (in sim mode)
             if self.config.mode == HostMode::Sim {
-                if let Some(script) = &self.script {
-                    if !script.has_more() {
-                        // Script exhausted, exit
-                        break;
-                    }
+                match &self.script {
+                    Some(script) if !script.has_more() => break,
+                    // No script, in sim mode, means nothing will ever
+                    // produce input: `pandagend` with no arguments has no
+                    // reachable exit at all -- `max_steps` is 0,
+                    // `exit_on_idle` is false, nothing sets Shutdown -- so it
+                    // burned a core, printed nothing, and needed Ctrl-C. In
+                    // sim mode with nothing to simulate there is nothing to
+                    // do.
+                    None => break,
+                    _ => {}
                 }
             }
 
@@ -803,5 +809,21 @@ mod tests {
             debug.last_key_event.is_some(),
             "HAL key event should be routed into workspace input pipeline"
         );
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_configuration_terminates() {
+        // `HostRuntimeConfig::default()` is max_steps 0 (unlimited),
+        // exit_on_idle false, no script -- so `run` had no reachable exit at
+        // all. `pandagend` with no arguments burned a core, printed nothing,
+        // and needed Ctrl-C.
+        let mut runtime = HostRuntime::new(HostRuntimeConfig::default())
+            .expect("the default configuration must build");
+        runtime.run().expect("and must return");
     }
 }

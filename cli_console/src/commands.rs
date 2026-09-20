@@ -142,15 +142,32 @@ impl<D: BlockDevice> PersistentCommandHandler<D> {
     }
 }
 
-/// Get current timestamp (nanoseconds since epoch)
+/// Nanoseconds since the epoch, for the timestamps written into the
+/// persistent filesystem.
+///
+/// This used to be an unsynchronised `static mut` counter starting at 1000.
+/// Two problems. It is a non-atomic read-modify-write through `static mut`,
+/// which is a data race and undefined behaviour the moment two threads touch
+/// it. And it is not a clock: every process restart handed out 1001, 1002,
+/// 1003 again, so a file created after a restart carried a timestamp *lower*
+/// than one created earlier in the previous run -- and anything resolving
+/// "latest wins" by timestamp, which `distributed_storage::compact` does,
+/// preferred the stale version. That is S5's shape (a per-boot counter
+/// aliasing across boots) in the timestamp field instead of the id field.
+///
+/// The counter remains as the fallback for a target with no clock, but it is
+/// atomic, and it starts above any value a previous run could have reached.
 fn get_timestamp() -> u64 {
-    // In a real system, this would get actual time
-    // For now, use a simple counter
-    static mut COUNTER: u64 = 1000;
-    unsafe {
-        COUNTER += 1;
-        COUNTER
+    #[cfg(not(target_os = "none"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        if let Ok(since) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            return since.as_nanos() as u64;
+        }
     }
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1000);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// CLI Command handler

@@ -88,6 +88,12 @@ impl RemoteUiHost {
         }
     }
 
+    /// How many viewers are still connected. A sink that fails a send is
+    /// dropped, so this falls as viewers go away.
+    pub fn sink_count(&self) -> usize {
+        self.sinks.len()
+    }
+
     pub fn add_sink(&mut self, sink: Box<dyn SnapshotSink>) {
         self.sinks.push(sink);
     }
@@ -104,9 +110,12 @@ impl RemoteUiHost {
             snapshot,
         };
 
-        for sink in &mut self.sinks {
-            sink.send(frame.clone())?;
-        }
+        // A sink that fails is a viewer that has gone away. Propagating the
+        // first error aborted the fan-out, so every sink later in the list
+        // never saw that frame -- and the dead one was never removed, so
+        // every later push failed at the same index and the whole remote UI
+        // went dark for everyone because one viewer closed its window.
+        self.sinks.retain_mut(|sink| sink.send(frame.clone()).is_ok());
 
         Ok(frame)
     }
@@ -125,9 +134,12 @@ impl RemoteUiHost {
             timestamp_ns,
             update: self.encoder.encode(&scene),
         };
-        for sink in &mut self.sinks {
-            sink.send_desktop(frame.clone())?;
-        }
+        // As above. This one also matters for correctness and not just
+        // liveness: the encoder has already consumed the delta state, so a
+        // sink skipped by an early return has a hole in its delta stream and
+        // renders a corrupted desktop until the next keyframe.
+        self.sinks
+            .retain_mut(|sink| sink.send_desktop(frame.clone()).is_ok());
         Ok(frame)
     }
 
@@ -362,6 +374,38 @@ mod tests {
                 consumed_by_global: false,
             }),
         }
+    }
+
+    /// A viewer that has closed its window.
+    struct DeadSink;
+    impl SnapshotSink for DeadSink {
+        fn send(&mut self, _frame: RemoteSnapshotFrame) -> Result<(), RemoteUiError> {
+            Err(RemoteUiError::Io("broken pipe".to_string()))
+        }
+        fn send_desktop(&mut self, _frame: RemoteDesktopFrame) -> Result<(), RemoteUiError> {
+            Err(RemoteUiError::Io("broken pipe".to_string()))
+        }
+    }
+
+    #[test]
+    fn one_dead_viewer_does_not_take_the_others_with_it() {
+        // The fan-out propagated the first sink's error, so every sink after
+        // it never saw the frame -- and the dead one was never removed, so
+        // every later push failed at the same index. One viewer closing its
+        // window took the whole remote UI down for everybody, permanently.
+        let mut host = RemoteUiHost::new();
+        host.add_sink(Box::new(DeadSink));
+        host.add_sink(Box::new(InMemorySink::default()));
+
+        host.push_snapshot(sample_snapshot(), 10)
+            .expect("a dead viewer must not fail the push");
+        host.push_snapshot(sample_snapshot(), 11)
+            .expect("and must not keep failing it");
+        assert_eq!(
+            host.sink_count(),
+            1,
+            "the viewer that went away should have been dropped"
+        );
     }
 
     #[test]
