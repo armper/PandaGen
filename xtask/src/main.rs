@@ -106,6 +106,23 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // More CPUs than there are per-CPU tables. Those without a GDT and TSS
     // must park rather than join: a double fault on one of them would load
     // RSP = 0 and triple-fault the machine.
+    // A different chipset, so PCI enumeration is exercised against
+    // something other than the one topology the default machine has.
+    println!("== boot on q35");
+    let args = [
+        "--machine".to_string(),
+        "q35".to_string(),
+        "--keys".to_string(),
+        "sleep:6".to_string(),
+        "--out".to_string(),
+        "dist/qemu_q35".to_string(),
+        "--expect-serial".to_string(),
+        "backend: virtio-blk-pci".to_string(),
+        "--expect-serial".to_string(),
+        "net: virtio-net-pci".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot with more CPUs than tables");
     let args = [
         "--smp".to_string(),

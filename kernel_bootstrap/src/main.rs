@@ -2115,7 +2115,18 @@ fn workspace_loop(
                 let mut vga_sink_storage: Option<VgaDisplaySink> = None;
                 let mut sink: Option<&mut dyn DisplaySink> = None;
 
-                if let Some(ref mut fb) = fb_console {
+                // Through the shadow, like every other text surface. The
+                // editor used to write straight to VRAM, so the shadow -- a
+                // full framebuffer, ~3 MiB, charged against the graphics
+                // budget -- sat reserved and unused for as long as the
+                // editor was open, and the two buffers were permanently out
+                // of step. Nothing presented the stale shadow over the
+                // editor today, but only by accident: any caller that marked
+                // the pacer dirty while editing would have painted the old
+                // workspace over the user's text.
+                if let Some(shadow) = fb_shadow.as_mut() {
+                    sink = Some(shadow as &mut dyn DisplaySink);
+                } else if let Some(ref mut fb) = fb_console {
                     sink = Some(*fb);
                 } else if let Some(ref mut vga) = vga_console {
                     vga_sink_storage = Some(VgaDisplaySink::new(*vga));
@@ -2193,6 +2204,9 @@ fn workspace_loop(
                         }
                         rendered_editor = true;
                     }
+                }
+                if rendered_editor && fb_shadow.is_some() {
+                    present_pacer.mark_dirty();
                 }
             }
 

@@ -115,33 +115,141 @@ pub fn probe(io: &mut impl PortIo, address: PciAddress) -> Option<PciDeviceInfo>
     })
 }
 
-/// Enumerate function 0 of every device slot on `bus`.
+/// Header type bit 7: this device has more functions than function 0.
+const HEADER_MULTIFUNCTION: u8 = 0x80;
+/// Header type 1 (low bits): a PCI-to-PCI bridge.
+const HEADER_TYPE_BRIDGE: u8 = 0x01;
+/// How many buses deep the search will go. Guards against a malformed or
+/// hostile bridge configuration that points back at a bus already visited.
+const MAX_BUS_DEPTH: usize = 8;
+
+/// Enumerate every function of every device slot on `bus`.
+///
+/// This used to probe function 0 alone, which misses the other seven
+/// functions of every multifunction device.
 pub fn enumerate_bus(io: &mut impl PortIo, bus: u8, mut visit: impl FnMut(PciDeviceInfo)) {
     for device in 0..32u8 {
-        if let Some(info) = probe(io, PciAddress::new(bus, device, 0)) {
-            visit(info);
+        let Some(first) = probe(io, PciAddress::new(bus, device, 0)) else {
+            continue;
+        };
+        let multifunction = first.header_type & HEADER_MULTIFUNCTION != 0;
+        visit(first);
+        if !multifunction {
+            continue;
+        }
+        for function in 1..8u8 {
+            if let Some(info) = probe(io, PciAddress::new(bus, device, function)) {
+                visit(info);
+            }
         }
     }
 }
 
-/// First function on bus 0 matching `wanted`; stops probing at the first match.
-pub fn find_on_bus0(
+/// Walk bus 0 and every bus reachable through a bridge, calling `visit` for
+/// each function found.
+///
+/// Enumeration used to stop at bus 0, so a device behind a PCIe root port --
+/// the ordinary topology on `-machine q35` -- was invisible. Storage then
+/// fell back to the 32-block RAM disk and there was no network at all, with
+/// only "no virtio-net device" to explain it.
+pub fn enumerate_all(io: &mut impl PortIo, mut visit: impl FnMut(PciDeviceInfo)) {
+    let mut pending = [0u8; MAX_BUS_DEPTH];
+    let mut seen = [false; 256];
+    let mut len = 1usize;
+    pending[0] = 0;
+    seen[0] = true;
+
+    let mut index = 0usize;
+    while index < len {
+        let bus = pending[index];
+        index += 1;
+        for device in 0..32u8 {
+            let Some(first) = probe(io, PciAddress::new(bus, device, 0)) else {
+                continue;
+            };
+            let functions = if first.header_type & HEADER_MULTIFUNCTION != 0 {
+                8
+            } else {
+                1
+            };
+            for function in 0..functions {
+                let Some(info) = probe(io, PciAddress::new(bus, device, function)) else {
+                    continue;
+                };
+                if info.header_type & 0x7F == HEADER_TYPE_BRIDGE {
+                    // Secondary bus number is byte 1 of register 0x18.
+                    let secondary = ((config_read32(io, info.address, 0x18) >> 8) & 0xFF) as u8;
+                    if !seen[secondary as usize] && len < MAX_BUS_DEPTH {
+                        seen[secondary as usize] = true;
+                        pending[len] = secondary;
+                        len += 1;
+                    }
+                }
+                visit(info);
+            }
+        }
+    }
+}
+
+/// First function anywhere matching `wanted`; stops probing at the first
+/// match, so a device in slot 4 costs five probes and not thirty-two.
+pub fn find_device(
     io: &mut impl PortIo,
     wanted: impl Fn(&PciDeviceInfo) -> bool,
 ) -> Option<PciDeviceInfo> {
-    (0..32u8)
-        .filter_map(|device| probe(io, PciAddress::new(0, device, 0)))
-        .find(|info| wanted(info))
+    let mut pending = [0u8; MAX_BUS_DEPTH];
+    let mut seen = [false; 256];
+    let mut len = 1usize;
+    pending[0] = 0;
+    seen[0] = true;
+
+    let mut index = 0usize;
+    while index < len {
+        let bus = pending[index];
+        index += 1;
+        for device in 0..32u8 {
+            let Some(first) = probe(io, PciAddress::new(bus, device, 0)) else {
+                continue;
+            };
+            let functions = if first.header_type & HEADER_MULTIFUNCTION != 0 {
+                8
+            } else {
+                1
+            };
+            for function in 0..functions {
+                let info = if function == 0 {
+                    first
+                } else {
+                    match probe(io, PciAddress::new(bus, device, function)) {
+                        Some(info) => info,
+                        None => continue,
+                    }
+                };
+                if wanted(&info) {
+                    return Some(info);
+                }
+                if info.header_type & 0x7F == HEADER_TYPE_BRIDGE {
+                    let secondary = ((config_read32(io, info.address, 0x18) >> 8) & 0xFF) as u8;
+                    if !seen[secondary as usize] && len < MAX_BUS_DEPTH {
+                        seen[secondary as usize] = true;
+                        pending[len] = secondary;
+                        len += 1;
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
-/// First virtio-blk function on bus 0.
+/// First virtio-blk function anywhere on the machine.
 pub fn find_virtio_blk(io: &mut impl PortIo) -> Option<PciDeviceInfo> {
-    find_on_bus0(io, PciDeviceInfo::is_virtio_blk)
+    find_device(io, PciDeviceInfo::is_virtio_blk)
 }
 
-/// First virtio-net function on bus 0.
+/// First virtio-net function anywhere on the machine.
 pub fn find_virtio_net(io: &mut impl PortIo) -> Option<PciDeviceInfo> {
-    find_on_bus0(io, PciDeviceInfo::is_virtio_net)
+    find_device(io, PciDeviceInfo::is_virtio_net)
 }
 
 /// Enable I/O space decoding and bus mastering (the device must DMA the
@@ -193,6 +301,67 @@ mod tests {
             io.writes()[0..4].iter().map(|w| w.0).collect::<Vec<_>>(),
             vec![0xCF8, 0xCF9, 0xCFA, 0xCFB]
         );
+    }
+
+    /// One probe's four config reads: id, class, header, BAR0.
+    fn script_function(io: &mut FakePortIo, id: u32, class: u32, header: u32, bar0: u32) {
+        io.script_read32(PCI_CONFIG_DATA, id);
+        if id & 0xFFFF == 0xFFFF {
+            return;
+        }
+        io.script_read32(PCI_CONFIG_DATA, class);
+        io.script_read32(PCI_CONFIG_DATA, header);
+        io.script_read32(PCI_CONFIG_DATA, bar0);
+    }
+
+    #[test]
+    fn a_device_behind_a_bridge_is_found() {
+        // Enumeration stopped at bus 0, function 0. A virtio device behind a
+        // PCIe root port -- the ordinary topology on `-machine q35` -- was
+        // invisible: storage fell back to the 32-block RAM disk and there was
+        // no network, with only "no virtio-net device" to explain it.
+        let mut io = FakePortIo::new();
+        // Bus 0, slot 0: a PCI-to-PCI bridge (header type 1) to bus 1.
+        script_function(&mut io, (0x0001u32 << 16) | 0x8086, 0x0604_0000, 0x0001_0000, 0);
+        io.script_read32(PCI_CONFIG_DATA, 0x0000_0100); // 0x18: secondary bus 1
+        // Bus 0, slots 1..31: empty.
+        for _ in 1..32 {
+            script_function(&mut io, 0xFFFF_FFFF, 0, 0, 0);
+        }
+        // Bus 1, slot 0: the virtio-blk device.
+        script_function(
+            &mut io,
+            (0x1001u32 << 16) | 0x1AF4,
+            0x0100_0000,
+            0x0000_0000,
+            0xC001,
+        );
+
+        let info = find_virtio_blk(&mut io).expect("the device behind the bridge must be found");
+        assert_eq!(info.address, PciAddress::new(1, 0, 0));
+        assert_eq!(info.io_base(), Some(0xC000));
+    }
+
+    #[test]
+    fn functions_past_the_first_of_a_multifunction_device_are_probed() {
+        // Only function 0 of each slot was ever probed, so seven eighths of
+        // every multifunction device went unseen.
+        let mut io = FakePortIo::new();
+        // Bus 0, slot 0, function 0: multifunction (header bit 7), not what
+        // we want.
+        script_function(&mut io, (0x0001u32 << 16) | 0x8086, 0x0600_0000, 0x0080_0000, 0);
+        // Function 1: the virtio-net device.
+        script_function(
+            &mut io,
+            (0x1000u32 << 16) | 0x1AF4,
+            0x0200_0000,
+            0x0000_0000,
+            0xC041,
+        );
+
+        let info = find_virtio_net(&mut io).expect("function 1 must be probed");
+        assert_eq!(info.address, PciAddress::new(0, 0, 1));
+        assert_eq!(info.io_base(), Some(0xC040));
     }
 
     #[test]
