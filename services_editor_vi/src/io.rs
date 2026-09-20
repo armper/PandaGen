@@ -248,6 +248,28 @@ impl EditorIo for StorageEditorIo {
             .as_mut()
             .ok_or_else(|| IoError::PermissionDenied("No root directory".to_string()))?;
 
+        // Refuse before writing anything.
+        //
+        // This wrote the whole buffer and *committed* it, and only then
+        // tried to link -- so `:w <a name that already exists>`, which is a
+        // routine vi habit, left a full second copy of the file committed
+        // into an object nothing links to, un-releasable and never
+        // reclaimed, and reported an error. A refusal that is also a leak.
+        if fs.open(root, path).is_ok() {
+            return Err(IoError::StorageError(format!(
+                "Cannot save as {path}: a file of that name is already there"
+            )));
+        }
+        // And check the directory exists before writing, for the same
+        // reason.
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            if !parent.is_empty() && fs.open(root, parent).is_err() {
+                return Err(IoError::StorageError(format!(
+                    "Cannot save as {path}: {parent} is not there"
+                )));
+            }
+        }
+
         // Create new object
         let mut tx = self
             .storage
@@ -261,10 +283,17 @@ impl EditorIo for StorageEditorIo {
             .map_err(Self::map_tx_error)?;
         self.storage.commit(&mut tx).map_err(Self::map_tx_error)?;
 
-        // Link to filesystem (simplified - assumes path is just a name in current dir)
-        // In a full implementation, this would parse the path and create directories as needed
-        let name = path.split('/').next_back().unwrap_or(path);
-        if let Err(err) = fs.link(root, name, object_id, services_storage::ObjectKind::Blob) {
+        // The *whole* path, not its last component.
+        //
+        // This did `path.split('/').next_back()`, with a comment saying a
+        // full implementation would parse the path -- so `:w docs/notes.txt`
+        // wrote `notes.txt` into the root, under a name that might collide
+        // with something unrelated, and then reported "Saved as:
+        // docs/notes.txt". The user was told their work was at a path that
+        // did not contain it, and `:e docs/notes.txt` afterwards answered
+        // `[New File]`. `link` has resolved the parent from the path all
+        // along; only this caller was throwing it away.
+        if let Err(err) = fs.link(root, path, object_id, services_storage::ObjectKind::Blob) {
             return Err(IoError::StorageError(format!(
                 "Failed to link file: {}",
                 err

@@ -28,6 +28,24 @@ impl FileSystemViewService {
     /// Registers a directory with the service
     ///
     /// This allows the service to traverse into this directory.
+    /// Copy the caller's root back into the service's own table.
+    ///
+    /// `register_directory` takes a `DirectoryView` by value and both real
+    /// hosts hand it `root.clone()`, while `link`, `mkdir` and `unlink`
+    /// mutate the caller's `&mut root`. So the service's copy of the root --
+    /// the one `DirectoryResolver::resolve_directory` hands out, and the
+    /// file picker's only way to load a directory -- never saw a single file
+    /// the user created. Every subdirectory was correct; only the root, the
+    /// one directory everything starts from, was stale.
+    ///
+    /// Two notions of one directory, updated in one place. The cheap repair
+    /// is to update both.
+    fn remember_root(&mut self, root: &DirectoryView) {
+        if self.directories.contains_key(&root.id) {
+            self.directories.insert(root.id, root.clone());
+        }
+    }
+
     pub fn register_directory(&mut self, dir: DirectoryView) {
         self.directories.insert(dir.id, dir);
     }
@@ -184,6 +202,7 @@ impl FileSystemOperations for FileSystemViewService {
         // But we also need to handle the case where parent is root
         if parent_id == root.id {
             root.add_entry(entry);
+            self.remember_root(root);
         } else {
             let parent_mut = self
                 .directories
@@ -219,6 +238,7 @@ impl FileSystemOperations for FileSystemViewService {
         // Add to parent
         if parent_id == root.id {
             root.add_entry(entry);
+            self.remember_root(root);
         } else {
             let parent_mut = self
                 .directories
@@ -243,6 +263,7 @@ impl FileSystemOperations for FileSystemViewService {
         // Remove from parent
         if parent_id == root.id {
             root.remove_entry(&name);
+            self.remember_root(root);
         } else {
             let parent_mut = self
                 .directories

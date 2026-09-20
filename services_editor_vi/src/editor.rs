@@ -651,7 +651,25 @@ impl Editor {
 
             let content = ViewContent::text_buffer(lines);
             let cursor_pos = self.state.cursor().position();
-            let cursor = CursorPosition::new(cursor_pos.row, cursor_pos.col);
+            // Publish a *character* column.
+            //
+            // The editor counts columns in bytes -- `line_length` is
+            // `String::len`, and every edit indexes the line with this
+            // number -- while `text_renderer_host` consumes
+            // `CursorPosition::column` as a character index
+            // (`chars().take(col)`). On any line holding a character outside
+            // ASCII the two disagree, and the caret is drawn one character
+            // further right per preceding multi-byte character: the user
+            // types into a position they cannot see. Two notions of a column
+            // across a crate boundary; the wire format is the place to
+            // settle it, and characters are what a renderer can use.
+            let cursor_column = self
+                .state
+                .buffer()
+                .line(cursor_pos.row)
+                .map(|line| line[..cursor_pos.col.min(line.len())].chars().count())
+                .unwrap_or(cursor_pos.col);
+            let cursor = CursorPosition::new(cursor_pos.row, cursor_column);
 
             let frame = ViewFrame::new(
                 handle.view_id,
