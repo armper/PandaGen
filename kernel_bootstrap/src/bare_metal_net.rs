@@ -53,8 +53,8 @@ struct HttpStream {
     close_when_done: bool,
 }
 
-/// How long a client may take to finish sending a request head, in ticks
-/// (100 Hz), before the connection is closed.
+/// How long a client may take to finish sending a request head or a command
+/// line, in ticks (100 Hz), before the connection is reset.
 ///
 /// The TCP reaper's rule is "a segment was exchanged", not "the request made
 /// progress", so one byte a minute held a slot for ever. Eight slots serve
@@ -64,11 +64,19 @@ struct HttpStream {
 /// both carry a separate head deadline for exactly this.
 const HTTP_HEAD_DEADLINE_TICKS: u64 = 1_000;
 
-/// When a connection's current request head started arriving.
-#[derive(Clone, Copy, Default)]
-struct HttpProgress {
-    /// Tick at which the first byte of this head arrived, or 0 for idle.
+/// When a connection first had input it could not yet act on.
+///
+/// Indexed by TCP slot, so it must also remember *which* connection it is
+/// about: the state used to survive a connection ending mid-request, and
+/// the next client to land in that slot inherited a deadline that had
+/// already expired -- reset on sight, before a tick of its own.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ConnProgress {
+    /// Tick at which the incomplete input first arrived, or 0 for idle.
     started: u64,
+    /// The peer this was about, so a new occupant of the slot is noticed.
+    peer_port: u16,
+    peer: [u8; 4],
 }
 
 /// Formats into a fixed buffer; the HTTP path must not allocate, because it
@@ -156,7 +164,12 @@ pub struct NetStack {
     http_timeouts: u64,
     http_bytes: u64,
     http_streams: [HttpStream; net_stack::tcp::MAX_CONNECTIONS],
-    http_progress: [HttpProgress; net_stack::tcp::MAX_CONNECTIONS],
+    /// Per-slot deadline for input that has not yet formed a complete
+    /// request head or command line.
+    progress: [ConnProgress; net_stack::tcp::MAX_CONNECTIONS],
+    /// Bytes of a declared HTTP body still owed before the next request on
+    /// that connection may be parsed.
+    http_owed: [usize; net_stack::tcp::MAX_CONNECTIONS],
     tcp_echoed_bytes: u64,
     tcp_accepted_seen: u64,
     /// How the address was obtained: "dhcp", "static", or "none".
@@ -220,7 +233,8 @@ impl NetStack {
             http_timeouts: 0,
             http_bytes: 0,
             http_streams: [HttpStream::default(); net_stack::tcp::MAX_CONNECTIONS],
-            http_progress: [HttpProgress::default(); net_stack::tcp::MAX_CONNECTIONS],
+            progress: [ConnProgress::default(); net_stack::tcp::MAX_CONNECTIONS],
+            http_owed: [0; net_stack::tcp::MAX_CONNECTIONS],
             tcp_echoed_bytes: 0,
             tcp_accepted_seen: 0,
             address_source: "none",
@@ -621,6 +635,21 @@ impl NetStack {
             },
         }
 
+        // Not while a declared body is still owed. Whatever arrives next on
+        // this connection is that body, not a request.
+        if self.http_owed[conn] > 0 {
+            let owed = self.http_owed[conn];
+            let taken = self.http_drain(conn, owed);
+            self.http_owed[conn] = owed - taken;
+            if self.http_owed[conn] > 0 {
+                // Still owed: a client that stops mid-body holds the slot,
+                // so it is under the same deadline as an unfinished head.
+                self.enforce_progress_deadline(conn);
+                return;
+            }
+            self.clear_progress(conn);
+        }
+
         // Not while a response is still streaming. `http_service` runs on
         // any segment, including the client's ACK of the headers, so a
         // pipelined request used to be answered *into the middle* of the
@@ -677,24 +706,8 @@ impl NetStack {
 
         let (head_len, keep_alive, method, route) = match action {
             Action::Wait => {
-                // A head that never finishes. Give it a deadline of its own:
-                // TCP's idle reaper only asks whether a segment arrived, so
-                // a client sending one byte a minute looked perfectly alive
-                // and held its slot for ever.
-                let now = self.iface.tcp().now();
-                let started = self.http_progress[conn].started;
-                if started == 0 {
-                    self.http_progress[conn].started = now.max(1);
-                } else if now.saturating_sub(started) >= HTTP_HEAD_DEADLINE_TICKS {
-                    self.http_timeouts += 1;
-                    self.http_progress[conn] = HttpProgress::default();
-                    // `abort`, not `close`. A polite FIN leaves the slot in
-                    // FinWait until the closing timeout, so the client that
-                    // would not finish its request goes on holding it for
-                    // another ten seconds -- which is the whole attack. A
-                    // client that has not managed a request head in ten
-                    // seconds gets a reset and the slot back at once.
-                    self.iface.tcp_mut().abort(conn);
+                // A head that never finishes gets a deadline of its own.
+                if self.enforce_progress_deadline(conn) {
                     return;
                 }
                 // Nothing to parse yet. If the peer has also hung up, there
@@ -716,16 +729,19 @@ impl NetStack {
                 return;
             }
             Action::HeadTooLarge => {
+                self.clear_progress(conn);
                 self.http_drain(conn, usize::MAX);
                 self.http_respond(conn, 431, "text/plain", b"header too large\n", false);
                 return;
             }
             Action::Malformed => {
+                self.clear_progress(conn);
                 self.http_drain(conn, usize::MAX);
                 self.http_respond(conn, 400, "text/plain", b"bad request\n", false);
                 return;
             }
             Action::Unsupported => {
+                self.clear_progress(conn);
                 self.http_drain(conn, usize::MAX);
                 self.http_respond(conn, 501, "text/plain", b"not implemented\n", false);
                 return;
@@ -738,10 +754,18 @@ impl NetStack {
             } => (head_len, keep_alive, method, route),
         };
 
-        self.http_drain(conn, head_len);
+        // Drain the head *and* any declared body. `http_drain` stops when
+        // the buffer runs dry, and `parse` answers as soon as the blank line
+        // arrives -- so a body split across segments was not consumed, and
+        // arrived afterwards into an empty buffer where the next pass parsed
+        // it as a request. That is H3 again for any body that is not already
+        // buffered, which for a `Content-Length` above the 2 KiB receive
+        // buffer is every body.
+        let drained = self.http_drain(conn, head_len);
+        self.http_owed[conn] = head_len.saturating_sub(drained);
         self.http_requests += 1;
         // This request finished; the next one starts its own clock.
-        self.http_progress[conn] = HttpProgress::default();
+        self.clear_progress(conn);
 
         // HEAD gets the headers a GET would get and none of the body. The
         // method was parsed and then used only to pick 405, so HEAD fell
@@ -835,8 +859,8 @@ impl NetStack {
         }
     }
 
-    /// Consume up to `count` buffered bytes.
-    fn http_drain(&mut self, conn: usize, count: usize) {
+    /// Consume up to `count` buffered bytes; returns how many were consumed.
+    fn http_drain(&mut self, conn: usize, count: usize) -> usize {
         let mut sink = [0u8; 256];
         let mut left = count;
         while left > 0 {
@@ -847,6 +871,7 @@ impl NetStack {
             }
             left -= got;
         }
+        count - left
     }
 
     /// Headers plus a body small enough to hand over in one go.
@@ -929,6 +954,62 @@ impl NetStack {
 
     /// A complete command line already sitting in some command-port
     /// connection's receive buffer.
+    /// Reset a connection that has had input it cannot act on for longer
+    /// than `HTTP_HEAD_DEADLINE_TICKS`. Returns true when it did.
+    ///
+    /// TCP's reaper asks whether a *segment* arrived, not whether the
+    /// request made progress, so one byte every so often looked perfectly
+    /// alive and held a slot for the full 120-second idle timeout. Eight
+    /// slots serve every port and six per port, so a handful of dribbling
+    /// sockets took the whole machine off the network at almost no traffic.
+    ///
+    /// Phase 311 gave this to the HTTP port only. The signed command port
+    /// waits for a newline and had no deadline of its own, so the same
+    /// attack aimed one port over still worked.
+    fn enforce_progress_deadline(&mut self, conn: usize) -> bool {
+        let Some(connection) = self.iface.tcp().connection(conn) else {
+            self.progress[conn] = ConnProgress::default();
+            return false;
+        };
+        let now = self.iface.tcp().now();
+        let here = ConnProgress {
+            started: 0,
+            peer_port: connection.peer_port,
+            peer: connection.peer,
+        };
+        let tracked = self.progress[conn];
+        if tracked.peer_port != here.peer_port || tracked.peer != here.peer {
+            // A different connection in this slot: start its own clock.
+            self.progress[conn] = ConnProgress {
+                started: now.max(1),
+                ..here
+            };
+            return false;
+        }
+        if tracked.started == 0 {
+            self.progress[conn] = ConnProgress {
+                started: now.max(1),
+                ..here
+            };
+            return false;
+        }
+        if now.saturating_sub(tracked.started) < HTTP_HEAD_DEADLINE_TICKS {
+            return false;
+        }
+        self.http_timeouts += 1;
+        self.progress[conn] = ConnProgress::default();
+        // `abort`, not `close`: a polite FIN leaves the slot in FinWait for
+        // the closing timeout, so the client that would not finish goes on
+        // holding it, which is the whole attack.
+        self.iface.tcp_mut().abort(conn);
+        true
+    }
+
+    /// Mark this connection as having made progress.
+    fn clear_progress(&mut self, conn: usize) {
+        self.progress[conn] = ConnProgress::default();
+    }
+
     /// Serve any HTTP connection with bytes already buffered.
     ///
     /// Only a received frame produces `TcpReady`, and a `TcpReady` raised
@@ -976,6 +1057,21 @@ impl NetStack {
         self.log_new_connection(conn, log);
         let mut line = [0u8; 1024];
         let taken = self.iface.tcp_mut().read_line(conn, &mut line);
+        match taken {
+            // A complete line: this connection is making progress.
+            Some(_) => self.clear_progress(conn),
+            None => {
+                // A line that never ends. `read_line` only yields at a
+                // newline or a full 2 KiB buffer, so six connections
+                // dribbling a byte a minute held every slot on the signed
+                // command port for ever -- unauthenticated, at almost no
+                // traffic. Phase 311 gave the HTTP port a deadline for
+                // exactly this and left the command port without one.
+                if self.enforce_progress_deadline(conn) {
+                    return None;
+                }
+            }
+        }
         if self
             .iface
             .tcp()
