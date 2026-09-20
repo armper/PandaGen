@@ -269,6 +269,16 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         Ok(dir.list_entries())
     }
 
+    /// What the last mount recovered, and what it threw away.
+    ///
+    /// Nothing read this, which is why a whole class of loss was silent: a
+    /// format change made every record an older build had written fail its
+    /// own checksum, recovery discarded all of them, and the only trace was
+    /// a counter no caller ever looked at.
+    pub fn recovery_report(&self) -> Option<&crate::StorageRecoveryReport> {
+        self.storage.recovery_report()
+    }
+
     /// Write file content (as a Blob object)
     pub fn write_file(&mut self, content: &[u8]) -> Result<ObjectId, TransactionError> {
         let file_id = ObjectId::from_serial(

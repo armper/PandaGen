@@ -1273,6 +1273,21 @@ pub extern "C" fn rust_main() -> ! {
                     "device has no cache"
                 }
             );
+            if let Some(report) = fs.recovery_report() {
+                if report.discarded_transactions > 0 {
+                    // Never silent again. A format change once made every
+                    // record an older build had written fail its own
+                    // checksum; recovery discarded all of them and the only
+                    // trace was a counter nobody read.
+                    kprintln!(
+                        serial,
+                        "storage: WARNING recovery discarded {} transactions ({} recovered, last sequence {})",
+                        report.discarded_transactions,
+                        report.recovered_commits,
+                        report.last_sequence
+                    );
+                }
+            }
             fs
         }
         Err(_) => {

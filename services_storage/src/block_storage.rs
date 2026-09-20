@@ -96,7 +96,13 @@ struct CommitRecord {
     /// next mount would re-reserve blocks that had been freed and handed to
     /// somebody else. Records are applied in sequence order, so a release
     /// always lands after the allocation it undoes.
-    #[serde(default)]
+    ///
+    /// Skipped when empty. The checksum below covers the serialised struct,
+    /// so a field that appears in the JSON changes the checksum of every
+    /// record -- including ones written before the field existed, which then
+    /// fail their own checksum and are discarded as corrupt. Omitting it
+    /// when empty keeps those records byte-identical to what they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     released: Vec<ObjectId>,
     /// CRC32 checksum of the commit record (excluding this field)
     checksum: u32,
@@ -176,7 +182,11 @@ struct AllocationEntry {
     /// large the object, and a fragmented one costs a pair per run. Absent on
     /// disks written before this field existed, where the contiguous range is
     /// the best guess available.
-    #[serde(default)]
+    ///
+    /// Skipped when empty, for the reason on `CommitRecord::released`: this
+    /// field appearing in the JSON changed the checksum of every record an
+    /// older build had written, and recovery threw them all away.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     extents: Vec<(u64, u64)>,
 }
 
@@ -363,6 +373,14 @@ impl<D: BlockDevice> BlockStorage<D> {
         // unbounded allocation, which on the kernel is an abort: a single
         // edited byte made the machine unbootable. Check the geometry
         // against the device the disk is actually on.
+        // Written since the first version and never read, so a future
+        // format would have been misread rather than refused. Refusing is
+        // the only safe answer: a mount that half-understands a disk
+        // destroys it.
+        if superblock.version > STORAGE_VERSION {
+            return Err(BlockStorageError::InvalidSuperblock);
+        }
+
         let device_blocks = device.block_count();
         let geometry_sound = superblock.total_blocks <= device_blocks
             && superblock.data_start < superblock.total_blocks
@@ -1293,6 +1311,55 @@ mod tests {
             got.iter().all(|&b| b == b'3'),
             "the third object's blocks were handed to a later write"
         );
+    }
+
+    #[test]
+    fn a_commit_record_with_no_new_fields_serialises_as_it_always_did() {
+        // The checksum covers the serialised struct, so any field that shows
+        // up in the JSON changes the checksum of *every* record an older
+        // build wrote -- they then fail their own checksum and recovery
+        // discards them as corrupt. That is how Phases 288 and 291 silently
+        // threw away everything committed since the last checkpoint the
+        // first time a disk was mounted by a newer build.
+        //
+        // This pins the wire form of a record that uses none of the added
+        // fields. If a future field makes it fail, that field needs
+        // `skip_serializing_if` -- or the format needs a real version and a
+        // migration, which is a much bigger decision than adding a field.
+        let record = CommitRecord::new(
+            TransactionId::new(),
+            7,
+            alloc::vec![AllocationEntry {
+                object_id: ObjectId::from_serial(3),
+                version_id: VersionId::from_serial(4),
+                block_idx: 12,
+                size_bytes: 40,
+                extents: Vec::new(),
+            }],
+        );
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !json.contains("extents"),
+            "an empty extent list must not appear in the record: {json}"
+        );
+        assert!(
+            !json.contains("released"),
+            "an empty release list must not appear in the record: {json}"
+        );
+        assert!(record.is_valid());
+
+        // And a record that *does* use them is self-consistent.
+        let mut with_fields = record.clone();
+        with_fields.allocations[0].extents = alloc::vec![(12, 1)];
+        let with_fields = CommitRecord::with_releases(
+            with_fields.transaction_id,
+            with_fields.sequence,
+            with_fields.allocations,
+            alloc::vec![ObjectId::from_serial(9)],
+        );
+        let json = serde_json::to_string(&with_fields).unwrap();
+        assert!(json.contains("extents") && json.contains("released"));
+        assert!(with_fields.is_valid());
     }
 
     #[test]

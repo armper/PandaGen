@@ -233,6 +233,11 @@ impl BareMetalFilesystem {
     }
 
     /// Get the active storage backend display name.
+    /// What the mount recovered, and what it threw away.
+    pub fn recovery_report(&self) -> Option<&services_storage::StorageRecoveryReport> {
+        self.fs.recovery_report()
+    }
+
     /// Whether the backing device has a cache that `flush` must reach.
     pub fn backend_flushes(&self) -> bool {
         self.backend_flushes

@@ -53,6 +53,12 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     println!("== cargo xtask iso");
     cmd_iso()?;
 
+    // From a freshly formatted disk. The image is only created when absent,
+    // so it otherwise accumulates every previous run's writes and is never
+    // refreshed after an on-disk-format change -- a judge could pass, or
+    // fail, because of state a run from days ago left behind.
+    let _ = fs::remove_file(root.join(DISK_OUTPUT));
+
     let mut judges: Vec<String> = fs::read_dir(root.join("gauntlet"))?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
@@ -71,7 +77,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     judges.sort();
     println!("== {} judges: {}", judges.len(), judges.join(" "));
 
-    let keys = format!("sleep:3,remote:cpus,{},sleep:1", judges.join(","));
+    let keys = format!("sleep:3,remote:cpus;online=,{},sleep:1", judges.join(","));
     let args = [
         "--keys".to_string(),
         keys,
@@ -218,14 +224,24 @@ struct Ports {
     http: u16,
 }
 
+/// How far apart consecutive port bases sit. The five forwarded ports span
+/// more than one, so shifting them all by `base` made base *b*'s command
+/// port the same number as base *b+1*'s echo port: two instances one base
+/// apart could not run together, which is the whole point of the option.
+const PORT_BASE_STRIDE: u16 = 16;
+
 impl Ports {
     fn with_base(base: u16) -> Self {
+        // Saturating, because `8080 + base * 16` overflows a u16 long before
+        // anyone has that many instances, and a panic in the harness is a
+        // worse answer than a refusal.
+        let shift = base.saturating_mul(PORT_BASE_STRIDE);
         Self {
-            udp_echo: UDP_ECHO_PORT + base,
-            remote: REMOTE_PORT + base,
-            tcp_echo: TCP_ECHO_PORT + base,
-            tcp_command: TCP_COMMAND_PORT + base,
-            http: HTTP_PORT + base,
+            udp_echo: UDP_ECHO_PORT.saturating_add(shift),
+            remote: REMOTE_PORT.saturating_add(shift),
+            tcp_echo: TCP_ECHO_PORT.saturating_add(shift),
+            tcp_command: TCP_COMMAND_PORT.saturating_add(shift),
+            http: HTTP_PORT.saturating_add(shift),
         }
     }
 
@@ -807,13 +823,14 @@ fn cmd_qemu_script(
 
     let mut monitor = UnixStream::connect(&sock)?;
     monitor.set_read_timeout(Some(Duration::from_millis(400)))?;
-    let mut mon = |cmd: &str| -> io::Result<()> {
+    // QEMU's reply to each monitor command, so a refusal is not thrown away.
+    let mut mon = |cmd: &str| -> io::Result<String> {
         monitor.write_all(cmd.as_bytes())?;
         monitor.write_all(b"\n")?;
         std::thread::sleep(Duration::from_millis(120));
         let mut sink = [0u8; 8192];
-        let _ = monitor.read(&mut sink);
-        Ok(())
+        let read = monitor.read(&mut sink).unwrap_or(0);
+        Ok(String::from_utf8_lossy(&sink[..read]).into_owned())
     };
     mon("")?;
 
@@ -825,7 +842,18 @@ fn cmd_qemu_script(
             std::thread::sleep(Duration::from_secs_f64(secs.parse()?));
         } else if let Some(name) = key.strip_prefix("shot:") {
             let path = format!("{out_str}.{name}.ppm");
-            mon(&format!("screendump {path}"))?;
+            // Remove any image from a previous run first. A screendump QEMU
+            // declines used to leave the old file in place, still listed as
+            // a shot, with the run reporting PASS -- and these images are
+            // how kernel changes get verified by eye.
+            let _ = fs::remove_file(&path);
+            let reply = mon(&format!("screendump {path}"))?;
+            if !std::path::Path::new(&path).exists() {
+                udp_failures.push(format!(
+                    "<screendump {name} produced no file: {}>",
+                    reply.trim()
+                ));
+            }
             shots.push(path);
         } else if let Some(motion) = key.strip_prefix("mouse:") {
             // mouse:dx;dy[;dz] -> relative motion (semicolons: commas split keys)
@@ -902,6 +930,13 @@ fn cmd_qemu_script(
                 Some((expected, token)) => (expected, token.to_string()),
                 None => (rest, remote_token()),
             };
+            // See the `remote:` step: an empty expectation matches anything.
+            if expected.is_empty() {
+                udp_failures.push(format!(
+                    "<remote-tcp {command:?} has no expectation; write remote-tcp:{command};<text>>"
+                ));
+                continue;
+            }
             match (
                 remote_tcp_call(command, Duration::from_secs(3), &token, ports.tcp_command),
                 expected.strip_prefix('!'),
@@ -953,6 +988,17 @@ fn cmd_qemu_script(
                 Some((expected, token)) => (expected, token.to_string()),
                 None => (rest, remote_token()),
             };
+            // `reply.contains("")` is true of every reply, so a step written
+            // without an expectation asserted nothing at all and reported
+            // success for any answer the kernel gave -- including an error.
+            // The canonical verification's only remote assertion was one of
+            // these. An empty expectation is a mistake, not a wildcard.
+            if expected.is_empty() {
+                udp_failures.push(format!(
+                    "<remote {command:?} has no expectation; write remote:{command};<text>>"
+                ));
+                continue;
+            }
             match (
                 remote_call(command, Duration::from_secs(3), &token, ports.remote),
                 expected.strip_prefix('!'),
@@ -979,7 +1025,14 @@ fn cmd_qemu_script(
     }
     std::thread::sleep(Duration::from_secs_f64(after));
     let final_path = format!("{out_str}.final.ppm");
-    mon(&format!("screendump {final_path}"))?;
+    let _ = fs::remove_file(&final_path);
+    let reply = mon(&format!("screendump {final_path}"))?;
+    if !std::path::Path::new(&final_path).exists() {
+        udp_failures.push(format!(
+            "<final screendump produced no file: {}>",
+            reply.trim()
+        ));
+    }
     shots.push(final_path);
     std::thread::sleep(Duration::from_millis(400));
     mon("quit")?;
@@ -1117,9 +1170,16 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     let limine_dir = staging.join("limine");
     fs::create_dir_all(&limine_dir)?;
     fs::write(limine_dir.join("limine.conf"), &conf_text)?;
-    copy_file(limine_cfg.clone(), staging.join("boot/limine.cfg"))?;
-    copy_file(limine_cfg.clone(), staging.join("limine.cfg"))?;
-    copy_file(limine_cfg, staging.join("limine/limine.cfg"))?;
+    // The legacy `.cfg` name is staged from the *same substituted text*.
+    // It used to be copied verbatim from `boot/limine.cfg`, a stale
+    // duplicate carrying neither the per-build remote token nor the
+    // graphics entry -- so if Limine ever preferred that name, the machine
+    // booted with no token and every remote step failed confusingly. Which
+    // file Limine picks is its business; both must say the same thing.
+    let _ = &limine_cfg;
+    fs::write(staging.join("boot/limine.cfg"), &conf_text)?;
+    fs::write(staging.join("limine.cfg"), &conf_text)?;
+    fs::write(limine_dir.join("limine.cfg"), &conf_text)?;
 
     let kernel_path = root
         .join("target")
