@@ -1841,11 +1841,36 @@ impl SimulatedKernel {
         self.identity_table.insert(execution_id, metadata);
         self.task_to_identity.insert(task_id, execution_id);
 
+        // The descriptor's capabilities are a *grant*, which is what
+        // `TaskDescriptor::with_capability` and
+        // `ServiceDescriptor::capabilities` -- "initial capabilities granted
+        // to the service" -- both say they are. They were stored in
+        // `TaskInfo` and never reached `capability_table`, so a task spawned
+        // with a capability did not hold it: a declaration three layers deep
+        // that nothing read, and one that reads like an authority list.
+        //
+        // This adds no reach: `grant_capability` is public on the kernel, so
+        // anything that can spawn could already grant directly. It only
+        // makes the field mean what it says.
+        let requested = descriptor.capabilities.clone();
+
         let task_info = TaskInfo {
             descriptor,
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
+
+        for capability in requested {
+            if let Err(err) = self.grant_capability(task_id, capability) {
+                // A capability that cannot be granted -- one already live
+                // elsewhere -- must not leave a task running that believes
+                // it holds it.
+                self.tasks.remove(&task_id);
+                self.identity_table.remove(&execution_id);
+                self.task_to_identity.remove(&task_id);
+                return Err(err);
+            }
+        }
 
         // Phase 23: Enqueue task in scheduler
         if let Some(smp) = self.smp.as_mut() {
@@ -2020,11 +2045,25 @@ impl KernelApi for SimulatedKernel {
         self.identity_table.insert(execution_id, metadata);
         self.task_to_identity.insert(task_id, execution_id);
 
+        // The descriptor's capabilities are a grant; see the same block in
+        // `spawn_task_with_identity`. They were stored and never reached
+        // `capability_table`, so a task spawned with a capability did not
+        // hold it.
+        let requested = descriptor.capabilities.clone();
         let task_info = TaskInfo {
             descriptor,
             execution_id,
         };
         self.tasks.insert(task_id, task_info);
+
+        for capability in requested {
+            if let Err(err) = self.grant_capability(task_id, capability) {
+                self.tasks.remove(&task_id);
+                self.identity_table.remove(&execution_id);
+                self.task_to_identity.remove(&task_id);
+                return Err(err);
+            }
+        }
 
         // Phase 23: Enqueue task in scheduler
         if let Some(smp) = self.smp.as_mut() {
@@ -4341,5 +4380,52 @@ mod tests {
         let space2 = kernel.get_address_space(exec_id2).unwrap();
 
         assert_ne!(space1.space_id, space2.space_id);
+    }
+}
+
+#[cfg(test)]
+mod spawn_capability_tests {
+    use super::*;
+    use kernel_api::{KernelApiV0, TaskDescriptor};
+
+    #[test]
+    fn a_task_spawned_with_a_capability_actually_holds_it() {
+        // `TaskDescriptor::capabilities` -- and `ServiceDescriptor`'s, which
+        // is documented as "initial capabilities granted to the service" --
+        // was plumbed three layers deep and read by nothing: the descriptor
+        // was stored in `TaskInfo` and never reached `capability_table`, so
+        // a task spawned with a capability did not hold it. It failed
+        // closed, which is why nothing had noticed, but it reads like an
+        // authority list and is caller-supplied.
+        let mut kernel = SimulatedKernel::new();
+        let cap: Cap<()> = Cap::new(4242);
+        let handle = kernel
+            .spawn_task(TaskDescriptor::new("svc".to_string()).with_capability(cap))
+            .expect("spawn");
+
+        assert!(
+            kernel.is_capability_valid(4242, handle.task_id),
+            "the task does not hold the capability it was spawned with"
+        );
+    }
+
+    #[test]
+    fn spawning_with_a_capability_that_is_already_live_is_refused() {
+        // And must not leave a half-built task behind believing it holds one.
+        let mut kernel = SimulatedKernel::new();
+        let cap: Cap<()> = Cap::new(77);
+        let first = kernel
+            .spawn_task(TaskDescriptor::new("first".to_string()).with_capability(cap))
+            .expect("the first holder");
+        let before = kernel.task_count();
+
+        assert!(
+            kernel
+                .spawn_task(TaskDescriptor::new("second".to_string()).with_capability(cap))
+                .is_err(),
+            "two tasks were given the same live capability"
+        );
+        assert_eq!(kernel.task_count(), before, "a half-built task was left behind");
+        assert!(kernel.is_capability_valid(77, first.task_id));
     }
 }

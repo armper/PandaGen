@@ -2,12 +2,29 @@
 //!
 //! This module implements PandaGen's capability-based security model.
 //!
-//! ## Design Principles
+//! ## What this type is, and is not
 //!
-//! 1. **Unforgeable**: Capabilities cannot be created except through authorized mechanisms
-//! 2. **Transferable**: Capabilities can be explicitly passed between tasks
-//! 3. **Typed**: Each capability has a phantom type ensuring type safety
-//! 4. **Testable**: The entire system works under `cargo test`
+//! A `Cap<T>` is **an identifier, not an authority**. It is a `u64` with a
+//! compile-time label. `Cap::new` is public, the `id` is arbitrary, and the
+//! phantom type is `#[serde(skip)]` -- so a `Cap<FileRead>` serialises to
+//! `{"id":7}` and deserialises as a `Cap<RootAuthority>` without complaint.
+//! The type parameter is a compile-time aid that does not survive any IPC or
+//! persistence boundary, and `Cap<()>` is already the type the kernel's own
+//! `grant_capability` takes, so the erasure is the norm rather than the edge
+//! case.
+//!
+//! The header used to claim capabilities were "unforgeable: cannot be
+//! created except through authorized mechanisms", and `try_cast` exists to
+//! demonstrate that retyping is impossible. Neither is true of the type. The
+//! **real** gate is `SimulatedKernel`'s capability table, which records who
+//! holds which id, refuses a second live holder, and checks lease expiry,
+//! revocation and owner liveness on every use. Authority comes from being in
+//! that table -- not from holding a value of this type.
+//!
+//! 1. **Transferable**: Capabilities can be explicitly passed between tasks
+//! 2. **Typed at compile time**: the phantom type catches mix-ups in Rust
+//!    code, and only there
+//! 3. **Testable**: The entire system works under `cargo test`
 //!
 //! ## Example
 //!
@@ -37,8 +54,8 @@ use serde::{Deserialize, Serialize};
 /// `Cap<T>` represents a capability to perform operations related to `T`.
 /// The type parameter `T` is a marker that ensures capabilities cannot be confused.
 ///
-/// Capabilities are unforgeable: they can only be created by trusted code
-/// (typically the kernel or a service with authority to grant capabilities).
+/// An identifier for an authority the kernel's capability table records.
+/// Holding one of these is not itself authority; see the module header.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cap<T> {
     /// Unique identifier for this capability
@@ -68,10 +85,12 @@ impl<T> Cap<T> {
         self.id
     }
 
-    /// Attempts to cast this capability to another type
+    /// Always fails.
     ///
-    /// This always fails because capabilities are type-specific.
-    /// This method exists to demonstrate type safety.
+    /// This exists to document that a cross-type cast is not a supported
+    /// operation in Rust code. It does not make retyping impossible: the
+    /// phantom type is skipped by serde, so a round trip through any
+    /// serialized form retypes freely.
     pub fn try_cast<U>(self) -> Result<Cap<U>, CapabilityError> {
         // In a real system, there might be legitimate cross-type casts
         // based on privilege relationships, but by default we reject them
@@ -476,5 +495,38 @@ mod tests {
         assert_eq!(metadata.cap_id, 42);
         assert_eq!(metadata.owner, task);
         assert_eq!(metadata.status, CapabilityStatus::Valid);
+    }
+}
+
+#[cfg(test)]
+mod erasure_tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    struct FileRead;
+    struct RootAuthority;
+
+    #[test]
+    fn the_phantom_type_does_not_survive_serialization() {
+        // The module header claimed capabilities were "unforgeable: cannot
+        // be created except through authorized mechanisms", and `try_cast`
+        // exists to demonstrate that retyping is impossible. Neither holds:
+        // `_phantom` is `#[serde(skip)]`, so the type parameter vanishes at
+        // every IPC and persistence boundary.
+        //
+        // This test pins the behaviour so nobody builds a security argument
+        // on the claim. Authority comes from the kernel's capability table,
+        // not from holding a value of this type.
+        let file: Cap<FileRead> = Cap::new(7);
+        let wire = serde_json::to_string(&file).unwrap();
+        assert_eq!(wire, "{\"id\":7}", "the type parameter is not on the wire");
+
+        let root: Cap<RootAuthority> = serde_json::from_str(&wire).unwrap();
+        assert_eq!(root.id(), 7);
+
+        // And `try_cast` refuses in Rust code, which is the only place it
+        // can refuse anything.
+        assert!(file.try_cast::<RootAuthority>().is_err());
+        let _ = "documented".to_string();
     }
 }

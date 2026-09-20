@@ -185,14 +185,26 @@ fn test_no_ambient_capability_authority() {
         .spawn_task(TaskDescriptor::new("child".to_string()))
         .expect("Failed to spawn child");
 
-    // Child does NOT inherit parent's capability (no ambient authority)
-    // To give child the capability, parent must explicitly grant it
+    // The child does not inherit the parent's capability: no ambient
+    // authority. The parent really holds 555 now -- spawning with a
+    // capability used to store it and grant nothing -- so handing the same
+    // id to the child is a second live holder and is refused.
+    assert!(
+        !kernel.is_capability_valid(555, child.task_id),
+        "the child inherited its parent's capability"
+    );
+    assert!(
+        kernel.grant_capability(child.task_id, cap).is_err(),
+        "one capability id was granted to two live holders"
+    );
 
+    // An explicit grant of a capability nobody holds is how the child gets
+    // authority.
+    let fresh: Cap<()> = Cap::new(556);
     kernel
-        .grant_capability(child.task_id, cap)
-        .expect("Failed to explicitly grant");
-
-    // Now child has the capability via explicit grant
+        .grant_capability(child.task_id, fresh)
+        .expect("an explicit grant of a free capability must work");
+    assert!(kernel.is_capability_valid(556, child.task_id));
     assert_eq!(kernel.task_count(), 2);
 }
 
@@ -217,12 +229,21 @@ fn test_capability_grant_requires_authorization() {
         .spawn_task(TaskDescriptor::new("task2".to_string()))
         .expect("Failed to spawn task2");
 
-    // Task 1 can grant the capability (it has it)
-    kernel
-        .grant_capability(task2.task_id, cap)
-        .expect("Task1 should be able to grant");
+    // Task 1 really holds 777 now, so it cannot be handed to task 2 as
+    // well: `reject_existing_capability` refuses a second live holder.
+    assert!(
+        kernel.grant_capability(task2.task_id, cap).is_err(),
+        "one capability id was granted to two live holders"
+    );
 
-    // In a real system with full capability tracking, we would verify that
-    // a task without the capability cannot grant it
-    // For now, we verify the grant operation succeeds when task exists
+    // A capability nobody holds can be granted.
+    let fresh: Cap<()> = Cap::new(778);
+    kernel
+        .grant_capability(task2.task_id, fresh)
+        .expect("a free capability must be grantable");
+    assert!(kernel.is_capability_valid(778, task2.task_id));
+
+    // Note: the kernel does not yet check *who* is granting -- any holder of
+    // a `&mut SimulatedKernel` may grant. That is unchanged by this test and
+    // recorded in GAUNTLET.md rather than implied here.
 }
