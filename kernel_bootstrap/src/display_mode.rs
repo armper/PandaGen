@@ -20,6 +20,10 @@ pub enum DisplayMode {
     TextConsole,
     /// Composited graphical desktop.
     GraphicsDesktop,
+    /// The desk (GFX-050): cards, a dock and a top bar, apps owning
+    /// windows. Composited like `GraphicsDesktop`, drawn from the desk's own
+    /// window list rather than the workspace's.
+    Desk,
 }
 
 impl DisplayMode {
@@ -34,6 +38,7 @@ impl DisplayMode {
         match name.trim() {
             "text" | "console" | "tty" => Some(DisplayMode::TextConsole),
             "graphics" | "gfx" | "desktop" | "gui" => Some(DisplayMode::GraphicsDesktop),
+            "desk" => Some(DisplayMode::Desk),
             _ => None,
         }
     }
@@ -62,11 +67,17 @@ impl DisplayMode {
         match self {
             DisplayMode::TextConsole => "text",
             DisplayMode::GraphicsDesktop => "graphics",
+            DisplayMode::Desk => "desk",
         }
     }
 
+    /// Whether the framebuffer is driven by the compositor. The desk is.
     pub const fn is_graphics(self) -> bool {
-        matches!(self, DisplayMode::GraphicsDesktop)
+        matches!(self, DisplayMode::GraphicsDesktop | DisplayMode::Desk)
+    }
+
+    pub const fn is_desk(self) -> bool {
+        matches!(self, DisplayMode::Desk)
     }
 }
 

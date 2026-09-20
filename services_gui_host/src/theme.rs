@@ -57,6 +57,11 @@ pub struct Theme {
     /// solid slightly-darker shape rather than a soft shadow.
     #[serde(default = "Theme::default_shadow")]
     pub shadow: RgbaColor,
+    /// The desk fades from `background` at the top to this at the bottom.
+    /// Equal to `background` means a flat fill. Fills overwrite on this
+    /// rasterizer, so the gradient is painted a row at a time.
+    #[serde(default = "Theme::default_background_bottom")]
+    pub background_bottom: RgbaColor,
 }
 
 impl Theme {
@@ -71,6 +76,9 @@ impl Theme {
     }
     const fn default_shadow() -> RgbaColor {
         Theme::DEFAULT.shadow
+    }
+    const fn default_background_bottom() -> RgbaColor {
+        Theme::DEFAULT.background_bottom
     }
 }
 
@@ -97,6 +105,17 @@ impl Theme {
         surface_raised: RgbaColor::new(22, 28, 40, 255),
         hairline: RgbaColor::new(48, 56, 72, 255),
         shadow: RgbaColor::new(8, 12, 20, 255),
+        // Flat by default: the classic graphics mode, the remote viewer's
+        // golden fixtures and every existing pixel test expect one colour.
+        background_bottom: RgbaColor::new(12, 18, 28, 255),
+    };
+
+    /// The desk's theme (GFX-052): the default palette with a soft vertical
+    /// gradient behind the cards. Applied per scene, so nothing that is not
+    /// the desk changes.
+    pub const DESK: Theme = Theme {
+        background_bottom: RgbaColor::new(22, 26, 44, 255),
+        ..Theme::DEFAULT
     };
 
     /// A light variant, mostly to prove the painter is theme-agnostic.
@@ -121,6 +140,7 @@ impl Theme {
         surface_raised: RgbaColor::new(238, 241, 246, 255),
         hairline: RgbaColor::new(200, 206, 216, 255),
         shadow: RgbaColor::new(196, 202, 212, 255),
+        background_bottom: RgbaColor::new(226, 230, 236, 255),
     };
 }
 

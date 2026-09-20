@@ -565,6 +565,15 @@ impl WorkspaceSession {
         self.filesystem = Some(fs);
     }
 
+    /// Borrow the filesystem out of the session, for the desk's apps.
+    ///
+    /// There is one filesystem and it is owned by whoever is writing; the
+    /// editor takes it the same way. Give it back with `set_filesystem`.
+    #[cfg(not(test))]
+    pub fn take_filesystem(&mut self) -> Option<BareMetalFilesystem> {
+        self.filesystem.take()
+    }
+
     /// Activate or deactivate CLI mode
     fn set_cli_active(&mut self, active: bool, serial: &mut SerialPort) {
         self.cli_active = active;
@@ -599,6 +608,11 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
+        // Bytes above ASCII are the desk's navigation keys (arrows, Delete),
+        // which the text workspace has no use for and must not echo.
+        if byte >= 0x80 {
+            return false;
+        }
         let _pre_editor_row = self.editor.as_ref().map(|editor| editor.cursor().row);
         let _pre_editor_col = self.editor.as_ref().map(|editor| editor.cursor().col);
         #[cfg(feature = "console_vga")]
@@ -1557,6 +1571,7 @@ impl WorkspaceSession {
                     match self.display_mode {
                         DisplayMode::TextConsole => "Display: text (graphics available)",
                         DisplayMode::GraphicsDesktop => "Display: graphics (text available)",
+                        DisplayMode::Desk => "Display: desk (text available)",
                     }
                 } else {
                     "Display: text (no framebuffer; graphics unavailable)"
@@ -1564,7 +1579,9 @@ impl WorkspaceSession {
                 self.emit_line(serial, line);
             }
             Some(name) => match DisplayMode::parse(name) {
-                Some(DisplayMode::GraphicsDesktop) if !self.graphics_available => {
+                Some(DisplayMode::GraphicsDesktop) | Some(DisplayMode::Desk)
+                    if !self.graphics_available =>
+                {
                     self.emit_line(
                         serial,
                         "Graphics display needs a framebuffer; staying in text mode.",
@@ -1578,12 +1595,13 @@ impl WorkspaceSession {
                     let text = match mode {
                         DisplayMode::TextConsole => "Switching display to text.",
                         DisplayMode::GraphicsDesktop => "Switching display to graphics.",
+                        DisplayMode::Desk => "Switching display to desk.",
                     };
                     self.emit_line(serial, text);
                     self.push_notice(NoticeLevel::Info, text);
                 }
                 None => {
-                    self.emit_line(serial, "Usage: display [text | graphics | status]");
+                    self.emit_line(serial, "Usage: display [text | graphics | desk | status]");
                 }
             },
         }

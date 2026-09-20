@@ -11,15 +11,18 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod desk;
 pub mod desktop_frame;
 pub mod display_mode;
 pub mod display_sink;
 pub mod free_list_heap;
 pub mod minimal_editor;
+pub mod notepad;
 pub mod optimized_render;
 pub mod palette_overlay;
 pub mod present_policy;
 pub mod render_stats;
+pub mod rtc;
 
 // Storage modules (available in both test and non-test)
 pub mod bare_metal_editor_io;

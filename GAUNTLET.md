@@ -642,6 +642,11 @@ It now also boots a machine with 16 MiB, one with sixteen CPUs, and one with
 no 8254, because each of those was a defect that only a differently-shaped
 machine could show.
 
+It also boots into the desk (GFX-050), opens a Notepad from the keyboard,
+types into it, and asserts pixels with `--expect-pixel x,y,r,g,b[,tol]`
+against the final screendump. Screendumps were verified by eye before that,
+which is to say not by the gauntlet.
+
 It exists because a verification run once went green against a **stale
 image**: the kernel had stopped building and I read the log for "ISO ready"
 instead of checking the exit status. It happened a second time one phase

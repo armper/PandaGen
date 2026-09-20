@@ -567,6 +567,21 @@ impl DesktopFrameRenderer {
         build_desktop_windows(&self.layout, model, &self.ids)
     }
 
+    /// Compose an already-built window list under `theme` (the desk paints
+    /// with `Theme::DESK`; the classic mode with the backend's own).
+    pub fn render_windows_with_theme(
+        &mut self,
+        windows: Vec<DesktopWindow>,
+        pointer: Option<(usize, usize)>,
+        theme: Theme,
+    ) -> usize {
+        let scene = self.scene(windows, pointer).with_theme(theme);
+        match self.backend.render(&scene) {
+            Ok(stats) => stats.painted_windows,
+            Err(_) => 0,
+        }
+    }
+
     /// Compose an already-built window list (lets a caller apply focus first).
     pub fn render_windows(
         &mut self,

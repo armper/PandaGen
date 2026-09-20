@@ -20,17 +20,20 @@ mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
 mod bare_metal_net;
 mod bare_metal_storage;
+mod desk;
 mod desktop_frame;
 mod display_mode;
 mod display_sink;
 mod framebuffer;
 mod free_list_heap;
 mod minimal_editor;
+mod notepad;
 mod optimized_render;
 mod output;
 mod palette_overlay;
 mod present_policy;
 mod render_stats;
+mod rtc;
 mod vga;
 mod workspace;
 
@@ -1502,6 +1505,11 @@ fn workspace_loop(
     workspace.set_graphics_available(graphics_available);
     workspace.set_display_mode(display_mode);
     let mut desktop_renderer: Option<desktop_frame::DesktopFrameRenderer> = None;
+    // The desk (GFX-050) is built when the desk mode first renders, because
+    // it needs the surface size, and lives for the session after that so
+    // windows keep their places across mode switches.
+    let mut desk: Option<desk::Desk> = None;
+    let mut rtc_port = hal_x86_64::RealPortIo::new();
     // GFX-048: degrade in a fixed order under memory pressure instead of
     // failing inside an allocation.
     let mut pressure_monitor = services_gui_host::PressureMonitor::new(
@@ -1639,7 +1647,57 @@ fn workspace_loop(
                 // Build kernel context
                 let mut ctx = kernel.context();
 
-                input_progressed = workspace.process_input(ch, &mut ctx, serial);
+                // In desk mode a key belongs to the focused app, or to the
+                // desk's own shortcuts, before the workspace sees it.
+                let mut desk_took_it = false;
+                if display_mode.is_desk() {
+                    if let Some(desk) = desk.as_mut() {
+                        let (request, changed) = if desk.wants_keys() {
+                            desk.handle_key(ch)
+                        } else {
+                            (None, desk.handle_shell_key(ch))
+                        };
+                        desk_took_it = changed || request.is_some();
+                        if let Some(desk::DeskRequest::Terminal(byte)) = request {
+                            // The Terminal card is the console: the key goes
+                            // where it always went, and the card redraws.
+                            let _ = workspace.process_input(byte, &mut ctx, serial);
+                            if byte == b'\n' || byte == b'\r' {
+                                output_dirty = true;
+                            }
+                        }
+                        if let Some(desk::DeskRequest::Io { id, effect }) = request {
+                            let result = match workspace.take_filesystem() {
+                                Some(fs) => {
+                                    let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                                    let result = match &effect {
+                                        notepad::NotepadEffect::Save { path, content } => io
+                                            .save_as(path, content)
+                                            .map(|_| None)
+                                            .map_err(|e| alloc::format!("{e:?}")),
+                                        notepad::NotepadEffect::Open { path } => {
+                                            match io.open(path) {
+                                                Ok((content, _)) => Ok(Some(content)),
+                                                Err(_) => Ok(None),
+                                            }
+                                        }
+                                        _ => Ok(None),
+                                    };
+                                    workspace.set_filesystem(io.into_filesystem());
+                                    result
+                                }
+                                None => Err(alloc::string::String::from("no filesystem")),
+                            };
+                            desk.io_done(id, &effect, result);
+                        }
+                    }
+                }
+                input_progressed = if desk_took_it {
+                    output_dirty = true;
+                    true
+                } else {
+                    workspace.process_input(ch, &mut ctx, serial)
+                };
                 #[cfg(debug_assertions)]
                 if input_progressed && workspace.is_editor_active() {
                     last_editor_input = Some(ch);
@@ -1744,7 +1802,26 @@ fn workspace_loop(
                 );
                 gfx_telemetry.record_pointer_event();
                 // Route against the desktop the user currently sees.
-                if display_mode.is_graphics() {
+                if display_mode.is_desk() {
+                    if let Some(renderer) = desktop_renderer.as_ref() {
+                        let (w, h) = (renderer.width(), renderer.height());
+                        let desk = desk.get_or_insert_with(|| desk::Desk::new(w, h));
+                        desk.set_pointer(Some((
+                            event.position.x.max(0) as usize,
+                            event.position.y.max(0) as usize,
+                        )));
+                        let terminal = desk
+                            .terminal_rows()
+                            .map(|rows| terminal_view(&workspace, rows));
+                        let windows = desk.windows("", true, terminal.as_ref());
+                        let deliveries =
+                            input_router.route(renderer.compositor(), &windows, *event);
+                        if desk.handle_deliveries(&deliveries) {
+                            output_dirty = true;
+                        }
+                    }
+                    input_dirty = true;
+                } else if display_mode.is_graphics() {
                     if let Some(renderer) = desktop_renderer.as_ref() {
                         let model = build_desktop_model(
                             &workspace,
@@ -2118,9 +2195,34 @@ fn workspace_loop(
                 }
                 model.caret_visible = caret_blink.is_on_at(now);
                 animation_clock.wake_after(caret_blink.next_flip_after(now));
-                let mut windows = renderer.windows(&model);
-                input_router.apply_focus(&mut windows);
-                renderer.render_windows(windows, model.pointer);
+                if display_mode.is_desk() {
+                    let (w, h) = (renderer.width(), renderer.height());
+                    let desk = desk.get_or_insert_with(|| desk::Desk::new(w, h));
+                    // The desk decides focus; the router mirrors it, so
+                    // `apply_focus` below paints the ring where the desk
+                    // says. Two records of one thing with one writer.
+                    let _ = input_router.set_keyboard_focus(desk.focus());
+                    // A clock that is one: the CMOS RTC, with uptime as the
+                    // fallback if it never settles.
+                    let clock = match rtc::read_time(&mut rtc_port) {
+                        Some(t) => alloc::format!("{:02}:{:02}", t.hour, t.minute),
+                        None => alloc::format!("up {}:{:02}", now / 6000, (now / 100) % 60),
+                    };
+                    let terminal = desk
+                        .terminal_rows()
+                        .map(|rows| terminal_view(&workspace, rows));
+                    let mut windows = desk.windows(&clock, model.caret_visible, terminal.as_ref());
+                    input_router.apply_focus(&mut windows);
+                    renderer.render_windows_with_theme(
+                        windows,
+                        model.pointer,
+                        services_gui_host::Theme::DESK,
+                    );
+                } else {
+                    let mut windows = renderer.windows(&model);
+                    input_router.apply_focus(&mut windows);
+                    renderer.render_windows(windows, model.pointer);
+                }
                 present_pacer.mark_dirty();
                 gfx_telemetry.record_frame();
                 // The text renderer's caches no longer describe the screen.
@@ -3595,6 +3697,35 @@ fn present_desktop_frame(
     }
 }
 
+/// The console as the desk's Terminal card shows it: the newest lines that
+/// fit above the prompt, and the caret on the prompt.
+fn terminal_view(workspace: &workspace::WorkspaceSession, rows: usize) -> desk::TerminalView {
+    extern crate alloc;
+    use alloc::string::String;
+
+    let mut view = desk::TerminalView::default();
+    if rows == 0 {
+        return view;
+    }
+    let total = workspace.output_line_count();
+    let scrolled = workspace.scrollback_offset().min(total);
+    let end = total - scrolled;
+    let shown = rows.saturating_sub(1).min(end);
+    for index in end - shown..end {
+        if let Some(line) = workspace.output_line(index) {
+            view.lines
+                .push(String::from_utf8_lossy(line.as_bytes()).into_owned());
+        }
+    }
+    let mut prompt = String::from(workspace.prompt_prefix());
+    let column = prompt.chars().count() + workspace.get_cursor_col();
+    prompt.push_str(&String::from_utf8_lossy(workspace.get_command_text()));
+    view.cursor = Some((view.lines.len(), column));
+    view.lines.push(prompt);
+    view.status = String::from(workspace.status_line());
+    view
+}
+
 /// Snapshot the workspace into the data model the desktop builder consumes.
 fn build_desktop_model(
     workspace: &workspace::WorkspaceSession,
@@ -3930,10 +4061,23 @@ impl Ps2ParserState {
             return None;
         }
 
-        // Handle E0-prefixed keys (arrows)
+        // E0-prefixed keys: the arrows and Delete (GFX-051). These were
+        // dropped outright, which is why every editor on this machine
+        // navigated with hjkl. They travel as private bytes above ASCII,
+        // which the workspace ignores and the desk's apps understand.
         if self.pending_e0 {
             self.pending_e0 = false;
-            return None;
+            if is_break {
+                return None;
+            }
+            return match code {
+                0x48 => Some(crate::notepad::KEY_UP),
+                0x50 => Some(crate::notepad::KEY_DOWN),
+                0x4B => Some(crate::notepad::KEY_LEFT),
+                0x4D => Some(crate::notepad::KEY_RIGHT),
+                0x53 => Some(crate::notepad::KEY_DELETE),
+                _ => None,
+            };
         }
 
         // Ignore break codes for now
@@ -4161,6 +4305,14 @@ impl Ps2ParserState {
             }
             0x39 => b' ',  // Space
             0x1C => b'\n', // Enter
+            0x0F => {
+                // Tab was not mapped at all. Ctrl+Tab cycles the desk's
+                // windows and travels as a private byte like the arrows.
+                if self.ctrl_pressed {
+                    return Some(crate::desk::KEY_CTRL_TAB);
+                }
+                b'\t'
+            }
             0x0E => {
                 // Backspace
                 return Some(0x08); // Special marker for backspace
@@ -4245,6 +4397,14 @@ impl Ps2ParserState {
             _ => return None,
         };
 
+        // Ctrl+letter is the matching control byte, the way a terminal
+        // would send it. Ctrl+P was the one letter special-cased above and
+        // it stays 0x10 either way; this gives Ctrl+S, Ctrl+Z, Ctrl+N,
+        // Ctrl+O and Ctrl+W to the desk's apps without a table per app.
+        if self.ctrl_pressed && ascii.is_ascii_alphabetic() {
+            return Some(ascii.to_ascii_lowercase() & 0x1f);
+        }
+
         Some(ascii)
     }
 }
@@ -4289,14 +4449,57 @@ mod keyboard_scancode_tests {
         assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
     }
 
+    /// This test used to be `test_scancode_e0_prefix_ignored` and asserted
+    /// that an arrow key produced nothing -- pinning the limitation that
+    /// made every editor on this machine navigate with hjkl. It now asserts
+    /// the contract the desk's apps rely on (GFX-051): the arrows and Delete
+    /// arrive as private bytes above ASCII, other E0 keys still produce
+    /// nothing, and the prefix never leaks into the next plain key.
     #[test]
-    fn test_scancode_e0_prefix_ignored() {
+    fn test_scancode_e0_arrows_are_delivered_and_other_e0_keys_are_not() {
         let mut parser = Ps2ParserState::new();
         let mut writer = DummyWriter;
+        for (code, byte) in [
+            (0x48, crate::notepad::KEY_UP),
+            (0x50, crate::notepad::KEY_DOWN),
+            (0x4B, crate::notepad::KEY_LEFT),
+            (0x4D, crate::notepad::KEY_RIGHT),
+            (0x53, crate::notepad::KEY_DELETE),
+        ] {
+            assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+            assert_eq!(parser.process_scancode(code, &mut writer), Some(byte));
+            // The break code of the same key is silent.
+            assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+            assert_eq!(parser.process_scancode(code | 0x80, &mut writer), None);
+        }
+        // An E0 key that is not one of those (Home) is still dropped.
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
-        assert_eq!(parser.process_scancode(0x48, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x47, &mut writer), None);
         // Next normal key should still work
         assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
+    }
+
+    /// Ctrl+letter is the matching control byte; Ctrl+P is 0x10 either way.
+    #[test]
+    fn test_ctrl_letter_is_a_control_byte() {
+        let mut parser = Ps2ParserState::new();
+        let mut writer = DummyWriter;
+        assert_eq!(parser.process_scancode(0x1D, &mut writer), None); // ctrl down
+        assert_eq!(
+            parser.process_scancode(0x1F, &mut writer),
+            Some(crate::notepad::CTRL_S)
+        );
+        assert_eq!(
+            parser.process_scancode(0x31, &mut writer),
+            Some(crate::notepad::CTRL_N)
+        );
+        assert_eq!(
+            parser.process_scancode(0x2C, &mut writer),
+            Some(crate::notepad::CTRL_Z)
+        );
+        assert_eq!(parser.process_scancode(0x19, &mut writer), Some(0x10));
+        assert_eq!(parser.process_scancode(0x1D | 0x80, &mut writer), None); // ctrl up
+        assert_eq!(parser.process_scancode(0x1F, &mut writer), Some(b's'));
     }
 
     #[test]

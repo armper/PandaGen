@@ -38,6 +38,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// looking at the status, so this exists to make that mistake unavailable.
 /// Judges are discovered from the gauntlet directory rather than listed, so
 /// a new one is included the moment it is written.
+/// One pixel the final screendump must show.
+#[derive(Debug, Clone)]
+struct PixelExpectation {
+    x: usize,
+    y: usize,
+    rgb: [u8; 3],
+    tolerance: u8,
+}
+
+impl std::str::FromStr for PixelExpectation {
+    type Err = Box<dyn std::error::Error>;
+
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = spec.split(',').collect();
+        if parts.len() != 5 && parts.len() != 6 {
+            return Err(format!("--expect-pixel wants x,y,r,g,b[,tolerance], got {spec:?}").into());
+        }
+        Ok(Self {
+            x: parts[0].trim().parse()?,
+            y: parts[1].trim().parse()?,
+            rgb: [
+                parts[2].trim().parse()?,
+                parts[3].trim().parse()?,
+                parts[4].trim().parse()?,
+            ],
+            tolerance: parts
+                .get(5)
+                .map(|t| t.trim().parse())
+                .transpose()?
+                .unwrap_or(4),
+        })
+    }
+}
+
+impl PixelExpectation {
+    /// `None` when the image shows the expected colour, else what it showed.
+    fn check(&self, image: &Ppm) -> Option<String> {
+        let Some(actual) = image.pixel(self.x, self.y) else {
+            return Some(format!(
+                "({},{}) is outside the {}x{} screendump",
+                self.x, self.y, image.width, image.height
+            ));
+        };
+        let off = actual
+            .iter()
+            .zip(self.rgb.iter())
+            .any(|(a, e)| (*a as i32 - *e as i32).unsigned_abs() > self.tolerance as u32);
+        off.then(|| {
+            format!(
+                "({},{}) expected rgb({},{},{}) got rgb({},{},{})",
+                self.x,
+                self.y,
+                self.rgb[0],
+                self.rgb[1],
+                self.rgb[2],
+                actual[0],
+                actual[1],
+                actual[2]
+            )
+        })
+    }
+}
+
+/// A binary PPM (P6), which is what QEMU's `screendump` writes.
+struct Ppm {
+    width: usize,
+    height: usize,
+    data: Vec<u8>,
+}
+
+impl Ppm {
+    fn pixel(&self, x: usize, y: usize) -> Option<[u8; 3]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let at = (y * self.width + x) * 3;
+        self.data.get(at..at + 3).map(|p| [p[0], p[1], p[2]])
+    }
+}
+
+fn read_ppm(path: &str) -> Result<Ppm, Box<dyn std::error::Error>> {
+    let bytes = fs::read(path)?;
+    // Header: "P6", whitespace, width, height, maxval, one whitespace byte,
+    // then the pixels. Comments are not something QEMU writes.
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 && at < bytes.len() {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        fields.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
+    }
+    if fields.len() != 4 || fields[0] != "P6" || fields[3] != "255" {
+        return Err(format!("{path}: not an 8-bit P6 ppm").into());
+    }
+    let width: usize = fields[1].parse()?;
+    let height: usize = fields[2].parse()?;
+    let data = bytes.get(at + 1..).ok_or("ppm truncated")?.to_vec();
+    if data.len() < width * height * 3 {
+        return Err(format!("{path}: {} bytes for {width}x{height}", data.len()).into());
+    }
+    Ok(Ppm {
+        width,
+        height,
+        data,
+    })
+}
+
 /// Held for the duration of a gauntlet run.
 ///
 /// Every stage of the suite writes the same three paths -- `dist/pandagen.iso`,
@@ -86,6 +198,10 @@ impl Drop for GauntletLock {
         let _ = fs::remove_file(&self.0);
     }
 }
+
+/// The port base every gauntlet boot uses, leaving base 0 -- the default
+/// forwarded ports -- for a person's own `cargo xtask qemu` session.
+const GAUNTLET_PORT_BASE: u32 = 1;
 
 fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
@@ -186,7 +302,11 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // so it otherwise accumulates every previous run's writes and is never
     // refreshed after an on-disk-format change -- a judge could pass, or
     // fail, because of state a run from days ago left behind.
-    let _ = fs::remove_file(root.join(DISK_OUTPUT));
+    //
+    // The gauntlet runs on its own port base with its own private disk, so
+    // it can run while `cargo xtask qemu` has the machine open on the
+    // default ports for a person -- which is how the desk is being tried.
+    let _ = fs::remove_file(root.join(format!("dist/pandagen-{GAUNTLET_PORT_BASE}.disk")));
 
     let mut judges: Vec<String> = fs::read_dir(root.join("gauntlet"))?
         .filter_map(|entry| entry.ok())
@@ -208,6 +328,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
 
     let keys = format!("sleep:3,remote:cpus;online=,{},sleep:1", judges.join(","));
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
         keys,
         "--expect-serial".to_string(),
@@ -227,6 +349,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // spins. The machine must keep serving and must not wedge.
     println!("== serve while a ping is in flight");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
         "sleep:4,n,e,t,spc,p,i,n,g,spc,1,0,dot,9,9,dot,9,9,dot,9,9,ret,\
          gauntlet:http_health,remote-tcp:cpus;online=,sleep:6"
@@ -240,6 +364,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("== boot on a small machine");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--memory".to_string(),
         "16M".to_string(),
         "--keys".to_string(),
@@ -263,6 +389,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // It must answer, whichever way.
     println!("== smp run on a two-CPU machine");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--smp".to_string(),
         "2".to_string(),
         "--keys".to_string(),
@@ -281,6 +409,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("== boot on q35");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--machine".to_string(),
         "q35".to_string(),
         "--keys".to_string(),
@@ -296,6 +426,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("== boot with more CPUs than tables");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--smp".to_string(),
         "16".to_string(),
         "--keys".to_string(),
@@ -309,8 +441,59 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    // The desk (GFX-050): switch to it, launch Notepad from the keyboard,
+    // type into it, and check the pixels a card, a dock and a top bar must
+    // put on the screen. The card sits at a known cascade position, so the
+    // focus ring and the surface can be asserted by coordinate.
+    println!("== desk: a card, a dock and a top bar");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Notepad first, then a Terminal on top of it: the console as a
+        // card, with `help` run in it.
+        "sleep:6,ctrl-n,sleep:1,h,e,l,l,o,sleep:1,ctrl-t,sleep:1,h,e,l,p,ret,sleep:2,shot:desk"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk".to_string(),
+        // The machine boots into the desk; the boot log says so, by label.
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // Top bar: the raised surface, four pixels down, mid-screen.
+        "--expect-pixel".to_string(),
+        "640,4,22,28,40".to_string(),
+        // Dock pill: raised surface. Tiles are 40px tall centred in the
+        // 56px pill (740..780), so three pixels under the pill's top edge at
+        // its centre is pill whatever the number of tiles -- the first
+        // version of this pinned an x that a second tile then covered.
+        "--expect-pixel".to_string(),
+        "640,735,22,28,40".to_string(),
+        // The Notepad card: 720 wide, centred, first cascade step, at y=44.
+        // It has lost focus to the Terminal, so its ring is the hairline...
+        "--expect-pixel".to_string(),
+        "300,44,48,56,72".to_string(),
+        // ...and its header, away from the title, is the plain surface.
+        "--expect-pixel".to_string(),
+        "880,56,28,34,48".to_string(),
+        // The Terminal card: 800 wide, second cascade step (x=272, y=76),
+        // focused, so its top edge is the accent ring.
+        "--expect-pixel".to_string(),
+        "400,76,52,211,153".to_string(),
+        "--expect-pixel".to_string(),
+        "900,88,28,34,48".to_string(),
+        // The console answered `help` inside the card: the serial log mirrors
+        // its output.
+        "--expect-serial".to_string(),
+        "WS > help".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== boot without a PIT");
     let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
         "--machine".to_string(),
         "pc,pit=off".to_string(),
         "--keys".to_string(),
@@ -881,6 +1064,8 @@ fn cmd_qemu_script(
     let mut expect_serial: Vec<String> = Vec::new();
     let mut allow_exception = false;
     let mut forbid_serial: Vec<String> = Vec::new();
+    // Pixels the final screendump must show: `x,y,r,g,b[,tolerance]`.
+    let mut expect_pixels: Vec<PixelExpectation> = Vec::new();
     let mut port_base: u16 = 0;
     let mut machine = "pc".to_string();
     let mut memory = "512M".to_string();
@@ -904,6 +1089,10 @@ fn cmd_qemu_script(
             "--expect-serial" => expect_serial.push(value("--expect-serial")?.replace("\\n", "\n")),
             // The mirror of --expect-serial: the run fails if this appears.
             "--forbid-serial" => forbid_serial.push(value("--forbid-serial")?.replace("\\n", "\n")),
+            // A pixel the final screendump must show. Screendumps are how
+            // graphics changes get verified, and until this existed they
+            // were verified by eye -- which is to say, not by the gauntlet.
+            "--expect-pixel" => expect_pixels.push(value("--expect-pixel")?.parse()?),
             "--allow-exception" => allow_exception = true,
             "--port-base" => port_base = value("--port-base")?.parse()?,
             // The QEMU machine string, so a run can boot hardware the
@@ -1238,7 +1427,7 @@ fn cmd_qemu_script(
             reply.trim()
         ));
     }
-    shots.push(final_path);
+    shots.push(final_path.clone());
     std::thread::sleep(Duration::from_millis(400));
     mon("quit")?;
 
@@ -1274,6 +1463,18 @@ fn cmd_qemu_script(
         missing.push("<no kernel exception>".to_string());
     }
     missing.extend(udp_failures);
+    if !expect_pixels.is_empty() {
+        match read_ppm(&final_path) {
+            Ok(image) => {
+                for expectation in &expect_pixels {
+                    if let Some(problem) = expectation.check(&image) {
+                        missing.push(format!("<pixel {problem}>"));
+                    }
+                }
+            }
+            Err(err) => missing.push(format!("<final screendump unreadable: {err}>")),
+        }
+    }
     if log.contains("framebuffer present rejected") {
         missing.push("<no rejected framebuffer present>".to_string());
     }

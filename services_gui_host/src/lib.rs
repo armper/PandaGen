@@ -175,6 +175,9 @@ impl DesktopWindowLayer {
 pub struct DesktopTab {
     pub label: String,
     pub active: bool,
+    /// The pointer is over this tab (a dock tile lights up under it).
+    #[serde(default)]
+    pub hovered: bool,
 }
 
 impl DesktopTab {
@@ -182,6 +185,7 @@ impl DesktopTab {
         Self {
             label: label.into(),
             active,
+            hovered: false,
         }
     }
 }
@@ -340,6 +344,19 @@ impl DesktopWindow {
             CARD_CLOSE_SIZE,
             CARD_CLOSE_SIZE,
         ))
+    }
+
+    /// Where a card's resize grip sits, or `None` for other styles.
+    pub fn grip_rect(&self) -> Option<RasterRect> {
+        (self.style == WindowStyle::Card).then(|| {
+            let bounds = self.bounds();
+            RasterRect::new(
+                bounds.right().saturating_sub(CARD_GRIP_SIZE),
+                bounds.bottom().saturating_sub(CARD_GRIP_SIZE),
+                CARD_GRIP_SIZE,
+                CARD_GRIP_SIZE,
+            )
+        })
     }
 
     /// The text origin and pitch of a card's content: `(x, y, line_height)`.
@@ -630,11 +647,16 @@ impl Compositor {
         let target_bounds = RasterRect::new(0, 0, target.width(), target.height());
         let damage_rect = damage_rect.and_then(|rect| rect.intersect(target_bounds));
 
-        if let Some(rect) = damage_rect {
-            target.fill_rect(rect, self.theme.background);
-        } else {
-            target.clear(self.theme.background);
-        }
+        // The desk background is a vertical gradient (GFX-052), so both the
+        // full clear and a damage repaint go through one row-wise fill, or
+        // a repainted rectangle would show a flat patch of the top colour.
+        let whole = RasterRect::new(0, 0, target.width(), target.height());
+        fill_background(
+            target,
+            damage_rect.unwrap_or(whole),
+            whole.height,
+            &self.theme,
+        );
 
         windows.sort_by_key(composition_sort_key);
 
@@ -884,6 +906,8 @@ pub enum HitRegion {
     Close,
     /// A dock tile, by index into `tabs`.
     DockTile { index: usize },
+    /// A card's bottom-right corner: press-and-drag resizes (GFX-052).
+    Resize,
 }
 
 /// Result of hit testing a desktop position.
@@ -1396,6 +1420,39 @@ fn raster_window(
     true
 }
 
+/// Paint `rect` with the desk background: `background` at row 0 fading to
+/// `background_bottom` at the last row of a `surface_height`-tall surface.
+/// A theme whose two colours are equal gets one plain fill.
+fn fill_background(
+    target: &mut impl RenderTarget,
+    rect: RasterRect,
+    surface_height: usize,
+    theme: &Theme,
+) {
+    let (top, bottom) = (theme.background, theme.background_bottom);
+    if top == bottom || surface_height <= 1 {
+        target.fill_rect(rect, top);
+        return;
+    }
+    let span = (surface_height - 1) as u32;
+    let lerp = |a: u8, b: u8, y: usize| -> u8 {
+        let y = y.min(surface_height - 1) as u32;
+        ((a as u32 * (span - y) + b as u32 * y) / span) as u8
+    };
+    for y in rect.y..rect.bottom().min(surface_height) {
+        let color = RgbaColor::new(
+            lerp(top.r, bottom.r, y),
+            lerp(top.g, bottom.g, y),
+            lerp(top.b, bottom.b, y),
+            255,
+        );
+        target.fill_rect(RasterRect::new(rect.x, y, rect.width, 1), color);
+    }
+}
+
+/// A card's resize grip: the bottom-right corner (GFX-052).
+pub const CARD_GRIP_SIZE: usize = 14;
+
 /// A card's content rectangle: inside the padding, below the header, above
 /// the footer (GFX-050).
 fn card_content_rect(window: &DesktopWindow) -> Option<RasterRect> {
@@ -1444,6 +1501,9 @@ fn hit_region_for_style(window: &DesktopWindow, x: usize, y: usize) -> Option<Hi
         WindowStyle::Card => {
             if window.close_rect().is_some_and(|r| r.contains(x, y)) {
                 return Some(HitRegion::Close);
+            }
+            if window.grip_rect().is_some_and(|r| r.contains(x, y)) {
+                return Some(HitRegion::Resize);
             }
             if window.header_rect().is_some_and(|r| r.contains(x, y)) {
                 return Some(HitRegion::Header);
@@ -1595,6 +1655,24 @@ fn raster_card(
         }
     }
 
+    // Resize grip: two short diagonals in the bottom-right corner, in the
+    // hairline colour so it reads as texture rather than as a control.
+    if let Some(grip) = window.grip_rect() {
+        let (cx, cy) = (
+            grip.right().saturating_sub(4),
+            grip.bottom().saturating_sub(4),
+        );
+        for step in [0usize, 4] {
+            painter.draw_line(
+                (cx.saturating_sub(8 - step)) as i64,
+                cy as i64,
+                cx as i64,
+                (cy.saturating_sub(8 - step)) as i64,
+                theme.hairline,
+            );
+        }
+    }
+
     // Footer: muted, above the bottom edge, under a hairline.
     if let Some(footer) = &window.footer {
         let top = rect.bottom().saturating_sub(CARD_FOOTER_HEIGHT);
@@ -1635,7 +1713,12 @@ fn raster_dock(
         let Some(tile) = dock_tile_rect(window, index) else {
             break;
         };
-        painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, theme.tab_inactive);
+        let fill = if tab.hovered {
+            theme.selection
+        } else {
+            theme.tab_inactive
+        };
+        painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, fill);
         let monogram: String = tab.label.chars().take(2).collect();
         let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
         painter.draw_text_with_font(
