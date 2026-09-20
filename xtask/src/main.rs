@@ -62,6 +62,73 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         return Err("workspace tests with all features failed".into());
     }
 
+    // Every crate on its own. Cargo unifies features across a workspace
+    // build, so a crate that does not declare what it actually needs
+    // compiles anyway as long as some *other* member happens to turn the
+    // feature on. Two crates were in that state: `workspace_access` and
+    // `console_vga`, the latter declaring serde only as a dev-dependency
+    // while its library derives Serialize. `--workspace` was green for both.
+    println!("== cargo check, one crate at a time");
+    // `cargo metadata`'s JSON has `name` on targets and dependencies too,
+    // so ask for the package list in a form with one name per line.
+    let members = Command::new("cargo")
+        .current_dir(&root)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()?;
+    let metadata = String::from_utf8_lossy(&members.stdout);
+    // Every workspace member appears in `"workspace_members"` as an id whose
+    // first token is the package name.
+    let mut names: Vec<String> = Vec::new();
+    if let Some(list) = metadata
+        .split_once("\"workspace_members\":[")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+    {
+        for entry in list.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            // Ids look like `path+file:///…/crate#1.0.0` or `crate 1.0.0 (…)`.
+            let name = entry
+                .rsplit_once('#')
+                .map(|(_, tail)| match tail.split_once('@') {
+                    Some((name, _)) => name,
+                    None => {
+                        // `#1.0.0` means the name is the last path segment.
+                        entry
+                            .split('#')
+                            .next()
+                            .and_then(|p| p.rsplit('/').next())
+                            .unwrap_or(tail)
+                    }
+                })
+                .unwrap_or_else(|| entry.split(' ').next().unwrap_or(entry));
+            if !name.is_empty() && !names.iter().any(|seen| seen == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err("could not list workspace members".into());
+    }
+    println!("   {} crates", names.len());
+    let mut alone_failed = Vec::new();
+    for name in &names {
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["check", "-p", name, "--all-targets", "--quiet"])
+            .status()?;
+        if !status.success() {
+            alone_failed.push(name.clone());
+        }
+    }
+    if !alone_failed.is_empty() {
+        return Err(format!(
+            "these crates do not build on their own, and pass only through \
+             workspace feature unification: {}",
+            alone_failed.join(", ")
+        )
+        .into());
+    }
+
     println!("== cargo xtask iso");
     cmd_iso()?;
 

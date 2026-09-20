@@ -6,7 +6,12 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# No external runtime dependencies - pure Rust implementation
+# `src/themes.rs` derives Serialize/Deserialize, so serde is a real runtime
+# dependency and not a dev one. It was declared only under dev-dependencies,
+# so the library compiled at all only because another workspace member
+# happened to put serde in the graph -- `cargo check -p console_vga` alone
+# failed while `--workspace` passed.
+serde = { workspace = true }
 
 [features]
 default = ["alloc"]

@@ -11,10 +11,14 @@
 
 use crate::{Style, VgaColor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+// `BTreeMap` for the serialized field: serde implements the ordered maps
+// with `alloc` alone, while `HashMap` needs `std`, and declaring that
+// feature here turned it on for the whole workspace and broke the no_std
+// kernel build.
+use std::collections::BTreeMap;
 
 /// Color roles for semantic coloring
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ColorRole {
     /// Normal text
     Normal,
@@ -65,7 +69,7 @@ pub struct Theme {
     /// Theme name
     pub name: String,
     /// Color assignments for roles
-    colors: HashMap<ColorRole, ColorPair>,
+    colors: BTreeMap<ColorRole, ColorPair>,
 }
 
 impl Theme {
@@ -73,7 +77,7 @@ impl Theme {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            colors: HashMap::new(),
+            colors: BTreeMap::new(),
         }
     }
 
@@ -278,7 +282,7 @@ pub struct ThemeManager {
     /// Active theme
     active_theme: Theme,
     /// Available themes
-    themes: HashMap<String, Theme>,
+    themes: BTreeMap<String, Theme>,
 }
 
 impl ThemeManager {
@@ -288,7 +292,7 @@ impl ThemeManager {
         let light = Theme::light();
         let high_contrast = Theme::high_contrast();
 
-        let mut themes = HashMap::new();
+        let mut themes = BTreeMap::new();
         themes.insert("dark".to_string(), dark.clone());
         themes.insert("light".to_string(), light);
         themes.insert("high_contrast".to_string(), high_contrast);
@@ -372,7 +376,7 @@ impl ThemeManager {
 
         let themes_data = data["themes"].as_object().ok_or("Missing themes")?;
 
-        let mut themes = HashMap::new();
+        let mut themes = BTreeMap::new();
         for (name, theme_data) in themes_data {
             let theme: Theme = serde_json::from_value(theme_data.clone())
                 .map_err(|e| format!("Failed to parse theme '{}': {}", name, e))?;
