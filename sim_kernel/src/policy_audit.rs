@@ -7,6 +7,12 @@ use kernel_api::Instant;
 use policy::{PolicyDecision, PolicyEvent};
 use serde::{Deserialize, Serialize};
 
+/// The most audit events kept.
+///
+/// R6-12 bounded the scheduler's audit log; six siblings in this crate were
+/// left unbounded, this among them.
+const MAX_AUDIT_EVENTS: usize = 4096;
+
 /// Policy decision audit event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyAuditEvent {
@@ -46,6 +52,10 @@ impl PolicyAuditLog {
         decision: PolicyDecision,
         context_summary: String,
     ) {
+        if self.events.len() >= MAX_AUDIT_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_AUDIT_EVENTS;
+            self.events.drain(..overflow);
+        }
         self.events.push(PolicyAuditEvent {
             timestamp,
             event,

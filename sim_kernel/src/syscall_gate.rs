@@ -115,11 +115,21 @@ pub struct SyscallAuditLog {
 }
 
 impl SyscallAuditLog {
+    /// The most syscall events kept.
+    pub const MAX_EVENTS: usize = 4096;
+
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
 
     pub fn record(&mut self, event: SyscallEvent) {
+        // Two entries per syscall, each with a `String`, on a path every
+        // syscall now takes. R6-12 bounded the scheduler's log and left this
+        // one and five other siblings in this crate unbounded.
+        if self.events.len() >= Self::MAX_EVENTS {
+            let overflow = self.events.len() + 1 - Self::MAX_EVENTS;
+            self.events.drain(..overflow);
+        }
         self.events.push(event);
     }
 

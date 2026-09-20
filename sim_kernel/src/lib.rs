@@ -564,9 +564,19 @@ impl SimulatedKernel {
         // Check current usage
         let current_usage = identity.usage.cpu_ticks.0;
 
-        // Check if we would exceed the limit
+        // Check if we would exceed the limit.
+        //
+        // This was `current_usage + amount > limit.0`. `amount` comes
+        // straight off the public `try_consume_cpu_ticks`, so a large enough
+        // request wraps the sum: in a debug build that is a panic, and in the
+        // optimized build the kernel ships it makes the comparison *false* --
+        // a request for `u64::MAX` ticks granted against a hundred-tick
+        // budget. The guard is defeated by asking for more.
+        //
+        // The three other budget paths (messages, packets, storage) use the
+        // non-additive `current_usage >= limit.0` and were never exposed.
         if let Some(limit) = budget.cpu_ticks {
-            if current_usage + amount > limit.0 {
+            if current_usage.saturating_add(amount) > limit.0 {
                 // Budget exhausted - cancel identity and fail
                 self.resource_audit.record_event(
                     self.current_time,
@@ -574,7 +584,7 @@ impl SimulatedKernel {
                         execution_id,
                         resource_type: "CpuTicks".to_string(),
                         limit: limit.0,
-                        attempted_usage: current_usage + amount,
+                        attempted_usage: current_usage.saturating_add(amount),
                         operation: "cpu_consumption".to_string(),
                     },
                 );
@@ -655,7 +665,7 @@ impl SimulatedKernel {
                         execution_id,
                         resource_type: "PipelineStages".to_string(),
                         limit: limit.0,
-                        attempted_usage: current_usage + 1,
+                        attempted_usage: current_usage.saturating_add(1),
                         operation: format!("pipeline_stage:{}", stage_name),
                     },
                 );
@@ -1586,7 +1596,7 @@ impl SimulatedKernel {
                         execution_id,
                         resource_type: "MessageCount".to_string(),
                         limit: limit.0,
-                        attempted_usage: current_usage + 1,
+                        attempted_usage: current_usage.saturating_add(1),
                         operation: format!("{:?}", operation),
                     },
                 );
@@ -1660,7 +1670,7 @@ impl SimulatedKernel {
                         execution_id,
                         resource_type: "PacketCount".to_string(),
                         limit: limit.0,
-                        attempted_usage: current_usage + 1,
+                        attempted_usage: current_usage.saturating_add(1),
                         operation: format!("{:?}", operation),
                     },
                 );
@@ -1730,7 +1740,7 @@ impl SimulatedKernel {
                         execution_id,
                         resource_type: "StorageOps".to_string(),
                         limit: limit.0,
-                        attempted_usage: current_usage + 1,
+                        attempted_usage: current_usage.saturating_add(1),
                         operation: format!("{:?}", operation),
                     },
                 );
@@ -2386,7 +2396,11 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
                     let units_needed = size_bytes.div_ceil(4096);
                     let current_usage = identity.usage.memory_units.0;
 
-                    if current_usage + units_needed > limit.0 {
+                    // Saturating for the same reason as the CPU budget
+                    // above. `units_needed` is capped near 2^52 by the
+                    // `div_ceil(4096)`, so this one needs thousands of huge
+                    // allocations to reach -- but it is the same line.
+                    if current_usage.saturating_add(units_needed) > limit.0 {
                         // Record budget exhaustion
                         self.resource_audit.record_event(
                             self.current_time,
@@ -2394,7 +2408,7 @@ impl syscall_gate::MemoryOps for SimulatedKernel {
                                 execution_id: caller_execution_id,
                                 resource_type: "MemoryUnits".to_string(),
                                 limit: limit.0,
-                                attempted_usage: current_usage + units_needed,
+                                attempted_usage: current_usage.saturating_add(units_needed),
                                 operation: "allocate_region".to_string(),
                             },
                         );

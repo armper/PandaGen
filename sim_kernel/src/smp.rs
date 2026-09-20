@@ -105,6 +105,22 @@ pub struct MultiCoreScheduler {
 }
 
 impl MultiCoreScheduler {
+    /// The most per-core scheduling events kept.
+    ///
+    /// One entry per scheduling decision, for as long as the machine runs.
+    /// R6-12's text verbatim, in the SMP scheduler next door to the one it
+    /// fixed.
+    const MAX_AUDIT_EVENTS: usize = 4096;
+
+    /// Appends one event, dropping the oldest once the log is full.
+    fn record(log: &mut Vec<CoreScheduleEvent>, event: CoreScheduleEvent) {
+        if log.len() >= Self::MAX_AUDIT_EVENTS {
+            let overflow = log.len() + 1 - Self::MAX_AUDIT_EVENTS;
+            log.drain(..overflow);
+        }
+        log.push(event);
+    }
+
     pub fn new(config: SmpConfig) -> Self {
         let mut cores = Vec::with_capacity(config.core_count);
         for _ in 0..config.core_count {
@@ -152,11 +168,14 @@ impl MultiCoreScheduler {
         let task_id = core.run_queue.pop_front()?;
         core.current_task = Some(task_id);
         core.ticks_in_quantum = 0;
-        self.audit_log.push(CoreScheduleEvent::TaskSelected {
-            core_id,
-            task_id,
-            timestamp_ticks,
-        });
+        Self::record(
+            &mut self.audit_log,
+            CoreScheduleEvent::TaskSelected {
+                core_id,
+                task_id,
+                timestamp_ticks,
+            },
+        );
         Some(task_id)
     }
 
@@ -180,12 +199,15 @@ impl MultiCoreScheduler {
     ) {
         let core = &mut self.cores[core_id.0];
         if let Some(task_id) = core.current_task.take() {
-            self.audit_log.push(CoreScheduleEvent::TaskPreempted {
-                core_id,
-                task_id,
-                reason,
-                timestamp_ticks,
-            });
+            Self::record(
+                &mut self.audit_log,
+                CoreScheduleEvent::TaskPreempted {
+                    core_id,
+                    task_id,
+                    reason,
+                    timestamp_ticks,
+                },
+            );
             core.ticks_in_quantum = 0;
             core.run_queue.push_back(task_id);
         }
@@ -204,12 +226,15 @@ impl MultiCoreScheduler {
         if core.current_task == Some(task_id) {
             core.current_task = None;
         }
-        self.audit_log.push(CoreScheduleEvent::TaskExited {
-            core_id,
-            task_id,
-            reason,
-            timestamp_ticks,
-        });
+        Self::record(
+            &mut self.audit_log,
+            CoreScheduleEvent::TaskExited {
+                core_id,
+                task_id,
+                reason,
+                timestamp_ticks,
+            },
+        );
     }
 
     pub fn exit_task_any(
@@ -237,12 +262,15 @@ impl MultiCoreScheduler {
         }
 
         if let Some(core_id) = found_core {
-            self.audit_log.push(CoreScheduleEvent::TaskExited {
-                core_id,
-                task_id,
-                reason,
-                timestamp_ticks,
-            });
+            Self::record(
+                &mut self.audit_log,
+                CoreScheduleEvent::TaskExited {
+                    core_id,
+                    task_id,
+                    reason,
+                    timestamp_ticks,
+                },
+            );
             return true;
         }
 

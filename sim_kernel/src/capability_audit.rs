@@ -63,7 +63,23 @@ impl CapabilityAuditLog {
     }
 
     /// Records a capability event at the specified time
+    /// The most entries kept.
+    ///
+    /// This log had no bound at all -- one per capability grant, delegation, revocation and expiry. R6-12 bounded the scheduler's
+    /// audit log and left six siblings in this crate untouched, which is
+    /// shape 3 and shape 2 at once.
+    pub const MAX_ENTRIES: usize = 4096;
+
+    /// Drops the oldest entries once the log is full.
+    fn bound(entries: &mut Vec<CapabilityAuditEvent>) {
+        if entries.len() >= Self::MAX_ENTRIES {
+            let overflow = entries.len() + 1 - Self::MAX_ENTRIES;
+            entries.drain(..overflow);
+        }
+    }
+
     pub fn record_event(&mut self, timestamp: Instant, event: CapabilityEvent) {
+        Self::bound(&mut self.events);
         self.events.push(CapabilityAuditEvent { timestamp, event });
     }
 

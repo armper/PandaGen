@@ -226,11 +226,19 @@ impl Executable {
             let section_data = if section_type == SectionType::Bss {
                 Vec::new()
             } else {
-                if data.len() < offset + size as usize {
+                // `size` is a `u64` read from the image. `offset + size`
+                // wrapped: a panic in debug, and in release a length check
+                // that passes before the slice panics with
+                // "slice index starts at 36 but ends at 35". Checked
+                // arithmetic turns a hostile image into a refusal.
+                let Some(end) = offset.checked_add(size as usize) else {
+                    return Err(ExecutableError::FileTooShort);
+                };
+                if data.len() < end {
                     return Err(ExecutableError::FileTooShort);
                 }
-                let section_data = data[offset..offset + size as usize].to_vec();
-                offset += size as usize;
+                let section_data = data[offset..end].to_vec();
+                offset = end;
                 section_data
             };
 

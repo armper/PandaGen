@@ -11,6 +11,12 @@ use identity::ExecutionId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The most audit events kept.
+///
+/// R6-12 bounded the scheduler's audit log; six siblings in this crate were
+/// left unbounded, this among them.
+const MAX_AUDIT_EVENTS: usize = 4096;
+
 /// Address space audit events (test-only)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressSpaceEvent {
@@ -69,6 +75,10 @@ impl AddressSpaceAuditLog {
 
     /// Records an event
     pub fn record(&mut self, event: AddressSpaceEvent) {
+        if self.events.len() >= MAX_AUDIT_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_AUDIT_EVENTS;
+            self.events.drain(..overflow);
+        }
         self.events.push(event);
     }
 

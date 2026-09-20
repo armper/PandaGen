@@ -118,7 +118,23 @@ impl ResourceAuditLog {
     }
 
     /// Records a resource event
+    /// The most entries kept.
+    ///
+    /// This log had no bound at all -- one per tick per task, plus one per message, packet and storage operation. R6-12 bounded the scheduler's
+    /// audit log and left six siblings in this crate untouched, which is
+    /// shape 3 and shape 2 at once.
+    pub const MAX_ENTRIES: usize = 4096;
+
+    /// Drops the oldest entries once the log is full.
+    fn bound(entries: &mut Vec<ResourceAuditEntry>) {
+        if entries.len() >= Self::MAX_ENTRIES {
+            let overflow = entries.len() + 1 - Self::MAX_ENTRIES;
+            entries.drain(..overflow);
+        }
+    }
+
     pub fn record_event(&mut self, timestamp: Instant, event: ResourceEvent) {
+        Self::bound(&mut self.entries);
         self.entries.push(ResourceAuditEntry { timestamp, event });
     }
 
