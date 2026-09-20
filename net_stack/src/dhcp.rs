@@ -8,6 +8,29 @@ use crate::{Config, Ipv4, Mac};
 
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
+
+/// Shortest lease the client will honour. Renewal happens at half the lease
+/// and spins for up to a second with the network lock held, so a very short
+/// lease is a way for a server to keep this machine busy.
+pub const MIN_LEASE_SECONDS: u32 = 60;
+/// Longest, so a server cannot park an address indefinitely.
+pub const MAX_LEASE_SECONDS: u32 = 7 * 24 * 60 * 60;
+/// Used when the server omits option 51, rather than never renewing.
+pub const DEFAULT_LEASE_SECONDS: u32 = 3600;
+
+/// Whether an address is one a host may actually use.
+fn usable_address(ip: [u8; 4]) -> bool {
+    ip != [0, 0, 0, 0]
+        && ip[0] != 127
+        && ip[0] & 0xF0 != 0xE0 // multicast
+        && ip != [255, 255, 255, 255]
+}
+
+/// Whether a netmask is a run of ones followed by a run of zeroes.
+fn contiguous_netmask(mask: [u8; 4]) -> bool {
+    let value = u32::from_be_bytes(mask);
+    value != 0 && (!value).wrapping_add(1).count_ones() <= 1
+}
 /// Minimum BOOTP payload; shorter requests are padded.
 pub const MIN_PAYLOAD: usize = 300;
 const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
@@ -254,16 +277,40 @@ impl Client {
                 }
             }
             (State::Requesting { offered, server }, MSG_ACK) if reply.your_ip == offered => {
+                // The kernel trusts whatever answers, so check what it said.
+                // An address of 0.0.0.0, loopback or multicast, or a netmask
+                // that is not a run of ones, is not a usable configuration
+                // and used to be accepted anyway.
+                if !usable_address(reply.your_ip) {
+                    self.state = State::Init;
+                    return Step::None;
+                }
+                let netmask = reply.subnet_mask.unwrap_or([255, 255, 255, 0]);
+                if !contiguous_netmask(netmask) {
+                    self.state = State::Init;
+                    return Step::None;
+                }
                 self.state = State::Bound;
                 Step::Bound {
                     server: reply.server_id.unwrap_or(server),
                     config: Config {
                         mac: self.mac,
                         ip: reply.your_ip,
-                        netmask: reply.subnet_mask.unwrap_or([255, 255, 255, 0]),
+                        netmask,
                         gateway: reply.router.unwrap_or(reply.server_id.unwrap_or([0; 4])),
                     },
-                    lease_seconds: reply.lease_seconds.unwrap_or(0),
+                    // Floored and capped. A lease of one second made the
+                    // kernel renew twice a second, and each renewal spins
+                    // for up to a second waiting for a reply with the
+                    // network lock held -- so a rogue server that answered
+                    // slowly could keep the machine inside that loop for as
+                    // long as it liked. A lease of zero disabled renewal
+                    // for ever, so the kernel kept an address the server had
+                    // since given to somebody else.
+                    lease_seconds: reply
+                        .lease_seconds
+                        .unwrap_or(DEFAULT_LEASE_SECONDS)
+                        .clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS),
                     dns: reply.dns,
                 }
             }
@@ -478,5 +525,50 @@ mod tests {
         let nak = reply(MSG_NAK, 5, [0; 4], &[OPT_SERVER_ID, 4, 10, 0, 2, 2]);
         assert_eq!(client.handle(&nak, &mut buf), Step::None);
         assert_eq!(client.state(), State::Init);
+    }
+}
+
+#[cfg(test)]
+mod hostile_server_tests {
+    use super::*;
+
+    #[test]
+    fn a_netmask_that_is_not_a_run_of_ones_is_refused() {
+        assert!(contiguous_netmask([255, 255, 255, 0]));
+        assert!(contiguous_netmask([255, 255, 255, 255]));
+        assert!(contiguous_netmask([128, 0, 0, 0]));
+        // A mask of zero puts everything on-link and the gateway is never
+        // used, so nothing off the segment is ever reachable.
+        assert!(!contiguous_netmask([0, 0, 0, 0]));
+        // Non-contiguous masks are not a thing hosts implement.
+        assert!(!contiguous_netmask([255, 0, 255, 0]));
+        assert!(!contiguous_netmask([255, 255, 0, 1]));
+    }
+
+    #[test]
+    fn an_address_a_host_cannot_use_is_refused() {
+        assert!(usable_address([10, 0, 2, 15]));
+        assert!(!usable_address([0, 0, 0, 0]));
+        assert!(!usable_address([127, 0, 0, 1]));
+        assert!(!usable_address([224, 0, 0, 1]), "multicast");
+        assert!(!usable_address([239, 1, 2, 3]), "multicast");
+        assert!(!usable_address([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn a_lease_is_floored_and_capped() {
+        // Renewal happens at half the lease and spins for up to a second
+        // with the network lock held, so a one-second lease made the kernel
+        // renew twice a second -- a rogue server that answered slowly could
+        // keep the machine in that loop for as long as it liked. A lease of
+        // zero disabled renewal entirely, so the kernel kept an address the
+        // server had since given to someone else.
+        assert_eq!(1u32.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS), MIN_LEASE_SECONDS);
+        assert_eq!(
+            u32::MAX.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS),
+            MAX_LEASE_SECONDS
+        );
+        assert!(MIN_LEASE_SECONDS >= 60, "half a lease must be many seconds");
+        assert!(DEFAULT_LEASE_SECONDS >= MIN_LEASE_SECONDS);
     }
 }

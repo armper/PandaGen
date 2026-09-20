@@ -581,6 +581,14 @@ impl NetStack {
         if remote.is_none() {
             remote = self.buffered_command_line(log);
         }
+        // The same pass for HTTP, which never had one. A `TcpReady` raised
+        // while `service` is elsewhere -- inside the DHCP exchange's spin
+        // loop, which can run for a second with the network lock held -- was
+        // simply discarded. The client had sent its whole request and been
+        // acknowledged, so it never retransmitted, and the request hung
+        // until the 120-second idle reaper. That is F2 again, fixed for the
+        // command port and never for this one.
+        self.buffered_http(status, log);
         // Top up any response still streaming out, then push everything.
         self.pump_http();
         self.flush_tcp();
@@ -921,6 +929,26 @@ impl NetStack {
 
     /// A complete command line already sitting in some command-port
     /// connection's receive buffer.
+    /// Serve any HTTP connection with bytes already buffered.
+    ///
+    /// Only a received frame produces `TcpReady`, and a `TcpReady` raised
+    /// while the kernel is busy elsewhere is lost, so without this sweep a
+    /// complete request could sit acknowledged and unanswered until the idle
+    /// reaper closed the connection.
+    fn buffered_http(&mut self, status: SystemStatus, log: &mut impl Write) {
+        let mut pending = [usize::MAX; net_stack::tcp::MAX_CONNECTIONS];
+        let mut count = 0;
+        for (index, conn) in self.iface.tcp().connections() {
+            if conn.local_port == HTTP_PORT && conn.readable() > 0 && count < pending.len() {
+                pending[count] = index;
+                count += 1;
+            }
+        }
+        for &index in &pending[..count] {
+            self.http_service(index, status, log);
+        }
+    }
+
     fn buffered_command_line(&mut self, log: &mut impl Write) -> Option<RemoteRequest> {
         let mut pending = [usize::MAX; net_stack::tcp::MAX_CONNECTIONS];
         let mut count = 0;
