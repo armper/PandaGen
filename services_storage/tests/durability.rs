@@ -392,3 +392,33 @@ fn released_blocks_stay_released_across_a_remount() {
         "after the remounts the name points at the wrong version"
     );
 }
+
+#[test]
+fn rewriting_one_directory_does_not_consume_the_disk() {
+    // Phase 291 freed an object when its last name went away, and nothing
+    // freed the *previous version* of an object that is still live. The root
+    // directory is rewritten on every create, save, delete and mkdir, so
+    // every one of those left a dead copy behind: about 437 rewrites filled
+    // a 512-block disk, and the real machine tolerated roughly fourteen
+    // thousand before dying. The disk still filled in proportion to how
+    // often it was written rather than what was on it, which is the finding.
+    let disk = SharedDisk::new(512);
+    let mut fs = PersistentFilesystem::format_with_root(disk, "test", ROOT).unwrap();
+
+    // Far past the old ceiling, on the same one-block directory.
+    for round in 0..2_000 {
+        let id = fs.write_file(b"small").unwrap_or_else(|err| {
+            panic!("round {round}: writing a five-byte file failed with {err:?}")
+        });
+        if let Some(old) = fs
+            .link("only.txt", ROOT, id, ObjectKind::Blob, 0)
+            .unwrap_or_else(|err| panic!("round {round}: rewriting the directory failed: {err:?}"))
+        {
+            fs.release_object(old.object_id).unwrap();
+        }
+    }
+
+    let names = fs.list(ROOT).unwrap();
+    assert_eq!(names.len(), 1, "the directory holds one name throughout");
+    assert_eq!(fs.read_file(names[0].1.object_id).unwrap(), b"small");
+}

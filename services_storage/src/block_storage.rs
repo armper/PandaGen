@@ -104,6 +104,16 @@ struct CommitRecord {
     /// when empty keeps those records byte-identical to what they were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     released: Vec<ObjectId>,
+    /// Versions this transaction replaced. Only the latest version of an
+    /// object is reachable, so a superseded one is dead the moment its
+    /// successor commits -- and nothing freed them, so the disk filled in
+    /// proportion to how often it was written. The root directory is
+    /// rewritten on every create, save, delete and mkdir, so it was the
+    /// worst offender: about 437 rewrites filled a 512-block disk.
+    ///
+    /// Skipped when empty; see `released`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded: Vec<(ObjectId, VersionId)>,
     /// CRC32 checksum of the commit record (excluding this field)
     checksum: u32,
 }
@@ -124,11 +134,22 @@ impl CommitRecord {
         allocations: Vec<AllocationEntry>,
         released: Vec<ObjectId>,
     ) -> Self {
+        Self::full(transaction_id, sequence, allocations, released, Vec::new())
+    }
+
+    fn full(
+        transaction_id: TransactionId,
+        sequence: u64,
+        allocations: Vec<AllocationEntry>,
+        released: Vec<ObjectId>,
+        superseded: Vec<(ObjectId, VersionId)>,
+    ) -> Self {
         let mut record = Self {
             transaction_id,
             sequence,
             allocations,
             released,
+            superseded,
             checksum: 0,
         };
         record.checksum = record.compute_checksum();
@@ -624,9 +645,15 @@ impl<D: BlockDevice> BlockStorage<D> {
                     self.free_blocks.remove(&block);
                 }
             }
-            // Releases are applied after the same record's allocations, and
-            // records come in sequence order, so a release always undoes an
-            // allocation that has already been replayed.
+            // Supersessions and releases are applied after the same
+            // record's allocations, and records come in sequence order, so
+            // each always undoes an allocation that has already been
+            // replayed. Without this a remount resurrects every superseded
+            // version and re-reserves its blocks -- which may since have
+            // been handed to somebody else.
+            for key in &record.superseded {
+                self.free_allocation(key);
+            }
             for object in &record.released {
                 let doomed: Vec<(ObjectId, VersionId)> = self
                     .allocations
@@ -673,7 +700,13 @@ impl<D: BlockDevice> BlockStorage<D> {
         allocations: Vec<AllocationEntry>,
     ) -> Result<(), BlockStorageError> {
         let mut landed = false;
-        self.write_commit_record_with(transaction_id, allocations, Vec::new(), &mut landed)
+        self.write_commit_record_with(
+            transaction_id,
+            allocations,
+            Vec::new(),
+            Vec::new(),
+            &mut landed,
+        )
     }
 
     /// Write one commit record.
@@ -691,6 +724,7 @@ impl<D: BlockDevice> BlockStorage<D> {
         transaction_id: TransactionId,
         allocations: Vec<AllocationEntry>,
         released: Vec<ObjectId>,
+        superseded: Vec<(ObjectId, VersionId)>,
         landed: &mut bool,
     ) -> Result<(), BlockStorageError> {
         // Increment commit sequence
@@ -699,7 +733,13 @@ impl<D: BlockDevice> BlockStorage<D> {
         let sequence = self.superblock.commit_sequence;
 
         // Create commit record with checksum
-        let record = CommitRecord::with_releases(transaction_id, sequence, allocations, released);
+        let record = CommitRecord::full(
+            transaction_id,
+            sequence,
+            allocations,
+            released,
+            superseded,
+        );
 
         // Serialize commit record
         let record_json =
@@ -752,18 +792,50 @@ impl<D: BlockDevice> BlockStorage<D> {
     }
 
     /// Allocate blocks for data
+    /// Blocks for an object of `size_bytes`, preferring contiguous runs.
+    ///
+    /// This used to take the lowest free block one at a time, so on a free
+    /// list with holes -- which releasing superseded versions guarantees --
+    /// an object became one extent per block. The whole extent list goes in
+    /// the commit record, which must fit one 4096-byte block, so past a few
+    /// hundred extents the save failed with an opaque serialization error on
+    /// a disk that was 85% empty.
+    ///
+    /// Taking the longest run first keeps the extent count near the minimum
+    /// the free list allows, and leaves the remaining runs as long as
+    /// possible for the next allocation.
     fn allocate_blocks(&mut self, size_bytes: u64) -> Result<Vec<u64>, BlockStorageError> {
         let blocks_needed = (size_bytes as usize).div_ceil(BLOCK_SIZE) as u64;
         if (self.free_blocks.len() as u64) < blocks_needed {
             return Err(BlockStorageError::NoFreeSpace);
         }
 
-        let mut allocated = Vec::new();
-        for _ in 0..blocks_needed {
-            if let Some(&block) = self.free_blocks.iter().next() {
-                self.free_blocks.remove(&block);
-                allocated.push(block);
+        // The free set as runs, longest first.
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for &block in self.free_blocks.iter() {
+            match runs.last_mut() {
+                Some((start, count)) if *start + *count == block => *count += 1,
+                _ => runs.push((block, 1)),
             }
+        }
+        runs.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut allocated = Vec::new();
+        let mut remaining = blocks_needed;
+        for (start, count) in runs {
+            if remaining == 0 {
+                break;
+            }
+            let take = count.min(remaining);
+            for offset in 0..take {
+                allocated.push(start + offset);
+            }
+            remaining -= take;
+        }
+        // Keep the blocks in order, so the extent list is minimal.
+        allocated.sort_unstable();
+        for block in &allocated {
+            self.free_blocks.remove(block);
         }
 
         Ok(allocated)
@@ -829,6 +901,17 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         self.read_data(&blocks, entry.size_bytes)
     }
+    /// Drop one version's allocation entry and return its blocks.
+    fn free_allocation(&mut self, key: &(ObjectId, VersionId)) {
+        if let Some(entry) = self.allocations.remove(key) {
+            for block in entry.block_list() {
+                if block < self.superblock.total_blocks {
+                    self.free_blocks.insert(block);
+                }
+            }
+        }
+    }
+
     /// Give an object's blocks back to the free set.
     ///
     /// Nothing was ever freed: every save allocated a fresh object and the
@@ -860,6 +943,7 @@ impl<D: BlockDevice> BlockStorage<D> {
             TransactionId::new(),
             Vec::new(),
             alloc::vec![object_id],
+            Vec::new(),
             &mut landed,
         )?;
 
@@ -920,11 +1004,27 @@ impl<D: BlockDevice> BlockStorage<D> {
             });
         }
 
+        // Every version these writes replace. Only the latest version of an
+        // object is ever reachable, so its predecessor is dead the instant
+        // this commit lands -- and nothing used to free them, so the disk
+        // filled in proportion to how often it was written rather than what
+        // was on it. The root directory, rewritten on every create, save,
+        // delete and mkdir, was the worst of it.
+        let mut superseded = Vec::new();
+        for alloc in &allocations_to_commit {
+            if let Some(previous) = self.latest_versions.get(&alloc.object_id) {
+                if *previous != alloc.version_id {
+                    superseded.push((alloc.object_id, *previous));
+                }
+            }
+        }
+
         // Step 2: Write commit record (atomic point of truth)
         let record = self.write_commit_record_with(
             id,
             allocations_to_commit.clone(),
             Vec::new(),
+            superseded.clone(),
             durable,
         );
 
@@ -938,6 +1038,9 @@ impl<D: BlockDevice> BlockStorage<D> {
                     .insert((alloc.object_id, alloc.version_id), alloc.clone());
                 self.latest_versions
                     .insert(alloc.object_id, alloc.version_id);
+            }
+            for key in superseded {
+                self.free_allocation(&key);
             }
         }
         record.map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
@@ -1419,6 +1522,44 @@ mod tests {
             };
             assert_eq!(entry.block_list(), blocks, "round trip lost blocks");
         }
+    }
+
+    #[test]
+    fn a_large_object_still_commits_on_a_fragmented_disk() {
+        // The extent list goes in the commit record, which must fit one
+        // 4096-byte block. `allocate_blocks` took the lowest free block one
+        // at a time, so on a free list full of holes -- which releasing
+        // superseded versions guarantees -- an object became one extent per
+        // block, and past a few hundred the save failed with an opaque
+        // serialization error on a disk that was mostly empty.
+        let disk = RamDisk::with_capacity_mb(16);
+        let mut storage = BlockStorage::format(disk).unwrap();
+
+        // Comb the free list: many small objects, every other one released.
+        let mut objects = Vec::new();
+        for _ in 0..900 {
+            let object = ObjectId::new();
+            let mut tx = storage.begin_transaction().unwrap();
+            storage.write(&mut tx, object, &[b'.'; 64]).unwrap();
+            storage.commit(&mut tx).unwrap();
+            objects.push(object);
+        }
+        for object in objects.iter().step_by(2) {
+            storage.release_object(*object).unwrap();
+        }
+
+        // Now an object far larger than any single hole.
+        let big = ObjectId::new();
+        let body = vec![b'B'; BLOCK_SIZE * 450];
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, big, &body).unwrap();
+        storage
+            .commit(&mut tx)
+            .expect("a 450-block object must commit on a disk with room for it");
+
+        let tx = storage.begin_transaction().unwrap();
+        let version = storage.read(&tx, big).unwrap();
+        assert_eq!(storage.read_object_data(big, version).unwrap(), body);
     }
 
     #[test]
