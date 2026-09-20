@@ -118,9 +118,76 @@ pub fn deserialize_overrides(bytes: &[u8]) -> PersistenceResult<SettingsOverride
     Ok(data)
 }
 
-/// Attempts to load settings from bytes, falling back to defaults on error
+/// What the bytes in the settings file turned out to be.
+///
+/// The distinction matters because falling back to defaults is safe only for
+/// *reading*. A file this build cannot parse still holds the user's settings,
+/// and every one of them is destroyed the moment an empty default set is
+/// written back over it. A caller that intends to write must ask which of
+/// these it is holding; [`load_overrides_safe`] cannot tell it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoredOverrides {
+    /// Parsed, and of a version this build understands.
+    Read(SettingsOverridesData),
+    /// Valid settings of a format version this build does not implement --
+    /// written by a newer build, or by an older one whose format has since
+    /// changed. The settings are intact on disk and must stay there.
+    FromAnotherVersion(u32),
+    /// Not settings at all: truncated, corrupt, or some other file.
+    Unreadable(PersistenceError),
+}
+
+impl StoredOverrides {
+    /// Classifies the bytes as read from storage.
+    pub fn classify(bytes: &[u8]) -> Self {
+        match deserialize_overrides(bytes) {
+            Ok(data) => Self::Read(data),
+            Err(PersistenceError::UnsupportedVersion(version)) => Self::FromAnotherVersion(version),
+            Err(err) => Self::Unreadable(err),
+        }
+    }
+
+    /// The overrides to run this session with: what was stored when it could
+    /// be read, and an empty set otherwise.
+    pub fn overrides(&self) -> SettingsOverridesData {
+        match self {
+            Self::Read(data) => data.clone(),
+            _ => SettingsOverridesData::new(),
+        }
+    }
+
+    /// Whether writing this build's overrides back over these bytes would
+    /// destroy settings that are still on disk.
+    ///
+    /// True for anything this build could not parse -- including a version it
+    /// does not implement, which is the case that matters, because a user who
+    /// boots an older build once would otherwise lose every setting they have.
+    pub fn writing_would_destroy_it(&self) -> bool {
+        !matches!(self, Self::Read(_))
+    }
+
+    /// A description of why the file could not be read, for a status line.
+    pub fn unreadable_because(&self) -> Option<String> {
+        match self {
+            Self::Read(_) => None,
+            Self::FromAnotherVersion(version) => Some(alloc::format!(
+                "settings file is format version {}; this build implements version {}",
+                version,
+                SettingsOverridesData::CURRENT_VERSION
+            )),
+            Self::Unreadable(err) => Some(alloc::format!("{}", err)),
+        }
+    }
+}
+
+/// Attempts to load settings from bytes, falling back to defaults on error.
+///
+/// Read-only callers only. This returns the same empty set for "the file says
+/// the user has no overrides" and "the file could not be read", so a caller
+/// that may write the result back must use [`StoredOverrides::classify`]
+/// instead and refuse to overwrite what it could not read.
 pub fn load_overrides_safe(bytes: &[u8]) -> SettingsOverridesData {
-    deserialize_overrides(bytes).unwrap_or_else(|_| SettingsOverridesData::new())
+    StoredOverrides::classify(bytes).overrides()
 }
 
 #[cfg(test)]
@@ -269,6 +336,63 @@ mod tests {
 
         // Should fall back to empty defaults
         assert_eq!(loaded, SettingsOverridesData::new());
+    }
+
+    /// The finding: a build that cannot parse the settings file loaded empty
+    /// defaults and reported nothing distinguishable from "no overrides set",
+    /// so the next save wrote that emptiness over the user's real settings.
+    #[test]
+    fn a_file_this_build_cannot_parse_is_never_mistaken_for_an_empty_one() {
+        let mut data = SettingsOverridesData::new();
+        let mut settings = BTreeMap::new();
+        settings.insert("editor.tab_size".to_string(), SettingValue::Integer(8));
+        data.user_overrides.insert("user1".to_string(), settings);
+        let mut bytes = serialize_overrides(&data).unwrap();
+
+        // The same file after a build that writes a newer format touched it.
+        let from_the_future = String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace("\"version\": 1", "\"version\": 2")
+            .into_bytes();
+
+        let empty = serialize_overrides(&SettingsOverridesData::new()).unwrap();
+        assert!(
+            !StoredOverrides::classify(&empty).writing_would_destroy_it(),
+            "a genuinely empty settings file must stay writable"
+        );
+
+        for (name, stored) in [
+            ("a newer format version", from_the_future),
+            ("corrupt bytes", b"{ invalid json }".to_vec()),
+            ("a truncated file", {
+                bytes.truncate(bytes.len() / 2);
+                bytes
+            }),
+        ] {
+            let stored = StoredOverrides::classify(&stored);
+            assert_eq!(
+                stored.overrides(),
+                SettingsOverridesData::new(),
+                "{name}: an unreadable file must still run with defaults"
+            );
+            assert!(
+                stored.writing_would_destroy_it(),
+                "{name}: writing defaults over this would destroy the user's settings"
+            );
+            assert!(
+                stored.unreadable_because().is_some(),
+                "{name}: the reason must be reportable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_readable_file_reports_no_reason_and_is_safe_to_overwrite() {
+        let bytes = serialize_overrides(&SettingsOverridesData::new()).unwrap();
+        let stored = StoredOverrides::classify(&bytes);
+        assert_eq!(stored, StoredOverrides::Read(SettingsOverridesData::new()));
+        assert!(stored.unreadable_because().is_none());
+        assert!(!stored.writing_would_destroy_it());
     }
 
     #[test]

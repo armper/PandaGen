@@ -176,6 +176,18 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
 | F8 | hal/virtio | `poll_receive` trusts the device's descriptor id and slot index; out-of-range values panic or read far past the DMA region | FIXED (282) |
 | F10 | kernel/http + net_stack/tcp | An ordinary keep-alive client that hangs up leaves its slot in CloseWait for the 120 s idle timeout; eight slots serve every port, so a handful of plain `curl` requests reset all later ones and take the command port with them (`http_slots`) | FIXED (287) |
+| R6-1 | services_focus_manager | `request_focus` pushed a subscriber that was already on the stack, so one client could hold several entries and a pop gave focus back to itself | FIXED (326) |
+| R6-2 | services_focus_manager | The audit trail was unbounded: a client that takes and drops focus in a loop grows it without limit | FIXED (326) |
+| R6-3 | net_stack | With no peer needing anything, the poll still emitted an ARP request every tick -- an idle machine flooded the segment | FIXED (326) |
+| R6-4 | kernel/http | `http_owed` survived into the next connection to reuse the slot, so a new client was answered with the previous client's owed body | FIXED (326) |
+| R6-5 | kernel/http | An HTTP connection whose peer had gone was never swept, so it sat in CloseWait until the idle timeout -- the same slot exhaustion as F10, by a different door | FIXED (326) |
+| R6-6 | services_storage | An unreadable checkpoint was treated as absent: the mount came up on a stale tail and silently lost everything after it | FIXED (326) |
+| R6-7 | kernel/storage | Only two of the six storage entry points asserted the boot CPU, so the single-CPU confinement SC5 documented was enforced on a third of its doors | FIXED (326) |
+| R6-8 | net_stack | Three of the four `NeedArp` transmit sites left the pending frame set, so the retry re-sent a frame the caller had already abandoned | FIXED (326) |
+| R6-9 | services_settings + workspace_manager | A settings file this build cannot parse -- including one written by another format version -- loaded as empty defaults, and the next save wrote that emptiness over it. Every user setting destroyed by booting the wrong build once | FIXED (327) |
+| R6-10 | workspace_manager/boot_profile | The same defect for the stored boot profile, found by grepping for R6-9's siblings | FIXED (327) |
+| G5 | harness | Two assertions that passed with their fix reverted: the `--smp 2` case asserted only a banner printed before the command ran, and the work-queue test asserted an id check that predates the fix | FIXED (326) |
+| G6 | harness | Two gauntlet runs at once silently corrupt each other -- same ISO, same disk, same ports -- and the loser failed with a bare `NotFound` naming none of it. A verifier that can produce a wrong answer is worse than none | FIXED (326) |
 
 ## Rejected claims
 
@@ -311,7 +323,24 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Next: round 6.** Not yet scoped. Candidates: a third regression pass (it
+**Round 6 is in progress.** Twelve findings so far, Phases 326-327. Its
+critics were the `services_*` crates round 5 did not reach, a third
+regression pass, and the harness itself.
+
+**Still open from round 6's critics, not yet fixed:**
+
+- Scheduler unbounded deadline catch-up (`sim_kernel/src/scheduler.rs:669`):
+  a late deadline replays every missed tick, 1M audit events in 27 ms.
+- `SyscallGate` validates nothing; `contract_tests` depends on nothing it
+  tests; `formal_verification/src/lib.rs` is dead code;
+  `PipelineExecutor::execute` cannot work against the real kernel;
+  `max_steps_per_tick` is a dead guard; `kernel_api` time overflow;
+  notification expiry deletes history.
+- Compositor: unclamped `DrawOp` geometry, a keyframe that still carries
+  damage, `add_sink` not forcing a keyframe, keyboard focus reconciled only
+  on pointer events, duplicate and unstable view ids.
+
+**Earlier candidates, still unscoped:** a third regression pass (it
 has been the most valuable role every time); the compositor and
 `services_gui_host` internals, which round 3 examined only partly; and the
 crates round 5's security critic did not reach -- `intent_router`,
@@ -327,6 +356,35 @@ and the PS/2 packet parser, `services_gui_host::layout`, the interrupt stub
 stack alignment, the PIC EOI paths, the AP bring-up window, LAPIC
 calibration arithmetic, virtqueue sizing, `mmio_map`, `fs_view::PathResolver`
 (no root escape), and `cli_console`'s line editing.
+
+### Round 6
+
+Findings in two halves: the critics' (R6-1 .. R6-10) and the harness's own
+(G5, G6). Three method notes:
+
+**A guard given to one call site is half a fix -- for the seventh time.**
+R6-7 and R6-8 are both this: SC5's single-CPU confinement was asserted on
+two of six storage doors, and the pending-frame clear was at one of four
+`NeedArp` sites. R6-10 was found only because R6-9 prompted a grep for
+siblings, and it was sitting in the next file. **Grep for the pattern, not
+the line, before calling a fix done.**
+
+**"Cannot read it" and "it is empty" are not the same answer, and the
+difference is the user's data.** R6-6 and R6-9 are the same shape in two
+unrelated crates: a load that could not parse its bytes fell back to a
+default, and the next save wrote the default back. The storage checkpoint
+lost every commit since the last one it could read; the settings file lost
+every override the user had, from booting an older build once. A fallback is
+safe for *running* and never safe for *writing back*. Anything that loads
+with `unwrap_or_default` and can later save to the same place is this bug.
+
+**The harness produced a failure it could not explain, and that is a
+finding.** A run died with `Os { code: 2, kind: NotFound }` and nothing
+else. The cause was three gauntlets running at once over one disk image --
+my own doing, not the kernel's -- but an unexplainable failure from the
+verifier is exactly how a false finding gets recorded as real. Both halves
+are now fixed: a run refuses to start while another holds the lock, and the
+one call that could fail that way names what it was trying to start.
 
 ### Round 5
 

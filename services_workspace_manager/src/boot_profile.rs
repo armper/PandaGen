@@ -161,6 +161,10 @@ pub struct BootProfileManager {
 
     /// Whether config has been loaded from storage
     loaded: bool,
+
+    /// Set when a load found bytes it could not parse. `config` is then the
+    /// default, and writing it back would destroy the stored profile.
+    unreadable_on_disk: bool,
 }
 
 impl BootProfileManager {
@@ -169,6 +173,7 @@ impl BootProfileManager {
         Self {
             config: BootConfig::default(),
             loaded: false,
+            unreadable_on_disk: false,
         }
     }
 
@@ -177,6 +182,7 @@ impl BootProfileManager {
         let Some(storage) = storage_handle else {
             self.config = BootConfig::default();
             self.loaded = true;
+            self.unreadable_on_disk = false;
             return Ok(());
         };
 
@@ -191,6 +197,8 @@ impl BootProfileManager {
                 let _ = storage.rollback(&mut tx);
                 self.config = BootConfig::default();
                 self.loaded = true;
+                // Nothing stored, so nothing to destroy.
+                self.unreadable_on_disk = false;
                 return Ok(());
             }
             Err(err) => {
@@ -200,16 +208,57 @@ impl BootProfileManager {
         };
         let _ = storage.rollback(&mut tx);
 
-        self.config = String::from_utf8(bytes)
+        // An unreadable profile is not an absent one. Falling back to the
+        // default is the right thing to *run* with, but the bytes still on
+        // disk are the user's configuration, and a save that writes the
+        // default back over them destroys it -- the same way the settings
+        // file used to be destroyed by a build that could not parse it.
+        match String::from_utf8(bytes)
             .ok()
             .and_then(|json| BootConfig::from_json(&json).ok())
-            .unwrap_or_default();
+        {
+            Some(config) => {
+                self.config = config;
+                self.unreadable_on_disk = false;
+            }
+            None => {
+                self.config = BootConfig::default();
+                self.unreadable_on_disk = true;
+            }
+        }
         self.loaded = true;
         Ok(())
     }
 
-    /// Saves configuration (to storage in real impl)
+    /// Saves configuration (to storage in real impl).
+    ///
+    /// Refuses when the last load could not parse what is on disk; see
+    /// [`Self::replace_unreadable_stored_profile`].
     pub fn save(&self, storage_handle: Option<&mut JournaledStorage>) -> Result<(), String> {
+        if self.unreadable_on_disk {
+            return Err(
+                "Refusing to overwrite the stored boot profile: this build could not \
+                 parse it. Saving would destroy it."
+                    .to_string(),
+            );
+        }
+        self.save_replacing(storage_handle)
+    }
+
+    /// Saves, replacing a stored profile this build could not parse.
+    ///
+    /// Destroys whatever is there, so it exists only to be called after the
+    /// refusal from [`Self::save`] has been acted on deliberately.
+    pub fn replace_unreadable_stored_profile(
+        &mut self,
+        storage_handle: Option<&mut JournaledStorage>,
+    ) -> Result<(), String> {
+        self.save_replacing(storage_handle)?;
+        self.unreadable_on_disk = false;
+        Ok(())
+    }
+
+    fn save_replacing(&self, storage_handle: Option<&mut JournaledStorage>) -> Result<(), String> {
         let Some(storage) = storage_handle else {
             return Ok(());
         };
@@ -457,5 +506,69 @@ mod tests {
         manager.set_profile(BootProfile::Kiosk);
 
         assert_eq!(manager.profile(), BootProfile::Kiosk);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_profile_tests {
+    use super::*;
+    use services_storage::JournaledStorage;
+
+    /// The sibling of the settings finding: a stored boot profile this build
+    /// cannot parse used to be silently replaced by the default on the next
+    /// save, destroying it.
+    #[test]
+    fn an_unparseable_stored_profile_is_never_overwritten() {
+        let corrupt = b"{ this is not a boot profile";
+        let mut storage = JournaledStorage::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(
+                &mut tx,
+                BootProfileManager::boot_profile_object_id(),
+                corrupt,
+            )
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let mut manager = BootProfileManager::new();
+        manager.load(Some(&mut storage)).unwrap();
+        assert_eq!(
+            manager.config().profile,
+            BootConfig::default().profile,
+            "an unreadable profile must still boot something"
+        );
+
+        let refusal = manager
+            .save(Some(&mut storage))
+            .expect_err("saving over an unparseable profile must be refused");
+        assert!(refusal.contains("Refusing"), "{refusal}");
+
+        let mut tx = storage.begin_transaction().unwrap();
+        let on_disk = storage
+            .read_data(&tx, BootProfileManager::boot_profile_object_id())
+            .unwrap();
+        let _ = storage.rollback(&mut tx);
+        assert_eq!(on_disk, corrupt, "the stored profile was destroyed");
+
+        // Deliberate replacement works, and clears the refusal.
+        manager
+            .replace_unreadable_stored_profile(Some(&mut storage))
+            .unwrap();
+        manager.save(Some(&mut storage)).unwrap();
+    }
+
+    /// The guard must not break the ordinary round trip.
+    #[test]
+    fn a_readable_stored_profile_still_saves() {
+        let mut storage = JournaledStorage::new();
+        let mut manager = BootProfileManager::new();
+        manager.set_profile(BootProfile::Kiosk);
+        manager.save(Some(&mut storage)).unwrap();
+
+        let mut reloaded = BootProfileManager::new();
+        reloaded.load(Some(&mut storage)).unwrap();
+        assert_eq!(reloaded.profile(), BootProfile::Kiosk);
+        reloaded.save(Some(&mut storage)).unwrap();
     }
 }

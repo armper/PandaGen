@@ -3227,8 +3227,24 @@ impl WorkspaceManager {
         }
     }
 
-    /// Saves settings to storage (if storage context is available)
+    /// Saves settings to storage (if storage context is available).
+    ///
+    /// Refuses when the stored file cannot be read by this build -- see
+    /// [`Self::replace_unreadable_settings_file`].
     pub fn save_settings(&mut self) -> Result<(), String> {
+        self.save_settings_inner(false)
+    }
+
+    /// Saves settings, replacing a stored file this build cannot read.
+    ///
+    /// This destroys whatever that file holds, so it exists only to be called
+    /// deliberately, after the refusal from [`Self::save_settings`] has been
+    /// shown to someone who can decide.
+    pub fn replace_unreadable_settings_file(&mut self) -> Result<(), String> {
+        self.save_settings_inner(true)
+    }
+
+    fn save_settings_inner(&mut self, replace_unreadable: bool) -> Result<(), String> {
         // Export overrides
         let overrides = self.settings_registry.export_overrides();
         let data =
@@ -3249,6 +3265,34 @@ impl WorkspaceManager {
             };
 
             let object_id = Self::resolve_settings_object_for_write(context)?;
+
+            // What is already there. A load that could not parse this file ran
+            // with empty defaults, and writing those defaults back is what
+            // turns "this build is too old to read your settings" into "your
+            // settings are gone". Read before overwriting, every time -- not
+            // just from whatever the last load happened to observe, since the
+            // file may have been written by another build since then.
+            if !replace_unreadable {
+                let mut probe = context
+                    .storage
+                    .begin_transaction()
+                    .map_err(|e| format!("Failed to start settings read transaction: {}", e))?;
+                let existing = context.storage.read_data(&probe, object_id);
+                let _ = context.storage.rollback(&mut probe);
+                if let Ok(existing) = existing {
+                    let stored =
+                        services_settings::persistence::StoredOverrides::classify(&existing);
+                    if stored.writing_would_destroy_it() {
+                        return Err(format!(
+                            "Refusing to overwrite {}: {}. The settings in it are \
+                             intact; saving from this build would destroy them.",
+                            SETTINGS_OVERRIDES_PATH,
+                            stored.unreadable_because().unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+
             let mut tx = context
                 .storage
                 .begin_transaction()
@@ -3323,11 +3367,12 @@ impl WorkspaceManager {
             };
             let _ = context.storage.rollback(&mut tx);
 
-            let recovered_from_corruption =
-                services_settings::persistence::deserialize_overrides(&bytes).is_err();
-            let loaded = services_settings::persistence::load_overrides_safe(&bytes);
+            let stored = services_settings::persistence::StoredOverrides::classify(&bytes);
+            // Not all of these are corruption: a format version this build does
+            // not implement is a perfectly good file. Report what it was.
+            let recovered_from_corruption = stored.unreadable_because();
             (
-                loaded.to_overrides(),
+                stored.overrides().to_overrides(),
                 recovered_from_corruption,
                 bytes.len(),
             )
@@ -3342,10 +3387,11 @@ impl WorkspaceManager {
             self.apply_setting(key.as_str());
         }
 
-        if recovered_from_corruption {
-            self.workspace_status.set_last_action(
-                "Settings loaded with recovery (invalid data reset to defaults)".to_string(),
-            );
+        if let Some(reason) = recovered_from_corruption {
+            self.workspace_status.set_last_action(format!(
+                "Settings loaded as defaults, stored file left untouched ({})",
+                reason
+            ));
         } else {
             self.workspace_status.set_last_action(format!(
                 "Settings loaded ({} bytes) from {}",
@@ -5112,7 +5158,10 @@ mod tests {
         // N" with nothing written and the dirty flag cleared, so the next
         // quit discarded the work.
         let result = workspace.execute_action(&Action::Save);
-        assert!(!result, "a save with nowhere to write must not report success");
+        assert!(
+            !result,
+            "a save with nowhere to write must not report success"
+        );
 
         let status = &workspace.workspace_status.last_action;
         let status_text = status.as_ref().expect("the failure must be reported");
@@ -5529,6 +5578,112 @@ mod tests {
                 .unwrap()
                 .as_integer(),
             Some(4)
+        );
+    }
+
+    /// The finding: boot a build whose settings format is older than the one
+    /// that wrote the file, and every setting the user has is destroyed --
+    /// the load reports "invalid data reset to defaults" and the very next
+    /// save writes that empty set over a file that was perfectly intact.
+    #[test]
+    fn a_settings_file_this_build_cannot_read_is_never_overwritten() {
+        use services_settings::persistence::{
+            serialize_overrides, SettingsOverridesData, StoredOverrides,
+        };
+
+        // A file written by a build whose format version this one does not
+        // implement. Everything in it is valid; only the version is foreign.
+        let mut data = SettingsOverridesData::new();
+        let mut settings = std::collections::BTreeMap::new();
+        settings.insert("editor.tab_size".to_string(), SettingValue::Integer(7));
+        data.user_overrides
+            .insert("test_user".to_string(), settings);
+        let from_another_version = String::from_utf8(serialize_overrides(&data).unwrap())
+            .unwrap()
+            .replace("\"version\": 1", "\"version\": 2")
+            .into_bytes();
+
+        let mut storage = JournaledStorage::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .write(
+                &mut tx,
+                WorkspaceManager::settings_object_id(),
+                &from_another_version,
+            )
+            .unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(storage));
+
+        // The load runs with defaults, which is right: this build cannot
+        // represent what the file holds.
+        workspace.load_settings().unwrap();
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(4),
+            "an unreadable file must not be taken as the user's settings"
+        );
+
+        // The save must refuse rather than replace it.
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        let refusal = workspace
+            .save_settings()
+            .expect_err("saving over a file this build cannot read must be refused");
+        assert!(
+            refusal.contains("version 2") && refusal.contains(SETTINGS_OVERRIDES_PATH),
+            "the refusal must name the file and the reason: {refusal}"
+        );
+
+        // And the file is still exactly what it was.
+        let context = workspace.editor_io_context.as_mut().unwrap();
+        let mut tx = context.storage.begin_transaction().unwrap();
+        let on_disk = context
+            .storage
+            .read_data(&tx, WorkspaceManager::settings_object_id())
+            .unwrap();
+        let _ = context.storage.rollback(&mut tx);
+        assert_eq!(
+            on_disk, from_another_version,
+            "the stored settings were destroyed by a build that could not read them"
+        );
+
+        // A deliberate replacement is still possible, and only then.
+        workspace.replace_unreadable_settings_file().unwrap();
+        let context = workspace.editor_io_context.as_mut().unwrap();
+        let mut tx = context.storage.begin_transaction().unwrap();
+        let on_disk = context
+            .storage
+            .read_data(&tx, WorkspaceManager::settings_object_id())
+            .unwrap();
+        let _ = context.storage.rollback(&mut tx);
+        assert!(matches!(
+            StoredOverrides::classify(&on_disk),
+            StoredOverrides::Read(_)
+        ));
+    }
+
+    /// A readable file -- including a genuinely empty one -- must still save
+    /// normally, or the guard above has simply broken settings.
+    #[test]
+    fn a_readable_settings_file_still_saves() {
+        let mut workspace = create_test_workspace();
+        workspace.set_editor_io_context(EditorIoContext::new(JournaledStorage::new()));
+        workspace.save_settings().unwrap();
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(2));
+        workspace.save_settings().unwrap();
+        workspace.set_setting("editor.tab_size".to_string(), SettingValue::Integer(9));
+        workspace.load_settings().unwrap();
+        assert_eq!(
+            workspace
+                .get_setting("editor.tab_size")
+                .unwrap()
+                .as_integer(),
+            Some(2)
         );
     }
 
