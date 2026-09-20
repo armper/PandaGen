@@ -208,27 +208,34 @@ The whole gauntlet suite (11 scripts) passes in one run, in any order, and
 path, and `services_*` above the kernel. Twenty-two findings confirmed and
 fixed across Phases 296-303. X4 was fixed in 294.
 
-**Still open from round 3, in the order to take them:**
+**Round 3 is closed.** Twenty-eight findings, Phases 296-306. Nothing from
+it is open.
 
-1. **G5** — the editor writes straight to VRAM while every other text
-   surface goes through the shadow framebuffer, so the 3 MiB shadow is
-   reserved and unused whenever the editor is open and the two buffers
-   diverge. Not currently harmful (nothing marks the pacer dirty in that
-   state) but it is a trap for the next caller that does.
-2. **B9** — PCI enumeration sees only bus 0, function 0: no multifunction
-   check, no bridge recursion. A virtio device behind a PCIe root port, the
-   normal topology on `-machine q35`, is invisible. Fails safe.
-3. **G7** — the framebuffer assumes 32 bpp and a 4-byte-aligned pitch
-   whatever the bootloader reports. Not reachable under QEMU + Limine.
-4. Minor, all confirmed by the services critic: `undo`/`redo` set dirty
-   unconditionally so undoing back to the on-disk text still blocks `:q`;
-   `:wq` on a clean buffer exits without writing (`:x` semantics under the
-   name `wq`); the workspace CLI's command history is uncapped while
-   `cli_console`'s caps at 100; `services_editor_vi::render.rs` compares a
-   char index against a byte column so the cursor is drawn wrong on a line
-   with a multi-byte character; `services_file_picker` pushes a
-   `DirectoryView` per descent with no depth cap, and nothing forbids a
-   directory cycle (unconfirmed — the critic did not construct one).
+One thing deliberately left alone: `:wq` on a clean buffer exits without
+writing, which is `:x` semantics under the name `wq`. The critic called it
+harmless in isolation and it is; changing it only adds a disk write to every
+`:wq`. Recorded so a later round does not re-raise it.
+
+**Next: round 4.** Three critics:
+
+1. **A regression critic on this loop's own work** — Phases 278-306 changed
+   a great deal, fast. Fresh eyes on the fixes themselves, looking for what
+   they broke or half-fixed. This is the highest-value target now, and no
+   critic has ever been pointed at my own output.
+2. **The host binaries and remaining services** — `pandagend`, `cli_console`,
+   `services_remote_ui_host`, `text_renderer_host`, `distributed_storage`,
+   `services_command_palette`, `ipc`, `core_types`.
+3. **The HTTP server and net_stack's non-TCP protocols** — the HTTP server
+   arrived in Phase 283 and has never been reviewed adversarially, only held
+   to `curl`. DHCP, ARP, ICMP and the IPv4 parsers were fuzzed for panics
+   (a negative result) but never read for protocol correctness.
+
+**Areas a critic has cleared, which a later round should not re-read:** the
+rasterizer's pixel addressing, the glyph tables and cache, pointer clamping
+and the PS/2 packet parser, `services_gui_host::layout`, the interrupt stub
+stack alignment, the PIC EOI paths, the AP bring-up window, LAPIC
+calibration arithmetic, virtqueue sizing, `mmio_map`, `fs_view::PathResolver`
+(no root escape), and `cli_console`'s line editing.
 
 ### Round 3
 
