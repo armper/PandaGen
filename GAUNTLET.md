@@ -80,6 +80,23 @@ list, and every audit of an unread crate should start by grepping it**,
 before reading anything for its own sake. Each line names the first place it
 was found and at least one place it was found *again* afterwards.
 
+Shape 0 is about the loop's own method rather than the code, and it is first
+because it is the one that lets every other shape through.
+
+0. **A test that fails for a different reason than the one it names.** The
+   check "revert the fix, watch the test fail" is not enough on its own: the
+   test may fail because the reverted code broke something *else* it
+   touches. Round 8 produced five of these in three consecutive phases, all
+   written by me: an executable-parse test that never reached the
+   arithmetic because the image was rejected for a bad magic number; an
+   audit-log test that recorded nothing because the task had no budget; a
+   process-manager test whose `RestartPolicy::Never` meant no restart was
+   ever attempted; a budget-cap test where leaving one field unlimited
+   tripped a different rule. The discipline is: revert the fix, watch the
+   test fail, **and read the failure message**. `assert!(x.is_err())` is not
+   an assertion -- pin the specific error, and make each case vary only the
+   one thing it names.
+
 1. **"Cannot read it" treated as "it is empty."** A load that falls back to
    a default, in code that can later save to the same place. The fallback is
    safe for *running* and never for *writing back*.

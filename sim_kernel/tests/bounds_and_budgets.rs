@@ -117,3 +117,70 @@ fn an_ordinary_budget_still_serves_ordinary_requests() {
             .expect("ten lots of ten against a hundred");
     }
 }
+
+/// `PolicyDecision::Allow { derived }` is "allow, but only this much
+/// authority", and `DerivedAuthority`'s own doc says it "must always be a
+/// subset of or equal to the original". Four of the five decision points in
+/// the tree discarded it; only `services_pipeline_executor` applied it.
+#[cfg(test)]
+mod derived_authority {
+    use identity::{IdentityKind, TrustDomain};
+    use kernel_api::{KernelApi, TaskDescriptor};
+    use policy::{
+        CapabilitySet, DerivedAuthority, PolicyContext, PolicyDecision, PolicyEngine, PolicyEvent,
+    };
+    use sim_kernel::SimulatedKernel;
+
+    /// Answers Allow, with an empty derived authority.
+    struct AllowNothing;
+
+    impl PolicyEngine for AllowNothing {
+        fn name(&self) -> &str {
+            "allow-nothing"
+        }
+        fn evaluate(&self, _event: PolicyEvent, _context: &PolicyContext) -> PolicyDecision {
+            PolicyDecision::Allow {
+                derived: Some(DerivedAuthority::new(CapabilitySet::from_capabilities(
+                    vec![],
+                ))),
+            }
+        }
+    }
+
+    #[test]
+    fn a_derived_authority_that_excludes_the_capability_refuses_the_delegation() {
+        let mut kernel = SimulatedKernel::new().with_policy_engine(Box::new(AllowNothing));
+
+        let (from, _from_exec) = kernel
+            .spawn_task_with_identity(
+                TaskDescriptor::new("from".to_string()),
+                IdentityKind::Service,
+                TrustDomain::core(),
+                None,
+                None,
+            )
+            .unwrap();
+        let (to, _to_exec) = kernel
+            .spawn_task_with_identity(
+                TaskDescriptor::new("to".to_string()),
+                IdentityKind::Service,
+                TrustDomain::core(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let cap: core_types::Cap<()> = core_types::Cap::new(77);
+        kernel.grant_capability(from.task_id, cap).unwrap();
+        let refused = kernel.delegate_capability(77, from.task_id, to.task_id);
+        assert!(
+            refused.is_err(),
+            "the policy answered Allow with an empty derived authority and the \
+             capability was delegated anyway"
+        );
+        assert!(
+            !kernel.is_capability_valid(77, to.task_id),
+            "the target holds a capability the derived authority excluded"
+        );
+    }
+}

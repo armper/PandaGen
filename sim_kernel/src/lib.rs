@@ -1420,6 +1420,24 @@ impl SimulatedKernel {
             let decision = self.evaluate_policy(PolicyEvent::OnCapabilityDelegate, &context);
 
             match decision {
+                // `Allow { derived: Some(..) }` is "allow, but only this
+                // much authority", and `DerivedAuthority`'s own doc says it
+                // "must always be a subset of or equal to the original".
+                // This arm was `Allow { .. } => {}`, discarding it -- so a
+                // policy that answered Allow with a derived set *excluding*
+                // this capability had the capability delegated anyway. Four
+                // of the five decision points in the tree threw the derived
+                // authority away; only `services_pipeline_executor` applied
+                // it. Same family as A3, where `Require` was silently
+                // treated as Allow.
+                PolicyDecision::Allow {
+                    derived: Some(derived),
+                } if !derived.capabilities.capabilities.contains(&cap_id) => {
+                    return Err(KernelError::InsufficientAuthority(format!(
+                        "Policy allowed delegation only under a derived authority \
+                         that does not include capability {cap_id}"
+                    )));
+                }
                 PolicyDecision::Allow { .. } => {
                     // Continue with delegation
                 }
@@ -1829,6 +1847,25 @@ impl SimulatedKernel {
                 let decision = self.evaluate_policy(PolicyEvent::OnSpawn, &context);
 
                 match decision {
+                    // As for delegation: a derived authority restricts what
+                    // the child may hold, and discarding it granted the
+                    // child everything the descriptor asked for regardless.
+                    PolicyDecision::Allow {
+                        derived: Some(derived),
+                    } => {
+                        let allowed = &derived.capabilities.capabilities;
+                        if let Some(denied) = descriptor
+                            .capabilities
+                            .iter()
+                            .map(|cap| cap.id())
+                            .find(|id| !allowed.contains(id))
+                        {
+                            return Err(KernelError::InsufficientAuthority(format!(
+                                "Policy allowed the spawn only under a derived \
+                                 authority that does not include capability {denied}"
+                            )));
+                        }
+                    }
                     PolicyDecision::Allow { .. } => {
                         // Continue with spawn
                     }

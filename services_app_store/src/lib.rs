@@ -49,20 +49,95 @@ impl StorePolicy for AllowAllPolicy {
     }
 }
 
+/// A ceiling on what a listing may ask for.
+///
+/// Two defects lived here, and they are A1's two defects exactly, in a crate
+/// A1's fix never touched.
+///
+/// It capped `cpu_ticks` and nothing else, while `ResourceBudget` has six
+/// fields -- so a listing asking for `u64::MAX` memory units, messages,
+/// packets, storage operations or pipeline stages was approved by a policy
+/// whose whole purpose is to cap what a listing may ask for.
+///
+/// And it skipped any field the listing left `None`, which in
+/// `ResourceBudget` means *unlimited* -- so declaring no CPU budget at all
+/// walked straight past a CPU cap. A field-by-field validator forgets the
+/// `None`-means-unlimited fields first, which is the note A1 left behind.
+///
+/// A cap left `None` here means "this store does not cap that resource",
+/// and a listing that asks for unlimited is refused by any cap that is set.
+#[derive(Debug, Clone, Default)]
 pub struct BudgetCapPolicy {
     pub max_cpu_ticks: Option<u64>,
+    pub max_memory_units: Option<u64>,
+    pub max_message_count: Option<u64>,
+    pub max_packet_count: Option<u64>,
+    pub max_storage_ops: Option<u64>,
+    pub max_pipeline_stages: Option<u64>,
+}
+
+impl BudgetCapPolicy {
+    /// A policy that caps every resource at `limit`.
+    pub fn capped_at(limit: u64) -> Self {
+        Self {
+            max_cpu_ticks: Some(limit),
+            max_memory_units: Some(limit),
+            max_message_count: Some(limit),
+            max_packet_count: Some(limit),
+            max_storage_ops: Some(limit),
+            max_pipeline_stages: Some(limit),
+        }
+    }
+
+    /// One resource against one cap.
+    ///
+    /// `requested` of `None` is a listing asking for *unlimited*, which no
+    /// cap can accommodate.
+    fn check(name: &str, cap: Option<u64>, requested: Option<u64>) -> Result<(), StoreError> {
+        let Some(cap) = cap else {
+            return Ok(());
+        };
+        match requested {
+            None => Err(StoreError::PolicyDenied(format!(
+                "{name} budget is unlimited, which exceeds the cap of {cap}"
+            ))),
+            Some(requested) if requested > cap => Err(StoreError::PolicyDenied(format!(
+                "{name} budget {requested} exceeds cap {cap}"
+            ))),
+            Some(_) => Ok(()),
+        }
+    }
 }
 
 impl StorePolicy for BudgetCapPolicy {
     fn allow(&self, listing: &AppListing) -> Result<(), StoreError> {
-        if let (Some(max), Some(cpu)) = (self.max_cpu_ticks, listing.default_budget.cpu_ticks) {
-            if cpu.0 > max {
-                return Err(StoreError::PolicyDenied(format!(
-                    "cpu budget {} exceeds cap {}",
-                    cpu.0, max
-                )));
-            }
-        }
+        let budget = &listing.default_budget;
+        Self::check("cpu", self.max_cpu_ticks, budget.cpu_ticks.map(|v| v.0))?;
+        Self::check(
+            "memory",
+            self.max_memory_units,
+            budget.memory_units.map(|v| v.0),
+        )?;
+        Self::check(
+            "message",
+            self.max_message_count,
+            budget.message_count.map(|v| v.0),
+        )?;
+        Self::check(
+            "packet",
+            self.max_packet_count,
+            budget.packet_count.map(|v| v.0),
+        )?;
+        Self::check(
+            "storage",
+            self.max_storage_ops,
+            budget.storage_ops.map(|v| v.0),
+        )?;
+        Self::check(
+            "pipeline stage",
+            self.max_pipeline_stages,
+            budget.pipeline_stages.map(|v| v.0),
+        )?;
         Ok(())
     }
 }
@@ -163,6 +238,7 @@ mod tests {
             index,
             Box::new(BudgetCapPolicy {
                 max_cpu_ticks: Some(5),
+                ..Default::default()
             }),
         );
         store.add_listing(AppListing {
