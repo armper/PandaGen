@@ -1051,9 +1051,28 @@ impl NetStack {
 
     /// Transmit every pending TCP segment.
     fn flush_tcp(&mut self) {
-        while let Some(n) = self.iface.tcp_next_frame(&mut self.tx_frame) {
-            if self.device.transmit(&self.tx_frame[..n]).is_err() {
-                break;
+        loop {
+            match self.iface.tcp_next_frame(&mut self.tx_frame) {
+                Some(n) => {
+                    if self.device.transmit(&self.tx_frame[..n]).is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    // `None` may mean "nothing to send" or "I wrote an ARP
+                    // request into the buffer because I could not resolve a
+                    // next hop". The UDP and ping paths all transmit that
+                    // frame; this one dropped it on the floor, so the fix
+                    // that was meant to drive resolution never put a single
+                    // request on the wire and recovery still depended on the
+                    // gateway ARPing us first.
+                    let pending = self.iface.pending_frame_len();
+                    if pending > 0 {
+                        let _ = self.device.transmit(&self.tx_frame[..pending]);
+                        self.iface.clear_pending_frame();
+                    }
+                    break;
+                }
             }
         }
     }

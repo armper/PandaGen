@@ -175,6 +175,10 @@ pub struct Tcp {
     pub refused: u64,
     /// Connections closed by the reaper or by exhausted retransmissions.
     pub reaped: u64,
+    /// Peers `poll` should pass over, set for the duration of one
+    /// `poll_skipping` call. A peer whose hardware address the caller cannot
+    /// resolve must not hold up every other connection's output.
+    skip_peers: [Option<Ipv4>; MAX_CONNECTIONS],
 }
 
 fn seq_le(a: u32, b: u32) -> bool {
@@ -200,6 +204,7 @@ impl Tcp {
             accepted: 0,
             refused: 0,
             reaped: 0,
+            skip_peers: [None; MAX_CONNECTIONS],
         }
     }
 
@@ -464,6 +469,50 @@ impl Tcp {
         self.reply.take()
     }
 
+    /// The peer of the immediate reply, if one is pending.
+    pub fn reply_peer(&self) -> Option<Ipv4> {
+        self.reply.as_ref().map(|reply| reply.peer)
+    }
+
+    /// Peers of every connection with a segment due, into `out`. Returns how
+    /// many were written.
+    ///
+    /// The caller resolves them itself and may be able to serve a later one
+    /// when the first is unreachable, which is what stops one unresolvable
+    /// peer holding up every other connection's output.
+    pub fn peers_with_work(&self, out: &mut [Ipv4]) -> usize {
+        let now = self.now;
+        let mut count = 0;
+        for conn in self.conns.iter() {
+            if count == out.len() {
+                break;
+            }
+            if Self::conn_has_work(conn, now) {
+                out[count] = conn.peer;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// As `poll`, but ignoring connections to any peer in `skip`.
+    ///
+    /// `poll` returns the first connection with work, so a peer whose
+    /// hardware address is unknown used to hold up every other connection:
+    /// nothing was polled at all, no retransmission timer advanced, and
+    /// data, ACKs and FINs for every other port waited behind it -- for the
+    /// 120-second idle timeout, if the stuck peer was an established
+    /// connection whose ARP entry had been evicted.
+    pub fn poll_skipping(&mut self, skip: &[Ipv4]) -> Option<Outgoing> {
+        self.skip_peers = [None; MAX_CONNECTIONS];
+        for (slot, peer) in self.skip_peers.iter_mut().zip(skip.iter()) {
+            *slot = Some(*peer);
+        }
+        let out = self.poll();
+        self.skip_peers = [None; MAX_CONNECTIONS];
+        out
+    }
+
     /// Who the next segment would go to, without producing it.
     ///
     /// The caller needs this to resolve the next hop *before* consuming
@@ -534,8 +583,12 @@ impl Tcp {
     /// Next segment to transmit for data, FIN, or retransmission; `None`
     /// when nothing is due. Call repeatedly until it returns `None`.
     pub fn poll(&mut self) -> Option<Outgoing> {
+        let skip = self.skip_peers;
         for conn in self.conns.iter_mut() {
             if conn.state == State::Closed {
+                continue;
+            }
+            if skip.iter().any(|peer| *peer == Some(conn.peer)) {
                 continue;
             }
             // An unacknowledged SYN|ACK is in flight too: without this a lost

@@ -723,12 +723,24 @@ fn an_unresolved_next_hop_does_not_consume_the_segment() {
     a.receive(&frame[..flen], &mut out);
 
     let before = a.counters().arp_requests_sent;
-    // The hop is unknown, so no frame comes out...
+    // The hop is unknown, so no TCP frame comes out...
     assert_eq!(a.tcp_next_frame(&mut out), None);
     assert!(
         a.counters().arp_requests_sent > before,
         "nothing asked for the address, so nothing would ever resolve it"
     );
+    // ...but a real ARP request is left in the buffer for the caller to
+    // transmit. Asserting the counter alone would pass with no request ever
+    // reaching the wire, which is exactly what happened: the counter is
+    // bumped at frame-build time and the kernel's TCP flush dropped the
+    // frame.
+    let pending = a.pending_frame_len();
+    assert!(pending > 0, "no frame was left to transmit");
+    let (eth, payload) = EthernetHeader::parse(&out[..pending]).unwrap();
+    assert_eq!(eth.ethertype, ETHERTYPE_ARP);
+    let request = ArpPacket::parse(payload).expect("a well-formed ARP request");
+    assert_eq!(request.operation, ARP_OP_REQUEST);
+    assert_eq!(request.target_ip, [10, 0, 2, 2], "for the gateway");
 
     // ...and the SYN-ACK is still owed once the address is known.
     a.arp_cache_mut().insert([10, 0, 2, 2], GW_MAC);
@@ -739,4 +751,111 @@ fn an_unresolved_next_hop_does_not_consume_the_segment() {
     let (_, body) = Ipv4Header::parse(ipp).unwrap();
     let parsed = Tcp::parse(body, [10, 0, 2, 15], [8, 8, 8, 8]).unwrap();
     assert_eq!(parsed.flags, TCP_SYN | TCP_ACK);
+}
+
+#[test]
+fn one_unreachable_peer_does_not_hold_up_every_other_connection() {
+    // `tcp_next_frame` resolved the hop of the *first* connection with work
+    // and returned None for everything when that one was unknown. Nothing
+    // was polled at all: no retransmission timer advanced and every other
+    // connection's data, ACKs and FINs waited behind it -- for the
+    // 120-second idle timeout, if the stuck peer was an established
+    // connection whose ARP entry had been evicted.
+    //
+    // The pending-reply path is resolved on its own terms, so this has to
+    // reach the *poll* path: no reply outstanding, and the stuck connection
+    // due for a retransmission ahead of the reachable one's queued data.
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+    let mut frame = [0u8; 1514];
+    assert!(a.tcp_mut().listen(7000));
+
+    // Slot 0: an off-subnet peer, so nothing is learned from it and the
+    // gateway stays unresolved. Left in SynReceived, which retransmits.
+    let stuck = Tcp {
+        src_port: 40000,
+        dst_port: 7000,
+        seq: 1000,
+        ack: 0,
+        flags: TCP_SYN,
+        window: 65535,
+        payload: &[],
+    };
+    let flen = build_tcp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [8, 8, 8, 8],
+        [10, 0, 2, 15],
+        &stuck,
+        None,
+    )
+    .unwrap();
+    a.receive(&frame[..flen], &mut out);
+    a.tcp_mut().take_reply();
+
+    // Slot 1: an on-link client, whose hardware address we learn from its
+    // own frame. Complete its handshake so it can carry data.
+    const CLIENT_MAC: Mac = [0x52, 0x55, 0x0a, 0, 2, 9];
+    let syn = Tcp {
+        src_port: 41000,
+        dst_port: 7000,
+        seq: 2000,
+        ack: 0,
+        flags: TCP_SYN,
+        window: 65535,
+        payload: &[],
+    };
+    let flen = build_tcp(
+        &mut frame,
+        CLIENT_MAC,
+        OUR_MAC,
+        [10, 0, 2, 9],
+        [10, 0, 2, 15],
+        &syn,
+        None,
+    )
+    .unwrap();
+    let client = a.receive(&frame[..flen], &mut out);
+    let client = match client {
+        Event::TcpReady { conn } => conn,
+        other => panic!("expected the client's connection, got {other:?}"),
+    };
+    let synack = a.tcp_mut().take_reply().expect("SYN|ACK");
+    let ack = Tcp {
+        src_port: 41000,
+        dst_port: 7000,
+        seq: 2001,
+        ack: synack.seq.wrapping_add(1),
+        flags: TCP_ACK,
+        window: 65535,
+        payload: &[],
+    };
+    let flen = build_tcp(
+        &mut frame,
+        CLIENT_MAC,
+        OUR_MAC,
+        [10, 0, 2, 9],
+        [10, 0, 2, 15],
+        &ack,
+        None,
+    )
+    .unwrap();
+    a.receive(&frame[..flen], &mut out);
+    a.tcp_mut().take_reply();
+
+    // The client has something to say, and time moves far enough that the
+    // stuck connection is also due to retransmit its SYN|ACK.
+    assert_eq!(a.tcp_mut().write(client, b"hello"), 5);
+    a.tcp_tick(tcp::RTO_TICKS);
+
+    // The reachable client must be served although the unreachable peer
+    // sits in an earlier slot with work of its own.
+    let len = a
+        .tcp_next_frame(&mut out)
+        .expect("a reachable peer must be served past an unreachable one");
+    let (eth, ipp) = EthernetHeader::parse(&out[..len]).unwrap();
+    assert_eq!(eth.dst, CLIENT_MAC);
+    let (ip, _) = Ipv4Header::parse(ipp).unwrap();
+    assert_eq!(ip.dst, [10, 0, 2, 9]);
 }

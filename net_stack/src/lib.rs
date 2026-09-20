@@ -250,23 +250,53 @@ impl Interface {
         // the wire. Five such passes and the connection was closed as if the
         // peer were dead. Nothing on this path asked for the address either,
         // so nothing drove resolution: it waited for the gateway to ARP us.
-        let pending_peer = self.tcp.next_peer()?;
-        let hop = self.config.next_hop(pending_peer);
-        let dst_mac = match self.arp.lookup(hop) {
-            Some(mac) => mac,
-            None => {
-                // Ask, and leave TCP alone so the segment is still owed.
-                if let Some(len) = self.arp_request(hop, out) {
-                    self.pending_len = len;
+        // The immediate reply is for one peer and cannot be deferred, so it
+        // is resolved on its own terms.
+        let mut skip = [[0u8; 4]; tcp::MAX_CONNECTIONS];
+        let mut skipped = 0;
+        let dst_mac = if let Some(peer) = self.tcp.reply_peer() {
+            let hop = self.config.next_hop(peer);
+            match self.arp.lookup(hop) {
+                Some(mac) => mac,
+                None => return self.ask_for(hop, out),
+            }
+        } else {
+            // Otherwise serve the first connection whose next hop we know.
+            // Taking only the first with work meant one unresolvable peer
+            // held up every other connection: nothing was polled at all, no
+            // retransmission timer advanced, and data, ACKs and FINs for
+            // every port waited behind it.
+            let mut peers = [[0u8; 4]; tcp::MAX_CONNECTIONS];
+            let count = self.tcp.peers_with_work(&mut peers);
+            let mut found = None;
+            for peer in &peers[..count] {
+                let hop = self.config.next_hop(*peer);
+                match self.arp.lookup(hop) {
+                    Some(mac) => {
+                        found = Some(mac);
+                        break;
+                    }
+                    None => {
+                        skip[skipped] = *peer;
+                        skipped += 1;
+                    }
                 }
-                return None;
+            }
+            match found {
+                Some(mac) => mac,
+                // Nobody is reachable. Ask about the first, and leave every
+                // connection's state untouched so nothing is spent.
+                None => {
+                    let hop = self.config.next_hop(*peers.first()?);
+                    return self.ask_for(hop, out);
+                }
             }
         };
 
         let (outgoing, payload_index) = match self.tcp.take_reply() {
             Some(reply) => (reply, None),
             None => {
-                let seg = self.tcp.poll()?;
+                let seg = self.tcp.poll_skipping(&skip[..skipped])?;
                 let index = self.tcp.index_of(&seg);
                 (seg, index)
             }
@@ -608,6 +638,15 @@ impl Interface {
     }
 
     /// Write an ARP request for `ip` into `out`.
+    /// Write an ARP request for `hop` into `out` and remember its length,
+    /// so a caller that got `None` can still transmit it.
+    fn ask_for(&mut self, hop: Ipv4, out: &mut [u8]) -> Option<usize> {
+        if let Some(len) = self.arp_request(hop, out) {
+            self.pending_len = len;
+        }
+        None
+    }
+
     pub fn arp_request(&mut self, ip: Ipv4, out: &mut [u8]) -> Option<usize> {
         let request = ArpPacket {
             operation: ARP_OP_REQUEST,
@@ -670,6 +709,12 @@ impl Interface {
     }
 
     /// Length of the ARP request written when `ping` returned `NeedArp`.
+    /// Forget a pending frame the caller has transmitted, so it is not sent
+    /// again on the next pass.
+    pub fn clear_pending_frame(&mut self) {
+        self.pending_len = 0;
+    }
+
     pub fn pending_frame_len(&self) -> usize {
         self.pending_len
     }
