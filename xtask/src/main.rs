@@ -50,6 +50,18 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         return Err("workspace tests failed".into());
     }
 
+    // `--workspace` builds default features only, so anything behind a
+    // non-default feature is never compiled, let alone tested. `hal_mode`
+    // held a real defect for exactly that reason.
+    println!("== cargo test --workspace --all-features");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["test", "--workspace", "--all-features"])
+        .status()?;
+    if !status.success() {
+        return Err("workspace tests with all features failed".into());
+    }
+
     println!("== cargo xtask iso");
     cmd_iso()?;
 

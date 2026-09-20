@@ -8,6 +8,14 @@
 /// Longest request head this server will accept before answering 431.
 pub const MAX_HEAD_BYTES: usize = 2048;
 
+// The 431 path can only fire when the whole head fits in the receive buffer:
+// the caller sees `Incomplete` with `buffered.len() >= MAX_HEAD_BYTES`, and
+// `buffered` is that buffer. Raise this above `tcp::BUFFER_BYTES` and the
+// branch becomes unreachable -- an oversized head fills the buffer, the
+// advertised window goes to zero, nothing is ever drained, and the
+// connection wedges with no response at all until the reaper.
+const _: () = assert!(MAX_HEAD_BYTES <= crate::tcp::BUFFER_BYTES);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,

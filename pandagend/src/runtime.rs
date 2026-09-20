@@ -329,7 +329,20 @@ impl HostRuntime {
         let mut hal = self.hal_input.take().ok_or_else(|| {
             HostRuntimeError::HalInputError("HAL mode active without HAL input context".to_string())
         })?;
+        let result = self.pump_hal_input_with(&mut hal);
+        // The context goes back whatever happened. Four error paths used to
+        // leave it `None`, after which every later poll failed with "HAL
+        // mode active without HAL input context" -- the keyboard dead for
+        // the life of the process, and the message blaming the wrong thing.
+        self.hal_input = Some(hal);
+        result
+    }
 
+    #[cfg(feature = "hal_mode")]
+    fn pump_hal_input_with(
+        &mut self,
+        hal: &mut HalInputContext,
+    ) -> Result<(), HostRuntimeError> {
         let poll_result = {
             hal.bridge
                 .poll(&hal.input_service, &mut self.kernel)
@@ -341,7 +354,6 @@ impl HostRuntime {
                 .map_err(|e| HostRuntimeError::HalInputError(e.to_string()))?;
 
             if envelope.action != INPUT_EVENT_ACTION {
-                self.hal_input = Some(hal);
                 return Err(HostRuntimeError::HalInputError(format!(
                     "unexpected HAL input action: {}",
                     envelope.action
@@ -362,7 +374,6 @@ impl HostRuntime {
                     && key.state == input_types::KeyState::Pressed
                 {
                     self.toggle_host_control();
-                    self.hal_input = Some(hal);
                     return Ok(());
                 }
             }
@@ -370,7 +381,6 @@ impl HostRuntime {
             self.handle_input_event(event)?;
         }
 
-        self.hal_input = Some(hal);
         Ok(())
     }
 
