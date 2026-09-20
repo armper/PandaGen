@@ -66,6 +66,78 @@ correct. Protocol claims must be judged at tier 1.
   fails before the fix and passes after.
 - `cargo xtask gauntlet` runs every script in `gauntlet/` against one boot.
 
+## The shapes
+
+Five of round 7's eight service-crate findings were repeats of shapes this
+loop had already fixed somewhere else. The critic that found them said the
+useful thing plainly:
+
+> The highest-yield thing I did was not reading for new bugs; it was
+> grepping for the old ones by shape.
+
+So the shapes are written down. **Every critic prompt should carry this
+list, and every audit of an unread crate should start by grepping it**,
+before reading anything for its own sake. Each line names the first place it
+was found and at least one place it was found *again* afterwards.
+
+1. **"Cannot read it" treated as "it is empty."** A load that falls back to
+   a default, in code that can later save to the same place. The fallback is
+   safe for *running* and never for *writing back*.
+   *R6-6 (storage checkpoint) → R6-9 (settings) → R6-10 (boot profile).*
+   Grep: `unwrap_or_default`, `unwrap_or_else(|_|`, `.ok()?` near a load.
+
+2. **A guard given to one call site.** The fix is right and lands on one of
+   several siblings. **Nine times now.** *F6, R6-7, R6-8, R6-10, K1, K2, K3,
+   K4, C1, C2.* Grep for the *pattern*, never the line; then list every
+   caller of the function you just changed and every peer of the field.
+
+3. **Unbounded history.** An audit log, trace log, completed-job list or
+   notification history documented as "kept for history" and kept for ever.
+   *R6-2 (focus manager) → R6-12 (scheduler) → N1 (developer_sdk) → N5 (job
+   scheduler).* Grep: `Vec<` fields named `*_log`, `history`, `events`,
+   `completed_*`, with no `MAX` nearby.
+
+4. **A caller-controlled integer as a loop bound.** A `u32` or `usize` off
+   the wire used to iterate against a small real resource.
+   *R6-20 (draw_line) → R6-21 (rounded rects) → C2 (draw_window).*
+   Grep: `for .. in 0..` where the bound is a struct field of a
+   `Deserialize` type.
+
+5. **Arithmetic that panics in debug and wraps in release.** The kernel
+   ships optimized, so a wrap is silent and a wrapped deadline is in the
+   past. *R6-14 (Instant/Duration) → N8 (total_size_bytes).*
+   Grep: bare `+` and `*` in files that mention `Deadline`, `Instant`,
+   `timeout` or `size`.
+
+6. **One dead consumer aborts a fan-out and is never removed.**
+   `for x in &mut sinks { x.send(..)? }`. *C4 (remote UI) → N1
+   (developer_sdk).* Grep: `?` inside a `for` over subscribers.
+
+7. **Code that documents a property it does not enforce.** A doc claiming
+   validation, a config knob nothing reads, a "contract test" that tests
+   itself, a feature list naming something that does not exist.
+   *R6-13 (SyscallGate), R6-16 (max_steps_per_tick), R6-17
+   (formal_verification), R6-18 (contract_tests), N5 (dependencies), N8
+   (core_types::memory).* Grep the doc comments, then grep for a caller.
+
+8. **A test that passes with the thing it tests removed.** Including the
+   tautology: an assertion that restates the function body.
+   *F8, G5, N6 (service ids).* Check by reverting, every time.
+
+9. **Per-slot state not re-qualified against what is in the slot now.** An
+   index into a table of reusable slots, held across anything.
+   *R6-4 (http_owed) → K2 (http_streams and ReplyTarget).*
+   Grep: arrays indexed by a connection or slot number.
+
+10. **Two notions of one thing, updated in two places.** They agree on the
+    common path and diverge on every other.
+    *R6-24 (focus ring vs key delivery) → C1 (the same, on launch) → N4
+    (revoked vs unsubscribed).* Ask what keeps them in step, and grep for
+    every writer of each.
+
+11. **A refusal that is also a loss.** Work consumed before the decision to
+    refuse it. *N2 (receive_packet pops before the policy runs).*
+
 ## Findings
 
 Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
@@ -209,6 +281,14 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | K4 | kernel/net | SC3's `keep_tcp_alive` reached three of the four spin loops; `ping`'s ARP wait is the fourth | FIXED (333) |
 | C1 | services_workspace_manager | **R6-24's own fix was incomplete.** `reconcile_focus` was wired only to the closing path. Launching a non-focusable component, or one whose focus the policy denies (the error is swallowed by `let _ =`), leaves the ring on the new window and the keys on the old one | FIXED (333) |
 | C2 | services_gui_host | **R6-21's own fix was incomplete.** The row clamp went into `graphics_rasterizer`'s rounded shapes and not into `draw_window`, the text compositor next door. `SurfaceRect` is four `usize`s off the wire: 200M rows on a 24-row canvas measured 1.57 s, and `usize::MAX` never finishes | FIXED (333) |
+| N1 | developer_sdk | C4 exactly, in a crate C4's fix never touched: `for sink in &mut self.sinks { sink.send(..)? }` aborted the fan-out and never removed the failed sink, so no sink after it received another event for the life of the process. Whether you got tracing depended on registration order. `TraceLog` was also unbounded, in the crate whose job is to record continuously | FIXED (334) |
+| N2 | services_network | `receive_packet` popped the packet *before* evaluating the policy and charging the budget, so a refusal returned `Err` with the packet already gone -- undeliverable for ever. `send_packet` three functions up has the order right | FIXED (334) |
+| N3 | services_network | `NetworkInterfaceId` is a caller-supplied parameter with no registration, so any id created a queue, and neither the queue depth nor the number of queues had a ceiling. 100 000 invented ids all accepted, all retained, every packet answered `Ok(())` and going nowhere | FIXED (334) |
+| N4 | services_input | "Revoked" and "unsubscribed" were two states and the re-subscribe path knew only one: a revoked task got `SubscriptionAlreadyExists` for the life of the service, and the revoked record was never reclaimed | FIXED (334) |
+| N5 | services_job_scheduler | Three: one job returning `Yielded` starved every higher-priority job for ever and `cancel_job` searched only `pending_jobs`, so it could not be stopped; `completed_jobs` was unbounded; `set_progress` had no route from a job to its own descriptor, so "progress tracking" was a listed feature with no API. The feature list also promised dependencies, which do not exist | FIXED (334) |
+| N6 | core_types | `test_core_service_ids_stable` restated the function body. Setting `CONSOLE_SERVICE_ID` to `0xdead_beef...` left the crate's 54 tests green -- a tautology in the shape of a guarantee, over the four constants that are the wire identity of the core services | FIXED (334) |
+| N7 | console_fb | `Line::from_text` truncated by bytes and `as_str` returns `""` for invalid UTF-8, so a line whose right margin fell inside a multi-byte character displayed as **nothing at all** -- the whole line lost, not the character | FIXED (334) |
+| N8 | core_types::memory | 675 lines of memory-authority model with no references outside the file, whose `add_region` doc promises an error it cannot return and whose type doc defers enforcement to a kernel that does not enforce it | DOCUMENTED (334) |
 
 ## Rejected claims
 
@@ -348,8 +428,13 @@ treat one as unguessable.
 
 **Round 7 is in progress.** Three critics: the regression critic on this
 loop's own phases 326-332, the crates no previous critic had read, and the
-bare-metal kernel. Six findings fixed in Phase 333 (K1-K4, C1, C2), eight
-more from the service-crate critic in hand. Its
+bare-metal kernel. Fourteen findings fixed across Phases 333 and 334
+(K1-K4, C1, C2, N1-N8).
+
+The round's most useful output was not a finding at all. Five of the eight
+service-crate findings were repeats of shapes this loop had already fixed
+elsewhere, so **the shapes are now written down** in their own section above,
+and every critic prompt carries them. Its
 critics were the `services_*` crates round 5 did not reach, a third
 regression pass, and the harness itself.
 

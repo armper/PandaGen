@@ -23,7 +23,18 @@ pub struct TraceLog {
 }
 
 impl TraceLog {
+    /// The most events kept.
+    ///
+    /// The log had no bound, in the crate whose whole job is to record
+    /// continuously. Same shape as the focus manager's audit trail and the
+    /// scheduler's.
+    pub const MAX_EVENTS: usize = 4096;
+
     pub fn record(&mut self, event: TraceEvent) {
+        if self.events.len() >= Self::MAX_EVENTS {
+            let overflow = self.events.len() + 1 - Self::MAX_EVENTS;
+            self.events.drain(..overflow);
+        }
         self.events.push(event);
     }
 }
@@ -118,11 +129,27 @@ impl DebuggerHost {
         self.sinks.push(sink);
     }
 
+    /// Deliver `event` to every sink that is still there.
+    ///
+    /// This was `for sink in &mut self.sinks { sink.send(..)? }`, which is
+    /// C4 exactly -- the defect Phase 314 fixed in `services_remote_ui_host`
+    /// and which this crate never heard about. The `?` aborted the fan-out
+    /// at the first failure and the failing sink was never removed, so every
+    /// later `publish` failed at the same index and **no sink after it ever
+    /// received another event for the life of the process**. Whether you got
+    /// any tracing at all depended on which sink you registered first.
+    ///
+    /// A sink that fails a send is a consumer that has gone away, so it is
+    /// dropped and the rest of the fan-out continues.
     pub fn publish(&mut self, event: TraceEvent) -> Result<(), DebuggerError> {
-        for sink in &mut self.sinks {
-            sink.send(event.clone())?;
-        }
+        self.sinks
+            .retain_mut(|sink| sink.send(event.clone()).is_ok());
         Ok(())
+    }
+
+    /// How many sinks are still attached. Falls as sinks go away.
+    pub fn sink_count(&self) -> usize {
+        self.sinks.len()
     }
 }
 

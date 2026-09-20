@@ -26,18 +26,39 @@ impl Line {
         }
     }
 
-    /// Create a line from text, truncating if needed
+    /// Create a line from text, truncating to `cols` bytes on a character
+    /// boundary.
+    ///
+    /// This truncated by raw bytes, and `as_str` returns `""` for invalid
+    /// UTF-8 -- so a line whose right margin fell inside a multi-byte
+    /// character displayed as *nothing at all*, losing the whole line rather
+    /// than the one character that did not fit. Cut on a boundary instead.
     pub fn from_text(text: &str, cols: usize) -> Self {
-        let mut line_text = Vec::with_capacity(cols);
-        for byte in text.bytes().take(cols) {
-            line_text.push(byte);
+        let end = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(core::iter::once(text.len()))
+            .take_while(|index| *index <= cols)
+            .last()
+            .unwrap_or(0);
+        Self {
+            text: text.as_bytes()[..end].to_vec(),
         }
-        Self { text: line_text }
     }
 
-    /// Get the text as a string slice (lossy conversion for non-UTF8)
+    /// Get the text as a string slice.
+    ///
+    /// Falls back to the longest valid prefix rather than to `""`. A line
+    /// assembled byte by byte through `push` can still be cut mid-character,
+    /// and losing the character is right where losing the line is not.
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.text).unwrap_or("")
+        match core::str::from_utf8(&self.text) {
+            Ok(text) => text,
+            Err(err) => {
+                // `valid_up_to` is a character boundary by construction.
+                core::str::from_utf8(&self.text[..err.valid_up_to()]).unwrap_or("")
+            }
+        }
     }
 
     /// Get the length of the line

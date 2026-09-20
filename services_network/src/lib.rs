@@ -393,6 +393,9 @@ pub enum NetworkError {
 
     #[error("Budget enforcement failed: {0}")]
     BudgetError(String),
+
+    #[error("Queue for interface {0:?} is full")]
+    QueueFull(NetworkInterfaceId),
 }
 
 impl From<kernel_api::KernelError> for NetworkError {
@@ -415,6 +418,16 @@ impl NetworkService {
         }
     }
 
+    /// The most packets one interface will hold.
+    ///
+    /// Unbounded queues on a caller-supplied interface id are a memory leak
+    /// with an `Ok(())` return: see `send_packet`.
+    pub const MAX_QUEUED_PACKETS: usize = 1024;
+
+    /// The most interfaces that will ever have a queue. There is no
+    /// registration to check an id against, so this is the only ceiling.
+    pub const MAX_INTERFACES: usize = 64;
+
     pub fn send_packet<B: PacketBudget>(
         &mut self,
         budget: &mut B,
@@ -434,8 +447,22 @@ impl NetworkService {
             NetworkDecision::Deny { reason } => return Err(NetworkError::PolicyDenied(reason)),
         }
 
-        budget.consume_packet(execution_id, PacketOperation::Send)?;
+        // A queue that is full refuses, rather than growing without limit.
+        // `NetworkInterfaceId` is a caller-supplied parameter with no
+        // registration behind it, so *any* id at all created a new queue and
+        // neither the depth nor the number of queues had a ceiling: a caller
+        // minting a fresh id per send grew the map for ever while every
+        // packet was accepted with `Ok(())` and went nowhere. The
+        // `PacketCount` budget bounds sends per execution, not memory.
+        if !self.queues.contains_key(&interface_id) && self.queues.len() >= Self::MAX_INTERFACES {
+            return Err(NetworkError::QueueFull(interface_id));
+        }
+        let queue = self.queues.entry(interface_id).or_default();
+        if queue.len() >= Self::MAX_QUEUED_PACKETS {
+            return Err(NetworkError::QueueFull(interface_id));
+        }
 
+        budget.consume_packet(execution_id, PacketOperation::Send)?;
         self.queues
             .entry(interface_id)
             .or_default()
@@ -449,13 +476,15 @@ impl NetworkService {
         execution_id: ExecutionId,
         interface_id: NetworkInterfaceId,
     ) -> Result<Option<Packet>, NetworkError> {
-        let packet = match self.queues.get_mut(&interface_id) {
-            Some(queue) => queue.pop_front(),
-            None => None,
-        };
-
-        let packet = match packet {
-            Some(packet) => packet,
+        // Decide on the packet before taking it. This used to `pop_front`
+        // first, so a policy denial or an exhausted budget returned `Err`
+        // with the packet already gone -- dropped on the floor, undeliverable
+        // for ever. A caller that hits its `PacketCount` ceiling on receive
+        // does not get "try again later", it gets a permanently missing
+        // packet. `send_packet` three functions up has the order right;
+        // this is its sibling.
+        let packet = match self.queues.get(&interface_id).and_then(|q| q.front()) {
+            Some(packet) => packet.clone(),
             None => return Ok(None),
         };
 
@@ -472,6 +501,11 @@ impl NetworkService {
         }
 
         budget.consume_packet(execution_id, PacketOperation::Receive)?;
+
+        // Only now is the packet ours to take.
+        self.queues
+            .get_mut(&interface_id)
+            .and_then(|queue| queue.pop_front());
 
         Ok(Some(packet))
     }

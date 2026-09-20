@@ -155,6 +155,12 @@ impl InputService {
             return Err(InputServiceError::SubscriptionAlreadyExists(task_id));
         }
 
+        // Reclaim this task's revoked records. Without this, a subscribe /
+        // revoke cycle leaves one dead record behind every time and nothing
+        // ever removes them.
+        self.subscriptions
+            .retain(|_, subscription| subscription.active || subscription.cap.task_id != task_id);
+
         let id = self.next_subscription_id;
         self.next_subscription_id += 1;
 
@@ -185,6 +191,21 @@ impl InputService {
         }
 
         subscription.active = false;
+        // The record stays -- that is the difference between `revoke` and
+        // `unsubscribe`, and `total_subscription_count` counts it -- but the
+        // task's *slot* is freed.
+        //
+        // "Revoked" and "unsubscribed" were two states and the re-subscribe
+        // path only knew about one: `subscribe_keyboard` refuses on
+        // `task_subscriptions.contains_key`, so a revoked task could never
+        // subscribe to input again, `SubscriptionAlreadyExists` for the life
+        // of the service. The crate header offers subscriptions as
+        // "capabilities that can be granted/revoked"; revoking one ended
+        // that subscription and sentenced the task to silence.
+        let task_id = subscription.cap.task_id;
+        if self.task_subscriptions.get(&task_id) == Some(&cap.id) {
+            self.task_subscriptions.remove(&task_id);
+        }
         Ok(())
     }
 

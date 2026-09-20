@@ -1,6 +1,25 @@
-//! # Memory Types
+//! # Memory Types (a sketch: nothing in the tree uses these)
 //!
 //! This module defines the fundamental memory abstraction types for PandaGen.
+//!
+//! **Nothing implements them.** `AddressSpace`, `MemoryRegion`,
+//! `MemoryPerms`, `MemoryBacking`, `AddressSpaceCap` and `MemoryRegionCap`
+//! have no references outside this file and the `pub use` in `lib.rs`, and
+//! `MemoryError::RegionOverlap`, `InvalidRegionSize`, `BudgetExhausted` and
+//! `CrossSpaceAccess` are constructed nowhere at all. The kernel's real
+//! memory paths are in `sim_kernel` and `kernel_bootstrap` and do not go
+//! through any of this.
+//!
+//! That matters most for `add_region`, whose doc says it "returns an error
+//! if adding this region would violate invariants" and which cannot fail:
+//! it pushes and returns `Ok(())`. The type doc below says overlap is
+//! "enforced by the kernel at allocation time" -- there is no such
+//! enforcement to defer to.
+//!
+//! The model is worth keeping as the clearest written statement of the
+//! intended shape. The present tense was not, so the principles below are
+//! what this is *for*, not what the system does today. Anything relying on
+//! them must check the code that would have to enforce them.
 //!
 //! ## Philosophy
 //!
@@ -312,9 +331,11 @@ impl AddressSpace {
         self.regions.iter().find(|r| r.region_id == region_id)
     }
 
-    /// Adds a region to this address space
+    /// Adds a region to this address space.
     ///
-    /// Returns an error if adding this region would violate invariants.
+    /// Never returns an error: it pushes and returns `Ok(())`. The `Result`
+    /// is the shape an enforcing version would have, and the module header
+    /// says why there is not one.
     /// Note: This is public so that sim_kernel can add regions.
     pub fn add_region(&mut self, region: MemoryRegion) -> Result<(), MemoryError> {
         // For simulation, we don't track actual addresses, so we can't check for
@@ -343,8 +364,13 @@ impl AddressSpace {
     }
 
     /// Returns the total size of all regions in bytes
+    /// Saturating: this was an unchecked `sum()`, which panics in debug and
+    /// wraps in release. Unreachable while nothing calls it, and the day
+    /// something does is the wrong time to find out.
     pub fn total_size_bytes(&self) -> u64 {
-        self.regions.iter().map(|r| r.size_bytes).sum()
+        self.regions.iter().fold(0u64, |total, region| {
+            total.saturating_add(region.size_bytes)
+        })
     }
 }
 

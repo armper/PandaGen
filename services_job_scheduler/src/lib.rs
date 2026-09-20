@@ -15,9 +15,19 @@
 //! ## Features
 //!
 //! - Cooperative task queue with explicit ticks
-//! - Job priorities and dependencies
-//! - Progress tracking
+//! - Job priorities: a pending job of higher priority preempts the running
+//!   one at the next tick, and the preempted job keeps its place at the head
+//!   of its own band
+//! - Progress tracking, reported by the job through `JobContext::progress`
 //! - Deterministic execution order
+//!
+//! ## Not implemented
+//!
+//! **Dependencies.** This list used to say "job priorities and dependencies".
+//! There is no dependency field, no dependency code and no dependency test:
+//! nothing here can express "run B after A". Saying so plainly rather than
+//! leaving the word in a feature list, because a feature list is the first
+//! thing a caller reads and the last thing anyone checks.
 //!
 //! ## Example Jobs
 //!
@@ -137,13 +147,23 @@ pub struct JobContext {
     pub tick_count: u64,
     /// Job's own tick count
     pub job_ticks: u64,
+    /// How far along the job says it is, 0-100.
+    ///
+    /// `JobDescriptor::set_progress` existed and had no callers anywhere,
+    /// because a job could not reach its own descriptor: the context handed
+    /// to an executor carried two tick counters and nothing else. "Progress
+    /// tracking" was a listed feature with no API, and `get_job_progress`
+    /// returned 0 until the job finished and then 100. A job sets this and
+    /// the scheduler copies it back after the tick.
+    pub progress: u8,
 }
 
 impl JobContext {
-    fn new(tick_count: u64, job_ticks: u64) -> Self {
+    fn new(tick_count: u64, job_ticks: u64, progress: u8) -> Self {
         Self {
             tick_count,
             job_ticks,
+            progress,
         }
     }
 }
@@ -241,14 +261,51 @@ impl JobScheduler {
         id
     }
 
+    /// The most finished jobs kept.
+    ///
+    /// `completed_jobs` was documented as "kept for history" and kept for
+    /// ever -- every descriptor with its `name` and its `error` string. The
+    /// third instance of the unbounded-history shape in this loop.
+    pub const MAX_COMPLETED_HISTORY: usize = 1024;
+
+    /// Files a finished job, dropping the oldest once the history is full.
+    fn record_finished(&mut self, job: JobDescriptor) {
+        if self.completed_jobs.len() >= Self::MAX_COMPLETED_HISTORY {
+            let overflow = self.completed_jobs.len() + 1 - Self::MAX_COMPLETED_HISTORY;
+            self.completed_jobs.drain(..overflow);
+        }
+        self.completed_jobs.push(job);
+    }
+
     /// Ticks the scheduler to make progress on jobs
     pub fn tick(&mut self) {
         self.tick_count += 1;
 
-        // If there's a running job, continue it
+        // If there's a running job, continue it -- unless something of
+        // higher priority is waiting.
+        //
+        // It used to be continued unconditionally, so one job returning
+        // `Yielded` for ever starved every other job including `High`, and
+        // `cancel_job` could not stop it either because it only searched
+        // `pending_jobs`. Priority was honoured at insertion and nowhere
+        // else, which is not a priority.
         if let Some(job) = self.running_job.take() {
-            self.execute_and_handle_job(job, true);
-            return;
+            match self.pending_jobs.front() {
+                Some(next) if next.priority > job.priority => {
+                    // Back to the head of its own band, so it does not lose
+                    // its place to jobs of equal priority queued behind it.
+                    let position = self
+                        .pending_jobs
+                        .iter()
+                        .position(|pending| pending.priority <= job.priority)
+                        .unwrap_or(self.pending_jobs.len());
+                    self.pending_jobs.insert(position, job);
+                }
+                _ => {
+                    self.execute_and_handle_job(job, true);
+                    return;
+                }
+            }
         }
 
         // Start the next pending job
@@ -264,15 +321,17 @@ impl JobScheduler {
         }
         job.ticks_executed += 1;
 
-        let mut ctx = JobContext::new(self.tick_count, job.ticks_executed);
+        let mut ctx = JobContext::new(self.tick_count, job.ticks_executed, job.progress);
 
         if let Some(ref mut executor) = job.executor {
-            match executor(&mut ctx) {
+            let outcome = executor(&mut ctx);
+            job.progress = ctx.progress.min(100);
+            match outcome {
                 JobResult::Completed => {
                     job.status = JobStatus::Completed;
                     job.progress = 100;
                     job.executor = None;
-                    self.completed_jobs.push(job);
+                    self.record_finished(job);
                 }
                 JobResult::Yielded => {
                     job.status = JobStatus::Yielded;
@@ -282,7 +341,7 @@ impl JobScheduler {
                     job.status = JobStatus::Failed;
                     job.error = Some(error);
                     job.executor = None;
-                    self.completed_jobs.push(job);
+                    self.record_finished(job);
                 }
             }
         }
@@ -360,14 +419,25 @@ impl JobScheduler {
         None
     }
 
-    /// Cancels a pending job
+    /// Cancels a job, whether it is pending or running.
+    ///
+    /// This used to search `pending_jobs` only, so the one job that most
+    /// needed stopping -- the one looping on `Yielded` -- was the one job
+    /// that could not be.
     pub fn cancel_job(&mut self, id: JobId) -> bool {
-        // Can only cancel pending jobs
+        if self.running_job.as_ref().map(|job| job.id) == Some(id) {
+            if let Some(mut job) = self.running_job.take() {
+                job.status = JobStatus::Cancelled;
+                job.executor = None;
+                self.record_finished(job);
+                return true;
+            }
+        }
         if let Some(pos) = self.pending_jobs.iter().position(|j| j.id == id) {
             let mut job = self.pending_jobs.remove(pos).unwrap();
             job.status = JobStatus::Cancelled;
             job.executor = None;
-            self.completed_jobs.push(job);
+            self.record_finished(job);
             true
         } else {
             false
@@ -566,8 +636,14 @@ mod tests {
         assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Cancelled));
     }
 
+    /// This test used to be `test_cannot_cancel_running_job` and asserted
+    /// `!cancelled`. It encoded a limitation as a requirement: the one job
+    /// that most needs stopping -- the one looping on `Yielded` -- was the
+    /// one job `cancel_job` could not touch, because it searched
+    /// `pending_jobs` only. A test that pins a defect in place is worse than
+    /// no test, so it now asserts what the scheduler should do.
     #[test]
-    fn test_cannot_cancel_running_job() {
+    fn test_can_cancel_running_job() {
         let mut scheduler = JobScheduler::new();
 
         let job_id = scheduler.schedule_job(JobDescriptor::new(
@@ -578,9 +654,11 @@ mod tests {
 
         scheduler.tick();
 
-        // Job is now running (yielded)
-        let cancelled = scheduler.cancel_job(job_id);
-        assert!(!cancelled);
+        // Job is now running (yielded).
+        assert!(scheduler.cancel_job(job_id));
+        assert_eq!(scheduler.get_job_status(job_id), Some(JobStatus::Cancelled));
+        // And cancelling it twice is not a second cancellation.
+        assert!(!scheduler.cancel_job(job_id));
     }
 
     #[test]
