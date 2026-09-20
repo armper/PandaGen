@@ -672,14 +672,26 @@ impl<D: BlockDevice> BlockStorage<D> {
         transaction_id: TransactionId,
         allocations: Vec<AllocationEntry>,
     ) -> Result<(), BlockStorageError> {
-        self.write_commit_record_with(transaction_id, allocations, Vec::new())
+        let mut landed = false;
+        self.write_commit_record_with(transaction_id, allocations, Vec::new(), &mut landed)
     }
 
+    /// Write one commit record.
+    ///
+    /// `landed` is set as soon as the record's block write returns success.
+    /// That is the point of no return, not the superblock update that
+    /// follows: once the record is on the platter, the next mount will
+    /// replay it. Reporting the commit as failed *and* giving its blocks
+    /// back -- which is what happened when the flush or the superblock write
+    /// failed -- let the live session hand those blocks to another object,
+    /// and the "failed" commit came back after reboot holding that object's
+    /// data.
     fn write_commit_record_with(
         &mut self,
         transaction_id: TransactionId,
         allocations: Vec<AllocationEntry>,
         released: Vec<ObjectId>,
+        landed: &mut bool,
     ) -> Result<(), BlockStorageError> {
         // Increment commit sequence
         self.superblock.commit_sequence += 1;
@@ -705,6 +717,11 @@ impl<D: BlockDevice> BlockStorage<D> {
         let mut block = [0u8; BLOCK_SIZE];
         block[..record_json.len()].copy_from_slice(&record_json);
         self.device.write_block(commit_block_idx, &block)?;
+        // From here the record may reach the platter whatever happens next,
+        // so the transaction can no longer be undone. A torn write fails the
+        // record's own checksum and is discarded at recovery, which is why
+        // a *failed* block write is still safe to roll back.
+        *landed = true;
         self.device.flush()?;
 
         // Update superblock with new commit sequence
@@ -838,7 +855,13 @@ impl<D: BlockDevice> BlockStorage<D> {
 
         // The record goes down first: if it fails, nothing has changed and
         // the blocks stay where they are.
-        self.write_commit_record_with(TransactionId::new(), Vec::new(), alloc::vec![object_id])?;
+        let mut landed = false;
+        self.write_commit_record_with(
+            TransactionId::new(),
+            Vec::new(),
+            alloc::vec![object_id],
+            &mut landed,
+        )?;
 
         for key in doomed {
             if let Some(entry) = self.allocations.remove(&key) {
@@ -898,17 +921,26 @@ impl<D: BlockDevice> BlockStorage<D> {
         }
 
         // Step 2: Write commit record (atomic point of truth)
-        self.write_commit_record(id, allocations_to_commit.clone())
-            .map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
+        let record = self.write_commit_record_with(
+            id,
+            allocations_to_commit.clone(),
+            Vec::new(),
+            durable,
+        );
 
-        // Step 3: Update in-memory state (only after commit record is written)
-        for alloc in allocations_to_commit {
-            self.allocations
-                .insert((alloc.object_id, alloc.version_id), alloc.clone());
-            self.latest_versions
-                .insert(alloc.object_id, alloc.version_id);
+        // Step 3: Update in-memory state. This runs whenever the record
+        // landed, even if a later step failed: the next mount will replay
+        // that record, so memory must agree with the disk rather than with
+        // the error we are about to report.
+        if *durable {
+            for alloc in allocations_to_commit {
+                self.allocations
+                    .insert((alloc.object_id, alloc.version_id), alloc.clone());
+                self.latest_versions
+                    .insert(alloc.object_id, alloc.version_id);
+            }
         }
-        *durable = true;
+        record.map_err(|e| TransactionError::StorageError(format!("{:?}", e)))?;
 
         // Step 4: fold the map into the reserved region often enough that
         // the commit ring never wraps past what the checkpoint covers.
@@ -991,18 +1023,23 @@ impl<D: BlockDevice> TransactionalStorage for BlockStorage<D> {
                     return Err(err);
                 }
                 Err(err) => {
-                    // Nothing was committed. The transaction is still Active,
-                    // so the caller may retry -- and a retry used to find the
-                    // pending list already emptied, skip every step and
-                    // return Ok, telling the caller its data was safe when
-                    // not a byte of it had been recorded. Give the writes
-                    // back, and the blocks with them, or each failed attempt
-                    // would eat a little more of the disk and leave a hole in
-                    // the free list behind it.
+                    // Nothing was committed. Give the blocks back, or every
+                    // failed attempt eats a little more of the disk and
+                    // leaves a hole in the free list behind it.
                     for block in taken {
                         self.free_blocks.insert(block);
                     }
-                    self.pending.insert(tx.id(), pending);
+                    // Roll the transaction back rather than holding its data
+                    // for a retry. Phase 289 kept the writes so a retry could
+                    // do the work -- but no caller in this tree retries, and
+                    // the entry is keyed by transaction id with nothing to
+                    // remove it, so a run of failed saves on a full disk kept
+                    // every one of those files in the heap for ever. Rolling
+                    // back frees them and still refuses to tell the caller a
+                    // failed commit succeeded: a second `commit` on this
+                    // transaction now gets `AlreadyFinalized`, not `Ok`.
+                    drop(pending);
+                    let _ = tx.rollback();
                     return Err(err);
                 }
             }
@@ -1430,21 +1467,131 @@ mod tests {
             .unwrap();
         assert!(storage.commit(&mut tx).is_err(), "the commit must fail");
 
-        // The disk is healthy again and the caller retries, as it may.
+        // The disk is healthy again and the caller retries.
         storage.device.set_policy(FailurePolicy::Never);
         let retry = storage.commit(&mut tx);
 
-        if retry.is_ok() {
-            let tx = storage.begin_transaction().unwrap();
-            let version = storage
-                .read(&tx, object)
-                .expect("commit returned Ok, so the object must be there");
-            assert_eq!(
-                storage.read_object_data(object, version).unwrap(),
-                b"the data the caller wants",
-                "commit returned Ok but the object holds something else"
+        // Whatever it answers, it must not be a bare Ok on an empty
+        // transaction: either the data is really there, or it says no.
+        match retry {
+            Ok(()) => {
+                let tx = storage.begin_transaction().unwrap();
+                let version = storage
+                    .read(&tx, object)
+                    .expect("commit returned Ok, so the object must be there");
+                assert_eq!(
+                    storage.read_object_data(object, version).unwrap(),
+                    b"the data the caller wants",
+                    "commit returned Ok but the object holds something else"
+                );
+            }
+            Err(err) => assert!(
+                matches!(err, TransactionError::AlreadyFinalized),
+                "a retry of a rolled-back transaction should say so, not {err:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_failed_commit_does_not_keep_the_file_in_memory() {
+        // The pending writes were held for a retry, keyed by transaction id
+        // with nothing to remove them. No caller retries, so a run of failed
+        // saves -- which a full disk guarantees -- kept every one of those
+        // files in the heap for ever, on a machine that now boots in 12 MiB.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+
+        let mut warm = storage.begin_transaction().unwrap();
+        storage.write(&mut warm, ObjectId::new(), b"warm").unwrap();
+        storage.commit(&mut warm).unwrap();
+
+        for _ in 0..8 {
+            // Fail the commit record itself, so nothing lands and the
+            // rollback path is the one under test.
+            let next_seq = storage.superblock.commit_sequence + 1;
+            let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+            let record_block = storage.superblock.commit_log_start + log_slot;
+            storage
+                .device
+                .set_policy(FailurePolicy::OnBlocks(vec![record_block]));
+
+            let mut tx = storage.begin_transaction().unwrap();
+            storage
+                .write(&mut tx, ObjectId::new(), &[b'x'; BLOCK_SIZE * 4])
+                .unwrap();
+            assert!(storage.commit(&mut tx).is_err());
+            storage.device.set_policy(FailurePolicy::Never);
+        }
+
+        let retained: usize = storage
+            .pending
+            .values()
+            .flat_map(|writes| writes.iter())
+            .map(|write| write.data.len())
+            .sum();
+        assert_eq!(
+            retained, 0,
+            "{retained} bytes of failed saves are still held in memory"
+        );
+    }
+
+    #[test]
+    fn a_commit_whose_record_landed_never_hands_its_blocks_to_anyone_else() {
+        // The commit record is written, then flushed, then the superblock is
+        // updated. Phase 289 treated only the *last* of those as the point of
+        // no return, so a failure in the flush or the superblock write
+        // reported the commit as failed and gave its blocks back -- while the
+        // record sat on the platter. The live session handed those blocks to
+        // another object, and at the next mount the "failed" commit came back
+        // holding that object's data. Exactly the aliasing that Phases 286
+        // and 288 were written to kill.
+        let disk = RamDisk::with_capacity_mb(1);
+        let failing = FailingBlockDevice::new(disk, FailurePolicy::Never);
+        let mut storage = BlockStorage::format(failing).unwrap();
+
+        // One ordinary commit first, so the identity-serial reservation is
+        // already on disk and does not need block 0 during the failing one.
+        let mut warm = storage.begin_transaction().unwrap();
+        storage.write(&mut warm, ObjectId::new(), b"warm").unwrap();
+        storage.commit(&mut warm).unwrap();
+
+        // Fail only the superblock (block 0), so the record itself lands.
+        storage.device.set_policy(FailurePolicy::OnBlocks(vec![0]));
+        let ghost = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, ghost, &[b'G'; BLOCK_SIZE]).unwrap();
+        assert!(
+            storage.commit(&mut tx).is_err(),
+            "the superblock write must fail"
+        );
+        storage.device.set_policy(FailurePolicy::Never);
+
+        // A second object now asks for blocks.
+        let live = ObjectId::new();
+        let mut tx = storage.begin_transaction().unwrap();
+        storage.write(&mut tx, live, &[b'L'; BLOCK_SIZE]).unwrap();
+        storage.commit(&mut tx).unwrap();
+
+        // Remount: the record the caller was told had failed is replayed.
+        let device = storage.device;
+        let mut storage = BlockStorage::open(device).unwrap();
+        let tx = storage.begin_transaction().unwrap();
+
+        if let Ok(version) = storage.read(&tx, ghost) {
+            let data = storage.read_object_data(ghost, version).unwrap();
+            assert!(
+                data.iter().all(|&b| b == b'G'),
+                "the commit reported as failed came back holding another \
+                 object's blocks"
             );
         }
+        let version = storage.read(&tx, live).expect("the live object must be there");
+        let data = storage.read_object_data(live, version).unwrap();
+        assert!(
+            data.iter().all(|&b| b == b'L'),
+            "the live object's blocks were handed to a commit that had failed"
+        );
     }
 
     #[test]
