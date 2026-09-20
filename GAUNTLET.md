@@ -147,6 +147,30 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | C6 | pandagend | The HAL input context was lost on any error, killing the keyboard for the life of the process — in code `cargo test --workspace` never compiled | FIXED (316) |
 | C7 | services_command_palette | The capability gate was declared, documented and read by nothing | FIXED (314) |
 | C8 | cli_console | Filesystem timestamps came from an unsynchronised `static mut` counter restarting at 1001 every run | FIXED (314) |
+| A1 | resources | `is_subset_of` skipped any field the child left unlimited, so a task under a hundred-tick parent could declare itself unmetered and run unmetered | FIXED (321*) |
+| A2 | sim_kernel + workspace | The budget-inheritance guard was unreachable dead code, and the workspace took a budget straight from the package manifest unchecked | FIXED (321*) |
+| A3 | services_workspace_manager | `PolicyDecision::Require` was silently treated as Allow, handing a sandboxed component keyboard focus across a trust boundary | FIXED (321*) |
+| A4 | secure_boot | Verifies no signature against no root of trust; an empty policy returned Ok for a fully tampered log; nothing in the workspace calls it | PARTLY FIXED (322) |
+| A5 | package_registry + app store | The source digest it exists to pin was never compared, and the storefront planned installs with an empty one | FIXED (321) |
+| A6 | sim_kernel | Spawn-time capabilities were plumbed three layers deep and granted by nothing | FIXED (323) |
+| A7 | core_types | `Cap<T>`'s phantom type is erased by serde and `Cap::new` is public, while the header claimed unforgeability | FIXED (323) |
+| A8 | workspace_access | Delegation required admin; *becoming* admin checked nothing, and nothing could be revoked | FIXED (322) |
+| A9 | packages | `format_version` was read by nothing; a manifest could overwrite its own derived entry | FIXED (321) |
+| F1 | services_storage | **Phase 307's own fix**: compatible with pre-288 disks and broke every disk written by Phases 291-306 | FIXED (317) |
+| F2 | services_storage | `release_object` threw away `landed`: a delete reported as failed happened anyway at the next mount | FIXED (317) |
+| F3 | net_stack + kernel | Phase 312's ARP request was built, counted and never transmitted; and one unresolvable peer held up every other connection | FIXED (319) |
+| F4 | kernel/http | Phase 311's body drain stopped at the buffer, so the smuggle survived a split segment -- i.e. every body above 2 KiB | FIXED (320) |
+| F5 | kernel/http | The head deadline was never cleared, so a new client inherited an expired one and was reset on sight | FIXED (320) |
+| F6 | kernel/tcp | The head deadline was given to the HTTP port only; the signed command port kept the identical slowloris | FIXED (320) |
+| F7 | services_editor_vi | `:w` with no I/O reported "Saved version N" having written nothing | FIXED (321) |
+| F8 | several | Tests that pass with the defect restored: xcompat skipped silently, the ARP test asserted a counter, the index-zero test asserted nothing | FIXED (317, 319, 321) |
+| SC1 | kernel/smp | `smp run` on a two-CPU machine waited on itself: the console answered nothing for twenty seconds | FIXED (318) |
+| SC2 | hal/work_queue | `complete` was check-then-act, so a result could be published into a recycled slot and accepted by the wrong job | FIXED (318) |
+| SC3 | kernel/net | `net ping` held the whole stack for seconds with no TCP timer advancing | FIXED (324) |
+| SC4 | kernel/present | The worker drain is bounded, so R8's window is narrowed rather than removed | OPEN (deliberate trade) |
+| SC5 | kernel/storage | The virtqueue and DMA area are `static mut`, safe only by an unstated single-CPU confinement | FIXED (325) |
+| SC6 | kernel | The keyboard queue raced on `read_pos`; the keyboard IRQ's debug path would self-deadlock on SERIAL_LOCK | FIXED (325) |
+| P6 | workspace | `workspace_access` and `console_vga` did not build alone -- they passed only through workspace feature unification | FIXED (322) |
 | X4 | remote_ipc | The message-envelope path keeps the bounded window: a `MessageId` is a random UUID, so there is no order to compare against and a captured envelope still comes back into range | OPEN |
 | X3 | kernel/remote | `boot` is on the remote allowlist and discloses kernel physical/virtual addresses and the HHDM offset | FIXED (285) |
 | F9 | net_stack/tcp | `listen` silently ignored a third port (only two slots), so HTTP was never bound and every client got a reset. Found within seconds of pointing real `curl` at the machine | FIXED (283) |
@@ -248,7 +272,29 @@ writing, which is `:x` semantics under the name `wq`. The critic called it
 harmless in isolation and it is; changing it only adds a disk write to every
 `:wq`. Recorded so a later round does not re-raise it.
 
-**Round 4 is closed.** Thirty-one findings, Phases 307-316. Its three
+**Round 5 is closed.** Twenty-six findings, Phases 317-325. Its three
+critics were the authorization crates (`identity`, `secure_boot`, `policy`,
+`workspace_access`, `package_registry`, capabilities), a second regression
+pass over rounds 3-4, and SMP concurrency.
+
+Phases marked `321*` were fixed in the same commit as Phase 321's other
+work; see that commit for which.
+
+**Open, deliberately:**
+
+- **SC4** — the present worker drain is bounded, so a worker descheduled
+  longer than the bound can still be inside `convert_rgba_rows` when the
+  boot CPU moves on. The trade (a hung CPU must not stop the display for
+  ever) is defensible but it is a trade, not a proof. Closing it properly
+  means a one-deep retirement list for the pixel buffer.
+- **A4** — `secure_boot` now refuses an empty or incomplete policy, but
+  there is still no signature and no root of trust, and nothing in the
+  workspace calls it: the shipped image has no boot chain. Real verified
+  boot needs a key and a signing step in the build.
+- The kernel does not check *who* is granting a capability; any holder of a
+  `&mut SimulatedKernel` may grant.
+
+**Round 4 was closed with** thirty-one findings, Phases 307-316. Its three
 critics were the regression critic on this loop's own work, the HTTP and
 non-TCP network critic, and the host crates nobody had read.
 
@@ -265,7 +311,15 @@ so the blast radius is zero. `core_types` identity types are sequential and
 predictable on the kernel (the documented no-`std` fallback); nothing should
 treat one as unguessable.
 
-**Next: round 5.** Not yet scoped; see the bottom of this file.
+**Next: round 6.** Not yet scoped. Candidates: a third regression pass (it
+has been the most valuable role every time); the compositor and
+`services_gui_host` internals, which round 3 examined only partly; and the
+crates round 5's security critic did not reach -- `intent_router`,
+`pipeline`, `services_job_scheduler`, `services_registry`,
+`services_device_manager`, `services_settings`, `services_notification`,
+`services_logger`, `services_input`, `services_focus_manager`,
+`services_view_host`, `services_network`, `developer_sdk`,
+`formal_verification`, `contract_tests`, `view_types`, `console_fb`.
 
 **Areas a critic has cleared, which a later round should not re-read:** the
 rasterizer's pixel addressing, the glyph tables and cache, pointer clamping
@@ -273,6 +327,34 @@ and the PS/2 packet parser, `services_gui_host::layout`, the interrupt stub
 stack alignment, the PIC EOI paths, the AP bring-up window, LAPIC
 calibration arithmetic, virtqueue sizing, `mmio_map`, `fs_view::PathResolver`
 (no root escape), and `cli_console`'s line editing.
+
+### Round 5
+
+Three critics, twenty-six findings. Four method notes:
+
+**The regression critic is the highest-yield role, and it stays that way.**
+A second pass over my own work found eight more, including F1: Phase 307's
+*fix* for silent upgrade loss reintroduced the identical loss for the twenty
+phases in between. The general fix -- checksum the bytes as read, never a
+re-serialisation -- is the one I should have written the first time.
+
+**Check that a test fails without the fix, every time, without exception.**
+Round 5 found four that did not: one skipped silently on any machine but
+mine, one asserted a counter incremented at frame-build time rather than the
+frame reaching the wire, one asserted nothing at all, and one of my own
+head-of-line tests passed either way until I re-aimed it. Every fix in this
+round was checked by reverting.
+
+**A guard given to one port, one editor or one call site is half a fix.**
+This loop has now made that mistake five times: undo-dirty, the save-failure
+guard, the slowloris deadline, `landed`, and the ARP transmit. When fixing
+something, grep for its siblings before committing.
+
+**`--workspace` can hide a crate that does not build.** Cargo unifies
+features across a workspace build, so two crates compiled only because their
+neighbours turned features on. And my first fix for that -- declaring the
+feature -- unified into the no_std kernel and broke it with 5829 errors. The
+ISO step caught it. Verification now checks all 58 crates one at a time.
 
 ### Round 4
 
