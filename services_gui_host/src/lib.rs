@@ -207,11 +207,63 @@ pub struct DesktopWindow {
     /// active launcher entry).
     #[serde(default)]
     pub highlight_line: Option<usize>,
+    /// How the window is painted and hit-tested (GFX-050).
+    #[serde(default)]
+    pub style: WindowStyle,
+    /// Pixel geometry, overriding the cell `rect` when set.
+    ///
+    /// The desk positions windows by pixel -- a card dragged by its header
+    /// lands where the pointer left it, not on the nearest cell. Everything
+    /// that needs a window's bounds goes through [`DesktopWindow::bounds`],
+    /// which is what lets both kinds coexist in one scene.
+    #[serde(default)]
+    pub pixel_rect: Option<RasterRect>,
+    /// Whether a card draws its close glyph and answers `HitRegion::Close`.
+    #[serde(default)]
+    pub closable: bool,
+    /// Muted text drawn in a card's footer strip (a notepad's `Ln 3, Col 12`).
+    #[serde(default)]
+    pub footer: Option<String>,
+}
+
+/// How a window is painted (GFX-050).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WindowStyle {
+    /// The tiled workspace look: cell grid, one-cell title strip, tabs.
+    #[default]
+    Classic,
+    /// A desk card: flat surface, hairline, rounded corners, a slim header
+    /// with a title and one close glyph, an optional footer strip.
+    Card,
+    /// The desk's bottom dock: a centred pill of rounded tiles, one per
+    /// `tabs` entry, whose label is a monogram and whose `active` flag draws
+    /// the running dot.
+    Dock,
+    /// The desk's top bar: the window title at the left, the first content
+    /// line right-aligned.
+    TopBar,
 }
 
 fn default_chrome() -> bool {
     true
 }
+
+/// Card geometry (GFX-050). Pixels, not cells.
+pub const CARD_HEADER_HEIGHT: usize = 24;
+pub const CARD_PADDING: usize = 8;
+pub const CARD_LINE_HEIGHT: usize = 20;
+pub const CARD_RADIUS: usize = 6;
+pub const CARD_FOOTER_HEIGHT: usize = 20;
+/// The close glyph's hit box, inset from the header's right edge.
+pub const CARD_CLOSE_SIZE: usize = 16;
+/// How far the shadow extends past a card, right and down. Damage for a
+/// moved card must grow by this much or it leaves a trail.
+pub const CARD_LIFT: usize = 2;
+/// Dock tiles.
+pub const DOCK_TILE: usize = 40;
+pub const DOCK_TILE_GAP: usize = 8;
+pub const DOCK_RADIUS: usize = 12;
+pub const DOCK_TILE_RADIUS: usize = 8;
 
 impl DesktopWindow {
     pub fn new(frame: ViewFrame, rect: SurfaceRect) -> Self {
@@ -225,7 +277,79 @@ impl DesktopWindow {
             focused: false,
             chrome: true,
             highlight_line: None,
+            style: WindowStyle::Classic,
+            pixel_rect: None,
+            closable: false,
+            footer: None,
         }
+    }
+
+    /// A card at a pixel rectangle (GFX-050).
+    pub fn card(frame: ViewFrame, bounds: RasterRect) -> Self {
+        let mut window = Self::new(frame, SurfaceRect::new(0, 0, 0, 0));
+        window.style = WindowStyle::Card;
+        window.pixel_rect = Some(bounds);
+        window.closable = true;
+        window
+    }
+
+    pub fn with_style(mut self, style: WindowStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_pixel_rect(mut self, bounds: RasterRect) -> Self {
+        self.pixel_rect = Some(bounds);
+        self
+    }
+
+    pub fn with_footer(mut self, footer: Option<String>) -> Self {
+        self.footer = footer;
+        self
+    }
+
+    /// The window's pixel bounds, whichever way its geometry was given.
+    pub fn bounds(&self) -> RasterRect {
+        self.pixel_rect.unwrap_or_else(|| pixel_rect(self.rect))
+    }
+
+    /// Where a card's header sits, or `None` for other styles.
+    pub fn header_rect(&self) -> Option<RasterRect> {
+        (self.style == WindowStyle::Card).then(|| {
+            let bounds = self.bounds();
+            RasterRect::new(
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                CARD_HEADER_HEIGHT.min(bounds.height),
+            )
+        })
+    }
+
+    /// Where a card's close glyph sits, or `None` when there is none.
+    pub fn close_rect(&self) -> Option<RasterRect> {
+        if !self.closable {
+            return None;
+        }
+        let header = self.header_rect()?;
+        let inset = (CARD_HEADER_HEIGHT.saturating_sub(CARD_CLOSE_SIZE)) / 2;
+        let x = header.right().checked_sub(CARD_CLOSE_SIZE + inset)?;
+        Some(RasterRect::new(
+            x,
+            header.y + inset,
+            CARD_CLOSE_SIZE,
+            CARD_CLOSE_SIZE,
+        ))
+    }
+
+    /// The text origin and pitch of a card's content: `(x, y, line_height)`.
+    pub fn card_text_origin(&self) -> (usize, usize, usize) {
+        let bounds = self.bounds();
+        (
+            bounds.x + CARD_PADDING,
+            bounds.y + CARD_HEADER_HEIGHT + CARD_PADDING,
+            CARD_LINE_HEIGHT,
+        )
     }
 
     pub fn with_role(mut self, role: DesktopWindowRole) -> Self {
@@ -268,10 +392,22 @@ impl DesktopWindow {
 
     /// Content lines this window can show at its cell height.
     pub fn content_rows(&self) -> usize {
-        if self.chrome {
-            self.rect.height.saturating_sub(2)
-        } else {
-            self.rect.height
+        match self.style {
+            WindowStyle::Card => {
+                let bounds = self.bounds();
+                let footer = if self.footer.is_some() {
+                    CARD_FOOTER_HEIGHT
+                } else {
+                    0
+                };
+                bounds
+                    .height
+                    .saturating_sub(CARD_HEADER_HEIGHT + CARD_PADDING * 2 + footer)
+                    / CARD_LINE_HEIGHT
+            }
+            WindowStyle::Dock | WindowStyle::TopBar => 0,
+            WindowStyle::Classic if self.chrome => self.rect.height.saturating_sub(2),
+            WindowStyle::Classic => self.rect.height,
         }
     }
 }
@@ -742,6 +878,12 @@ pub enum HitRegion {
     Chrome,
     /// The content area, with the text cell under the pointer.
     Content { line: usize, column: usize },
+    /// A card's header: press-and-drag moves the window (GFX-050).
+    Header,
+    /// A card's close glyph.
+    Close,
+    /// A dock tile, by index into `tabs`.
+    DockTile { index: usize },
 }
 
 /// Result of hit testing a desktop position.
@@ -786,7 +928,17 @@ pub fn caret_pixel_rect(
     window: &DesktopWindow,
     cursor: view_types::CursorPosition,
 ) -> Option<RasterRect> {
-    let rect = pixel_rect(window.rect);
+    if window.style == WindowStyle::Card {
+        let (x, y, pitch) = window.card_text_origin();
+        let caret = RasterRect::new(
+            x + cursor.column * RASTER_CELL_WIDTH,
+            y + cursor.line * pitch,
+            2,
+            pitch.saturating_sub(4),
+        );
+        return card_content_rect(window).and_then(|content| caret.intersect(content));
+    }
+    let rect = window.bounds();
     let content_top = if window.chrome {
         rect.y + RASTER_CELL_HEIGHT
     } else {
@@ -809,12 +961,23 @@ impl Compositor {
     pub fn hit_test(&self, windows: &[DesktopWindow], x: usize, y: usize) -> Option<HitTarget> {
         for index in composition_order(windows).into_iter().rev() {
             let window = &windows[index];
-            let rect = pixel_rect(window.rect);
+            let rect = window.bounds();
             if !rect.contains(x, y) {
                 continue;
             }
             let local_x = x - rect.x;
             let local_y = y - rect.y;
+
+            if let Some(region) = hit_region_for_style(window, x, y) {
+                return Some(HitTarget {
+                    window_index: index,
+                    view_id: window.frame.view_id,
+                    role: window.role,
+                    region,
+                    local_x,
+                    local_y,
+                });
+            }
 
             let region = if let Some(content) = window_content_rect_for(rect, window.chrome)
                 .filter(|content| content.contains(x, y))
@@ -1136,7 +1299,7 @@ fn raster_window(
     // They did not: `RasterRect::bottom()` overflowed, which panics in debug
     // and in release wraps to *below* `y`, so `contains` answered false for
     // every pixel and the window rendered as nothing with no error at all.
-    let rect = pixel_rect(window.rect).clamped_to(target.width(), target.height());
+    let rect = window.bounds().clamped_to(target.width(), target.height());
     if rect.width == 0 || rect.height == 0 {
         return false;
     }
@@ -1147,6 +1310,13 @@ fn raster_window(
     let Some(clipped_rect) = clipped_rect else {
         return false;
     };
+
+    match window.style {
+        WindowStyle::Card => return raster_card(target, window, rect, clipped_rect, theme),
+        WindowStyle::Dock => return raster_dock(target, window, rect, clipped_rect, theme),
+        WindowStyle::TopBar => return raster_top_bar(target, window, rect, clipped_rect, theme),
+        WindowStyle::Classic => {}
+    }
 
     let border_color = if window.focused {
         theme.border_focused
@@ -1224,6 +1394,307 @@ fn raster_window(
     }
 
     true
+}
+
+/// A card's content rectangle: inside the padding, below the header, above
+/// the footer (GFX-050).
+fn card_content_rect(window: &DesktopWindow) -> Option<RasterRect> {
+    let bounds = window.bounds();
+    let footer = if window.footer.is_some() {
+        CARD_FOOTER_HEIGHT
+    } else {
+        0
+    };
+    let top = bounds.y + CARD_HEADER_HEIGHT + CARD_PADDING;
+    let bottom = bounds.bottom().saturating_sub(CARD_PADDING + footer);
+    if top >= bottom || bounds.width <= CARD_PADDING * 2 {
+        return None;
+    }
+    Some(RasterRect::new(
+        bounds.x + CARD_PADDING,
+        top,
+        bounds.width - CARD_PADDING * 2,
+        bottom - top,
+    ))
+}
+
+/// A dock tile's rectangle, or `None` past the end of `tabs`.
+fn dock_tile_rect(window: &DesktopWindow, index: usize) -> Option<RasterRect> {
+    if index >= window.tabs.len() {
+        return None;
+    }
+    let bounds = window.bounds();
+    let count = window.tabs.len();
+    let row_width = count * DOCK_TILE + count.saturating_sub(1) * DOCK_TILE_GAP;
+    let start_x = bounds.x + bounds.width.saturating_sub(row_width) / 2;
+    let y = bounds.y + bounds.height.saturating_sub(DOCK_TILE) / 2;
+    Some(RasterRect::new(
+        start_x + index * (DOCK_TILE + DOCK_TILE_GAP),
+        y,
+        DOCK_TILE,
+        DOCK_TILE,
+    ))
+}
+
+/// Hit regions for the desk styles; `None` hands the classic geometry the
+/// decision.
+fn hit_region_for_style(window: &DesktopWindow, x: usize, y: usize) -> Option<HitRegion> {
+    match window.style {
+        WindowStyle::Classic => None,
+        WindowStyle::Card => {
+            if window.close_rect().is_some_and(|r| r.contains(x, y)) {
+                return Some(HitRegion::Close);
+            }
+            if window.header_rect().is_some_and(|r| r.contains(x, y)) {
+                return Some(HitRegion::Header);
+            }
+            if card_content_rect(window).is_some_and(|c| c.contains(x, y)) {
+                let (origin_x, origin_y, pitch) = window.card_text_origin();
+                return Some(HitRegion::Content {
+                    line: y.saturating_sub(origin_y) / pitch,
+                    column: x.saturating_sub(origin_x) / RASTER_CELL_WIDTH,
+                });
+            }
+            Some(HitRegion::Border)
+        }
+        WindowStyle::Dock => {
+            let index = (0..window.tabs.len())
+                .find(|&i| dock_tile_rect(window, i).is_some_and(|r| r.contains(x, y)));
+            Some(match index {
+                Some(index) => HitRegion::DockTile { index },
+                None => HitRegion::Border,
+            })
+        }
+        WindowStyle::TopBar => Some(HitRegion::Border),
+    }
+}
+
+/// Paint a desk card (GFX-050): shadow, body, hairline or accent ring,
+/// header with title and close glyph, content lines with caret, footer.
+fn raster_card(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    rect: RasterRect,
+    clipped_rect: RasterRect,
+    theme: &Theme,
+) -> bool {
+    // The lift extends two pixels past the card's bounds, so the clip has
+    // to as well -- a scissor cut to the bounds alone clipped the shadow
+    // away entirely, and the first pixel test caught it.
+    let lift = RasterRect::new(
+        clipped_rect.x,
+        clipped_rect.y,
+        clipped_rect.width + CARD_LIFT,
+        clipped_rect.height + CARD_LIFT,
+    )
+    .clamped_to(target.width(), target.height());
+    let mut painter = ScissorTarget::new(target, lift);
+
+    // Lift: a solid darker shape two pixels down and right. Fills overwrite
+    // on this rasterizer, so this is the honest version of a shadow.
+    let shadow = RasterRect::new(
+        rect.x + CARD_LIFT,
+        rect.y + CARD_LIFT,
+        rect.width,
+        rect.height,
+    );
+    painter.fill_rounded_rect(shadow, CARD_RADIUS, theme.shadow);
+    painter.fill_rounded_rect(rect, CARD_RADIUS, theme.surface);
+
+    // Focus is a ring, not a flooded title bar.
+    let (ring, thickness) = if window.focused {
+        (theme.accent, 2)
+    } else {
+        (theme.hairline, 1)
+    };
+    painter.draw_rounded_border(rect, CARD_RADIUS, thickness, ring);
+
+    // Header: title at the left, a hairline under it, the close glyph at
+    // the right. The header is the same surface as the body -- calm, not a
+    // colour-flooded strip.
+    let title_color = if window.focused {
+        theme.text
+    } else {
+        theme.text_muted
+    };
+    let title_y = rect.y + (CARD_HEADER_HEIGHT.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+    let close = window.close_rect();
+    let title_room = close
+        .map(|c| c.x.saturating_sub(rect.x + CARD_PADDING + 4))
+        .unwrap_or(rect.width.saturating_sub(CARD_PADDING * 2));
+    let title = window_chrome_label(window);
+    let title = fit_text(&title, title_room / RASTER_CELL_WIDTH.max(1));
+    painter.draw_text_with_font(
+        rect.x + CARD_PADDING + 4,
+        title_y,
+        &title,
+        &DESKTOP_FONT,
+        title_color,
+    );
+    let header_bottom = rect.y + CARD_HEADER_HEIGHT;
+    if header_bottom < rect.bottom() {
+        painter.draw_hline(
+            rect.x + thickness,
+            header_bottom,
+            rect.width.saturating_sub(thickness * 2),
+            theme.hairline,
+        );
+    }
+    if let Some(close) = close {
+        // An 'x' in the one font there is, centred in its hit box.
+        let gx = close.x + (CARD_CLOSE_SIZE.saturating_sub(RASTER_CELL_WIDTH)) / 2;
+        let gy = close.y + (CARD_CLOSE_SIZE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+        painter.draw_text_with_font(gx, gy, "x", &DESKTOP_FONT, theme.text_muted);
+    }
+
+    // Content.
+    if let Some(content) = card_content_rect(window) {
+        if let Some(content_clip) = content.intersect(clipped_rect) {
+            let (origin_x, origin_y, pitch) = window.card_text_origin();
+            let rows = window.content_rows();
+            let mut content_painter = ScissorTarget::new(&mut painter, content_clip);
+            if let Some(highlight) = window.highlight_line.filter(|l| *l < rows) {
+                content_painter.fill_rect(
+                    RasterRect::new(
+                        content.x,
+                        origin_y + highlight * pitch,
+                        content.width,
+                        pitch,
+                    ),
+                    theme.selection,
+                );
+            }
+            if let ViewContent::Graphics { ops } = &window.frame.content {
+                raster_graphics(&mut content_painter, content_clip, ops, theme);
+            }
+            let text_y_offset = (pitch.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+            for (line_index, line) in render_content_lines(&window.frame.content)
+                .into_iter()
+                .take(rows)
+                .enumerate()
+            {
+                content_painter.draw_text_with_font(
+                    origin_x,
+                    origin_y + line_index * pitch + text_y_offset,
+                    &line,
+                    &DESKTOP_FONT,
+                    theme.text,
+                );
+            }
+            if let Some(cursor) = window.frame.cursor {
+                content_painter.fill_rect(
+                    RasterRect::new(
+                        origin_x + cursor.column * RASTER_CELL_WIDTH,
+                        origin_y + cursor.line * pitch + 2,
+                        2,
+                        pitch.saturating_sub(4),
+                    ),
+                    theme.accent,
+                );
+            }
+        }
+    }
+
+    // Footer: muted, above the bottom edge, under a hairline.
+    if let Some(footer) = &window.footer {
+        let top = rect.bottom().saturating_sub(CARD_FOOTER_HEIGHT);
+        if top > rect.y + CARD_HEADER_HEIGHT {
+            painter.draw_hline(
+                rect.x + thickness,
+                top,
+                rect.width.saturating_sub(thickness * 2),
+                theme.hairline,
+            );
+            let text_y = top + (CARD_FOOTER_HEIGHT.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+            let room = rect.width.saturating_sub(CARD_PADDING * 2) / RASTER_CELL_WIDTH.max(1);
+            painter.draw_text_with_font(
+                rect.x + CARD_PADDING,
+                text_y,
+                &fit_text(footer, room),
+                &DESKTOP_FONT,
+                theme.text_muted,
+            );
+        }
+    }
+    true
+}
+
+/// Paint the dock (GFX-050): a raised pill holding one rounded tile per
+/// `tabs` entry, the label as a monogram, a dot under the running ones.
+fn raster_dock(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    rect: RasterRect,
+    clipped_rect: RasterRect,
+    theme: &Theme,
+) -> bool {
+    let mut painter = ScissorTarget::new(target, clipped_rect);
+    painter.fill_rounded_rect(rect, DOCK_RADIUS, theme.surface_raised);
+    painter.draw_rounded_border(rect, DOCK_RADIUS, 1, theme.hairline);
+    for (index, tab) in window.tabs.iter().enumerate() {
+        let Some(tile) = dock_tile_rect(window, index) else {
+            break;
+        };
+        painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, theme.tab_inactive);
+        let monogram: String = tab.label.chars().take(2).collect();
+        let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
+        painter.draw_text_with_font(
+            tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
+            tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
+            &monogram,
+            &DESKTOP_FONT,
+            theme.text,
+        );
+        if tab.active {
+            painter.fill_rounded_rect(
+                RasterRect::new(tile.x + DOCK_TILE / 2 - 2, tile.bottom() + 2, 4, 4),
+                2,
+                theme.accent,
+            );
+        }
+    }
+    true
+}
+
+/// Paint the top bar (GFX-050): raised strip, hairline under it, the title
+/// at the left and the first content line at the right.
+fn raster_top_bar(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    rect: RasterRect,
+    clipped_rect: RasterRect,
+    theme: &Theme,
+) -> bool {
+    let mut painter = ScissorTarget::new(target, clipped_rect);
+    painter.fill_rect(rect, theme.surface_raised);
+    if rect.height > 0 {
+        painter.draw_hline(rect.x, rect.bottom() - 1, rect.width, theme.hairline);
+    }
+    let text_y = rect.y + (rect.height.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+    let left = window.frame.title.clone().unwrap_or_default();
+    painter.draw_text_with_font(rect.x + 12, text_y, &left, &DESKTOP_FONT, theme.text);
+    if let Some(right) = render_content_lines(&window.frame.content)
+        .into_iter()
+        .next()
+    {
+        let width = right.chars().count() * RASTER_CELL_WIDTH;
+        let x = rect.right().saturating_sub(width + 12);
+        painter.draw_text_with_font(x, text_y, &right, &DESKTOP_FONT, theme.text_muted);
+    }
+    true
+}
+
+/// `text` cut to `max_chars`, with a trailing ellipsis mark when cut.
+fn fit_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = text.chars().take(keep).collect();
+    if max_chars > 0 {
+        out.push('~');
+    }
+    out
 }
 
 /// Title bar fill for a window: role first, then focus.

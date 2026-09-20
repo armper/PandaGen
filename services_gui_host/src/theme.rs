@@ -41,6 +41,37 @@ pub struct Theme {
     pub tab_inactive: RgbaColor,
     pub pointer_fill: RgbaColor,
     pub pointer_outline: RgbaColor,
+    /// Desk tokens (GFX-050). One accent, used only for focus, the caret and
+    /// the dock's running dot; a raised surface for the shell strips; and a
+    /// hairline for card edges. Hierarchy on this rasterizer comes from
+    /// colour and space, not size -- there is one 8x16 font -- so these are
+    /// deliberately few.
+    #[serde(default = "Theme::default_accent")]
+    pub accent: RgbaColor,
+    #[serde(default = "Theme::default_surface_raised")]
+    pub surface_raised: RgbaColor,
+    #[serde(default = "Theme::default_hairline")]
+    pub hairline: RgbaColor,
+    /// Drawn under a card, offset by two pixels, to lift it off the desk.
+    /// Fills overwrite rather than blend on this rasterizer, so it is a
+    /// solid slightly-darker shape rather than a soft shadow.
+    #[serde(default = "Theme::default_shadow")]
+    pub shadow: RgbaColor,
+}
+
+impl Theme {
+    const fn default_accent() -> RgbaColor {
+        Theme::DEFAULT.accent
+    }
+    const fn default_surface_raised() -> RgbaColor {
+        Theme::DEFAULT.surface_raised
+    }
+    const fn default_hairline() -> RgbaColor {
+        Theme::DEFAULT.hairline
+    }
+    const fn default_shadow() -> RgbaColor {
+        Theme::DEFAULT.shadow
+    }
 }
 
 impl Theme {
@@ -62,6 +93,10 @@ impl Theme {
         tab_inactive: RgbaColor::new(52, 60, 78, 255),
         pointer_fill: RgbaColor::new(245, 245, 245, 255),
         pointer_outline: RgbaColor::new(10, 10, 10, 255),
+        accent: RgbaColor::new(52, 211, 153, 255),
+        surface_raised: RgbaColor::new(22, 28, 40, 255),
+        hairline: RgbaColor::new(48, 56, 72, 255),
+        shadow: RgbaColor::new(8, 12, 20, 255),
     };
 
     /// A light variant, mostly to prove the painter is theme-agnostic.
@@ -82,6 +117,10 @@ impl Theme {
         tab_inactive: RgbaColor::new(214, 220, 228, 255),
         pointer_fill: RgbaColor::new(20, 20, 20, 255),
         pointer_outline: RgbaColor::new(250, 250, 250, 255),
+        accent: RgbaColor::new(16, 122, 90, 255),
+        surface_raised: RgbaColor::new(238, 241, 246, 255),
+        hairline: RgbaColor::new(200, 206, 216, 255),
+        shadow: RgbaColor::new(196, 202, 212, 255),
     };
 }
 
