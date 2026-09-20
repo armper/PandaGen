@@ -167,6 +167,19 @@ impl Ipv4Header {
         if total_len < ihl || total_len > p.len() {
             return None;
         }
+        // Fragments. Bytes 6..8 hold the flags and the fragment offset, and
+        // they used to be read only to be written back on send -- so a
+        // non-first fragment was handed to the TCP or UDP parser as though
+        // its first bytes were a transport header, and a first fragment was
+        // treated as a complete, short datagram. RFC 1122 3.3.2 requires a
+        // host to reassemble or discard; this stack does not reassemble, so
+        // it discards. MF is bit 5 of byte 6; the offset is the low 13 bits.
+        let flags_and_offset = be16(&p[6..8]);
+        let more_fragments = flags_and_offset & 0x2000 != 0;
+        let fragment_offset = flags_and_offset & 0x1FFF;
+        if more_fragments || fragment_offset != 0 {
+            return None;
+        }
         let mut src = [0; 4];
         let mut dst = [0; 4];
         src.copy_from_slice(&p[12..16]);

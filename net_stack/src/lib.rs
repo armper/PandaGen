@@ -185,6 +185,11 @@ pub struct Interface {
     counters: Counters,
     pending_len: usize,
     bound: [Option<u16>; MAX_BOUND_PORTS],
+    /// Addresses we have sent an ARP request for and not yet heard back on.
+    /// An ARP reply is only believed when it answers one of these: an
+    /// unsolicited reply is the oldest spoof there is, and Linux refuses it
+    /// by default (`arp_accept = 0`).
+    solicited: [Ipv4; 4],
     tcp: tcp::Tcp,
 }
 
@@ -193,6 +198,7 @@ impl Interface {
         Self {
             config,
             arp: ArpCache::new(),
+            solicited: [[0; 4]; 4],
             ping: None,
             next_seq: 1,
             ident: 0x5047, // "PG"
@@ -236,6 +242,27 @@ impl Interface {
     /// data, FINs, and retransmissions). `None` when nothing is pending or
     /// the peer's MAC is unknown.
     pub fn tcp_next_frame(&mut self, out: &mut [u8]) -> Option<usize> {
+        // Resolve the next hop *before* touching TCP. `take_reply` removes
+        // the pending reply and `poll` mutates the connection -- it counts a
+        // retransmission and advances the timer -- so doing this the other
+        // way round threw away a SYN-ACK or a RST with nothing to resend it,
+        // and spent retransmission attempts on segments that never reached
+        // the wire. Five such passes and the connection was closed as if the
+        // peer were dead. Nothing on this path asked for the address either,
+        // so nothing drove resolution: it waited for the gateway to ARP us.
+        let pending_peer = self.tcp.next_peer()?;
+        let hop = self.config.next_hop(pending_peer);
+        let dst_mac = match self.arp.lookup(hop) {
+            Some(mac) => mac,
+            None => {
+                // Ask, and leave TCP alone so the segment is still owed.
+                if let Some(len) = self.arp_request(hop, out) {
+                    self.pending_len = len;
+                }
+                return None;
+            }
+        };
+
         let (outgoing, payload_index) = match self.tcp.take_reply() {
             Some(reply) => (reply, None),
             None => {
@@ -244,8 +271,6 @@ impl Interface {
                 (seg, index)
             }
         };
-        let hop = self.config.next_hop(outgoing.peer);
-        let dst_mac = self.arp.lookup(hop)?;
         let payload: &[u8] = match payload_index {
             Some(index) if outgoing.payload.1 > 0 => self.tcp.payload(index, outgoing.payload),
             _ => &[],
@@ -371,6 +396,12 @@ impl Interface {
         self.counters
     }
 
+    /// Test-only: seed the cache without a handshake.
+    #[cfg(test)]
+    pub fn arp_cache_mut(&mut self) -> &mut ArpCache<16> {
+        &mut self.arp
+    }
+
     pub fn arp_cache(&self) -> &ArpCache<16> {
         &self.arp
     }
@@ -404,9 +435,19 @@ impl Interface {
             self.counters.dropped += 1;
             return Event::None;
         };
-        // Learn from any ARP we see that involves us.
+        // Learn from a request addressed to us -- that is a peer telling us
+        // it wants to talk, and the reply we are about to send needs its
+        // address anyway -- and from a reply only when we asked for it. An
+        // unsolicited reply used to be believed, which is the oldest ARP
+        // spoof there is; Linux refuses it by default (`arp_accept = 0`).
         if arp.target_ip == self.config.ip {
-            self.arp.insert(arp.sender_ip, arp.sender_mac);
+            match arp.operation {
+                ARP_OP_REQUEST => self.arp.insert(arp.sender_ip, arp.sender_mac),
+                ARP_OP_REPLY if self.solicited.contains(&arp.sender_ip) => {
+                    self.arp.insert(arp.sender_ip, arp.sender_mac);
+                }
+                _ => {}
+            }
         }
         if arp.operation == ARP_OP_REQUEST && arp.target_ip == self.config.ip {
             let reply = ArpPacket {
@@ -438,19 +479,32 @@ impl Interface {
             self.counters.dropped += 1;
             return Event::None;
         };
-        // Ours: our address, the limited broadcast, or (while unconfigured)
-        // anything unicast to our MAC, which is how DHCP replies arrive.
-        let for_us = ip.dst == self.config.ip
-            || ip.dst == [255, 255, 255, 255]
-            || (!self.config.is_configured() && eth_dst_is_ours);
+        // Ours: our address, or (while unconfigured) anything unicast to our
+        // MAC, which is how DHCP replies arrive.
+        let broadcast = ip.dst == [255, 255, 255, 255];
+        let for_us =
+            ip.dst == self.config.ip || broadcast || (!self.config.is_configured() && eth_dst_is_ours);
         if !for_us {
             return Event::None;
         }
-        // Neighbour learning: whoever sends us IPv4 directly is reachable at
-        // that MAC (covers hosts that never ARP us, like the QEMU gateway
-        // forwarding host traffic).
-        if self.config.same_subnet(ip.src) {
+        // Neighbour learning, but only where there is nothing to overwrite.
+        // Taking the source address of any datagram as gospel meant one
+        // packet with a forged source -- an unbound UDP port would do --
+        // pointed all our off-link traffic at the attacker's MAC. Linux does
+        // not learn layer-3-to-layer-2 bindings from data packets at all;
+        // this keeps the convenience (hosts that never ARP us, like the QEMU
+        // gateway forwarding host traffic) without the overwrite.
+        if self.config.same_subnet(ip.src) && self.arp.lookup(ip.src).is_none() {
             self.arp.insert(ip.src, src_mac);
+        }
+        // A broadcast datagram is accepted only for the protocols that need
+        // it. Answering an echo -- ICMP or the UDP echo port -- sent to the
+        // broadcast address with a forged source turns this machine into a
+        // reflector aimed at whoever the attacker names, from one packet.
+        // Linux sets `icmp_echo_ignore_broadcasts` by default and has not
+        // shipped a UDP echo service in decades.
+        if broadcast && ip.protocol != IP_PROTO_UDP {
+            return Event::None;
         }
         match ip.protocol {
             IP_PROTO_ICMP => self.receive_icmp(ip, body, out),
@@ -480,6 +534,13 @@ impl Interface {
                 };
                 if !self.is_bound(udp.dst_port) {
                     self.counters.udp_unbound += 1;
+                    return Event::None;
+                }
+                // Broadcast UDP is only ever wanted for DHCP replies. Any
+                // other port answering a broadcast -- the echo port, say --
+                // reflects to whatever source the sender forged.
+                if broadcast && udp.dst_port != crate::dhcp::DHCP_CLIENT_PORT {
+                    self.counters.dropped += 1;
                     return Event::None;
                 }
                 self.counters.udp_received += 1;
@@ -557,6 +618,11 @@ impl Interface {
         };
         let len = wire::build_arp(out, self.config.mac, MAC_BROADCAST, &request)?;
         self.counters.arp_requests_sent += 1;
+        // Remember what we asked for, so the reply is believable.
+        if !self.solicited.contains(&ip) {
+            self.solicited.rotate_right(1);
+            self.solicited[0] = ip;
+        }
         Some(len)
     }
 

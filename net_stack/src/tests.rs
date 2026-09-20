@@ -570,3 +570,173 @@ fn tcp_frames_are_built_and_parsed_through_the_interface() {
     }
     assert!(a.tcp_next_frame(&mut out).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// What a hostile but well-formed peer on the same segment can do.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_datagram_cannot_overwrite_an_arp_entry_with_its_own_source() {
+    // Any accepted IPv4 packet inserted (ip.src, src_mac) into the cache,
+    // before the protocol was even dispatched -- so one datagram to an
+    // unbound UDP port with a forged source pointed all our off-link traffic
+    // at the attacker's MAC. Linux does not learn layer-3-to-layer-2
+    // bindings from data packets at all.
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+
+    // Learn the gateway honestly, by asking.
+    a.arp_request([10, 0, 2, 2], &mut out).unwrap();
+    let reply = ArpPacket {
+        operation: ARP_OP_REPLY,
+        sender_mac: GW_MAC,
+        sender_ip: [10, 0, 2, 2],
+        target_mac: OUR_MAC,
+        target_ip: [10, 0, 2, 15],
+    };
+    let mut frame = [0u8; 1514];
+    let flen = build_arp(&mut frame, GW_MAC, OUR_MAC, &reply).unwrap();
+    a.receive(&frame[..flen], &mut out);
+    assert_eq!(a.arp_cache().lookup([10, 0, 2, 2]), Some(GW_MAC));
+
+    // Now an attacker sends a datagram claiming to be the gateway.
+    const ATTACKER: Mac = [0xAA; 6];
+    let mut frame = [0u8; 1514];
+    let udp = Udp {
+        src_port: 9999,
+        dst_port: 9999,
+        payload: b"x",
+    };
+    let len = build_udp(
+        &mut frame,
+        ATTACKER,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &udp,
+    )
+    .unwrap();
+    a.receive(&frame[..len], &mut out);
+    assert_eq!(
+        a.arp_cache().lookup([10, 0, 2, 2]),
+        Some(GW_MAC),
+        "a data packet overwrote the gateway's hardware address"
+    );
+}
+
+#[test]
+fn an_unsolicited_arp_reply_is_not_believed() {
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+    const ATTACKER: Mac = [0xBB; 6];
+
+    let reply = ArpPacket {
+        operation: ARP_OP_REPLY,
+        sender_mac: ATTACKER,
+        sender_ip: [10, 0, 2, 2],
+        target_mac: OUR_MAC,
+        target_ip: [10, 0, 2, 15],
+    };
+    let mut frame = [0u8; 1514];
+    let flen = build_arp(&mut frame, ATTACKER, OUR_MAC, &reply).unwrap();
+    a.receive(&frame[..flen], &mut out);
+    assert_eq!(
+        a.arp_cache().lookup([10, 0, 2, 2]),
+        None,
+        "a reply to a question we never asked created a cache entry"
+    );
+}
+
+#[test]
+fn a_fragment_is_discarded_rather_than_read_as_a_whole_datagram() {
+    // Flags and offset were read only to be written back on send, so a
+    // non-first fragment reached the TCP or UDP parser as though its first
+    // bytes were a transport header.
+    let mut frame = [0u8; 1514];
+    let udp = Udp {
+        src_port: 1000,
+        dst_port: 2000,
+        payload: b"payload",
+    };
+    let len = build_udp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        &udp,
+    )
+    .unwrap();
+    let (_, ipp) = EthernetHeader::parse(&frame[..len]).unwrap();
+    assert!(Ipv4Header::parse(ipp).is_some(), "the whole datagram parses");
+
+    // Set the More Fragments bit and fix the header checksum.
+    let mut fragmented = frame;
+    let ip_start = 14;
+    fragmented[ip_start + 6] |= 0x20;
+    fragmented[ip_start + 10] = 0;
+    fragmented[ip_start + 11] = 0;
+    let sum = checksum(&fragmented[ip_start..ip_start + 20]);
+    fragmented[ip_start + 10] = (sum >> 8) as u8;
+    fragmented[ip_start + 11] = sum as u8;
+    let (_, ipp) = EthernetHeader::parse(&fragmented[..len]).unwrap();
+    assert!(
+        Ipv4Header::parse(ipp).is_none(),
+        "a fragment must be discarded, not parsed as a complete datagram"
+    );
+}
+
+#[test]
+fn an_unresolved_next_hop_does_not_consume_the_segment() {
+    // `take_reply` removed the pending reply and `poll` counted a
+    // retransmission, and only then was the hardware address looked up -- so
+    // an unknown next hop threw the segment away with nothing to resend it,
+    // and spent retransmission attempts on segments that never reached the
+    // wire. Five such passes and the connection was closed as if the peer
+    // were dead. Nothing on this path asked for the address either.
+    let mut a = iface();
+    let mut out = [0u8; 1514];
+    assert!(a.tcp_mut().listen(7000));
+
+    // A SYN from off-subnet, so nothing is learned from it and the gateway
+    // stays unresolved.
+    let mut frame = [0u8; 1514];
+    let seg = Tcp {
+        src_port: 40000,
+        dst_port: 7000,
+        seq: 1000,
+        ack: 0,
+        flags: TCP_SYN,
+        window: 65535,
+        payload: &[],
+    };
+    let flen = build_tcp(
+        &mut frame,
+        GW_MAC,
+        OUR_MAC,
+        [8, 8, 8, 8],
+        [10, 0, 2, 15],
+        &seg,
+        None,
+    )
+    .unwrap();
+    a.receive(&frame[..flen], &mut out);
+
+    let before = a.counters().arp_requests_sent;
+    // The hop is unknown, so no frame comes out...
+    assert_eq!(a.tcp_next_frame(&mut out), None);
+    assert!(
+        a.counters().arp_requests_sent > before,
+        "nothing asked for the address, so nothing would ever resolve it"
+    );
+
+    // ...and the SYN-ACK is still owed once the address is known.
+    a.arp_cache_mut().insert([10, 0, 2, 2], GW_MAC);
+    let len = a
+        .tcp_next_frame(&mut out)
+        .expect("the handshake reply must still be pending");
+    let (_, ipp) = EthernetHeader::parse(&out[..len]).unwrap();
+    let (_, body) = Ipv4Header::parse(ipp).unwrap();
+    let parsed = Tcp::parse(body, [10, 0, 2, 15], [8, 8, 8, 8]).unwrap();
+    assert_eq!(parsed.flags, TCP_SYN | TCP_ACK);
+}

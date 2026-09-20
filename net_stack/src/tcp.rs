@@ -464,6 +464,23 @@ impl Tcp {
         self.reply.take()
     }
 
+    /// Who the next segment would go to, without producing it.
+    ///
+    /// The caller needs this to resolve the next hop *before* consuming
+    /// anything: `take_reply` removes the reply and `poll` counts a
+    /// retransmission, so discovering afterwards that the hardware address
+    /// is unknown threw the segment away with nothing to resend it.
+    pub fn next_peer(&self) -> Option<Ipv4> {
+        if let Some(reply) = self.reply.as_ref() {
+            return Some(reply.peer);
+        }
+        let now = self.now;
+        self.conns
+            .iter()
+            .find(|conn| Self::conn_has_work(conn, now))
+            .map(|conn| conn.peer)
+    }
+
     /// Read one line (through its newline) if a complete line is buffered,
     /// or the whole buffer when it is full without a newline.
     pub fn read_line(&mut self, index: usize, out: &mut [u8]) -> Option<usize> {
@@ -618,6 +635,29 @@ impl Tcp {
             }
         }
         None
+    }
+
+    /// Whether this connection has a segment due at `now`.
+    ///
+    /// Mirrors the decisions in `poll` without taking any of them, so a
+    /// caller can learn where the next segment is going before committing to
+    /// producing it.
+    fn conn_has_work(conn: &Connection, now: u64) -> bool {
+        if conn.state == State::Closed {
+            return false;
+        }
+        let syn_pending = conn.state == State::SynReceived;
+        let in_flight = syn_pending
+            || conn.tx_unacked > 0
+            || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
+        if in_flight {
+            return now.saturating_sub(conn.last_send_tick) >= RTO_TICKS;
+        }
+        let unsent = conn.tx_len - conn.tx_unacked;
+        if unsent > 0 && matches!(conn.state, State::Established | State::CloseWait) {
+            return unsent.min(MSS as usize).min(conn.snd_wnd as usize) > 0;
+        }
+        conn.fin_pending && !conn.fin_sent && unsent == 0
     }
 
     /// Payload bytes for an `Outgoing` produced by `poll`.
