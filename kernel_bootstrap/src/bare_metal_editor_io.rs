@@ -42,11 +42,55 @@ impl DocumentHandle {
 /// Bare-metal editor I/O implementation
 pub struct BareMetalEditorIo {
     fs: BareMetalFilesystem,
+    /// Seconds since the epoch, from the RTC, stamped on what this writes;
+    /// 0 when the kernel has no date.
+    now: u64,
 }
 
 impl BareMetalEditorIo {
     pub fn new(fs: BareMetalFilesystem) -> Self {
-        Self { fs }
+        Self { fs, now: 0 }
+    }
+
+    /// `new`, with the time writes are stamped with (GFX-056).
+    pub fn with_clock(fs: BareMetalFilesystem, now: u64) -> Self {
+        Self { fs, now }
+    }
+
+    /// The root directory with sizes and times.
+    pub fn list_entries(&mut self) -> Result<Vec<crate::desk::FileEntry>, EditorIoError> {
+        Ok(self.fs.list_entries()?)
+    }
+
+    /// Remove `name`.
+    pub fn delete(&mut self, name: &str) -> Result<(), EditorIoError> {
+        let known = self.fs.list_files()?.iter().any(|n| n == name);
+        if !known {
+            return Err(EditorIoError::NotFound);
+        }
+        Ok(self.fs.delete_file_at(name, self.now)?)
+    }
+
+    /// Give `from` the name `to`. The filesystem has no rename, so this is
+    /// a copy under the new name and then the old name's removal -- in that
+    /// order, so a failure part-way leaves the file under at least one name.
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), EditorIoError> {
+        if from == to || to.is_empty() {
+            return Ok(());
+        }
+        let content = self.fs.read_file_by_name(from)?;
+        self.fs.create_file_at(to, &content, self.now)?;
+        self.fs.delete_file_at(from, self.now)?;
+        Ok(())
+    }
+
+    /// Create `name` empty, unless it exists.
+    pub fn create_empty(&mut self, name: &str) -> Result<(), EditorIoError> {
+        if self.fs.list_files()?.iter().any(|n| n == name) {
+            return Err(EditorIoError::StorageError(alloc::format!("{name} exists")));
+        }
+        self.fs.create_file_at(name, b"", self.now)?;
+        Ok(())
     }
 
     /// Extract the filesystem (for returning to workspace)
@@ -89,7 +133,7 @@ impl BareMetalEditorIo {
         path: &str,
         content: &str,
     ) -> Result<(String, DocumentHandle), EditorIoError> {
-        let object_id = self.fs.write_file_by_name(path, content.as_bytes())?;
+        let object_id = self.fs.create_file_at(path, content.as_bytes(), self.now)?;
         let handle = DocumentHandle::new(Some(object_id), Some(path.to_string()));
         Ok((alloc::format!("Saved as {}", path), handle))
     }

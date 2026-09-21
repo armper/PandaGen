@@ -295,14 +295,26 @@ impl BareMetalFilesystem {
         name: &str,
         content: &[u8],
     ) -> Result<ObjectId, TransactionError> {
+        self.create_file_at(name, content, 0)
+    }
+
+    /// `create_file`, stamping the entry with `now` (seconds since the
+    /// epoch, from the RTC) so Files can say when it was last written.
+    pub fn create_file_at(
+        &mut self,
+        name: &str,
+        content: &[u8],
+        now: u64,
+    ) -> Result<ObjectId, TransactionError> {
         self.assert_boot_cpu();
         let file_id = self.fs.write_file(content)?;
-        let displaced = self.fs.link(
+        let displaced = self.fs.link_sized(
             name,
             self.root_id,
             file_id,
             services_storage::ObjectKind::Blob,
-            0,
+            now,
+            content.len() as u64,
         )?;
         // The name now points at the new object, so whatever it displaced is
         // unreachable: nothing in this tree ever binds one object to two
@@ -352,10 +364,46 @@ impl BareMetalFilesystem {
         Ok(entries.into_iter().map(|(name, _)| name).collect())
     }
 
+    /// The root directory's entries with what is known about each (GFX-056):
+    /// size and last-written time from the entry, reading the object only
+    /// for entries written before sizes were recorded.
+    pub fn list_entries(&mut self) -> Result<Vec<crate::desk::FileEntry>, TransactionError> {
+        self.assert_boot_cpu();
+        let entries = self.fs.list(self.root_id)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for (name, entry) in entries {
+            let size = if entry.size > 0 {
+                entry.size
+            } else {
+                self.fs
+                    .read_file(entry.object_id)
+                    .map(|b| b.len() as u64)
+                    .unwrap_or(0)
+            };
+            out.push(crate::desk::FileEntry {
+                name,
+                size,
+                kind: match entry.kind {
+                    services_storage::ObjectKind::Blob => "file",
+                    services_storage::ObjectKind::Map => "folder",
+                    _ => "object",
+                },
+                modified_at: entry.modified_at,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
     /// Delete a file
     pub fn delete_file(&mut self, name: &str) -> Result<(), TransactionError> {
+        self.delete_file_at(name, 0)
+    }
+
+    /// `delete_file`, stamping the directory with `now`.
+    pub fn delete_file_at(&mut self, name: &str, now: u64) -> Result<(), TransactionError> {
         self.assert_boot_cpu();
-        if let Some(entry) = self.fs.unlink(name, self.root_id, 0)? {
+        if let Some(entry) = self.fs.unlink(name, self.root_id, now)? {
             // Deleting used to remove the name and keep the blocks.
             let _ = self.fs.release_object(entry.object_id);
         }

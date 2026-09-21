@@ -89,15 +89,85 @@ impl DeskApp {
             DeskApp::Terminal => TERMINAL_SIZE,
         }
     }
+
+    /// The header chips (GFX-056): each is a key the app already answers,
+    /// so the pointer and the keyboard reach the same code.
+    pub fn actions(self) -> &'static [(&'static str, u8)] {
+        match self {
+            DeskApp::Notepad => &[
+                ("Save", crate::notepad::CTRL_S),
+                ("Save as", crate::notepad::CTRL_SHIFT_S),
+                ("Open", crate::notepad::CTRL_O),
+                ("Find", crate::notepad::CTRL_F),
+            ],
+            DeskApp::Files => &[
+                ("New", b'n'),
+                ("Open", b'\n'),
+                ("Rename", b'r'),
+                ("Delete", crate::notepad::KEY_DELETE),
+                ("Refresh", CTRL_R),
+            ],
+            DeskApp::Terminal => &[],
+        }
+    }
 }
 
-/// The Files app's state: the names the kernel listed, and the selection.
+/// Ctrl+R: refresh the Files listing.
+pub const CTRL_R: u8 = 0x12;
+
+/// One entry of the root directory, as the kernel lists it (GFX-056).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileEntry {
+    pub name: String,
+    pub size: u64,
+    /// "file", "folder" or "object".
+    pub kind: &'static str,
+    /// Seconds since the epoch when last written; 0 when never stamped.
+    pub modified_at: u64,
+}
+
+impl FileEntry {
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: "file",
+            ..Self::default()
+        }
+    }
+}
+
+/// `12 B`, `1.5 KB`, `2.0 MB`.
+pub fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        alloc::format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        alloc::format!("{}.{} KB", bytes / 1024, (bytes % 1024) * 10 / 1024)
+    } else {
+        let mb = bytes / (1024 * 1024);
+        alloc::format!("{}.{} MB", mb, (bytes % (1024 * 1024)) * 10 / (1024 * 1024))
+    }
+}
+
+/// A one-line prompt in the Files footer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilesPrompt {
+    /// A name for a new, empty file.
+    New(String),
+    /// A new name for the selected file.
+    Rename(String),
+    /// Delete the selected file? Enter confirms.
+    ConfirmDelete,
+}
+
+/// The Files app's state: what the kernel listed, the selection, and any
+/// prompt in the footer.
 #[derive(Debug, Clone, Default)]
 pub struct FilesView {
-    pub entries: Vec<String>,
+    pub entries: Vec<FileEntry>,
     pub selection: usize,
     pub loaded: bool,
     pub scroll: usize,
+    pub prompt: Option<FilesPrompt>,
 }
 
 impl FilesView {
@@ -110,11 +180,69 @@ impl FilesView {
         self.selection = (self.selection as isize + delta).clamp(0, last) as usize;
     }
 
+    fn selected(&self) -> Option<&FileEntry> {
+        self.entries.get(self.selection)
+    }
+
+    /// The footer: a prompt while one is open, otherwise everything known
+    /// about the selected entry -- the details live where the eye already
+    /// is, not in a dialog.
     fn footer(&self) -> String {
+        match &self.prompt {
+            Some(FilesPrompt::New(name)) => {
+                return alloc::format!("New file: {name}_   (Enter creates, Esc cancels)")
+            }
+            Some(FilesPrompt::Rename(name)) => {
+                return alloc::format!("Rename to: {name}_   (Enter renames, Esc cancels)")
+            }
+            Some(FilesPrompt::ConfirmDelete) => {
+                let name = self.selected().map(|e| e.name.as_str()).unwrap_or("");
+                return alloc::format!("Delete {name}?   Enter deletes, Esc keeps it");
+            }
+            None => {}
+        }
         if !self.loaded {
             return "Reading the filesystem...".to_string();
         }
-        alloc::format!("{} files   Enter opens   R refreshes", self.entries.len())
+        match self.selected() {
+            Some(entry) => alloc::format!(
+                "{}   {}   {}   written {}   Enter opens",
+                entry.name,
+                format_size(entry.size),
+                entry.kind,
+                crate::rtc::format_unix_minutes(entry.modified_at)
+            ),
+            None => "No files yet   N makes one".to_string(),
+        }
+    }
+
+    /// One row: name, size, kind and time in columns that fit `columns`
+    /// character cells. The name column takes what the fixed columns
+    /// leave; narrow cards lose the rightmost columns first. The first
+    /// build gave the name 28 cells and the date then fell off a 63-cell
+    /// card, so stamped files showed less than unstamped ones.
+    fn line(entry: &FileEntry, columns: usize) -> String {
+        let when = crate::rtc::format_unix_minutes(entry.modified_at);
+        let size = format_size(entry.size);
+        let clipped = |width: usize| -> String { entry.name.chars().take(width).collect() };
+        // " {:>8}   {:<6}  {:16}" after the name.
+        const TAIL_FULL: usize = 1 + 8 + 3 + 6 + 2 + 16;
+        const TAIL_SHORT: usize = 1 + 8;
+        if columns >= TAIL_FULL + 12 {
+            let name_w = columns - TAIL_FULL;
+            alloc::format!(
+                "{:<name_w$} {:>8}   {:<6}  {}",
+                clipped(name_w),
+                size,
+                entry.kind,
+                when
+            )
+        } else if columns >= TAIL_SHORT + 8 {
+            let name_w = columns - TAIL_SHORT;
+            alloc::format!("{:<name_w$} {:>8}", clipped(name_w), size)
+        } else {
+            clipped(columns)
+        }
     }
 }
 
@@ -244,6 +372,16 @@ pub enum DeskRequest {
     TextConsole,
     /// Scroll the console's view: positive notches towards older lines.
     TerminalScroll { notches: i32 },
+    /// Create `name` empty, then list again for `id` and open it (GFX-056).
+    CreateFile { id: ViewId, name: String },
+    /// Give `from` the name `to`, then list again for `id`.
+    RenameFile {
+        id: ViewId,
+        from: String,
+        to: String,
+    },
+    /// Remove `name`, then list again for `id`.
+    DeleteFile { id: ViewId, name: String },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -485,16 +623,33 @@ impl Desk {
     }
 
     /// The kernel answers a `ListFiles` request.
-    pub fn files_listed(&mut self, id: ViewId, names: Vec<String>) {
+    pub fn files_listed(&mut self, id: ViewId, entries: Vec<FileEntry>) {
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
         self.file_names_cache = names.clone();
         if let Some(files) = self.window_mut(id).and_then(|w| w.files_mut()) {
-            files.entries = names.clone();
+            // Keep the selection on the same name across a refresh.
+            let keep = files.selected().map(|e| e.name.clone());
+            files.entries = entries;
             files.loaded = true;
+            files.selection = keep
+                .and_then(|name| files.entries.iter().position(|e| e.name == name))
+                .unwrap_or(0);
             files.select(0);
         }
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
             notepad.set_file_names(names);
         }
+    }
+
+    /// A header chip was pressed: the app's key for it (GFX-056).
+    fn card_action(&mut self, id: ViewId, index: usize) -> (Option<DeskRequest>, bool) {
+        let Some(app) = self.window(id).map(|w| w.app) else {
+            return (None, false);
+        };
+        let Some((_, byte)) = app.actions().get(index) else {
+            return (None, false);
+        };
+        self.handle_app_key(id, *byte)
     }
 
     pub fn window_count(&self) -> usize {
@@ -920,6 +1075,13 @@ impl Desk {
                             self.close(*target);
                             changed = true;
                         }
+                        (true, _, Some(HitRegion::Action { index }), _) => {
+                            self.raise(*target);
+                            self.focus = Some(*target);
+                            let (request, _) = self.card_action(*target, index);
+                            requests.extend(request);
+                            changed = true;
+                        }
                         (true, _, Some(HitRegion::Resize), _) => {
                             self.raise(*target);
                             if let Some(window) = self.window(*target) {
@@ -1127,7 +1289,7 @@ impl Desk {
     /// selects, the next opens, and there is no double-click clock to beat.
     fn open_files_selection(&mut self, id: ViewId) -> Option<DeskRequest> {
         let files = self.window_mut(id).and_then(|w| w.files_mut())?;
-        let name = files.entries.get(files.selection).cloned()?;
+        let name = files.entries.get(files.selection).map(|e| e.name.clone())?;
         let notepad_id = self.launch(DeskApp::Notepad);
         Some(DeskRequest::Io {
             id: notepad_id,
@@ -1155,26 +1317,67 @@ impl Desk {
                 }
                 (Some(DeskRequest::Terminal(byte)), true)
             }
-            AppState::Files(files) => match byte {
-                crate::notepad::KEY_UP => {
-                    files.select(-1);
-                    (None, true)
+            AppState::Files(files) => {
+                // A prompt owns the keys while it is open.
+                if let Some(prompt) = files.prompt.clone() {
+                    return Self::files_prompt_key(files, id, prompt, byte);
                 }
-                crate::notepad::KEY_DOWN => {
-                    files.select(1);
-                    (None, true)
+                match byte {
+                    crate::notepad::KEY_UP => {
+                        files.select(-1);
+                        (None, true)
+                    }
+                    crate::notepad::KEY_DOWN => {
+                        files.select(1);
+                        (None, true)
+                    }
+                    crate::notepad::KEY_PAGE_UP => {
+                        files.select(-10);
+                        (None, true)
+                    }
+                    crate::notepad::KEY_PAGE_DOWN => {
+                        files.select(10);
+                        (None, true)
+                    }
+                    crate::notepad::KEY_HOME => {
+                        files.selection = 0;
+                        (None, true)
+                    }
+                    crate::notepad::KEY_END => {
+                        files.selection = files.entries.len().saturating_sub(1);
+                        (None, true)
+                    }
+                    CTRL_R => (Some(DeskRequest::ListFiles { id }), true),
+                    b'n' | b'N' => {
+                        files.prompt = Some(FilesPrompt::New(String::new()));
+                        (None, true)
+                    }
+                    b'r' | b'R' => match files.selected() {
+                        Some(entry) => {
+                            files.prompt = Some(FilesPrompt::Rename(entry.name.clone()));
+                            (None, true)
+                        }
+                        None => (None, false),
+                    },
+                    crate::notepad::KEY_DELETE | crate::notepad::BACKSPACE => {
+                        if files.selected().is_some() {
+                            files.prompt = Some(FilesPrompt::ConfirmDelete);
+                            (None, true)
+                        } else {
+                            (None, false)
+                        }
+                    }
+                    crate::notepad::CTRL_W => {
+                        self.close(id);
+                        (None, true)
+                    }
+                    b'\n' | b'\r' => match self.open_files_selection(id) {
+                        Some(request) => (Some(request), true),
+                        None => (None, false),
+                    },
+                    _ => (None, false),
                 }
-                b'r' | b'R' => (Some(DeskRequest::ListFiles { id }), true),
-                crate::notepad::CTRL_W => {
-                    self.close(id);
-                    (None, true)
-                }
-                b'\n' | b'\r' => match self.open_files_selection(id) {
-                    Some(request) => (Some(request), true),
-                    None => (None, false),
-                },
-                _ => (None, false),
-            },
+            }
             AppState::Notepad(notepad) => match if byte == crate::notepad::CTRL_V {
                 notepad.paste(&clipboard)
             } else {
@@ -1195,6 +1398,68 @@ impl Desk {
                     (Some(DeskRequest::Io { id, effect }), true)
                 }
             },
+        }
+    }
+
+    /// A key while a Files prompt is open.
+    fn files_prompt_key(
+        files: &mut FilesView,
+        id: ViewId,
+        prompt: FilesPrompt,
+        byte: u8,
+    ) -> (Option<DeskRequest>, bool) {
+        match (prompt, byte) {
+            (_, crate::notepad::ESC) => {
+                files.prompt = None;
+                (None, true)
+            }
+            (FilesPrompt::ConfirmDelete, b'\n' | b'\r') => {
+                files.prompt = None;
+                match files.selected() {
+                    Some(entry) => (
+                        Some(DeskRequest::DeleteFile {
+                            id,
+                            name: entry.name.clone(),
+                        }),
+                        true,
+                    ),
+                    None => (None, true),
+                }
+            }
+            (FilesPrompt::ConfirmDelete, _) => (None, false),
+            (FilesPrompt::New(name) | FilesPrompt::Rename(name), b'\n' | b'\r') => {
+                let name = name.trim().to_string();
+                let renaming = matches!(files.prompt, Some(FilesPrompt::Rename(_)));
+                if name.is_empty() {
+                    return (None, false);
+                }
+                files.prompt = None;
+                if renaming {
+                    let from = files.selected().map(|e| e.name.clone()).unwrap_or_default();
+                    if from == name {
+                        return (None, true);
+                    }
+                    (Some(DeskRequest::RenameFile { id, from, to: name }), true)
+                } else {
+                    (Some(DeskRequest::CreateFile { id, name }), true)
+                }
+            }
+            (FilesPrompt::New(mut name) | FilesPrompt::Rename(mut name), byte) => {
+                let renaming = matches!(files.prompt, Some(FilesPrompt::Rename(_)));
+                match byte {
+                    crate::notepad::BACKSPACE => {
+                        name.pop();
+                    }
+                    0x20..=0x7E if name.len() < 64 => name.push(byte as char),
+                    _ => return (None, false),
+                }
+                files.prompt = Some(if renaming {
+                    FilesPrompt::Rename(name)
+                } else {
+                    FilesPrompt::New(name)
+                });
+                (None, true)
+            }
         }
     }
 
@@ -1277,12 +1542,17 @@ impl Desk {
                     } else if rows > 0 && files.selection >= files.scroll + rows {
                         files.scroll = files.selection + 1 - rows;
                     }
+                    let columns = window
+                        .bounds
+                        .width
+                        .saturating_sub(services_gui_host::CARD_PADDING * 2)
+                        / GLYPH_WIDTH;
                     let lines: Vec<String> = files
                         .entries
                         .iter()
                         .skip(files.scroll)
                         .take(rows)
-                        .cloned()
+                        .map(|entry| FilesView::line(entry, columns))
                         .collect();
                     if !files.entries.is_empty() {
                         highlight = Some(files.selection - files.scroll);
@@ -1311,7 +1581,15 @@ impl Desk {
                 .with_z_index(window.z)
                 .with_footer(Some(footer))
                 .with_highlight(highlight)
-                .with_selection(selection);
+                .with_selection(selection)
+                .with_actions(
+                    window
+                        .app
+                        .actions()
+                        .iter()
+                        .map(|(label, _)| label.to_string())
+                        .collect(),
+                );
             if focused {
                 card = card.focused();
             }
@@ -1738,7 +2016,10 @@ mod tests {
         let id = desk.focused_window().map(|w| w.id).unwrap();
         assert_eq!(requests, alloc::vec![DeskRequest::ListFiles { id }]);
 
-        desk.files_listed(id, alloc::vec!["a.txt".to_string(), "b.txt".to_string()]);
+        desk.files_listed(
+            id,
+            alloc::vec![FileEntry::named("a.txt"), FileEntry::named("b.txt")],
+        );
         desk.handle_key(crate::notepad::KEY_DOWN);
         let (request, _) = desk.handle_key(b'\n');
         let notepad_id = desk.focused_window().map(|w| w.id).unwrap();
@@ -1806,7 +2087,10 @@ mod tests {
         let mut desk = Desk::new(1280, 800);
         let mut router = DesktopInputRouter::new();
         let id = desk.launch(DeskApp::Files);
-        desk.files_listed(id, alloc::vec!["a.txt".to_string(), "b.txt".to_string()]);
+        desk.files_listed(
+            id,
+            alloc::vec![FileEntry::named("a.txt"), FileEntry::named("b.txt")],
+        );
         let bounds = desk.window(id).unwrap().bounds;
         let text_x = (bounds.x + services_gui_host::CARD_PADDING + 4) as i32;
         let row_y = |row: usize| {
@@ -1982,6 +2266,168 @@ mod tests {
             .find(|w| w.style == WindowStyle::TopBar)
             .unwrap();
         assert_eq!(bar.frame.title.as_deref(), Some("Notepad"));
+    }
+
+    #[test]
+    fn files_shows_size_kind_and_time_and_narrows_to_the_name() {
+        let entry = FileEntry {
+            name: "notes.txt".to_string(),
+            size: 1536,
+            kind: "file",
+            modified_at: 1_789_946_225,
+        };
+        let line = FilesView::line(&entry, 80);
+        assert!(line.starts_with("notes.txt"), "{line}");
+        assert!(
+            line.contains("1.5 KB") && line.contains("2026-09-20 23:17"),
+            "{line}"
+        );
+        let narrow = FilesView::line(&entry, 40);
+        assert!(
+            narrow.contains("1.5 KB") && !narrow.contains("2026"),
+            "{narrow}"
+        );
+        assert_eq!(FilesView::line(&entry, 5), "notes");
+        assert_eq!(format_size(12), "12 B");
+        assert_eq!(format_size(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
+
+        let mut files = FilesView::default();
+        files.entries = alloc::vec![entry];
+        files.loaded = true;
+        assert!(files.footer().contains("1.5 KB") && files.footer().contains("written 2026"));
+        files.entries.clear();
+        assert!(files.footer().contains("N makes one"));
+    }
+
+    #[test]
+    fn files_creates_renames_and_deletes_through_footer_prompts() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Files);
+        desk.files_listed(
+            id,
+            alloc::vec![FileEntry::named("a.txt"), FileEntry::named("b.txt")],
+        );
+        // New: a name, Enter.
+        desk.handle_key(b'n');
+        for byte in b"c.txt" {
+            desk.handle_key(*byte);
+        }
+        let footer = desk.window(id).unwrap().files().unwrap().footer();
+        assert!(footer.starts_with("New file: c.txt_"), "{footer}");
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::CreateFile {
+                id,
+                name: "c.txt".to_string()
+            })
+        );
+        // Delete asks first; Esc keeps it, Enter does it.
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        desk.handle_key(crate::notepad::KEY_DELETE);
+        assert!(desk
+            .window(id)
+            .unwrap()
+            .files()
+            .unwrap()
+            .footer()
+            .starts_with("Delete b.txt?"));
+        desk.handle_key(crate::notepad::ESC);
+        assert!(desk.window(id).unwrap().files().unwrap().prompt.is_none());
+        desk.handle_key(crate::notepad::KEY_DELETE);
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::DeleteFile {
+                id,
+                name: "b.txt".to_string()
+            })
+        );
+        // Rename starts from the current name; an unchanged name is a no-op.
+        desk.handle_key(b'r');
+        assert!(desk
+            .window(id)
+            .unwrap()
+            .files()
+            .unwrap()
+            .footer()
+            .starts_with("Rename to: b.txt_"));
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(request, None);
+        desk.handle_key(b'r');
+        desk.handle_key(crate::notepad::BACKSPACE);
+        desk.handle_key(crate::notepad::BACKSPACE);
+        desk.handle_key(crate::notepad::BACKSPACE);
+        desk.handle_key(b'm');
+        desk.handle_key(b'd');
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::RenameFile {
+                id,
+                from: "b.txt".to_string(),
+                to: "b.md".to_string()
+            })
+        );
+        // Ctrl+R lists again; a refresh keeps the selection by name.
+        assert_eq!(
+            desk.handle_key(CTRL_R).0,
+            Some(DeskRequest::ListFiles { id })
+        );
+        desk.files_listed(
+            id,
+            alloc::vec![
+                FileEntry::named("a.txt"),
+                FileEntry::named("b.md"),
+                FileEntry::named("c.txt")
+            ],
+        );
+        // "b.txt" is gone, so the selection falls back to the top.
+        assert_eq!(desk.window(id).unwrap().files().unwrap().selection, 0);
+    }
+
+    #[test]
+    fn header_chips_run_the_apps_own_keys() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let id = desk.launch(DeskApp::Notepad);
+        desk.handle_key(b'x');
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.actions, alloc::vec!["Save", "Save as", "Open", "Find"]);
+        let save = card.action_rects()[0].expect("the Save chip is placed");
+        let compositor = Compositor::new();
+        let deliveries = router.route(
+            &compositor,
+            &windows,
+            press((save.x + 3) as i32, (save.y + 3) as i32),
+        );
+        let (requests, changed) = desk.handle_deliveries_with_requests(&deliveries);
+        assert!(changed);
+        // An unnamed document: Save opens the name prompt, which asks for
+        // the listing to complete against.
+        assert_eq!(requests, alloc::vec![DeskRequest::ListFiles { id }]);
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert!(
+            notepad.footer().starts_with("Save as:"),
+            "{}",
+            notepad.footer()
+        );
+
+        let files = desk.launch(DeskApp::Files);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == files).unwrap();
+        assert_eq!(
+            card.actions,
+            alloc::vec!["New", "Open", "Rename", "Delete", "Refresh"]
+        );
+        let terminal = desk.launch(DeskApp::Terminal);
+        let windows = desk.windows("", true, None);
+        let card = windows
+            .iter()
+            .find(|w| w.frame.view_id == terminal)
+            .unwrap();
+        assert!(card.actions.is_empty());
     }
 
     #[test]

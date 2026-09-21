@@ -239,7 +239,19 @@ pub struct DesktopWindow {
     /// Muted text drawn in a card's footer strip (a notepad's `Ln 3, Col 12`).
     #[serde(default)]
     pub footer: Option<String>,
+    /// Action chips in a card's header, right of the title (GFX-056):
+    /// small labelled pills, hit as `HitRegion::Action { index }`. The
+    /// card's own commands live here, so nothing needs a menu bar.
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
+
+/// Height of a header action chip.
+pub const CARD_CHIP_HEIGHT: usize = 16;
+/// Horizontal padding inside a chip, each side.
+pub const CARD_CHIP_PAD: usize = 6;
+/// Gap between chips.
+pub const CARD_CHIP_GAP: usize = 6;
 
 /// How a window is painted (GFX-050).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -297,6 +309,7 @@ impl DesktopWindow {
             pixel_rect: None,
             closable: false,
             footer: None,
+            actions: Vec::new(),
         }
     }
 
@@ -312,6 +325,55 @@ impl DesktopWindow {
     pub fn with_style(mut self, style: WindowStyle) -> Self {
         self.style = style;
         self
+    }
+
+    /// Give a card header action chips (GFX-056).
+    pub fn with_actions(mut self, actions: Vec<String>) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    /// Where each header chip sits, in `actions` order, laid out from the
+    /// close glyph leftwards. Chips that would run into the title are
+    /// dropped from the end, so a narrow card keeps its first actions.
+    pub fn action_rects(&self) -> Vec<Option<RasterRect>> {
+        let Some(header) = self.header_rect() else {
+            return self.actions.iter().map(|_| None).collect();
+        };
+        let right = match self.close_rect() {
+            Some(close) => close.x.saturating_sub(CARD_CHIP_GAP),
+            None => header.right().saturating_sub(CARD_PADDING),
+        };
+        // Leave the title at least twelve cells.
+        let min_x = header.x + CARD_PADDING + 4 + 12 * RASTER_CELL_WIDTH;
+        let y = header.y + (CARD_HEADER_HEIGHT.saturating_sub(CARD_CHIP_HEIGHT)) / 2;
+        let widths: Vec<usize> = self
+            .actions
+            .iter()
+            .map(|a| a.chars().count() * RASTER_CELL_WIDTH + CARD_CHIP_PAD * 2)
+            .collect();
+        let mut keep = widths.len();
+        let mut total = 0;
+        while keep > 0 {
+            total = widths[..keep].iter().sum::<usize>() + CARD_CHIP_GAP * (keep - 1);
+            if right >= total && right - total >= min_x {
+                break;
+            }
+            keep -= 1;
+        }
+        let mut x = if keep == 0 { 0 } else { right - total };
+        widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| {
+                if index >= keep {
+                    return None;
+                }
+                let rect = RasterRect::new(x, y, *width, CARD_CHIP_HEIGHT);
+                x += width + CARD_CHIP_GAP;
+                Some(rect)
+            })
+            .collect()
     }
 
     pub fn with_pixel_rect(mut self, bounds: RasterRect) -> Self {
@@ -927,6 +989,8 @@ pub enum HitRegion {
     DockTile { index: usize },
     /// A card's bottom-right corner: press-and-drag resizes (GFX-052).
     Resize,
+    /// A header action chip, by index into `actions` (GFX-056).
+    Action { index: usize },
 }
 
 /// Result of hit testing a desktop position.
@@ -1521,6 +1585,13 @@ fn hit_region_for_style(window: &DesktopWindow, x: usize, y: usize) -> Option<Hi
             if window.close_rect().is_some_and(|r| r.contains(x, y)) {
                 return Some(HitRegion::Close);
             }
+            if let Some(index) = window
+                .action_rects()
+                .iter()
+                .position(|r| r.is_some_and(|r| r.contains(x, y)))
+            {
+                return Some(HitRegion::Action { index });
+            }
             if window.grip_rect().is_some_and(|r| r.contains(x, y)) {
                 return Some(HitRegion::Resize);
             }
@@ -1598,8 +1669,11 @@ fn raster_card(
     };
     let title_y = rect.y + (CARD_HEADER_HEIGHT.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
     let close = window.close_rect();
-    let title_room = close
-        .map(|c| c.x.saturating_sub(rect.x + CARD_PADDING + 4))
+    let chips = window.action_rects();
+    let chips_left = chips.iter().flatten().map(|r| r.x).min();
+    let title_room = chips_left
+        .or(close.map(|c| c.x))
+        .map(|x| x.saturating_sub(rect.x + CARD_PADDING + 4 + CARD_CHIP_GAP))
         .unwrap_or(rect.width.saturating_sub(CARD_PADDING * 2));
     let title = window_chrome_label(window);
     let title = fit_text(&title, title_room / RASTER_CELL_WIDTH.max(1));
@@ -1617,6 +1691,24 @@ fn raster_card(
             header_bottom,
             rect.width.saturating_sub(thickness * 2),
             theme.hairline,
+        );
+    }
+    // Header action chips: raised pills with a hairline, muted text.
+    for (label, chip) in window.actions.iter().zip(chips.iter()) {
+        let Some(chip) = chip else { continue };
+        painter.fill_rounded_rect(*chip, 4, theme.surface_raised);
+        painter.draw_rounded_border(*chip, 4, 1, theme.hairline);
+        let ty = chip.y + (chip.height.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
+        painter.draw_text_with_font(
+            chip.x + CARD_CHIP_PAD,
+            ty,
+            label,
+            &DESKTOP_FONT,
+            if window.focused {
+                theme.text
+            } else {
+                theme.text_muted
+            },
         );
     }
     if let Some(close) = close {

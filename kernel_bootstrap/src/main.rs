@@ -1975,6 +1975,10 @@ fn workspace_loop(
         if !desk_requests.is_empty() {
             let pending: alloc::vec::Vec<desk::DeskRequest> = desk_requests.drain(..).collect();
             let now = get_tick_count();
+            // What writes are stamped with (GFX-056): the RTC's date, or 0.
+            let now_secs = rtc::read_clock(&mut rtc_port)
+                .map(|d| d.unix_seconds())
+                .unwrap_or(0);
             for request in pending {
                 let Some(desk) = desk.as_mut() else {
                     break;
@@ -1991,22 +1995,86 @@ fn workspace_loop(
                         workspace.request_display_mode(display_mode::DisplayMode::TextConsole);
                     }
                     desk::DeskRequest::ListFiles { id } => {
-                        let names = match workspace.take_filesystem() {
+                        let entries = match workspace.take_filesystem() {
                             Some(fs) => {
                                 let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
-                                let names = io.list_files().unwrap_or_default();
+                                let entries = io.list_entries().unwrap_or_default();
                                 workspace.set_filesystem(io.into_filesystem());
-                                names
+                                entries
                             }
                             None => alloc::vec::Vec::new(),
                         };
-                        desk.files_listed(id, names);
+                        desk.files_listed(id, entries);
+                        output_dirty = true;
+                    }
+                    op @ (desk::DeskRequest::CreateFile { .. }
+                    | desk::DeskRequest::RenameFile { .. }
+                    | desk::DeskRequest::DeleteFile { .. }) => {
+                        // The three file operations share one shape: do it
+                        // with the clock, say how it went, list again.
+                        let (id, name, to, verb) = match op {
+                            desk::DeskRequest::CreateFile { id, name } => {
+                                (id, name, None, "Created")
+                            }
+                            desk::DeskRequest::RenameFile { id, from, to } => {
+                                (id, from, Some(to), "Renamed")
+                            }
+                            desk::DeskRequest::DeleteFile { id, name } => {
+                                (id, name, None, "Deleted")
+                            }
+                            _ => continue,
+                        };
+                        let (result, entries) = match workspace.take_filesystem() {
+                            Some(fs) => {
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::with_clock(
+                                    fs, now_secs,
+                                );
+                                let result = match &to {
+                                    Some(to) => io.rename(&name, to),
+                                    None if verb == "Created" => io.create_empty(&name),
+                                    None => io.delete(&name),
+                                }
+                                .map_err(|e| alloc::format!("{e:?}"));
+                                let entries = io.list_entries().unwrap_or_default();
+                                workspace.set_filesystem(io.into_filesystem());
+                                (result, entries)
+                            }
+                            None => (
+                                Err(alloc::string::String::from("no filesystem")),
+                                alloc::vec::Vec::new(),
+                            ),
+                        };
+                        match result {
+                            Ok(()) => {
+                                let text = match &to {
+                                    Some(to) => alloc::format!("{verb} {name} to {to}"),
+                                    None => alloc::format!("{verb} {name}"),
+                                };
+                                desk.notify(services_gui_host::NoticeLevel::Success, text, now);
+                                if verb == "Created" {
+                                    // A new file opens where it will be written.
+                                    let notepad_id = desk.launch(desk::DeskApp::Notepad);
+                                    desk_requests.push(desk::DeskRequest::Io {
+                                        id: notepad_id,
+                                        effect: notepad::NotepadEffect::Open { path: name.clone() },
+                                    });
+                                }
+                            }
+                            Err(error) => desk.notify(
+                                services_gui_host::NoticeLevel::Error,
+                                alloc::format!("{verb} {name} failed: {error}"),
+                                now,
+                            ),
+                        }
+                        desk.files_listed(id, entries);
                         output_dirty = true;
                     }
                     desk::DeskRequest::Io { id, effect } => {
                         let result = match workspace.take_filesystem() {
                             Some(fs) => {
-                                let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::with_clock(
+                                    fs, now_secs,
+                                );
                                 let result = match &effect {
                                     notepad::NotepadEffect::Save { path, content } => io
                                         .save_as(path, content)

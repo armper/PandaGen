@@ -22,6 +22,15 @@ pub struct DirectoryEntry {
     pub object_id: ObjectId,
     /// Object kind (Blob, Map, Log)
     pub kind: ObjectKind,
+    /// When this name was last bound, in the caller's clock (seconds since
+    /// the epoch when the kernel has a date; 0 for entries written before
+    /// GFX-056 or by a caller with no clock). Directories are JSON on disk,
+    /// so a missing field reads as 0 and old disks still mount.
+    #[serde(default)]
+    pub modified_at: u64,
+    /// The object's size in bytes when it was linked; 0 when unknown.
+    #[serde(default)]
+    pub size: u64,
 }
 
 impl DirectoryEntry {
@@ -31,6 +40,8 @@ impl DirectoryEntry {
             name,
             object_id,
             kind,
+            modified_at: 0,
+            size: 0,
         }
     }
 }
@@ -228,8 +239,24 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         kind: ObjectKind,
         timestamp: u64,
     ) -> Result<Option<DirectoryEntry>, TransactionError> {
+        self.link_sized(name, dir_id, object_id, kind, timestamp, 0)
+    }
+
+    /// `link`, recording the object's size on the entry so a listing can
+    /// show it without reading every file.
+    pub fn link_sized(
+        &mut self,
+        name: impl Into<String>,
+        dir_id: ObjectId,
+        object_id: ObjectId,
+        kind: ObjectKind,
+        timestamp: u64,
+        size: u64,
+    ) -> Result<Option<DirectoryEntry>, TransactionError> {
         let mut dir = self.read_directory(dir_id)?;
-        let entry = DirectoryEntry::new(name.into(), object_id, kind);
+        let mut entry = DirectoryEntry::new(name.into(), object_id, kind);
+        entry.modified_at = timestamp;
+        entry.size = size;
         // Whatever this name pointed at is no longer reachable through it.
         // Returned rather than released here: only the caller knows whether
         // any other name still refers to it.

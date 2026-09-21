@@ -9,6 +9,8 @@
 //! Host-testable: the register decoding takes a `PortIo`, so a fake device
 //! can present any register contents.
 
+extern crate alloc;
+
 use hal_x86_64::PortIo;
 
 const CMOS_SELECT: u16 = 0x70;
@@ -16,6 +18,11 @@ const CMOS_DATA: u16 = 0x71;
 const REG_SECONDS: u8 = 0x00;
 const REG_MINUTES: u8 = 0x02;
 const REG_HOURS: u8 = 0x04;
+const REG_DAY: u8 = 0x07;
+const REG_MONTH: u8 = 0x08;
+const REG_YEAR: u8 = 0x09;
+/// The century register most firmware keeps; 0 when it does not.
+const REG_CENTURY: u8 = 0x32;
 const REG_STATUS_A: u8 = 0x0A;
 const REG_STATUS_B: u8 = 0x0B;
 /// Status A bit 7: an update is in progress and the time registers are
@@ -36,6 +43,85 @@ pub struct TimeOfDay {
     pub second: u8,
 }
 
+/// A calendar date and time (GFX-056), as the RTC keeps it: no zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub time: TimeOfDay,
+}
+
+impl DateTime {
+    /// Seconds since 1970-01-01 00:00, treating the RTC as UTC.
+    pub fn unix_seconds(&self) -> u64 {
+        let days = days_from_civil(self.year as i64, self.month as i64, self.day as i64);
+        let secs = days * 86_400
+            + self.time.hour as i64 * 3_600
+            + self.time.minute as i64 * 60
+            + self.time.second as i64;
+        secs.max(0) as u64
+    }
+
+    /// The inverse of [`DateTime::unix_seconds`].
+    pub fn from_unix_seconds(secs: u64) -> Self {
+        let days = (secs / 86_400) as i64;
+        let rem = secs % 86_400;
+        let (year, month, day) = civil_from_days(days);
+        Self {
+            year: year as u16,
+            month: month as u8,
+            day: day as u8,
+            time: TimeOfDay {
+                hour: (rem / 3_600) as u8,
+                minute: ((rem % 3_600) / 60) as u8,
+                second: (rem % 60) as u8,
+            },
+        }
+    }
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
+/// algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `2026-09-20 23:17` for a listing; "-" when the time was never set.
+pub fn format_unix_minutes(secs: u64) -> alloc::string::String {
+    if secs == 0 {
+        return alloc::string::String::from("-");
+    }
+    let d = DateTime::from_unix_seconds(secs);
+    alloc::format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        d.year,
+        d.month,
+        d.day,
+        d.time.hour,
+        d.time.minute
+    )
+}
+
 fn read_register<P: PortIo>(port: &mut P, register: u8) -> u8 {
     // Bit 7 of the select register controls NMI; leave it set so an NMI
     // cannot arrive between the select and the read.
@@ -50,6 +136,11 @@ fn from_bcd(value: u8) -> u8 {
 /// Read the time of day, or `None` if the clock never settled or answered
 /// something no clock says.
 pub fn read_time<P: PortIo>(port: &mut P) -> Option<TimeOfDay> {
+    read_clock(port).map(|d| d.time)
+}
+
+/// Read the date and time. A century register of 0 means "20xx".
+pub fn read_clock<P: PortIo>(port: &mut P) -> Option<DateTime> {
     let mut polls = 0;
     while read_register(port, REG_STATUS_A) & UPDATE_IN_PROGRESS != 0 {
         polls += 1;
@@ -61,6 +152,10 @@ pub fn read_time<P: PortIo>(port: &mut P) -> Option<TimeOfDay> {
     let raw_seconds = read_register(port, REG_SECONDS);
     let raw_minutes = read_register(port, REG_MINUTES);
     let raw_hours = read_register(port, REG_HOURS);
+    let raw_day = read_register(port, REG_DAY);
+    let raw_month = read_register(port, REG_MONTH);
+    let raw_year = read_register(port, REG_YEAR);
+    let raw_century = read_register(port, REG_CENTURY);
 
     let binary = status_b & BINARY_MODE != 0;
     let decode = |value: u8| if binary { value } else { from_bcd(value) };
@@ -79,10 +174,26 @@ pub fn read_time<P: PortIo>(port: &mut P) -> Option<TimeOfDay> {
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    Some(TimeOfDay {
-        hour,
-        minute,
-        second,
+    let day = decode(raw_day);
+    let month = decode(raw_month);
+    let century = if raw_century == 0 {
+        20
+    } else {
+        decode(raw_century)
+    };
+    let year = century as u16 * 100 + decode(raw_year) as u16;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(DateTime {
+        year,
+        month,
+        day,
+        time: TimeOfDay {
+            hour,
+            minute,
+            second,
+        },
     })
 }
 
@@ -103,6 +214,11 @@ mod tests {
             registers[REG_HOURS as usize] = hours;
             registers[REG_MINUTES as usize] = minutes;
             registers[REG_SECONDS as usize] = seconds;
+            // A real date, so a time-only test is not failed by the
+            // calendar check.
+            registers[REG_DAY as usize] = 0x01;
+            registers[REG_MONTH as usize] = 0x01;
+            registers[REG_YEAR as usize] = 0x26;
             Self {
                 selected: 0,
                 registers,
@@ -119,6 +235,28 @@ mod tests {
             assert_eq!(port, CMOS_SELECT);
             self.selected = value;
         }
+    }
+
+    #[test]
+    fn the_date_registers_decode_and_round_trip_through_unix_seconds() {
+        let mut cmos = FakeCmos::new(HOURS_24, 0x23, 0x17, 0x05);
+        cmos.registers[REG_DAY as usize] = 0x20;
+        cmos.registers[REG_MONTH as usize] = 0x09;
+        cmos.registers[REG_YEAR as usize] = 0x26;
+        let clock = read_clock(&mut cmos).unwrap();
+        assert_eq!((clock.year, clock.month, clock.day), (2026, 9, 20));
+        let secs = clock.unix_seconds();
+        assert_eq!(secs, 1_789_946_225);
+        assert_eq!(DateTime::from_unix_seconds(secs), clock);
+        assert_eq!(format_unix_minutes(secs), "2026-09-20 23:17");
+        assert_eq!(format_unix_minutes(0), "-");
+        // The epoch itself, and a leap day.
+        assert_eq!(DateTime::from_unix_seconds(0).year, 1970);
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        // A month no calendar has is not a date.
+        cmos.registers[REG_MONTH as usize] = 0x13;
+        assert_eq!(read_clock(&mut cmos), None);
     }
 
     #[test]

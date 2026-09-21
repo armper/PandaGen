@@ -479,9 +479,11 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // It has lost focus to the Terminal, so its ring is the hairline...
         "--expect-pixel".to_string(),
         "300,44,48,56,72".to_string(),
-        // ...and its header, away from the title, is the plain surface.
+        // ...and its header, between the title and the action chips, is
+        // the plain surface. (This sat at x=880 until the chips arrived
+        // there.)
         "--expect-pixel".to_string(),
-        "880,56,28,34,48".to_string(),
+        "600,56,28,34,48".to_string(),
         // The Terminal card: 800 wide, second cascade step (x=272, y=76),
         // focused, so its top edge is the accent ring.
         "--expect-pixel".to_string(),
@@ -530,6 +532,36 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "592,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
         "640,785,52,211,153".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
+    println!("== the desk: Files with its chips, columns and details");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Save memo.txt from a Notepad, open Files from the palette: the
+        // card lists it, selected, with its size, kind and the RTC's date.
+        "sleep:6,ctrl-n,sleep:1,h,i,ctrl-s,sleep:1,m,e,m,o,dot,t,x,t,ret,sleep:1,ctrl-spc,sleep:1,f,i,l,e,s,ret,sleep:2,shot:files"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_files_chips".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The "New" chip in the Files header is a raised pill...
+        "--expect-pixel".to_string(),
+        "630,88,22,28,40".to_string(),
+        // ...the selected row (memo.txt, first alphabetically) is on the
+        // selection fill across the whole row...
+        "--expect-pixel".to_string(),
+        "600,117,44,82,96".to_string(),
+        "--expect-pixel".to_string(),
+        "700,117,44,82,96".to_string(),
+        // ...and the Files card has focus.
+        "--expect-pixel".to_string(),
+        "413,300,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

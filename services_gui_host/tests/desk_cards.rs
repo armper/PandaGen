@@ -164,6 +164,55 @@ fn the_caret_and_a_footer_are_drawn_where_the_geometry_says() {
     );
 }
 
+/// Header chips sit between the title and the close glyph, in order, and
+/// answer as `HitRegion::Action` (GFX-056). A card too narrow for all of
+/// them keeps the first.
+#[test]
+fn header_action_chips_are_laid_out_in_order_and_hit_by_index() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let card = DesktopWindow::card(frame("Files", &["a.txt"]), bounds)
+        .focused()
+        .with_actions(vec!["New".into(), "Open".into(), "Delete".into()]);
+    let rects = card.action_rects();
+    let placed: Vec<RasterRect> = rects.iter().flatten().copied().collect();
+    assert_eq!(placed.len(), 3, "{rects:?}");
+    assert!(
+        placed[0].x < placed[1].x && placed[1].x < placed[2].x,
+        "not in order"
+    );
+    let close = card.close_rect().unwrap();
+    assert!(placed[2].right() < close.x, "chips overlap the close glyph");
+    assert_eq!(placed[0].width, 3 * 8 + 12);
+
+    let compositor = Compositor::new();
+    let windows = vec![card.clone()];
+    let hit = compositor
+        .hit_test(&windows, placed[1].x + 2, placed[1].y + 2)
+        .unwrap();
+    assert_eq!(hit.region, HitRegion::Action { index: 1 });
+    // Between chips is still the header.
+    let hit = compositor
+        .hit_test(&windows, placed[1].x - 3, placed[1].y + 2)
+        .unwrap();
+    assert_eq!(hit.region, HitRegion::Header);
+
+    // Painted: the chip's fill inside, the surface just outside it.
+    let target = render(windows);
+    assert_eq!(
+        px(&target, placed[0].x + 2, placed[0].y + 2),
+        theme.surface_raised
+    );
+    assert_eq!(px(&target, placed[0].x - 2, placed[0].y + 2), theme.surface);
+
+    // A narrow card keeps "New" and drops from the end.
+    let narrow = DesktopWindow::card(frame("Files", &[]), RasterRect::new(0, 0, 200, 100))
+        .with_actions(vec!["New".into(), "Open".into(), "Delete".into()]);
+    let rects = narrow.action_rects();
+    assert!(rects[0].is_some(), "{rects:?}");
+    assert!(rects[2].is_none(), "{rects:?}");
+}
+
 /// Selected text sits on the selection fill, the rest on the surface, and
 /// a span past a line's end marks its line break (GFX-054).
 #[test]
