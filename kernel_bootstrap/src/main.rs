@@ -1981,6 +1981,12 @@ fn workspace_loop(
                 };
                 match request {
                     desk::DeskRequest::Terminal(_) => {}
+                    desk::DeskRequest::TerminalScroll { notches } => {
+                        let visible = desk.terminal_rows().unwrap_or(1).saturating_sub(1);
+                        if workspace.scroll_view(notches, visible) {
+                            output_dirty = true;
+                        }
+                    }
                     desk::DeskRequest::TextConsole => {
                         workspace.request_display_mode(display_mode::DisplayMode::TextConsole);
                     }
@@ -2255,11 +2261,7 @@ fn workspace_loop(
                         &shell_notices,
                     );
                     input_router.apply_focus(&mut windows);
-                    renderer.render_windows_with_theme(
-                        windows,
-                        model.pointer,
-                        services_gui_host::Theme::DESK,
-                    );
+                    renderer.render_windows_with_theme(windows, model.pointer, desk.theme());
                 } else {
                     let mut windows = renderer.windows(&model);
                     input_router.apply_focus(&mut windows);
@@ -4129,6 +4131,8 @@ impl Ps2ParserState {
                 (0x47, true) => Some(crate::notepad::KEY_SHIFT_HOME),
                 (0x4F, true) => Some(crate::notepad::KEY_SHIFT_END),
                 (0x53, _) => Some(crate::notepad::KEY_DELETE),
+                (0x49, _) => Some(crate::notepad::KEY_PAGE_UP),
+                (0x51, _) => Some(crate::notepad::KEY_PAGE_DOWN),
                 _ => None,
             };
         }
@@ -4532,9 +4536,9 @@ mod keyboard_scancode_tests {
             assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
             assert_eq!(parser.process_scancode(code | 0x80, &mut writer), None);
         }
-        // An E0 key that is not one of those (Page Up) is still dropped.
+        // An E0 key that is not one of those (Insert) is still dropped.
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
-        assert_eq!(parser.process_scancode(0x49, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x52, &mut writer), None);
         // Next normal key should still work
         assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
 

@@ -46,6 +46,8 @@ pub const KEY_HOME: u8 = 0x8C;
 pub const KEY_END: u8 = 0x8D;
 pub const KEY_SHIFT_HOME: u8 = 0x8E;
 pub const KEY_SHIFT_END: u8 = 0x8F;
+pub const KEY_PAGE_UP: u8 = 0x90;
+pub const KEY_PAGE_DOWN: u8 = 0x91;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
 pub const CTRL_F: u8 = 0x06;
@@ -113,6 +115,8 @@ pub struct Notepad {
     /// The other end of the selection; the caret is the moving end. `None`
     /// when nothing is selected (GFX-054).
     anchor: Option<Position>,
+    /// How many rows the card last showed: a page, for Page Up and Down.
+    last_rows: usize,
     /// Names on the filesystem, for the prompt's completions.
     file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
@@ -141,6 +145,7 @@ impl Notepad {
             scrolled_away: false,
             file_names: Vec::new(),
             anchor: None,
+            last_rows: 1,
         }
     }
 
@@ -473,6 +478,7 @@ impl Notepad {
 
     /// The lines the window shows, `rows` of them from `scroll`.
     pub fn viewport_lines(&mut self, rows: usize) -> Vec<String> {
+        self.last_rows = rows.max(1);
         self.keep_cursor_visible(rows);
         (self.scroll..self.scroll + rows)
             .filter_map(|row| self.buffer.line(row).map(|l| l.to_string()))
@@ -580,6 +586,17 @@ impl Notepad {
                     KEY_SHIFT_HOME => self.cursor.col = 0,
                     _ => self.cursor.col = self.buffer.line_length(self.cursor.row),
                 }
+                return NotepadEffect::Redraw;
+            }
+            KEY_PAGE_UP | KEY_PAGE_DOWN => {
+                // A page is what the card shows; the caret moves with the
+                // view and the view follows it.
+                self.anchor = None;
+                let last = self.buffer.line_count().saturating_sub(1) as isize;
+                let page = self.last_rows as isize;
+                let delta = if byte == KEY_PAGE_UP { -page } else { page };
+                let target = (self.cursor.row as isize + delta).clamp(0, last);
+                self.move_vertical(target - self.cursor.row as isize);
                 return NotepadEffect::Redraw;
             }
             KEY_HOME => {
@@ -1223,6 +1240,30 @@ mod tests {
         assert_eq!(pad.selected_text().as_deref(), Some("llo "));
         pad.place_cursor(0, 0);
         assert!(pad.selection().is_none(), "a click drops the selection");
+    }
+
+    #[test]
+    fn page_up_and_down_move_the_caret_by_what_the_card_shows() {
+        let mut pad = Notepad::new();
+        let text: String = (0..50).map(|i| alloc::format!("line {i}\n")).collect();
+        pad.load(None, &text);
+        pad.viewport_lines(10);
+        pad.handle_byte(KEY_PAGE_DOWN);
+        assert_eq!(pad.cursor().row, 10);
+        pad.handle_byte(KEY_PAGE_DOWN);
+        assert_eq!(pad.cursor().row, 20);
+        assert_eq!(
+            pad.viewport_lines(10).first().map(String::as_str),
+            Some("line 11")
+        );
+        pad.handle_byte(KEY_PAGE_UP);
+        pad.handle_byte(KEY_PAGE_UP);
+        pad.handle_byte(KEY_PAGE_UP);
+        assert_eq!(pad.cursor().row, 0, "clamped at the top");
+        for _ in 0..10 {
+            pad.handle_byte(KEY_PAGE_DOWN);
+        }
+        assert_eq!(pad.cursor().row, 49, "clamped at the last line");
     }
 
     #[test]

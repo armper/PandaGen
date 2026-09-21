@@ -535,6 +535,32 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: the light theme, from the palette");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // From the bare desk, "light" is a palette search that lands on
+        // "Switch between the dark and light themes"; open a Terminal
+        // after, so a card is drawn with the new theme too.
+        "sleep:6,l,i,g,h,t,ret,sleep:1,ctrl-t,sleep:2,shot:light".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_light".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The desk background, the top bar, and the Terminal card's
+        // surface, all in the light palette.
+        "--expect-pixel".to_string(),
+        "100,400,226,230,236".to_string(),
+        "--expect-pixel".to_string(),
+        "640,4,238,241,246".to_string(),
+        "--expect-pixel".to_string(),
+        "640,300,250,250,252".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: select, copy, paste, find");
     let args = [
         "--port-base".to_string(),

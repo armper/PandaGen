@@ -17,7 +17,7 @@ use graphics_rasterizer::RasterRect;
 use input_types::{PointerButton, PointerEventKind};
 use services_gui_host::{
     Delivery, DesktopTab, DesktopWindow, DesktopWindowLayer, DesktopWindowRole, HitRegion,
-    NoticeLevel, ShellNotice, SurfaceRect, WindowStyle,
+    NoticeLevel, ShellNotice, SurfaceRect, Theme, WindowStyle,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -242,6 +242,8 @@ pub enum DeskRequest {
     ListFiles { id: ViewId },
     /// Leave the desk for the text console.
     TextConsole,
+    /// Scroll the console's view: positive notches towards older lines.
+    TerminalScroll { notches: i32 },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -265,10 +267,11 @@ pub enum PaletteAction {
     Cut,
     Paste,
     Find,
+    ToggleTheme,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 18] = [
+    pub const ALL: [PaletteAction; 19] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -287,6 +290,7 @@ impl PaletteAction {
         PaletteAction::Cut,
         PaletteAction::Paste,
         PaletteAction::Find,
+        PaletteAction::ToggleTheme,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -309,6 +313,7 @@ impl PaletteAction {
             PaletteAction::Cut => "Cut",
             PaletteAction::Paste => "Paste",
             PaletteAction::Find => "Find...",
+            PaletteAction::ToggleTheme => "Switch between the dark and light themes",
         }
     }
 
@@ -332,6 +337,7 @@ impl PaletteAction {
             PaletteAction::Cut => "Ctrl+X",
             PaletteAction::Paste => "Ctrl+V",
             PaletteAction::Find => "Ctrl+F",
+            PaletteAction::ToggleTheme => "",
         }
     }
 
@@ -425,6 +431,8 @@ pub struct Desk {
     palette_id: ViewId,
     /// One clipboard for every card (GFX-054).
     clipboard: String,
+    /// The light theme is on (GFX-055).
+    light: bool,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
@@ -451,6 +459,7 @@ impl Desk {
             palette: None,
             palette_id: ViewId::new(),
             clipboard: String::new(),
+            light: false,
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
@@ -490,6 +499,15 @@ impl Desk {
 
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// The theme the desk is drawn with.
+    pub fn theme(&self) -> Theme {
+        if self.light {
+            Theme::LIGHT
+        } else {
+            Theme::DESK
+        }
     }
 
     pub fn focus(&self) -> Option<ViewId> {
@@ -663,6 +681,10 @@ impl Desk {
                 None
             }
             PaletteAction::TextConsole => Some(DeskRequest::TextConsole),
+            PaletteAction::ToggleTheme => {
+                self.light = !self.light;
+                None
+            }
         }
     }
 
@@ -963,6 +985,12 @@ impl Desk {
                             {
                                 notepad.scroll_by(-(*dy) * 3);
                                 changed = true;
+                            } else if self.window(*target).map(|w| w.app) == Some(DeskApp::Terminal)
+                            {
+                                // The console's scrollback is the
+                                // workspace's; ask for it.
+                                requests.push(DeskRequest::TerminalScroll { notches: *dy * 3 });
+                                changed = true;
                             }
                         }
                         (_, _, _, PointerEventKind::Move { .. }) => {
@@ -1118,6 +1146,12 @@ impl Desk {
                 if byte == crate::notepad::CTRL_W {
                     self.close(id);
                     return (None, true);
+                }
+                if byte == crate::notepad::KEY_PAGE_UP {
+                    return (Some(DeskRequest::TerminalScroll { notches: 10 }), true);
+                }
+                if byte == crate::notepad::KEY_PAGE_DOWN {
+                    return (Some(DeskRequest::TerminalScroll { notches: -10 }), true);
                 }
                 (Some(DeskRequest::Terminal(byte)), true)
             }
@@ -1382,10 +1416,15 @@ impl Desk {
         }
 
         // Top bar: the focused app's name on the left, the clock on the right.
-        let left = self
-            .focused_window()
-            .map(|w| w.app.name().to_string())
-            .unwrap_or_else(|| "PandaGen".to_string());
+        // With nothing open the bar says how to begin, once; a desk with
+        // no hint on it is a desk the first visitor stares at.
+        let left = match self.focused_window() {
+            Some(w) => w.app.name().to_string(),
+            None if self.windows.iter().all(|w| w.tucked) => {
+                "PandaGen   -   type to search, Ctrl+Space for everything".to_string()
+            }
+            None => "PandaGen".to_string(),
+        };
         let mut bar_frame = ViewFrame::new(
             self.top_bar_id,
             ViewKind::StatusLine,
@@ -1891,6 +1930,58 @@ mod tests {
             "{}",
             notepad.footer()
         );
+    }
+
+    #[test]
+    fn the_terminal_card_scrolls_the_workspaces_scrollback_by_wheel_and_page_keys() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let id = desk.launch(DeskApp::Terminal);
+        let bounds = desk.window(id).unwrap().bounds;
+        let (x, y) = ((bounds.x + 100) as i32, (bounds.y + 100) as i32);
+        let compositor = Compositor::new();
+        let windows = desk.windows("", true, None);
+        let deliveries = router.route(&compositor, &windows, wheel(x, y, 2));
+        let (requests, changed) = desk.handle_deliveries_with_requests(&deliveries);
+        assert!(changed);
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::TerminalScroll { notches: 6 }]
+        );
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_PAGE_UP).0,
+            Some(DeskRequest::TerminalScroll { notches: 10 })
+        );
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_PAGE_DOWN).0,
+            Some(DeskRequest::TerminalScroll { notches: -10 })
+        );
+    }
+
+    #[test]
+    fn the_palette_switches_the_theme_and_the_empty_desk_says_how_to_begin() {
+        let mut desk = Desk::new(1280, 800);
+        assert_eq!(desk.theme(), Theme::DESK);
+        let windows = desk.windows("", true, None);
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        assert!(bar.frame.title.as_deref().unwrap().contains("Ctrl+Space"));
+
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"light" {
+            desk.handle_key(*byte);
+        }
+        desk.handle_key(b'\n');
+        assert_eq!(desk.theme(), Theme::LIGHT);
+        desk.launch(DeskApp::Notepad);
+        let windows = desk.windows("", true, None);
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        assert_eq!(bar.frame.title.as_deref(), Some("Notepad"));
     }
 
     #[test]
