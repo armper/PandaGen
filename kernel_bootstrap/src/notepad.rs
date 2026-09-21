@@ -40,6 +40,9 @@ pub const KEY_DELETE: u8 = 0x84;
 pub const CTRL_N: u8 = 0x0E;
 pub const CTRL_O: u8 = 0x0F;
 pub const CTRL_S: u8 = 0x13;
+/// Not a key the parser can produce -- the palette's "Save as..." row uses
+/// it to ask for the prompt even when a name is already known.
+pub const CTRL_SHIFT_S: u8 = 0x87;
 pub const CTRL_T: u8 = 0x14;
 pub const CTRL_W: u8 = 0x17;
 pub const CTRL_Z: u8 = 0x1A;
@@ -62,6 +65,9 @@ pub enum NotepadEffect {
     Open { path: String },
     /// The user asked for the window to go.
     Close,
+    /// A name prompt opened: list the filesystem and call `set_file_names`,
+    /// so the prompt can complete names as they are typed.
+    ListFiles,
 }
 
 /// A one-line prompt in the footer, for a file name.
@@ -85,6 +91,8 @@ pub struct Notepad {
     scroll: usize,
     /// Set after the first Ctrl+W on a dirty document; a second closes.
     close_armed: bool,
+    /// Names on the filesystem, for the prompt's completions.
+    file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
     /// caret move so the view follows the caret again.
     scrolled_away: bool,
@@ -109,7 +117,22 @@ impl Notepad {
             scroll: 0,
             close_armed: false,
             scrolled_away: false,
+            file_names: Vec::new(),
         }
+    }
+
+    /// The names a prompt completes against.
+    pub fn set_file_names(&mut self, names: Vec<String>) {
+        self.file_names = names;
+    }
+
+    /// Names that start with what has been typed into the prompt, in order.
+    fn completions(&self, typed: &str) -> Vec<&str> {
+        self.file_names
+            .iter()
+            .filter(|name| name.starts_with(typed))
+            .map(|name| name.as_str())
+            .collect()
     }
 
     /// Replace the document with `content` from `path`.
@@ -159,11 +182,26 @@ impl Notepad {
     /// saved state, with the last status message if there is one.
     pub fn footer(&self) -> String {
         match &self.prompt {
-            Some(Prompt::SaveAs(name)) => {
-                return alloc::format!("Save as: {name}_   (Enter to save, Esc to cancel)")
-            }
-            Some(Prompt::Open(name)) => {
-                return alloc::format!("Open: {name}_   (Enter to open, Esc to cancel)")
+            Some(Prompt::SaveAs(name)) | Some(Prompt::Open(name)) => {
+                let verb = if matches!(self.prompt, Some(Prompt::SaveAs(_))) {
+                    "Save as"
+                } else {
+                    "Open"
+                };
+                let completions = self.completions(name);
+                let mut text = alloc::format!("{verb}: {name}_");
+                if !completions.is_empty() {
+                    text.push_str("   -> ");
+                    let shown: Vec<&str> = completions.iter().copied().take(3).collect();
+                    text.push_str(&shown.join(", "));
+                    if completions.len() > 3 {
+                        text.push_str(", ...");
+                    }
+                    text.push_str("   (Tab completes)");
+                } else {
+                    text.push_str("   (Enter confirms, Esc cancels)");
+                }
+                return text;
             }
             None => {}
         }
@@ -285,12 +323,16 @@ impl Notepad {
                     }
                 } else {
                     self.prompt = Some(Prompt::SaveAs(String::new()));
-                    NotepadEffect::Redraw
+                    NotepadEffect::ListFiles
                 }
+            }
+            CTRL_SHIFT_S => {
+                self.prompt = Some(Prompt::SaveAs(String::new()));
+                NotepadEffect::ListFiles
             }
             CTRL_O => {
                 self.prompt = Some(Prompt::Open(String::new()));
-                NotepadEffect::Redraw
+                NotepadEffect::ListFiles
             }
             CTRL_N => {
                 if self.dirty && !self.close_armed {
@@ -426,6 +468,21 @@ impl Notepad {
                 name.pop();
                 NotepadEffect::Redraw
             }
+            b'\t' => {
+                // Complete to the first matching name.
+                let typed = name.clone();
+                let first = self
+                    .file_names
+                    .iter()
+                    .find(|candidate| candidate.starts_with(&typed))
+                    .cloned();
+                if let (Some(first), Some(prompt)) = (first, self.prompt.as_mut()) {
+                    match prompt {
+                        Prompt::SaveAs(n) | Prompt::Open(n) => *n = first,
+                    }
+                }
+                NotepadEffect::Redraw
+            }
             b'\n' | b'\r' => {
                 let name = name.trim().to_string();
                 let prompt = self.prompt.take();
@@ -524,7 +581,8 @@ mod tests {
     fn the_first_save_asks_for_a_name_and_the_second_does_not() {
         let mut pad = Notepad::new();
         type_str(&mut pad, "note");
-        assert_eq!(pad.handle_byte(CTRL_S), NotepadEffect::Redraw);
+        // The prompt asks for the listing so it can complete names.
+        assert_eq!(pad.handle_byte(CTRL_S), NotepadEffect::ListFiles);
         assert!(pad.footer().starts_with("Save as:"));
         type_str(&mut pad, "a.txt");
         let effect = pad.handle_byte(b'\n');
@@ -649,6 +707,36 @@ mod tests {
         assert_eq!(pad.content(), "    ");
         pad.handle_byte(CTRL_Z);
         assert_eq!(pad.content(), "");
+    }
+
+    #[test]
+    fn a_prompt_asks_for_the_listing_then_completes_on_tab() {
+        let mut pad = Notepad::new();
+        type_str(&mut pad, "x");
+        assert_eq!(pad.handle_byte(CTRL_O), NotepadEffect::ListFiles);
+        pad.set_file_names(alloc::vec![
+            "notes.txt".to_string(),
+            "notes2.txt".to_string(),
+            "readme".to_string(),
+        ]);
+        type_str(&mut pad, "no");
+        assert!(
+            pad.footer().contains("notes.txt, notes2.txt"),
+            "{}",
+            pad.footer()
+        );
+        pad.handle_byte(b'\t');
+        assert!(
+            pad.footer().starts_with("Open: notes.txt_"),
+            "{}",
+            pad.footer()
+        );
+        assert_eq!(
+            pad.handle_byte(b'\n'),
+            NotepadEffect::Open {
+                path: "notes.txt".to_string()
+            }
+        );
     }
 
     #[test]

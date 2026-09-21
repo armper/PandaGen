@@ -17,7 +17,7 @@ use graphics_rasterizer::RasterRect;
 use input_types::{PointerButton, PointerEventKind};
 use services_gui_host::{
     Delivery, DesktopTab, DesktopWindow, DesktopWindowLayer, DesktopWindowRole, HitRegion,
-    SurfaceRect, WindowStyle,
+    NoticeLevel, ShellNotice, SurfaceRect, WindowStyle,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -36,22 +36,39 @@ pub const MIN_CARD_SIZE: (usize, usize) = (240, 140);
 pub const SNAP_MARGIN: usize = 6;
 /// Ctrl+Tab, as the parser delivers it.
 pub const KEY_CTRL_TAB: u8 = 0x85;
+/// Ctrl+Space, as the parser delivers it: the palette.
+pub const KEY_CTRL_SPACE: u8 = 0x86;
+/// The palette card (GFX-053).
+pub const PALETTE_WIDTH: usize = 560;
+pub const PALETTE_MAX_ROWS: usize = 8;
+/// Notice cards (GFX-053).
+pub const NOTICE_WIDTH: usize = 340;
+/// The one font's advance, for fitting text to a card's width.
+pub const GLYPH_WIDTH: usize = 8;
+pub const NOTICE_MARGIN: usize = 12;
+/// How long a desk-raised notice stays, in ticks (100 Hz).
+pub const NOTICE_TTL_TICKS: u64 = 400;
+pub const FILES_SIZE: (usize, usize) = (520, 440);
 
 /// The apps the dock offers, in dock order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeskApp {
     Notepad,
+    /// The real filesystem, as a list: Enter or a click opens a file in a
+    /// Notepad.
+    Files,
     /// The machine's console -- the `WS >` prompt and everything it can do --
     /// as a card, so the desk never has to be left to reach it.
     Terminal,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 2] = [DeskApp::Notepad, DeskApp::Terminal];
+    pub const ALL: [DeskApp; 3] = [DeskApp::Notepad, DeskApp::Files, DeskApp::Terminal];
 
     pub const fn name(self) -> &'static str {
         match self {
             DeskApp::Notepad => "Notepad",
+            DeskApp::Files => "Files",
             DeskApp::Terminal => "Terminal",
         }
     }
@@ -60,6 +77,7 @@ impl DeskApp {
     pub const fn monogram(self) -> &'static str {
         match self {
             DeskApp::Notepad => "Np",
+            DeskApp::Files => "Fi",
             DeskApp::Terminal => "Tm",
         }
     }
@@ -67,15 +85,84 @@ impl DeskApp {
     const fn size(self) -> (usize, usize) {
         match self {
             DeskApp::Notepad => NOTEPAD_SIZE,
+            DeskApp::Files => FILES_SIZE,
             DeskApp::Terminal => TERMINAL_SIZE,
         }
     }
+}
+
+/// The Files app's state: the names the kernel listed, and the selection.
+#[derive(Debug, Clone, Default)]
+pub struct FilesView {
+    pub entries: Vec<String>,
+    pub selection: usize,
+    pub loaded: bool,
+    pub scroll: usize,
+}
+
+impl FilesView {
+    fn select(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.selection = 0;
+            return;
+        }
+        let last = self.entries.len() as isize - 1;
+        self.selection = (self.selection as isize + delta).clamp(0, last) as usize;
+    }
+
+    fn footer(&self) -> String {
+        if !self.loaded {
+            return "Reading the filesystem...".to_string();
+        }
+        alloc::format!("{} files   Enter opens   R refreshes", self.entries.len())
+    }
+}
+
+/// Break `text` into lines of at most `columns` characters at spaces; a
+/// word longer than a line is cut. A notice card is 340px wide and the
+/// workspace's messages are longer than that -- the first build showed
+/// "Unknown command: files. Type 'help' for h" and stopped.
+pub fn wrap_words(text: &str, columns: usize) -> Vec<String> {
+    let columns = columns.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let mut word = word;
+        while !word.is_empty() {
+            let used = line.chars().count();
+            let sep = usize::from(!line.is_empty());
+            let len = word.chars().count();
+            if used + sep + len <= columns {
+                if sep == 1 {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                break;
+            }
+            if used > 0 {
+                lines.push(core::mem::take(&mut line));
+                continue;
+            }
+            let cut = word
+                .char_indices()
+                .nth(columns)
+                .map(|(i, _)| i)
+                .unwrap_or(word.len());
+            lines.push(word[..cut].to_string());
+            word = &word[cut..];
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// What an open window holds.
 #[derive(Debug, Clone)]
 pub enum AppState {
     Notepad(Notepad),
+    Files(FilesView),
     /// The console's state lives in the workspace; the card only shows it.
     Terminal,
 }
@@ -89,6 +176,8 @@ pub struct DeskWindow {
     pub z: usize,
     /// The bounds before a snap, so the next header drag un-snaps to them.
     pub restore: Option<RasterRect>,
+    /// Tucked into the dock: not drawn, not focusable, waiting on its tile.
+    pub tucked: bool,
     pub state: AppState,
 }
 
@@ -96,14 +185,28 @@ impl DeskWindow {
     pub fn notepad(&self) -> Option<&Notepad> {
         match &self.state {
             AppState::Notepad(notepad) => Some(notepad),
-            AppState::Terminal => None,
+            _ => None,
         }
     }
 
     pub fn notepad_mut(&mut self) -> Option<&mut Notepad> {
         match &mut self.state {
             AppState::Notepad(notepad) => Some(notepad),
-            AppState::Terminal => None,
+            _ => None,
+        }
+    }
+
+    pub fn files(&self) -> Option<&FilesView> {
+        match &self.state {
+            AppState::Files(files) => Some(files),
+            _ => None,
+        }
+    }
+
+    pub fn files_mut(&mut self) -> Option<&mut FilesView> {
+        match &mut self.state {
+            AppState::Files(files) => Some(files),
+            _ => None,
         }
     }
 }
@@ -135,6 +238,135 @@ pub enum DeskRequest {
     Io { id: ViewId, effect: NotepadEffect },
     /// A key for the console, which the workspace owns.
     Terminal(u8),
+    /// List the filesystem, then call [`Desk::files_listed`] for `id`.
+    ListFiles { id: ViewId },
+    /// Leave the desk for the text console.
+    TextConsole,
+}
+
+/// One row of the palette: what it does and how it is spelled (GFX-053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteAction {
+    NewNotepad,
+    NewTerminal,
+    OpenFiles,
+    Save,
+    SaveAs,
+    Open,
+    CloseWindow,
+    NextWindow,
+    SnapLeft,
+    SnapRight,
+    Maximise,
+    Tuck,
+    TextConsole,
+}
+
+impl PaletteAction {
+    pub const ALL: [PaletteAction; 13] = [
+        PaletteAction::NewNotepad,
+        PaletteAction::NewTerminal,
+        PaletteAction::OpenFiles,
+        PaletteAction::Save,
+        PaletteAction::SaveAs,
+        PaletteAction::Open,
+        PaletteAction::CloseWindow,
+        PaletteAction::NextWindow,
+        PaletteAction::SnapLeft,
+        PaletteAction::SnapRight,
+        PaletteAction::Maximise,
+        PaletteAction::Tuck,
+        PaletteAction::TextConsole,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            PaletteAction::NewNotepad => "New Notepad window",
+            PaletteAction::NewTerminal => "New Terminal",
+            PaletteAction::OpenFiles => "Files",
+            PaletteAction::Save => "Save",
+            PaletteAction::SaveAs => "Save as...",
+            PaletteAction::Open => "Open file...",
+            PaletteAction::CloseWindow => "Close window",
+            PaletteAction::NextWindow => "Next window",
+            PaletteAction::SnapLeft => "Snap left",
+            PaletteAction::SnapRight => "Snap right",
+            PaletteAction::Maximise => "Fill the desk",
+            PaletteAction::Tuck => "Tuck into the dock",
+            PaletteAction::TextConsole => "Switch to the text console",
+        }
+    }
+
+    pub const fn shortcut(self) -> &'static str {
+        match self {
+            PaletteAction::NewNotepad => "Ctrl+N",
+            PaletteAction::NewTerminal => "Ctrl+T",
+            PaletteAction::OpenFiles => "",
+            PaletteAction::Save => "Ctrl+S",
+            PaletteAction::SaveAs => "",
+            PaletteAction::Open => "Ctrl+O",
+            PaletteAction::CloseWindow => "Ctrl+W",
+            PaletteAction::NextWindow => "Ctrl+Tab",
+            PaletteAction::SnapLeft | PaletteAction::SnapRight | PaletteAction::Maximise => {
+                "drag to the edge"
+            }
+            PaletteAction::Tuck => "drag onto the dock",
+            PaletteAction::TextConsole => "",
+        }
+    }
+
+    /// Whether the action needs a focused Notepad.
+    const fn needs_notepad(self) -> bool {
+        matches!(
+            self,
+            PaletteAction::Save | PaletteAction::SaveAs | PaletteAction::Open
+        )
+    }
+
+    /// Whether the action needs any focused window.
+    const fn needs_window(self) -> bool {
+        matches!(
+            self,
+            PaletteAction::CloseWindow
+                | PaletteAction::SnapLeft
+                | PaletteAction::SnapRight
+                | PaletteAction::Maximise
+                | PaletteAction::Tuck
+        )
+    }
+}
+
+/// The palette while it is open (GFX-053): a query and the actions that
+/// match it, one selected. There are no menus anywhere on the desk; this is
+/// the one place every action is listed, with its shortcut beside it.
+#[derive(Debug, Clone, Default)]
+pub struct Palette {
+    pub query: String,
+    pub selection: usize,
+}
+
+impl Palette {
+    /// The actions that match the query, in order, filtered for the state
+    /// of the desk so the list never offers something that would do nothing.
+    pub fn matches(&self, has_window: bool, has_notepad: bool) -> Vec<PaletteAction> {
+        let query = self.query.to_ascii_lowercase();
+        PaletteAction::ALL
+            .iter()
+            .copied()
+            .filter(|action| !(action.needs_notepad() && !has_notepad))
+            .filter(|action| !(action.needs_window() && !has_window))
+            .filter(|action| {
+                query.is_empty() || action.label().to_ascii_lowercase().contains(query.as_str())
+            })
+            .collect()
+    }
+}
+
+/// A notice the desk raised itself (a save that landed), with its expiry.
+#[derive(Debug, Clone)]
+struct DeskNotice {
+    notice: ShellNotice,
+    expires_at: u64,
 }
 
 /// The console as the Terminal card shows it, built by the kernel from the
@@ -162,6 +394,12 @@ pub struct Desk {
     opened: usize,
     pointer: Option<(usize, usize)>,
     hovered_tile: Option<usize>,
+    palette: Option<Palette>,
+    palette_id: ViewId,
+    notices: Vec<DeskNotice>,
+    notice_ids: Vec<ViewId>,
+    /// The last file listing, for save-as and open autocomplete.
+    file_names_cache: Vec<String>,
 }
 
 impl Desk {
@@ -179,6 +417,41 @@ impl Desk {
             opened: 0,
             pointer: None,
             hovered_tile: None,
+            palette: None,
+            palette_id: ViewId::new(),
+            notices: Vec::new(),
+            notice_ids: (0..4).map(|_| ViewId::new()).collect(),
+            file_names_cache: Vec::new(),
+        }
+    }
+
+    pub fn palette_open(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    /// Raise a notice card for a few seconds (GFX-053).
+    pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>, now: u64) {
+        self.notices.push(DeskNotice {
+            notice: ShellNotice::new(level, text),
+            expires_at: now.saturating_add(NOTICE_TTL_TICKS),
+        });
+        let max = self.notice_ids.len();
+        if self.notices.len() > max {
+            let overflow = self.notices.len() - max;
+            self.notices.drain(..overflow);
+        }
+    }
+
+    /// The kernel answers a `ListFiles` request.
+    pub fn files_listed(&mut self, id: ViewId, names: Vec<String>) {
+        self.file_names_cache = names.clone();
+        if let Some(files) = self.window_mut(id).and_then(|w| w.files_mut()) {
+            files.entries = names.clone();
+            files.loaded = true;
+            files.select(0);
+        }
+        if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
+            notepad.set_file_names(names);
         }
     }
 
@@ -203,10 +476,6 @@ impl Desk {
     }
 
     /// Whether a key typed now belongs to an app rather than the shell.
-    pub fn wants_keys(&self) -> bool {
-        self.focused_window().is_some()
-    }
-
     /// Whether the console has a card open, and if so how many content rows
     /// it shows -- so the kernel can build a [`TerminalView`] that fits.
     pub fn terminal_rows(&self) -> Option<usize> {
@@ -260,8 +529,10 @@ impl Desk {
             bounds: RasterRect::new(x, y, w, h),
             z,
             restore: None,
+            tucked: false,
             state: match app {
                 DeskApp::Notepad => AppState::Notepad(Notepad::new()),
+                DeskApp::Files => AppState::Files(FilesView::default()),
                 DeskApp::Terminal => AppState::Terminal,
             },
         });
@@ -269,11 +540,152 @@ impl Desk {
         id
     }
 
+    /// Tuck `id` into the dock: hidden until its tile is clicked.
+    pub fn tuck(&mut self, id: ViewId) {
+        if let Some(window) = self.window_mut(id) {
+            window.tucked = true;
+        }
+        if self.focus == Some(id) {
+            self.focus = self
+                .windows
+                .iter()
+                .filter(|w| !w.tucked)
+                .max_by_key(|w| w.z)
+                .map(|w| w.id);
+        }
+    }
+
+    fn untuck(&mut self, id: ViewId) {
+        if let Some(window) = self.window_mut(id) {
+            window.tucked = false;
+        }
+        self.raise(id);
+    }
+
+    /// Snap the focused window from the palette.
+    fn snap_focused(&mut self, how: PaletteAction) {
+        let area = self.work_area();
+        let Some(id) = self.focus else {
+            return;
+        };
+        let target = match how {
+            PaletteAction::SnapLeft => RasterRect::new(area.x, area.y, area.width / 2, area.height),
+            PaletteAction::SnapRight => RasterRect::new(
+                area.x + area.width / 2,
+                area.y,
+                area.width - area.width / 2,
+                area.height,
+            ),
+            _ => area,
+        };
+        if let Some(window) = self.window_mut(id) {
+            if window.restore.is_none() {
+                window.restore = Some(window.bounds);
+            }
+            window.bounds = target;
+        }
+    }
+
+    /// Run a palette action. Returns what the kernel must do, if anything.
+    fn run_action(&mut self, action: PaletteAction) -> Option<DeskRequest> {
+        match action {
+            PaletteAction::NewNotepad => {
+                self.launch(DeskApp::Notepad);
+                None
+            }
+            PaletteAction::NewTerminal => {
+                self.launch(DeskApp::Terminal);
+                None
+            }
+            PaletteAction::OpenFiles => {
+                let id = self.launch(DeskApp::Files);
+                Some(DeskRequest::ListFiles { id })
+            }
+            PaletteAction::Save => self.forward_to_notepad(crate::notepad::CTRL_S),
+            PaletteAction::SaveAs => self.forward_to_notepad(crate::notepad::CTRL_SHIFT_S),
+            PaletteAction::Open => self.forward_to_notepad(crate::notepad::CTRL_O),
+            PaletteAction::CloseWindow => {
+                if let Some(id) = self.focus {
+                    self.close(id);
+                }
+                None
+            }
+            PaletteAction::NextWindow => {
+                self.cycle_focus();
+                None
+            }
+            PaletteAction::SnapLeft | PaletteAction::SnapRight | PaletteAction::Maximise => {
+                self.snap_focused(action);
+                None
+            }
+            PaletteAction::Tuck => {
+                if let Some(id) = self.focus {
+                    self.tuck(id);
+                }
+                None
+            }
+            PaletteAction::TextConsole => Some(DeskRequest::TextConsole),
+        }
+    }
+
+    fn forward_to_notepad(&mut self, byte: u8) -> Option<DeskRequest> {
+        let id = self.focus?;
+        let (request, _) = self.handle_app_key(id, byte);
+        request
+    }
+
+    /// A key while the palette is open.
+    fn handle_palette_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
+        let has_window = self.focused_window().is_some();
+        let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
+        let Some(palette) = self.palette.as_mut() else {
+            return (None, false);
+        };
+        match byte {
+            crate::notepad::ESC | KEY_CTRL_SPACE | 0x10 => {
+                self.palette = None;
+                (None, true)
+            }
+            crate::notepad::KEY_UP => {
+                palette.selection = palette.selection.saturating_sub(1);
+                (None, true)
+            }
+            crate::notepad::KEY_DOWN => {
+                let count = palette.matches(has_window, has_notepad).len();
+                palette.selection = (palette.selection + 1).min(count.saturating_sub(1));
+                (None, true)
+            }
+            crate::notepad::BACKSPACE => {
+                palette.query.pop();
+                palette.selection = 0;
+                (None, true)
+            }
+            b'\n' | b'\r' => {
+                let matches = palette.matches(has_window, has_notepad);
+                let chosen = matches.get(palette.selection).copied();
+                self.palette = None;
+                match chosen {
+                    Some(action) => (self.run_action(action), true),
+                    None => (None, true),
+                }
+            }
+            0x20..=0x7E => {
+                if palette.query.len() < 40 {
+                    palette.query.push(byte as char);
+                    palette.selection = 0;
+                }
+                (None, true)
+            }
+            _ => (None, false),
+        }
+    }
+
     /// Bring `id` to the front and give it focus.
     pub fn raise(&mut self, id: ViewId) {
         let z = self.next_z;
         if let Some(window) = self.window_mut(id) {
             window.z = z;
+            window.tucked = false;
             self.next_z += 1;
             self.focus = Some(id);
         }
@@ -289,18 +701,29 @@ impl Desk {
         }
         if self.focus == Some(id) {
             // The top-most remaining window takes focus.
-            self.focus = self.windows.iter().max_by_key(|w| w.z).map(|w| w.id);
+            self.focus = self
+                .windows
+                .iter()
+                .filter(|w| !w.tucked)
+                .max_by_key(|w| w.z)
+                .map(|w| w.id);
         }
     }
 
-    /// Focus the next window in z order (Ctrl+Tab).
+    /// Focus the next window in z order (Ctrl+Tab). Tucked windows are
+    /// skipped; the dock is how they come back.
     pub fn cycle_focus(&mut self) -> bool {
-        if self.windows.len() < 2 {
+        if self.windows.iter().filter(|w| !w.tucked).count() < 2 {
             return false;
         }
         // The lowest window comes to the top, so repeated presses walk the
         // whole stack.
-        let lowest = self.windows.iter().min_by_key(|w| w.z).map(|w| w.id);
+        let lowest = self
+            .windows
+            .iter()
+            .filter(|w| !w.tucked)
+            .min_by_key(|w| w.z)
+            .map(|w| w.id);
         if let Some(id) = lowest {
             self.raise(id);
         }
@@ -309,10 +732,19 @@ impl Desk {
 
     /// A dock tile was pressed: focus the app's window if it has one, else
     /// launch it.
-    pub fn activate_dock_tile(&mut self, index: usize) -> bool {
-        let Some(app) = DeskApp::ALL.get(index).copied() else {
-            return false;
-        };
+    pub fn activate_dock_tile(&mut self, index: usize) -> Option<DeskRequest> {
+        let app = DeskApp::ALL.get(index).copied()?;
+        // A tucked window of this app comes back first.
+        let tucked = self
+            .windows
+            .iter()
+            .filter(|w| w.app == app && w.tucked)
+            .max_by_key(|w| w.z)
+            .map(|w| w.id);
+        if let Some(id) = tucked {
+            self.untuck(id);
+            return None;
+        }
         let existing = self
             .windows
             .iter()
@@ -320,12 +752,15 @@ impl Desk {
             .max_by_key(|w| w.z)
             .map(|w| w.id);
         match existing {
-            Some(id) => self.raise(id),
+            Some(id) => {
+                self.raise(id);
+                None
+            }
             None => {
-                self.launch(app);
+                let id = self.launch(app);
+                (app == DeskApp::Files).then_some(DeskRequest::ListFiles { id })
             }
         }
-        true
     }
 
     /// Snap a window whose drag ended at the desk's edge (GFX-052): left or
@@ -361,6 +796,16 @@ impl Desk {
 
     /// Apply routed pointer deliveries. Returns whether the screen changed.
     pub fn handle_deliveries(&mut self, deliveries: &[Delivery]) -> bool {
+        let (_, changed) = self.handle_deliveries_with_requests(deliveries);
+        changed
+    }
+
+    /// As `handle_deliveries`, also returning what the kernel must do.
+    pub fn handle_deliveries_with_requests(
+        &mut self,
+        deliveries: &[Delivery],
+    ) -> (Vec<DeskRequest>, bool) {
+        let mut requests = Vec::new();
         let mut changed = false;
         for delivery in deliveries {
             match delivery {
@@ -394,9 +839,17 @@ impl Desk {
                             changed = true;
                         }
                         if let (true, Some(index)) = (press, tile) {
-                            changed |= self.activate_dock_tile(index);
+                            if let Some(request) = self.activate_dock_tile(index) {
+                                requests.push(request);
+                            }
+                            changed = true;
                         }
                         continue;
+                    }
+                    // A click anywhere while the palette is open closes it.
+                    if press && self.palette.is_some() && *target != self.palette_id {
+                        self.palette = None;
+                        changed = true;
                     }
                     if self.window(*target).is_none() {
                         continue;
@@ -446,6 +899,19 @@ impl Desk {
                             {
                                 notepad.place_cursor(line, column);
                             }
+                            let mut open = false;
+                            if let Some(files) =
+                                self.window_mut(*target).and_then(|w| w.files_mut())
+                            {
+                                let row = files.scroll + line;
+                                if row < files.entries.len() {
+                                    open = files.selection == row;
+                                    files.selection = row;
+                                }
+                            }
+                            if open {
+                                requests.extend(self.open_files_selection(*target));
+                            }
                             changed = true;
                         }
                         (true, _, _, _) => {
@@ -493,7 +959,15 @@ impl Desk {
                         (_, true, _, _) => {
                             if self.drag.map(|d| d.id) == Some(*target) {
                                 self.drag = None;
-                                changed |= self.snap_if_at_edge(*target, px, py);
+                                // Dropped on the dock: tucked away (GFX-053).
+                                let dock_top =
+                                    self.height.saturating_sub(DOCK_HEIGHT + DOCK_MARGIN);
+                                if py >= dock_top {
+                                    self.tuck(*target);
+                                    changed = true;
+                                } else {
+                                    changed |= self.snap_if_at_edge(*target, px, py);
+                                }
                             }
                             if self.resize.map(|r| r.id) == Some(*target) {
                                 self.resize = None;
@@ -511,12 +985,21 @@ impl Desk {
                 _ => {}
             }
         }
-        changed
+        (requests, changed)
     }
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
     pub fn handle_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
+        // The palette first: it is modal while open, and Ctrl+Space or
+        // Ctrl+P opens it from anywhere.
+        if self.palette.is_some() {
+            return self.handle_palette_key(byte);
+        }
+        if byte == KEY_CTRL_SPACE || byte == 0x10 {
+            self.palette = Some(Palette::default());
+            return (None, true);
+        }
         // Launching is global. The first build only answered Ctrl+T with
         // nothing focused, so with a Notepad open the keystroke fell into
         // the Notepad and did nothing -- a shortcut that only works when
@@ -531,14 +1014,50 @@ impl Desk {
             return (None, true);
         }
         let Some(id) = self.focus else {
+            // The bare desk. Ctrl+N opens a Notepad, and a printable key
+            // opens the palette with that key already typed: the desk with
+            // nothing on it is a search box, not a place keys vanish into.
+            // (They used to: the kernel sent bare-desk keys through a second
+            // entry point that knew three shortcuts and nothing else, so the
+            // first Ctrl+Space of a session went to the invisible console.)
+            if byte == crate::notepad::CTRL_N {
+                self.launch(DeskApp::Notepad);
+                return (None, true);
+            }
+            if (0x20..0x7f).contains(&byte) {
+                self.palette = Some(Palette {
+                    query: String::from(byte as char),
+                    selection: 0,
+                });
+                return (None, true);
+            }
             return (None, false);
         };
         if byte == crate::notepad::CTRL_N
-            && self.window(id).map(|w| w.app) == Some(DeskApp::Terminal)
+            && self.window(id).map(|w| w.app) != Some(DeskApp::Notepad)
         {
             self.launch(DeskApp::Notepad);
             return (None, true);
         }
+        self.handle_app_key(id, byte)
+    }
+
+    /// Open the Files card's selected entry in a fresh Notepad; the kernel
+    /// reads the file and reports back to that window. Enter does this, and
+    /// so does a click on the row that is already selected -- one click
+    /// selects, the next opens, and there is no double-click clock to beat.
+    fn open_files_selection(&mut self, id: ViewId) -> Option<DeskRequest> {
+        let files = self.window_mut(id).and_then(|w| w.files_mut())?;
+        let name = files.entries.get(files.selection).cloned()?;
+        let notepad_id = self.launch(DeskApp::Notepad);
+        Some(DeskRequest::Io {
+            id: notepad_id,
+            effect: NotepadEffect::Open { path: name },
+        })
+    }
+
+    /// A key for window `id`'s app.
+    fn handle_app_key(&mut self, id: ViewId, byte: u8) -> (Option<DeskRequest>, bool) {
         let Some(window) = self.window_mut(id) else {
             return (None, false);
         };
@@ -550,9 +1069,30 @@ impl Desk {
                 }
                 (Some(DeskRequest::Terminal(byte)), true)
             }
+            AppState::Files(files) => match byte {
+                crate::notepad::KEY_UP => {
+                    files.select(-1);
+                    (None, true)
+                }
+                crate::notepad::KEY_DOWN => {
+                    files.select(1);
+                    (None, true)
+                }
+                b'r' | b'R' => (Some(DeskRequest::ListFiles { id }), true),
+                crate::notepad::CTRL_W => {
+                    self.close(id);
+                    (None, true)
+                }
+                b'\n' | b'\r' => match self.open_files_selection(id) {
+                    Some(request) => (Some(request), true),
+                    None => (None, false),
+                },
+                _ => (None, false),
+            },
             AppState::Notepad(notepad) => match notepad.handle_byte(byte) {
                 NotepadEffect::None => (None, false),
                 NotepadEffect::Redraw => (None, true),
+                NotepadEffect::ListFiles => (Some(DeskRequest::ListFiles { id }), true),
                 NotepadEffect::Close => {
                     self.close(id);
                     (None, true)
@@ -564,34 +1104,33 @@ impl Desk {
         }
     }
 
-    /// A key with no app focused: the desk's own shortcuts. Ctrl+N opens a
-    /// Notepad and Ctrl+T a Terminal, so the machine is usable from the
-    /// keyboard alone -- and so the gauntlet can drive it without knowing
-    /// where the pointer starts.
-    pub fn handle_shell_key(&mut self, byte: u8) -> bool {
-        match byte {
-            crate::notepad::CTRL_N => {
-                self.launch(DeskApp::Notepad);
-                true
-            }
-            crate::notepad::CTRL_T => {
-                self.launch(DeskApp::Terminal);
-                true
-            }
-            KEY_CTRL_TAB => self.cycle_focus(),
-            _ => false,
-        }
-    }
-
-    /// The kernel reports a file operation's outcome.
+    /// The kernel reports a file operation's outcome, and the desk says so
+    /// with a notice card.
     pub fn io_done(
         &mut self,
         id: ViewId,
         effect: &NotepadEffect,
         result: Result<Option<String>, String>,
+        now: u64,
     ) {
+        let (level, text) = match (effect, &result) {
+            (NotepadEffect::Save { path, .. }, Ok(_)) => {
+                (NoticeLevel::Info, alloc::format!("Saved {path}"))
+            }
+            (NotepadEffect::Open { path }, Ok(Some(_))) => {
+                (NoticeLevel::Info, alloc::format!("Opened {path}"))
+            }
+            (NotepadEffect::Open { path }, Ok(None)) => {
+                (NoticeLevel::Warning, alloc::format!("Not found: {path}"))
+            }
+            (_, Err(err)) => (NoticeLevel::Error, alloc::format!("{err}")),
+            _ => (NoticeLevel::Info, String::new()),
+        };
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
             notepad.io_done(effect, result);
+        }
+        if !text.is_empty() {
+            self.notify(level, text, now);
         }
     }
 
@@ -605,18 +1144,54 @@ impl Desk {
         caret_visible: bool,
         terminal: Option<&TerminalView>,
     ) -> Vec<DesktopWindow> {
-        let mut out = Vec::with_capacity(self.windows.len() + 2);
+        self.windows_at(clock, caret_visible, terminal, u64::MAX / 2, &[])
+    }
+
+    /// As `windows`, with the time (for notice expiry) and the workspace's
+    /// own notices to show as cards.
+    pub fn windows_at(
+        &mut self,
+        clock: &str,
+        caret_visible: bool,
+        terminal: Option<&TerminalView>,
+        now: u64,
+        shell_notices: &[ShellNotice],
+    ) -> Vec<DesktopWindow> {
+        self.notices.retain(|n| n.expires_at > now);
+        let mut out = Vec::with_capacity(self.windows.len() + 8);
 
         // Cards.
         let focus = self.focus;
         for window in &mut self.windows {
+            if window.tucked {
+                continue;
+            }
             let rows = Self::card_rows(window.bounds);
             let focused = focus == Some(window.id);
+            let mut highlight = None;
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
                     let lines = notepad.viewport_lines(rows);
                     let cursor = notepad.viewport_cursor();
                     (lines, notepad.title(), notepad.footer(), cursor)
+                }
+                AppState::Files(files) => {
+                    if files.selection < files.scroll {
+                        files.scroll = files.selection;
+                    } else if rows > 0 && files.selection >= files.scroll + rows {
+                        files.scroll = files.selection + 1 - rows;
+                    }
+                    let lines: Vec<String> = files
+                        .entries
+                        .iter()
+                        .skip(files.scroll)
+                        .take(rows)
+                        .cloned()
+                        .collect();
+                    if !files.entries.is_empty() {
+                        highlight = Some(files.selection - files.scroll);
+                    }
+                    (lines, "Files".to_string(), files.footer(), None)
                 }
                 AppState::Terminal => {
                     let view = terminal.cloned().unwrap_or_default();
@@ -638,11 +1213,109 @@ impl Desk {
             }
             let mut card = DesktopWindow::card(frame, window.bounds)
                 .with_z_index(window.z)
-                .with_footer(Some(footer));
+                .with_footer(Some(footer))
+                .with_highlight(highlight);
             if focused {
                 card = card.focused();
             }
             out.push(card);
+        }
+
+        // The palette: a card near the top, above everything, without a
+        // close glyph -- Esc or a click elsewhere closes it.
+        if let Some(palette) = &self.palette {
+            let has_window = focus.is_some();
+            let has_notepad = self
+                .windows
+                .iter()
+                .any(|w| focus == Some(w.id) && w.notepad().is_some());
+            let matches = palette.matches(has_window, has_notepad);
+            let rows = matches.len().min(PALETTE_MAX_ROWS);
+            let mut lines = Vec::with_capacity(rows + 1);
+            let inner = PALETTE_WIDTH.saturating_sub(services_gui_host::CARD_PADDING * 2)
+                / services_gui_host::RASTER_CELL_WIDTH;
+            for action in matches.iter().take(rows) {
+                let label = action.label();
+                let shortcut = action.shortcut();
+                let pad =
+                    inner.saturating_sub(label.chars().count() + shortcut.chars().count() + 2);
+                let mut line = String::from(label);
+                for _ in 0..pad {
+                    line.push(' ');
+                }
+                line.push_str("  ");
+                line.push_str(shortcut);
+                lines.push(line);
+            }
+            if matches.is_empty() {
+                lines.push("No actions match".to_string());
+            }
+            let height = services_gui_host::CARD_HEADER_HEIGHT
+                + services_gui_host::CARD_PADDING * 2
+                + lines.len() * services_gui_host::CARD_LINE_HEIGHT
+                + services_gui_host::CARD_FOOTER_HEIGHT;
+            let mut frame = ViewFrame::new(
+                self.palette_id,
+                ViewKind::Panel,
+                0,
+                ViewContent::text_buffer(lines),
+                0,
+            );
+            frame.title = Some(alloc::format!("> {}_", palette.query));
+            let mut card = DesktopWindow::card(
+                frame,
+                RasterRect::new(
+                    self.width.saturating_sub(PALETTE_WIDTH) / 2,
+                    TOP_BAR_HEIGHT + 40,
+                    PALETTE_WIDTH,
+                    height,
+                ),
+            )
+            .with_role(DesktopWindowRole::Palette)
+            .with_z_index(usize::MAX / 2)
+            .with_footer(Some("Enter runs   Esc closes   type to filter".to_string()))
+            .with_highlight(
+                (!matches.is_empty()).then_some(palette.selection.min(rows.saturating_sub(1))),
+            );
+            card.closable = false;
+            card.focused = true;
+            out.push(card);
+        }
+
+        // Notices: small cards at the top right, newest highest. The
+        // workspace's own (a display switch, an error) and the desk's (a
+        // save that landed) share one look.
+        let mut all: Vec<ShellNotice> = shell_notices.to_vec();
+        all.extend(self.notices.iter().map(|n| n.notice.clone()));
+        let mut y = TOP_BAR_HEIGHT + NOTICE_MARGIN;
+        let columns = (NOTICE_WIDTH - services_gui_host::CARD_PADDING * 2) / GLYPH_WIDTH;
+        for (index, notice) in all.iter().rev().take(self.notice_ids.len()).enumerate() {
+            let lines = wrap_words(&notice.text, columns);
+            let height = services_gui_host::CARD_HEADER_HEIGHT
+                + services_gui_host::CARD_PADDING * 2
+                + services_gui_host::CARD_LINE_HEIGHT * lines.len().max(1);
+            let mut frame = ViewFrame::new(
+                self.notice_ids[index],
+                ViewKind::Panel,
+                0,
+                ViewContent::text_buffer(lines),
+                0,
+            );
+            frame.title = Some(notice.card_title());
+            let mut card = DesktopWindow::card(
+                frame,
+                RasterRect::new(
+                    self.width.saturating_sub(NOTICE_WIDTH + NOTICE_MARGIN),
+                    y,
+                    NOTICE_WIDTH,
+                    height,
+                ),
+            )
+            .with_role(DesktopWindowRole::Notification)
+            .with_z_index(usize::MAX / 2 - 1);
+            card.closable = false;
+            out.push(card);
+            y += height + NOTICE_MARGIN;
         }
 
         // Top bar: the focused app's name on the left, the clock on the right.
@@ -674,6 +1347,7 @@ impl Desk {
                 let mut tab =
                     DesktopTab::new(app.monogram(), self.windows.iter().any(|w| w.app == *app));
                 tab.hovered = self.hovered_tile == Some(index);
+                tab.tucked = self.windows.iter().any(|w| w.app == *app && w.tucked);
                 tab
             })
             .collect();
@@ -777,15 +1451,46 @@ mod tests {
     #[test]
     fn ctrl_n_and_ctrl_t_on_the_bare_desk_open_apps() {
         let mut desk = Desk::new(1280, 800);
-        assert!(desk.handle_shell_key(crate::notepad::CTRL_N));
-        assert!(desk.handle_shell_key(crate::notepad::CTRL_T));
+        assert!(desk.handle_key(crate::notepad::CTRL_N).1);
+        assert!(desk.handle_key(crate::notepad::CTRL_T).1);
         assert_eq!(desk.window_count(), 2);
         assert_eq!(
             desk.focused_window().map(|w| w.app),
             Some(DeskApp::Terminal)
         );
         assert!(desk.terminal_rows().is_some());
-        assert!(!desk.handle_shell_key(b'x'));
+    }
+
+    /// The kernel used to route bare-desk keys through a second entry point
+    /// that knew three shortcuts, so the first Ctrl+Space of a session --
+    /// before any card had focus -- went to the invisible console, and so
+    /// did everything typed after it. There is one entry point now, and a
+    /// printable key on the bare desk is the start of a palette search.
+    #[test]
+    fn typing_on_the_bare_desk_opens_the_palette_with_the_key_typed() {
+        let mut desk = Desk::new(1280, 800);
+        assert!(!desk.palette_open());
+        let (request, changed) = desk.handle_key(b't');
+        assert!(request.is_none() && changed && desk.palette_open());
+        for byte in b"erm" {
+            desk.handle_key(*byte);
+        }
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        assert!(palette.frame.title.as_deref().unwrap().contains("term"));
+        desk.handle_key(b'\n');
+        assert_eq!(
+            desk.focused_window().map(|w| w.app),
+            Some(DeskApp::Terminal)
+        );
+
+        // A control byte the bare desk has no use for is not taken.
+        let mut desk = Desk::new(1280, 800);
+        assert_eq!(desk.handle_key(0x01), (None, false));
+        assert!(!desk.palette_open());
     }
 
     /// The first build answered the launch shortcuts only with nothing
@@ -794,7 +1499,7 @@ mod tests {
     #[test]
     fn launch_shortcuts_work_whatever_is_focused() {
         let mut desk = Desk::new(1280, 800);
-        desk.handle_shell_key(crate::notepad::CTRL_N);
+        desk.handle_key(crate::notepad::CTRL_N);
         assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Notepad));
 
         // Ctrl+T from inside the Notepad opens a Terminal.
@@ -826,6 +1531,254 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_lists_filters_and_runs_actions() {
+        let mut desk = Desk::new(1280, 800);
+        // Ctrl+Space opens it from the bare desk; it is a card.
+        let (_, changed) = desk.handle_key(KEY_CTRL_SPACE);
+        assert!(changed && desk.palette_open());
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        assert_eq!(palette.style, WindowStyle::Card);
+        // With nothing open, window-only actions are not offered.
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(listed.iter().any(|l| l.starts_with("New Notepad window")));
+        assert!(!listed.iter().any(|l| l.starts_with("Close window")));
+
+        // Typing filters; Enter runs the selected row.
+        for byte in b"term" {
+            desk.handle_key(*byte);
+        }
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        assert!(palette.frame.title.as_deref().unwrap().contains("term"));
+        let (request, _) = desk.handle_key(b'\n');
+        assert!(request.is_none());
+        assert!(!desk.palette_open());
+        assert_eq!(
+            desk.focused_window().map(|w| w.app),
+            Some(DeskApp::Terminal)
+        );
+
+        // Esc closes without running.
+        desk.handle_key(0x10);
+        assert!(desk.palette_open());
+        desk.handle_key(crate::notepad::ESC);
+        assert!(!desk.palette_open());
+
+        // "Switch to the text console" is a request to the kernel.
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"text" {
+            desk.handle_key(*byte);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(request, Some(DeskRequest::TextConsole));
+    }
+
+    #[test]
+    fn dropping_a_card_on_the_dock_tucks_it_and_the_tile_brings_it_back() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let id = desk.launch(DeskApp::Notepad);
+        let bounds = desk.window(id).unwrap().bounds;
+        drag(
+            &mut desk,
+            &mut router,
+            ((bounds.x + 100) as i32, (bounds.y + 10) as i32),
+            (640, 790),
+        );
+        assert!(desk.window(id).unwrap().tucked);
+        assert_eq!(desk.focus(), None);
+        let windows = desk.windows("", true, None);
+        assert!(
+            !windows.iter().any(|w| w.frame.view_id == id),
+            "a tucked card is still drawn"
+        );
+        let dock = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap();
+        assert!(dock.tabs[0].active && dock.tabs[0].tucked);
+
+        // Ctrl+Tab skips it; the dock tile brings it back.
+        assert!(!desk.cycle_focus());
+        let pill = dock.bounds();
+        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
+        let y = (pill.y + pill.height / 2) as i32;
+        route(&mut desk, &mut router, press(first_x, y));
+        assert!(!desk.window(id).unwrap().tucked);
+        assert_eq!(desk.focus(), Some(id));
+    }
+
+    #[test]
+    fn files_lists_the_filesystem_and_enter_opens_in_a_notepad() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let windows = desk.windows("", true, None);
+        let pill = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap()
+            .bounds();
+        let files_x = (pill.x + (pill.width - 136) / 2 + 20 + 48) as i32;
+        let y = (pill.y + pill.height / 2) as i32;
+        let compositor = Compositor::new();
+        let deliveries = router.route(&compositor, &windows, press(files_x, y));
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        let id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(requests, alloc::vec![DeskRequest::ListFiles { id }]);
+
+        desk.files_listed(id, alloc::vec!["a.txt".to_string(), "b.txt".to_string()]);
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        let (request, _) = desk.handle_key(b'\n');
+        let notepad_id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_ne!(notepad_id, id);
+        assert_eq!(
+            request,
+            Some(DeskRequest::Io {
+                id: notepad_id,
+                effect: NotepadEffect::Open {
+                    path: "b.txt".to_string()
+                }
+            })
+        );
+        assert_eq!(desk.window_count(), 2);
+    }
+
+    #[test]
+    fn notices_wrap_to_the_card_instead_of_running_off_it() {
+        assert_eq!(
+            wrap_words("Saved n.txt", 40),
+            alloc::vec!["Saved n.txt".to_string()]
+        );
+        assert_eq!(
+            wrap_words("Unknown command: files. Type 'help' for help.", 20),
+            alloc::vec![
+                "Unknown command:".to_string(),
+                "files. Type 'help'".to_string(),
+                "for help.".to_string()
+            ]
+        );
+        assert_eq!(
+            wrap_words("abcdefghij", 4),
+            alloc::vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]
+        );
+        assert_eq!(wrap_words("", 4), alloc::vec![String::new()]);
+
+        let mut desk = Desk::new(1280, 800);
+        let shell = alloc::vec![ShellNotice::new(
+            NoticeLevel::Warning,
+            "Unknown command: files. Type 'help' for help.",
+        )];
+        let windows = desk.windows_at("", true, None, 5000, &shell);
+        let notice = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Notification)
+            .unwrap();
+        let lines = match &notice.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(lines.len() >= 2, "{lines:?}");
+        assert!(lines
+            .iter()
+            .all(|l| l.len() * GLYPH_WIDTH <= NOTICE_WIDTH - 16));
+        assert_eq!(
+            notice.bounds().height,
+            services_gui_host::CARD_HEADER_HEIGHT
+                + 16
+                + services_gui_host::CARD_LINE_HEIGHT * lines.len()
+        );
+    }
+
+    #[test]
+    fn in_files_one_click_selects_and_a_click_on_the_selection_opens() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let id = desk.launch(DeskApp::Files);
+        desk.files_listed(id, alloc::vec!["a.txt".to_string(), "b.txt".to_string()]);
+        let bounds = desk.window(id).unwrap().bounds;
+        let text_x = (bounds.x + services_gui_host::CARD_PADDING + 4) as i32;
+        let row_y = |row: usize| {
+            (bounds.y
+                + services_gui_host::CARD_HEADER_HEIGHT
+                + services_gui_host::CARD_PADDING
+                + services_gui_host::CARD_LINE_HEIGHT * row
+                + 4) as i32
+        };
+        let compositor = Compositor::new();
+        let windows = desk.windows("", true, None);
+        let deliveries = router.route(&compositor, &windows, press(text_x, row_y(1)));
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        assert!(requests.is_empty(), "the first click only selects");
+        route(&mut desk, &mut router, release(text_x, row_y(1)));
+        assert_eq!(
+            desk.window(id).unwrap().files().map(|f| f.selection),
+            Some(1)
+        );
+
+        let windows = desk.windows("", true, None);
+        let deliveries = router.route(&compositor, &windows, press(text_x, row_y(1)));
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        let notepad_id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::Io {
+                id: notepad_id,
+                effect: NotepadEffect::Open {
+                    path: "b.txt".to_string()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn a_landed_save_raises_a_notice_that_expires() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        let effect = NotepadEffect::Save {
+            path: "n.txt".to_string(),
+            content: String::new(),
+        };
+        desk.io_done(id, &effect, Ok(None), 1000);
+        let windows = desk.windows_at("", true, None, 1000, &[]);
+        let notice = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Notification)
+            .expect("a notice card");
+        assert!(
+            matches!(&notice.frame.content, ViewContent::TextBuffer { lines } if lines[0] == "Saved n.txt")
+        );
+        assert!(!notice.closable);
+
+        let windows = desk.windows_at("", true, None, 1000 + NOTICE_TTL_TICKS + 1, &[]);
+        assert!(
+            !windows
+                .iter()
+                .any(|w| w.role == DesktopWindowRole::Notification),
+            "the notice did not expire"
+        );
+
+        // The workspace's own notices show the same way.
+        let shell = alloc::vec![ShellNotice::new(
+            NoticeLevel::Info,
+            "Switching display to desk."
+        )];
+        let windows = desk.windows_at("", true, None, 5000, &shell);
+        assert!(windows
+            .iter()
+            .any(|w| w.role == DesktopWindowRole::Notification));
+    }
+
+    #[test]
     fn the_empty_desk_has_a_top_bar_and_a_dock_and_nothing_else() {
         let mut desk = Desk::new(1280, 800);
         let windows = desk.windows("12:34", true, None);
@@ -838,7 +1791,6 @@ mod tests {
             matches!(&bar.frame.content, ViewContent::TextBuffer { lines } if lines[0] == "12:34")
         );
         assert!(windows.iter().any(|w| w.style == WindowStyle::Dock));
-        assert!(!desk.wants_keys());
     }
 
     #[test]
@@ -850,10 +1802,10 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        // Two tiles: 2*40 + 8 = 88 wide, centred in the pill. The first
-        // tile's centre is 44px left of the pill's centre... plus half a tile.
+        // Three tiles: 3*40 + 2*8 = 136 wide, centred in the pill; the
+        // first tile's centre is 20px into that row.
         let pill = dock.bounds();
-        let first_x = (pill.x + (pill.width - 88) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(&mut desk, &mut router, press(first_x, y)));
@@ -877,7 +1829,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let first_x = (pill.x + (pill.width - 88) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(
@@ -1112,7 +2064,11 @@ mod tests {
             assert!(request.is_none() && changed);
         }
         let (request, _) = desk.handle_key(crate::notepad::CTRL_S);
-        assert!(request.is_none(), "the first save asks for a name");
+        assert_eq!(
+            request,
+            Some(DeskRequest::ListFiles { id }),
+            "the first save asks for a name, and for the names to complete against"
+        );
         for byte in b"n.txt" {
             desk.handle_key(*byte);
         }
@@ -1127,7 +2083,7 @@ mod tests {
                         content: "hi".to_string()
                     }
                 );
-                desk.io_done(id, &effect, Ok(None));
+                desk.io_done(id, &effect, Ok(None), 0);
             }
             other => panic!("expected a save request, got {other:?}"),
         }

@@ -352,11 +352,17 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
-        "sleep:4,n,e,t,spc,p,i,n,g,spc,1,0,dot,9,9,dot,9,9,dot,9,9,ret,\
+        // The machine boots into the desk, where typing is a palette
+        // search: the console is a card, so open one (Ctrl+T) and type
+        // into it. Before this the keys went to the palette and the ping
+        // never ran -- and nothing here noticed, because nothing asked.
+        "sleep:4,ctrl-t,sleep:1,n,e,t,spc,p,i,n,g,spc,1,0,dot,9,9,dot,9,9,dot,9,9,ret,\
          gauntlet:http_health,remote-tcp:cpus;online=,sleep:6"
             .to_string(),
         "--out".to_string(),
         "dist/qemu_ping".to_string(),
+        "--expect-serial".to_string(),
+        "WS > net ping 10.99.99.99".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -394,7 +400,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--smp".to_string(),
         "2".to_string(),
         "--keys".to_string(),
-        "sleep:4,s,m,p,spc,r,u,n,spc,2,ret,sleep:3".to_string(),
+        // Into a Terminal card; see the ping shape.
+        "sleep:4,ctrl-t,sleep:1,s,m,p,spc,r,u,n,spc,2,ret,sleep:3".to_string(),
         "--out".to_string(),
         "dist/qemu_smp2".to_string(),
         // The banner alone is not an assertion: it is printed long before
@@ -485,6 +492,66 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // its output.
         "--expect-serial".to_string(),
         "WS > help".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
+    println!("== the desk: a save, Files from the palette, a file opened from it");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Write and save n.txt, open Files through the palette (Ctrl+Space,
+        // "files", Enter), then Enter on the first row: n.txt opens in a
+        // second Notepad and a notice says so.
+        "sleep:6,ctrl-n,sleep:1,h,i,ctrl-s,sleep:1,n,dot,t,x,t,ret,sleep:1,ctrl-spc,sleep:1,f,i,l,e,s,ret,sleep:2,ret,sleep:2,shot:opened"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_files".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The opened Notepad is the third cascade step (x=344, y=108),
+        // focused: accent ring on its top edge, plain surface in its body.
+        "--expect-pixel".to_string(),
+        "500,108,52,211,153".to_string(),
+        "--expect-pixel".to_string(),
+        "700,300,28,34,48".to_string(),
+        // The Files card behind it, second step (x=412, y=76): hairline
+        // ring now that it has lost focus.
+        "--expect-pixel".to_string(),
+        "412,90,48,56,72".to_string(),
+        // The "Opened n.txt" notice at the top right: a card surface where
+        // the bare gradient would otherwise be.
+        "--expect-pixel".to_string(),
+        "1200,81,28,34,48".to_string(),
+        // Two dock tiles lit: Notepad and Files.
+        "--expect-pixel".to_string(),
+        "592,785,52,211,153".to_string(),
+        "--expect-pixel".to_string(),
+        "640,785,52,211,153".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
+    println!(
+        "== the desk: typing on the bare desk is a palette search, and the console is a row in it"
+    );
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // No card has focus. The first build sent these keys to the
+        // invisible console; now "t" opens the palette and "text" + Enter
+        // runs "Switch to the text console".
+        "sleep:6,t,e,x,t,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_search".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        "--expect-serial".to_string(),
+        "display: switched to text mode".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

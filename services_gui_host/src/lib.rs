@@ -178,6 +178,10 @@ pub struct DesktopTab {
     /// The pointer is over this tab (a dock tile lights up under it).
     #[serde(default)]
     pub hovered: bool,
+    /// The app has a window tucked into the dock (GFX-053): the running dot
+    /// is drawn as a ring, so the tile says "something is here, waiting".
+    #[serde(default)]
+    pub tucked: bool,
 }
 
 impl DesktopTab {
@@ -186,6 +190,7 @@ impl DesktopTab {
             label: label.into(),
             active,
             hovered: false,
+            tucked: false,
         }
     }
 }
@@ -1729,11 +1734,12 @@ fn raster_dock(
             theme.text,
         );
         if tab.active {
-            painter.fill_rounded_rect(
-                RasterRect::new(tile.x + DOCK_TILE / 2 - 2, tile.bottom() + 2, 4, 4),
-                2,
-                theme.accent,
-            );
+            let dot = RasterRect::new(tile.x + DOCK_TILE / 2 - 3, tile.bottom() + 2, 6, 6);
+            if tab.tucked {
+                painter.draw_rounded_border(dot, 3, 1, theme.accent);
+            } else {
+                painter.fill_rounded_rect(dot, 3, theme.accent);
+            }
         }
     }
     true

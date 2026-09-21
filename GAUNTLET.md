@@ -322,6 +322,8 @@ Status values: `OPEN` (confirmed, not fixed), `FIXED` (with the phase number),
 | V12 | services_storage | `Capability` is documented "unforgeable" and `Capability::new` is `pub`, while `check_access` compared only the fields of the struct it was handed: anyone could mint themselves `Own` on another principal's object. A7's defect, in the module A7's fix never touched | FIXED (340) |
 | S8-1 | services_fs_view | `test_cannot_traverse_through_blob` passed with its guard deleted -- the blob's id is absent from `directories` so the next lookup answers `NotFound`, which `assert!(is_err())` accepts. Shape 0 | FIXED (341) |
 | S11b | services_input_hal_bridge | `poll_packet` consumes the packet and `translate` advances the button state, then a `?` mid-batch dropped every later event for ever: a release for a button never seen pressed, or a stuck drag nothing retries | FIXED (341) |
+| D1 | kernel_bootstrap::desk | The kernel had two key entry points into the desk -- `handle_key` when a card had focus and `handle_shell_key` when none did -- and the palette's Ctrl+Space was added to one. The first Ctrl+Space of every session, before any card had focus, went to the invisible console, and everything typed after it followed. Shape 2, found by a screendump that showed `WS > term` in the text console. One entry point now; the gauntlet types on the bare desk | FIXED (345) |
+| D2 | xtask gauntlet | The ping shape typed `net ping 10.99.99.99` blind at boot and asserted nothing about it; when the desk began reading bare-desk typing as a palette search the ping stopped running and the shape stayed green. Shape 0 in the harness itself. It requires the console's echo now, and both blind-typing shapes open a Terminal card first | FIXED (345) |
 
 ## Rejected claims
 

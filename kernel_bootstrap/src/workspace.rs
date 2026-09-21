@@ -1564,6 +1564,12 @@ impl WorkspaceSession {
         self.display_mode_request.take()
     }
 
+    /// Ask for a display switch from outside the command line -- the desk's
+    /// palette does, for "Switch to the text console".
+    pub fn request_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode_request = Some(mode);
+    }
+
     fn run_display_command(&mut self, serial: &mut SerialPort, arg: Option<&str>) {
         match arg {
             None | Some("status") => {

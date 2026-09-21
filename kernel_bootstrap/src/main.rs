@@ -1510,6 +1510,9 @@ fn workspace_loop(
     // windows keep their places across mode switches.
     let mut desk: Option<desk::Desk> = None;
     let mut rtc_port = hal_x86_64::RealPortIo::new();
+    // What the desk asked the kernel for this iteration: file operations,
+    // listings, a display switch. Served after input, once, in order.
+    let mut desk_requests: alloc::vec::Vec<desk::DeskRequest> = alloc::vec::Vec::new();
     // GFX-048: degrade in a fixed order under memory pressure instead of
     // failing inside an allocation.
     let mut pressure_monitor = services_gui_host::PressureMonitor::new(
@@ -1652,12 +1655,11 @@ fn workspace_loop(
                 let mut desk_took_it = false;
                 if display_mode.is_desk() {
                     if let Some(desk) = desk.as_mut() {
-                        let (request, changed) = if desk.wants_keys() {
-                            desk.handle_key(ch)
-                        } else {
-                            (None, desk.handle_shell_key(ch))
-                        };
+                        let (request, changed) = desk.handle_key(ch);
                         desk_took_it = changed || request.is_some();
+                        if let Some(request) = request.clone() {
+                            desk_requests.push(request);
+                        }
                         if let Some(desk::DeskRequest::Terminal(byte)) = request {
                             // The Terminal card is the console: the key goes
                             // where it always went, and the card redraws.
@@ -1665,30 +1667,6 @@ fn workspace_loop(
                             if byte == b'\n' || byte == b'\r' {
                                 output_dirty = true;
                             }
-                        }
-                        if let Some(desk::DeskRequest::Io { id, effect }) = request {
-                            let result = match workspace.take_filesystem() {
-                                Some(fs) => {
-                                    let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
-                                    let result = match &effect {
-                                        notepad::NotepadEffect::Save { path, content } => io
-                                            .save_as(path, content)
-                                            .map(|_| None)
-                                            .map_err(|e| alloc::format!("{e:?}")),
-                                        notepad::NotepadEffect::Open { path } => {
-                                            match io.open(path) {
-                                                Ok((content, _)) => Ok(Some(content)),
-                                                Err(_) => Ok(None),
-                                            }
-                                        }
-                                        _ => Ok(None),
-                                    };
-                                    workspace.set_filesystem(io.into_filesystem());
-                                    result
-                                }
-                                None => Err(alloc::string::String::from("no filesystem")),
-                            };
-                            desk.io_done(id, &effect, result);
                         }
                     }
                 }
@@ -1816,8 +1794,12 @@ fn workspace_loop(
                         let windows = desk.windows("", true, terminal.as_ref());
                         let deliveries =
                             input_router.route(renderer.compositor(), &windows, *event);
-                        if desk.handle_deliveries(&deliveries) {
+                        let (requests, changed) = desk.handle_deliveries_with_requests(&deliveries);
+                        if changed {
                             output_dirty = true;
+                        }
+                        for request in requests {
+                            desk_requests.push(request);
                         }
                     }
                     input_dirty = true;
@@ -1985,6 +1967,59 @@ fn workspace_loop(
                     }
                     // The cursor is a desktop surface: moving it is a redraw.
                     input_dirty = true;
+                }
+            }
+        }
+
+        // Serve what the desk asked for (GFX-053).
+        if !desk_requests.is_empty() {
+            let pending: alloc::vec::Vec<desk::DeskRequest> = desk_requests.drain(..).collect();
+            let now = get_tick_count();
+            for request in pending {
+                let Some(desk) = desk.as_mut() else {
+                    break;
+                };
+                match request {
+                    desk::DeskRequest::Terminal(_) => {}
+                    desk::DeskRequest::TextConsole => {
+                        workspace.request_display_mode(display_mode::DisplayMode::TextConsole);
+                    }
+                    desk::DeskRequest::ListFiles { id } => {
+                        let names = match workspace.take_filesystem() {
+                            Some(fs) => {
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                                let names = io.list_files().unwrap_or_default();
+                                workspace.set_filesystem(io.into_filesystem());
+                                names
+                            }
+                            None => alloc::vec::Vec::new(),
+                        };
+                        desk.files_listed(id, names);
+                        output_dirty = true;
+                    }
+                    desk::DeskRequest::Io { id, effect } => {
+                        let result = match workspace.take_filesystem() {
+                            Some(fs) => {
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                                let result = match &effect {
+                                    notepad::NotepadEffect::Save { path, content } => io
+                                        .save_as(path, content)
+                                        .map(|_| None)
+                                        .map_err(|e| alloc::format!("{e:?}")),
+                                    notepad::NotepadEffect::Open { path } => match io.open(path) {
+                                        Ok((content, _)) => Ok(Some(content)),
+                                        Err(_) => Ok(None),
+                                    },
+                                    _ => Ok(None),
+                                };
+                                workspace.set_filesystem(io.into_filesystem());
+                                result
+                            }
+                            None => Err(alloc::string::String::from("no filesystem")),
+                        };
+                        desk.io_done(id, &effect, result, now);
+                        output_dirty = true;
+                    }
                 }
             }
         }
@@ -2211,7 +2246,14 @@ fn workspace_loop(
                     let terminal = desk
                         .terminal_rows()
                         .map(|rows| terminal_view(&workspace, rows));
-                    let mut windows = desk.windows(&clock, model.caret_visible, terminal.as_ref());
+                    let shell_notices = workspace.notices();
+                    let mut windows = desk.windows_at(
+                        &clock,
+                        model.caret_visible,
+                        terminal.as_ref(),
+                        now,
+                        &shell_notices,
+                    );
                     input_router.apply_focus(&mut windows);
                     renderer.render_windows_with_theme(
                         windows,
@@ -4303,7 +4345,14 @@ impl Ps2ParserState {
                     b'm'
                 }
             }
-            0x39 => b' ',  // Space
+            0x39 => {
+                // Ctrl+Space opens the desk's palette; a private byte, like
+                // the arrows.
+                if self.ctrl_pressed {
+                    return Some(crate::desk::KEY_CTRL_SPACE);
+                }
+                b' '
+            }
             0x1C => b'\n', // Enter
             0x0F => {
                 // Tab was not mapped at all. Ctrl+Tab cycles the desk's
