@@ -4112,12 +4112,23 @@ impl Ps2ParserState {
             if is_break {
                 return None;
             }
-            return match code {
-                0x48 => Some(crate::notepad::KEY_UP),
-                0x50 => Some(crate::notepad::KEY_DOWN),
-                0x4B => Some(crate::notepad::KEY_LEFT),
-                0x4D => Some(crate::notepad::KEY_RIGHT),
-                0x53 => Some(crate::notepad::KEY_DELETE),
+            // With Shift held the arrows, Home and End grow a selection
+            // (GFX-054); they are their own bytes so the app can tell.
+            let shift = self.shift_pressed;
+            return match (code, shift) {
+                (0x48, false) => Some(crate::notepad::KEY_UP),
+                (0x50, false) => Some(crate::notepad::KEY_DOWN),
+                (0x4B, false) => Some(crate::notepad::KEY_LEFT),
+                (0x4D, false) => Some(crate::notepad::KEY_RIGHT),
+                (0x48, true) => Some(crate::notepad::KEY_SHIFT_UP),
+                (0x50, true) => Some(crate::notepad::KEY_SHIFT_DOWN),
+                (0x4B, true) => Some(crate::notepad::KEY_SHIFT_LEFT),
+                (0x4D, true) => Some(crate::notepad::KEY_SHIFT_RIGHT),
+                (0x47, false) => Some(crate::notepad::KEY_HOME),
+                (0x4F, false) => Some(crate::notepad::KEY_END),
+                (0x47, true) => Some(crate::notepad::KEY_SHIFT_HOME),
+                (0x4F, true) => Some(crate::notepad::KEY_SHIFT_END),
+                (0x53, _) => Some(crate::notepad::KEY_DELETE),
                 _ => None,
             };
         }
@@ -4521,11 +4532,35 @@ mod keyboard_scancode_tests {
             assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
             assert_eq!(parser.process_scancode(code | 0x80, &mut writer), None);
         }
-        // An E0 key that is not one of those (Home) is still dropped.
+        // An E0 key that is not one of those (Page Up) is still dropped.
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
-        assert_eq!(parser.process_scancode(0x47, &mut writer), None);
+        assert_eq!(parser.process_scancode(0x49, &mut writer), None);
         // Next normal key should still work
         assert_eq!(parser.process_scancode(0x1E, &mut writer), Some(b'a'));
+
+        // Shift held: the same keys are the selection bytes; Home and End
+        // travel too (GFX-054).
+        assert_eq!(parser.process_scancode(0x2A, &mut writer), None);
+        for (code, byte) in [
+            (0x48, crate::notepad::KEY_SHIFT_UP),
+            (0x4B, crate::notepad::KEY_SHIFT_LEFT),
+            (0x47, crate::notepad::KEY_SHIFT_HOME),
+            (0x4F, crate::notepad::KEY_SHIFT_END),
+        ] {
+            assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+            assert_eq!(parser.process_scancode(code, &mut writer), Some(byte));
+        }
+        assert_eq!(parser.process_scancode(0x2A | 0x80, &mut writer), None);
+        assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x47, &mut writer),
+            Some(crate::notepad::KEY_HOME)
+        );
+        assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x4F, &mut writer),
+            Some(crate::notepad::KEY_END)
+        );
     }
 
     /// Ctrl+letter is the matching control byte; Ctrl+P is 0x10 either way.

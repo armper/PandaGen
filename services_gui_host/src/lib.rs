@@ -216,6 +216,12 @@ pub struct DesktopWindow {
     /// active launcher entry).
     #[serde(default)]
     pub highlight_line: Option<usize>,
+    /// Selected text, as `(content line, first column, end column)` spans
+    /// in character cells, painted with the selection fill behind the text
+    /// (GFX-054). A span may run past the line's end to mark a selected
+    /// line break.
+    #[serde(default)]
+    pub selection_spans: Vec<(usize, usize, usize)>,
     /// How the window is painted and hit-tested (GFX-050).
     #[serde(default)]
     pub style: WindowStyle,
@@ -286,6 +292,7 @@ impl DesktopWindow {
             focused: false,
             chrome: true,
             highlight_line: None,
+            selection_spans: Vec::new(),
             style: WindowStyle::Classic,
             pixel_rect: None,
             closable: false,
@@ -403,6 +410,13 @@ impl DesktopWindow {
     /// Fill content line `line` with the selection colour.
     pub fn with_highlight(mut self, line: Option<usize>) -> Self {
         self.highlight_line = line;
+        self
+    }
+
+    /// Paint these `(line, start, end)` character spans with the selection
+    /// fill.
+    pub fn with_selection(mut self, spans: Vec<(usize, usize, usize)>) -> Self {
+        self.selection_spans = spans;
         self
     }
 
@@ -1624,6 +1638,20 @@ fn raster_card(
                         content.x,
                         origin_y + highlight * pitch,
                         content.width,
+                        pitch,
+                    ),
+                    theme.selection,
+                );
+            }
+            for &(line, start, end) in &window.selection_spans {
+                if line >= rows || end <= start {
+                    continue;
+                }
+                content_painter.fill_rect(
+                    RasterRect::new(
+                        origin_x + start * RASTER_CELL_WIDTH,
+                        origin_y + line * pitch,
+                        (end - start) * RASTER_CELL_WIDTH,
                         pitch,
                     ),
                     theme.selection,

@@ -164,6 +164,36 @@ fn the_caret_and_a_footer_are_drawn_where_the_geometry_says() {
     );
 }
 
+/// Selected text sits on the selection fill, the rest on the surface, and
+/// a span past a line's end marks its line break (GFX-054).
+#[test]
+fn selection_spans_paint_behind_the_selected_cells_only() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let card = DesktopWindow::card(frame("Notepad", &["hello world", "ab", ""]), bounds)
+        .focused()
+        .with_selection(vec![(0, 6, 12), (1, 0, 3), (2, 0, 1)]);
+    let (origin_x, origin_y, pitch) = card.card_text_origin();
+    let target = render(vec![card]);
+    let cell = services_gui_host::RASTER_CELL_WIDTH;
+    let mid = |line: usize| origin_y + line * pitch + 1;
+    // Line 0: "hello " is on the surface, "world" and one cell beyond on the fill.
+    assert_eq!(px(&target, origin_x + 2 * cell + 1, mid(0)), theme.surface);
+    assert_eq!(
+        px(&target, origin_x + 6 * cell + 1, mid(0)),
+        theme.selection
+    );
+    assert_eq!(
+        px(&target, origin_x + 11 * cell + 1, mid(0)),
+        theme.selection
+    );
+    assert_eq!(px(&target, origin_x + 12 * cell + 1, mid(0)), theme.surface);
+    // Line 1 and the empty line 2 carry their marks; line 1 past its span is surface.
+    assert_eq!(px(&target, origin_x + 1, mid(1)), theme.selection);
+    assert_eq!(px(&target, origin_x + 3 * cell + 1, mid(1)), theme.surface);
+    assert_eq!(px(&target, origin_x + 1, mid(2)), theme.selection);
+}
+
 #[test]
 fn the_dock_paints_a_tile_per_app_and_names_the_tile_that_was_hit() {
     let theme = Theme::DEFAULT;

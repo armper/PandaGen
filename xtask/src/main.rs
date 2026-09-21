@@ -535,6 +535,34 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: select, copy, paste, find");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // "hello world", Shift+Left five times selects "world"; Ctrl+C,
+        // End, Enter, Ctrl+V puts it on a second line; Ctrl+F "wo" wraps
+        // to the first match and selects those two cells.
+        "sleep:6,ctrl-n,sleep:1,h,e,l,l,o,spc,w,o,r,l,d,sleep:1,shift-left,shift-left,shift-left,shift-left,shift-left,sleep:1,ctrl-c,end,ret,ctrl-v,sleep:1,ctrl-f,w,o,sleep:1,shot:find"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_select".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // Line 0 of the Notepad card (text origin x=288, y=76): "wo" at
+        // columns 6-7 is on the selection fill, "r" at 8 and "hello" are
+        // on the surface.
+        "--expect-pixel".to_string(),
+        "340,80,44,82,96".to_string(),
+        "--expect-pixel".to_string(),
+        "360,80,28,34,48".to_string(),
+        "--expect-pixel".to_string(),
+        "300,80,28,34,48".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!(
         "== the desk: typing on the bare desk is a palette search, and the console is a row in it"
     );

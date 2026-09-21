@@ -260,10 +260,15 @@ pub enum PaletteAction {
     Maximise,
     Tuck,
     TextConsole,
+    SelectAll,
+    Copy,
+    Cut,
+    Paste,
+    Find,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 13] = [
+    pub const ALL: [PaletteAction; 18] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -277,6 +282,11 @@ impl PaletteAction {
         PaletteAction::Maximise,
         PaletteAction::Tuck,
         PaletteAction::TextConsole,
+        PaletteAction::SelectAll,
+        PaletteAction::Copy,
+        PaletteAction::Cut,
+        PaletteAction::Paste,
+        PaletteAction::Find,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -294,6 +304,11 @@ impl PaletteAction {
             PaletteAction::Maximise => "Fill the desk",
             PaletteAction::Tuck => "Tuck into the dock",
             PaletteAction::TextConsole => "Switch to the text console",
+            PaletteAction::SelectAll => "Select all",
+            PaletteAction::Copy => "Copy",
+            PaletteAction::Cut => "Cut",
+            PaletteAction::Paste => "Paste",
+            PaletteAction::Find => "Find...",
         }
     }
 
@@ -312,6 +327,11 @@ impl PaletteAction {
             }
             PaletteAction::Tuck => "drag onto the dock",
             PaletteAction::TextConsole => "",
+            PaletteAction::SelectAll => "Ctrl+A",
+            PaletteAction::Copy => "Ctrl+C",
+            PaletteAction::Cut => "Ctrl+X",
+            PaletteAction::Paste => "Ctrl+V",
+            PaletteAction::Find => "Ctrl+F",
         }
     }
 
@@ -319,7 +339,14 @@ impl PaletteAction {
     const fn needs_notepad(self) -> bool {
         matches!(
             self,
-            PaletteAction::Save | PaletteAction::SaveAs | PaletteAction::Open
+            PaletteAction::Save
+                | PaletteAction::SaveAs
+                | PaletteAction::Open
+                | PaletteAction::SelectAll
+                | PaletteAction::Copy
+                | PaletteAction::Cut
+                | PaletteAction::Paste
+                | PaletteAction::Find
         )
     }
 
@@ -396,6 +423,10 @@ pub struct Desk {
     hovered_tile: Option<usize>,
     palette: Option<Palette>,
     palette_id: ViewId,
+    /// One clipboard for every card (GFX-054).
+    clipboard: String,
+    /// A pointer drag selecting text in this card.
+    text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
     notice_ids: Vec<ViewId>,
     /// The last file listing, for save-as and open autocomplete.
@@ -419,6 +450,8 @@ impl Desk {
             hovered_tile: None,
             palette: None,
             palette_id: ViewId::new(),
+            clipboard: String::new(),
+            text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
             file_names_cache: Vec::new(),
@@ -604,6 +637,11 @@ impl Desk {
             PaletteAction::Save => self.forward_to_notepad(crate::notepad::CTRL_S),
             PaletteAction::SaveAs => self.forward_to_notepad(crate::notepad::CTRL_SHIFT_S),
             PaletteAction::Open => self.forward_to_notepad(crate::notepad::CTRL_O),
+            PaletteAction::SelectAll => self.forward_to_notepad(crate::notepad::CTRL_A),
+            PaletteAction::Copy => self.forward_to_notepad(crate::notepad::CTRL_C),
+            PaletteAction::Cut => self.forward_to_notepad(crate::notepad::CTRL_X),
+            PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
+            PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
             PaletteAction::CloseWindow => {
                 if let Some(id) = self.focus {
                     self.close(id);
@@ -898,6 +936,7 @@ impl Desk {
                                 self.window_mut(*target).and_then(|w| w.notepad_mut())
                             {
                                 notepad.place_cursor(line, column);
+                                self.text_select = Some(*target);
                             }
                             let mut open = false;
                             if let Some(files) =
@@ -927,7 +966,16 @@ impl Desk {
                             }
                         }
                         (_, _, _, PointerEventKind::Move { .. }) => {
-                            if let Some(drag) = self.drag.filter(|d| d.id == *target) {
+                            if self.text_select == Some(*target) {
+                                if let Some(HitRegion::Content { line, column }) = region {
+                                    if let Some(notepad) =
+                                        self.window_mut(*target).and_then(|w| w.notepad_mut())
+                                    {
+                                        notepad.extend_selection_to(line, column);
+                                        changed = true;
+                                    }
+                                }
+                            } else if let Some(drag) = self.drag.filter(|d| d.id == *target) {
                                 let (width, height) = (self.width, self.height);
                                 if let Some(window) = self.window_mut(*target) {
                                     let max_x = width.saturating_sub(window.bounds.width);
@@ -971,6 +1019,9 @@ impl Desk {
                             }
                             if self.resize.map(|r| r.id) == Some(*target) {
                                 self.resize = None;
+                            }
+                            if self.text_select == Some(*target) {
+                                self.text_select = None;
                             }
                         }
                         _ => {}
@@ -1058,6 +1109,7 @@ impl Desk {
 
     /// A key for window `id`'s app.
     fn handle_app_key(&mut self, id: ViewId, byte: u8) -> (Option<DeskRequest>, bool) {
+        let clipboard = self.clipboard.clone();
         let Some(window) = self.window_mut(id) else {
             return (None, false);
         };
@@ -1089,10 +1141,18 @@ impl Desk {
                 },
                 _ => (None, false),
             },
-            AppState::Notepad(notepad) => match notepad.handle_byte(byte) {
+            AppState::Notepad(notepad) => match if byte == crate::notepad::CTRL_V {
+                notepad.paste(&clipboard)
+            } else {
+                notepad.handle_byte(byte)
+            } {
                 NotepadEffect::None => (None, false),
                 NotepadEffect::Redraw => (None, true),
                 NotepadEffect::ListFiles => (Some(DeskRequest::ListFiles { id }), true),
+                NotepadEffect::Copy(text) => {
+                    self.clipboard = text;
+                    (None, true)
+                }
                 NotepadEffect::Close => {
                     self.close(id);
                     (None, true)
@@ -1169,10 +1229,12 @@ impl Desk {
             let rows = Self::card_rows(window.bounds);
             let focused = focus == Some(window.id);
             let mut highlight = None;
+            let mut selection = Vec::new();
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
                     let lines = notepad.viewport_lines(rows);
                     let cursor = notepad.viewport_cursor();
+                    selection = notepad.viewport_selection(rows);
                     (lines, notepad.title(), notepad.footer(), cursor)
                 }
                 AppState::Files(files) => {
@@ -1214,7 +1276,8 @@ impl Desk {
             let mut card = DesktopWindow::card(frame, window.bounds)
                 .with_z_index(window.z)
                 .with_footer(Some(footer))
-                .with_highlight(highlight);
+                .with_highlight(highlight)
+                .with_selection(selection);
             if focused {
                 card = card.focused();
             }
@@ -1737,6 +1800,96 @@ mod tests {
                     path: "b.txt".to_string()
                 }
             }]
+        );
+    }
+
+    #[test]
+    fn the_clipboard_is_the_desks_and_every_notepad_shares_it() {
+        let mut desk = Desk::new(1280, 800);
+        let first = desk.launch(DeskApp::Notepad);
+        for byte in b"copy me" {
+            desk.handle_key(*byte);
+        }
+        desk.handle_key(crate::notepad::CTRL_A);
+        let (request, changed) = desk.handle_key(crate::notepad::CTRL_C);
+        assert!(request.is_none() && changed);
+        assert_eq!(desk.clipboard, "copy me");
+
+        let second = desk.launch(DeskApp::Notepad);
+        assert_ne!(first, second);
+        desk.handle_key(crate::notepad::CTRL_V);
+        assert_eq!(
+            desk.window(second).unwrap().notepad().unwrap().content(),
+            "copy me"
+        );
+
+        // The selection is drawn: the card carries spans for the compositor.
+        desk.handle_key(crate::notepad::CTRL_A);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == second).unwrap();
+        assert_eq!(card.selection_spans, alloc::vec![(0, 0, 7)]);
+        let other = windows.iter().find(|w| w.frame.view_id == first).unwrap();
+        assert!(
+            other.selection_spans.is_empty() || other.selection_spans == alloc::vec![(0, 0, 7)]
+        );
+    }
+
+    #[test]
+    fn dragging_across_a_notepads_text_selects_it() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let id = desk.launch(DeskApp::Notepad);
+        for byte in b"hello world" {
+            desk.handle_key(*byte);
+        }
+        let bounds = desk.window(id).unwrap().bounds;
+        let text_x = |col: usize| {
+            (bounds.x
+                + services_gui_host::CARD_PADDING
+                + col * services_gui_host::RASTER_CELL_WIDTH
+                + 2) as i32
+        };
+        let y = (bounds.y
+            + services_gui_host::CARD_HEADER_HEIGHT
+            + services_gui_host::CARD_PADDING
+            + 4) as i32;
+        drag(&mut desk, &mut router, (text_x(6), y), (text_x(11), y));
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert_eq!(notepad.selected_text().as_deref(), Some("world"));
+
+        // After the release, moving the pointer does not grow it.
+        route(
+            &mut desk,
+            &mut router,
+            moved(text_x(0), y, PointerButtons::none()),
+        );
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert_eq!(notepad.selected_text().as_deref(), Some("world"));
+
+        // Editing actions are palette rows only over a Notepad.
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"find" {
+            desk.handle_key(*byte);
+        }
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(
+            listed.iter().any(|l| l.starts_with("Find...")),
+            "{listed:?}"
+        );
+        desk.handle_key(b'\n');
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert!(
+            notepad.footer().starts_with("Find: world_"),
+            "{}",
+            notepad.footer()
         );
     }
 
