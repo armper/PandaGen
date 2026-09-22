@@ -519,10 +519,10 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "500,108,52,211,153".to_string(),
         "--expect-pixel".to_string(),
         "700,300,28,34,48".to_string(),
-        // The Files card behind it, second step (x=412, y=76): hairline
-        // ring now that it has lost focus.
+        // The Files card behind it, second step (680 wide, so x=332, y=76):
+        // hairline ring now that it has lost focus.
         "--expect-pixel".to_string(),
-        "412,90,48,56,72".to_string(),
+        "332,90,48,56,72".to_string(),
         // The "Opened n.txt" notice at the top right: a card surface where
         // the bare gradient would otherwise be.
         "--expect-pixel".to_string(),
@@ -552,16 +552,16 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "display_mode=Some(\"desk\")".to_string(),
         // The "New" chip in the Files header is a raised pill...
         "--expect-pixel".to_string(),
-        "630,88,22,28,40".to_string(),
+        "685,88,22,28,40".to_string(),
         // ...the selected row (memo.txt, first alphabetically) is on the
         // selection fill across the whole row...
         "--expect-pixel".to_string(),
         "600,117,44,82,96".to_string(),
         "--expect-pixel".to_string(),
-        "700,117,44,82,96".to_string(),
+        "500,117,44,82,96".to_string(),
         // ...and the Files card has focus.
         "--expect-pixel".to_string(),
-        "413,300,52,211,153".to_string(),
+        "333,300,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

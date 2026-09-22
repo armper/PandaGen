@@ -31,6 +31,30 @@ pub struct DirectoryEntry {
     /// The object's size in bytes when it was linked; 0 when unknown.
     #[serde(default)]
     pub size: u64,
+    /// What the content is, as a schema name (`text/plain`), when the
+    /// writer said (GFX-057). The type is a property of the entry, not a
+    /// suffix on the name.
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Free-form tags; a file is found by what it is about, not by where
+    /// it was put.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// In the bin: hidden from the ordinary listing, restorable, and only
+    /// gone when removed from there.
+    #[serde(default)]
+    pub trashed: bool,
+    /// Earlier contents of this name, newest first, bounded by the writer.
+    #[serde(default)]
+    pub versions: Vec<VersionRecord>,
+}
+
+/// One earlier content of a name (GFX-057).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VersionRecord {
+    pub object_id: ObjectId,
+    pub modified_at: u64,
+    pub size: u64,
 }
 
 impl DirectoryEntry {
@@ -42,6 +66,10 @@ impl DirectoryEntry {
             kind,
             modified_at: 0,
             size: 0,
+            schema: None,
+            tags: Vec::new(),
+            trashed: false,
+            versions: Vec::new(),
         }
     }
 }
@@ -253,10 +281,20 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         timestamp: u64,
         size: u64,
     ) -> Result<Option<DirectoryEntry>, TransactionError> {
-        let mut dir = self.read_directory(dir_id)?;
         let mut entry = DirectoryEntry::new(name.into(), object_id, kind);
         entry.modified_at = timestamp;
         entry.size = size;
+        self.link_entry(dir_id, entry, timestamp)
+    }
+
+    /// Bind a fully described entry under its name.
+    pub fn link_entry(
+        &mut self,
+        dir_id: ObjectId,
+        entry: DirectoryEntry,
+        timestamp: u64,
+    ) -> Result<Option<DirectoryEntry>, TransactionError> {
+        let mut dir = self.read_directory(dir_id)?;
         // Whatever this name pointed at is no longer reachable through it.
         // Returned rather than released here: only the caller knows whether
         // any other name still refers to it.
@@ -264,6 +302,25 @@ impl<D: BlockDevice> PersistentFilesystem<D> {
         dir.add_entry(entry.name.clone(), entry, timestamp);
         self.write_directory(dir_id, &dir)?;
         Ok(displaced)
+    }
+
+    /// Change an entry's description -- tags, bin state -- without touching
+    /// its object. `Ok(false)` when there is no such name.
+    pub fn update_entry(
+        &mut self,
+        dir_id: ObjectId,
+        name: &str,
+        timestamp: u64,
+        change: impl FnOnce(&mut DirectoryEntry),
+    ) -> Result<bool, TransactionError> {
+        let mut dir = self.read_directory(dir_id)?;
+        let Some(entry) = dir.entries.get_mut(name) else {
+            return Ok(false);
+        };
+        change(entry);
+        dir.metadata.modified_at = timestamp;
+        self.write_directory(dir_id, &dir)?;
+        Ok(true)
     }
 
     /// Give an object's blocks back. The caller must have established that

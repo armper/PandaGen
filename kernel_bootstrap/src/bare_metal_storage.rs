@@ -188,6 +188,9 @@ impl BlockDevice for StorageBackend {
 /// `SpinLock` first. The debug assertion below is a tripwire, not a
 /// guarantee -- it only fires in a debug build, and only once the damage
 /// would already be possible.
+/// How many earlier contents a name keeps (GFX-057).
+pub const MAX_VERSIONS: usize = 5;
+
 pub struct BareMetalFilesystem {
     pub(crate) fs: PersistentFilesystem<StorageBackend>,
     root_id: ObjectId,
@@ -306,27 +309,88 @@ impl BareMetalFilesystem {
         content: &[u8],
         now: u64,
     ) -> Result<ObjectId, TransactionError> {
+        self.write_named(name, content, now, None)
+    }
+
+    /// Write `content` under `name` (GFX-057). The entry keeps its tags and
+    /// its schema unless a new one is given; the content it replaces is
+    /// kept as a version, newest first, up to [`MAX_VERSIONS`], and the
+    /// version that falls off the end is released. Writing to a name in
+    /// the bin takes it out.
+    pub fn write_named(
+        &mut self,
+        name: &str,
+        content: &[u8],
+        now: u64,
+        schema: Option<&str>,
+    ) -> Result<ObjectId, TransactionError> {
         self.assert_boot_cpu();
+        let previous = self
+            .fs
+            .read_directory(self.root_id)?
+            .get_entry(name)
+            .cloned();
         let file_id = self.fs.write_file(content)?;
-        let displaced = self.fs.link_sized(
-            name,
-            self.root_id,
+        let mut entry = services_storage::persistent_fs::DirectoryEntry::new(
+            name.into(),
             file_id,
             services_storage::ObjectKind::Blob,
-            now,
-            content.len() as u64,
-        )?;
-        // The name now points at the new object, so whatever it displaced is
-        // unreachable: nothing in this tree ever binds one object to two
-        // names. Without this, every save kept its predecessor's blocks
-        // forever and the disk filled in proportion to how often a file was
-        // saved rather than how large it was.
-        if let Some(old) = displaced {
+        );
+        entry.modified_at = now;
+        entry.size = content.len() as u64;
+        entry.schema = schema.map(String::from);
+        if let Some(old) = previous {
+            if entry.schema.is_none() {
+                entry.schema = old.schema.clone();
+            }
+            entry.tags = old.tags.clone();
             if old.object_id != file_id {
-                let _ = self.fs.release_object(old.object_id);
+                entry
+                    .versions
+                    .push(services_storage::persistent_fs::VersionRecord {
+                        object_id: old.object_id,
+                        modified_at: old.modified_at,
+                        size: old.size,
+                    });
+            }
+            entry.versions.extend(old.versions.iter().cloned());
+            // Bounded: nothing in this tree grows without a ceiling (V11's
+            // lesson). What falls off the end is released.
+            for dropped in entry
+                .versions
+                .drain(MAX_VERSIONS.min(entry.versions.len())..)
+            {
+                let _ = self.fs.release_object(dropped.object_id);
             }
         }
+        self.fs.link_entry(self.root_id, entry, now)?;
         Ok(file_id)
+    }
+
+    /// Change what is known about `name` -- tags, bin state -- leaving the
+    /// content alone. `Ok(false)` when there is no such name.
+    pub fn update_entry(
+        &mut self,
+        name: &str,
+        now: u64,
+        change: impl FnOnce(&mut services_storage::persistent_fs::DirectoryEntry),
+    ) -> Result<bool, TransactionError> {
+        self.assert_boot_cpu();
+        self.fs.update_entry(self.root_id, name, now, change)
+    }
+
+    /// An earlier content of `name`: 0 is the newest kept version.
+    pub fn read_version(&mut self, name: &str, index: usize) -> Result<Vec<u8>, TransactionError> {
+        self.assert_boot_cpu();
+        let dir = self.fs.read_directory(self.root_id)?;
+        let entry = dir
+            .get_entry(name)
+            .ok_or_else(|| TransactionError::StorageError("File not found".into()))?;
+        let version = entry
+            .versions
+            .get(index)
+            .ok_or_else(|| TransactionError::StorageError("No such version".into()))?;
+        self.fs.read_file(version.object_id)
     }
 
     /// Read a file by name
@@ -389,6 +453,10 @@ impl BareMetalFilesystem {
                     _ => "object",
                 },
                 modified_at: entry.modified_at,
+                schema: entry.schema.clone(),
+                tags: entry.tags.clone(),
+                trashed: entry.trashed,
+                versions: entry.versions.len(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -404,8 +472,12 @@ impl BareMetalFilesystem {
     pub fn delete_file_at(&mut self, name: &str, now: u64) -> Result<(), TransactionError> {
         self.assert_boot_cpu();
         if let Some(entry) = self.fs.unlink(name, self.root_id, now)? {
-            // Deleting used to remove the name and keep the blocks.
+            // Deleting used to remove the name and keep the blocks. The
+            // kept versions go with it.
             let _ = self.fs.release_object(entry.object_id);
+            for version in &entry.versions {
+                let _ = self.fs.release_object(version.object_id);
+            }
         }
         Ok(())
     }

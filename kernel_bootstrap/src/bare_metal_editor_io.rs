@@ -9,6 +9,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use services_storage::ObjectId;
 
+/// The schema Notepad writes (GFX-057).
+pub const TEXT_SCHEMA: &str = "text/plain";
+
 /// Editor I/O error
 #[derive(Debug)]
 pub enum EditorIoError {
@@ -89,7 +92,8 @@ impl BareMetalEditorIo {
         if self.fs.list_files()?.iter().any(|n| n == name) {
             return Err(EditorIoError::StorageError(alloc::format!("{name} exists")));
         }
-        self.fs.create_file_at(name, b"", self.now)?;
+        self.fs
+            .write_named(name, b"", self.now, Some(TEXT_SCHEMA))?;
         Ok(())
     }
 
@@ -133,9 +137,53 @@ impl BareMetalEditorIo {
         path: &str,
         content: &str,
     ) -> Result<(String, DocumentHandle), EditorIoError> {
-        let object_id = self.fs.create_file_at(path, content.as_bytes(), self.now)?;
+        // Notepad writes text; the entry says so, and the name need not.
+        let object_id =
+            self.fs
+                .write_named(path, content.as_bytes(), self.now, Some(TEXT_SCHEMA))?;
         let handle = DocumentHandle::new(Some(object_id), Some(path.to_string()));
         Ok((alloc::format!("Saved as {}", path), handle))
+    }
+
+    /// Add and remove tags on `name` (GFX-057).
+    pub fn set_tags(
+        &mut self,
+        name: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), EditorIoError> {
+        let changed = self.fs.update_entry(name, self.now, |entry| {
+            entry.tags.retain(|t| !remove.contains(t));
+            for tag in add {
+                if !entry.tags.contains(tag) {
+                    entry.tags.push(tag.clone());
+                }
+            }
+            entry.tags.sort();
+        })?;
+        if changed {
+            Ok(())
+        } else {
+            Err(EditorIoError::NotFound)
+        }
+    }
+
+    /// Put `name` in the bin, or take it out.
+    pub fn set_trashed(&mut self, name: &str, trashed: bool) -> Result<(), EditorIoError> {
+        let changed = self
+            .fs
+            .update_entry(name, self.now, |entry| entry.trashed = trashed)?;
+        if changed {
+            Ok(())
+        } else {
+            Err(EditorIoError::NotFound)
+        }
+    }
+
+    /// An earlier content of `name`; 0 is the newest kept.
+    pub fn read_version(&mut self, name: &str, index: usize) -> Result<String, EditorIoError> {
+        let bytes = self.fs.read_version(name, index)?;
+        String::from_utf8(bytes).map_err(|_| EditorIoError::InvalidUtf8)
     }
 
     /// Create a new empty file

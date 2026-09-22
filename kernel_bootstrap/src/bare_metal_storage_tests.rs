@@ -148,6 +148,75 @@ mod tests {
         assert_eq!(content, "new content");
     }
 
+    /// GFX-057: a rewrite keeps the earlier content as a version, bounded;
+    /// the entry carries a schema and tags; the bin hides without losing;
+    /// removing releases the versions with the file.
+    #[test]
+    fn a_name_keeps_its_earlier_contents_its_type_and_its_tags() {
+        let fs = BareMetalFilesystem::new().unwrap();
+        let mut io = BareMetalEditorIo::with_clock(fs, 1_000);
+        io.save_as("memo", "one").unwrap();
+        let entry = |io: &mut BareMetalEditorIo| {
+            io.list_entries()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.name == "memo")
+                .expect("memo is listed")
+        };
+        let first = entry(&mut io);
+        assert_eq!(first.schema.as_deref(), Some("text/plain"));
+        assert_eq!(
+            (first.size, first.modified_at, first.versions),
+            (3, 1_000, 0)
+        );
+
+        // Seven saves: five earlier contents kept, the two oldest released.
+        for (i, text) in ["two", "three", "four", "five", "six", "seven", "eight"]
+            .iter()
+            .enumerate()
+        {
+            io = BareMetalEditorIo::with_clock(io.into_filesystem(), 2_000 + i as u64);
+            io.save_as("memo", text).unwrap();
+        }
+        let latest = entry(&mut io);
+        assert_eq!(latest.versions, crate::bare_metal_storage::MAX_VERSIONS);
+        assert_eq!(io.read_version("memo", 0).unwrap(), "seven");
+        assert_eq!(io.read_version("memo", 4).unwrap(), "three");
+        assert!(
+            io.read_version("memo", 5).is_err(),
+            "the sixth-oldest is gone"
+        );
+        assert_eq!(io.open("memo").unwrap().0, "eight");
+
+        // Tags: added, deduplicated, removed; the content untouched.
+        io.set_tags("memo", &["work".into(), "draft".into()], &[])
+            .unwrap();
+        io.set_tags("memo", &["work".into()], &["draft".into()])
+            .unwrap();
+        assert_eq!(entry(&mut io).tags, vec!["work".to_string()]);
+        assert_eq!(io.open("memo").unwrap().0, "eight");
+        assert!(io.set_tags("nobody", &[], &[]).is_err());
+
+        // The bin: hidden, not gone; a save takes it back out.
+        io.set_trashed("memo", true).unwrap();
+        assert!(entry(&mut io).trashed);
+        io.save_as("memo", "nine").unwrap();
+        assert!(
+            !entry(&mut io).trashed,
+            "writing to a binned name restores it"
+        );
+        assert_eq!(
+            entry(&mut io).tags,
+            vec!["work".to_string()],
+            "tags survive a save"
+        );
+
+        // Removing for good takes the versions with it.
+        io.delete("memo").unwrap();
+        assert!(io.list_entries().unwrap().iter().all(|e| e.name != "memo"));
+        assert!(io.read_version("memo", 0).is_err());
+    }
+
     #[test]
     fn test_editor_io_new_buffer() {
         let fs = BareMetalFilesystem::new().unwrap();

@@ -2009,49 +2009,82 @@ fn workspace_loop(
                     }
                     op @ (desk::DeskRequest::CreateFile { .. }
                     | desk::DeskRequest::RenameFile { .. }
-                    | desk::DeskRequest::DeleteFile { .. }) => {
-                        // The three file operations share one shape: do it
-                        // with the clock, say how it went, list again.
-                        let (id, name, to, verb) = match op {
+                    | desk::DeskRequest::TrashFile { .. }
+                    | desk::DeskRequest::PurgeFile { .. }
+                    | desk::DeskRequest::TagFile { .. }) => {
+                        // The file operations share one shape: do it with
+                        // the clock, say how it went, list again.
+                        let Some(fs) = workspace.take_filesystem() else {
+                            continue;
+                        };
+                        let mut io =
+                            bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                        let (id, name, text, result, opens) = match op {
                             desk::DeskRequest::CreateFile { id, name } => {
-                                (id, name, None, "Created")
+                                let result = io.create_empty(&name);
+                                (
+                                    id,
+                                    name.clone(),
+                                    alloc::format!("Created {name}"),
+                                    result,
+                                    true,
+                                )
                             }
                             desk::DeskRequest::RenameFile { id, from, to } => {
-                                (id, from, Some(to), "Renamed")
+                                let result = io.rename(&from, &to);
+                                (
+                                    id,
+                                    from.clone(),
+                                    alloc::format!("Renamed {from} to {to}"),
+                                    result,
+                                    false,
+                                )
                             }
-                            desk::DeskRequest::DeleteFile { id, name } => {
-                                (id, name, None, "Deleted")
+                            desk::DeskRequest::TrashFile { id, name, trashed } => {
+                                let result = io.set_trashed(&name, trashed);
+                                let text = if trashed {
+                                    alloc::format!("{name} is in the bin")
+                                } else {
+                                    alloc::format!("{name} is back")
+                                };
+                                (id, name.clone(), text, result, false)
                             }
-                            _ => continue,
-                        };
-                        let (result, entries) = match workspace.take_filesystem() {
-                            Some(fs) => {
-                                let mut io = bare_metal_editor_io::BareMetalEditorIo::with_clock(
-                                    fs, now_secs,
-                                );
-                                let result = match &to {
-                                    Some(to) => io.rename(&name, to),
-                                    None if verb == "Created" => io.create_empty(&name),
-                                    None => io.delete(&name),
-                                }
-                                .map_err(|e| alloc::format!("{e:?}"));
-                                let entries = io.list_entries().unwrap_or_default();
+                            desk::DeskRequest::PurgeFile { id, name } => {
+                                let result = io.delete(&name);
+                                (
+                                    id,
+                                    name.clone(),
+                                    alloc::format!("{name} removed for good"),
+                                    result,
+                                    false,
+                                )
+                            }
+                            desk::DeskRequest::TagFile {
+                                id,
+                                name,
+                                add,
+                                remove,
+                            } => {
+                                let result = io.set_tags(&name, &add, &remove);
+                                (
+                                    id,
+                                    name.clone(),
+                                    alloc::format!("Tagged {name}"),
+                                    result,
+                                    false,
+                                )
+                            }
+                            _ => {
                                 workspace.set_filesystem(io.into_filesystem());
-                                (result, entries)
+                                continue;
                             }
-                            None => (
-                                Err(alloc::string::String::from("no filesystem")),
-                                alloc::vec::Vec::new(),
-                            ),
                         };
+                        let entries = io.list_entries().unwrap_or_default();
+                        workspace.set_filesystem(io.into_filesystem());
                         match result {
                             Ok(()) => {
-                                let text = match &to {
-                                    Some(to) => alloc::format!("{verb} {name} to {to}"),
-                                    None => alloc::format!("{verb} {name}"),
-                                };
                                 desk.notify(services_gui_host::NoticeLevel::Success, text, now);
-                                if verb == "Created" {
+                                if opens {
                                     // A new file opens where it will be written.
                                     let notepad_id = desk.launch(desk::DeskApp::Notepad);
                                     desk_requests.push(desk::DeskRequest::Io {
@@ -2062,7 +2095,7 @@ fn workspace_loop(
                             }
                             Err(error) => desk.notify(
                                 services_gui_host::NoticeLevel::Error,
-                                alloc::format!("{verb} {name} failed: {error}"),
+                                alloc::format!("{text}: failed, {error:?}"),
                                 now,
                             ),
                         }

@@ -48,7 +48,7 @@ pub const GLYPH_WIDTH: usize = 8;
 pub const NOTICE_MARGIN: usize = 12;
 /// How long a desk-raised notice stays, in ticks (100 Hz).
 pub const NOTICE_TTL_TICKS: u64 = 400;
-pub const FILES_SIZE: (usize, usize) = (520, 440);
+pub const FILES_SIZE: (usize, usize) = (680, 440);
 
 /// The apps the dock offers, in dock order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,25 +89,22 @@ impl DeskApp {
             DeskApp::Terminal => TERMINAL_SIZE,
         }
     }
+}
 
+impl DeskWindow {
     /// The header chips (GFX-056): each is a key the app already answers,
-    /// so the pointer and the keyboard reach the same code.
-    pub fn actions(self) -> &'static [(&'static str, u8)] {
-        match self {
-            DeskApp::Notepad => &[
-                ("Save", crate::notepad::CTRL_S),
-                ("Save as", crate::notepad::CTRL_SHIFT_S),
-                ("Open", crate::notepad::CTRL_O),
-                ("Find", crate::notepad::CTRL_F),
+    /// so the pointer and the keyboard reach the same code. Files' depend
+    /// on its state (GFX-057).
+    pub fn actions(&self) -> Vec<(String, u8)> {
+        match &self.state {
+            AppState::Notepad(_) => alloc::vec![
+                ("Save".to_string(), crate::notepad::CTRL_S),
+                ("Save as".to_string(), crate::notepad::CTRL_SHIFT_S),
+                ("Open".to_string(), crate::notepad::CTRL_O),
+                ("Find".to_string(), crate::notepad::CTRL_F),
             ],
-            DeskApp::Files => &[
-                ("New", b'n'),
-                ("Open", b'\n'),
-                ("Rename", b'r'),
-                ("Delete", crate::notepad::KEY_DELETE),
-                ("Refresh", CTRL_R),
-            ],
-            DeskApp::Terminal => &[],
+            AppState::Files(files) => files.actions(),
+            AppState::Terminal => Vec::new(),
         }
     }
 }
@@ -124,6 +121,13 @@ pub struct FileEntry {
     pub kind: &'static str,
     /// Seconds since the epoch when last written; 0 when never stamped.
     pub modified_at: u64,
+    /// What the content is, when the writer said (GFX-057).
+    pub schema: Option<String>,
+    pub tags: Vec<String>,
+    /// In the bin.
+    pub trashed: bool,
+    /// How many earlier contents are kept.
+    pub versions: usize,
 }
 
 impl FileEntry {
@@ -132,6 +136,16 @@ impl FileEntry {
             name: name.to_string(),
             kind: "file",
             ..Self::default()
+        }
+    }
+
+    /// The type as a word: from the schema, never from the name.
+    pub fn kind_label(&self) -> &'static str {
+        match (self.kind, self.schema.as_deref()) {
+            ("folder", _) => "Folder",
+            (_, Some("text/plain")) => "Text",
+            (_, Some(_)) => "Data",
+            (_, None) => "File",
         }
     }
 }
@@ -155,33 +169,82 @@ pub enum FilesPrompt {
     New(String),
     /// A new name for the selected file.
     Rename(String),
-    /// Delete the selected file? Enter confirms.
-    ConfirmDelete,
+    /// Tags to add (and `-tag` to remove) on the selected file.
+    Tag(String),
+    /// Remove the selected file from the bin for good? Enter confirms.
+    ConfirmPurge,
 }
 
-/// The Files app's state: what the kernel listed, the selection, and any
-/// prompt in the footer.
+/// Ctrl+E: rename ("edit the name"). Ctrl+K: tag. Ctrl+B: the bin.
+pub const CTRL_E: u8 = 0x05;
+pub const CTRL_K: u8 = 0x0B;
+pub const CTRL_B: u8 = 0x02;
+
+/// The Files app's state (GFX-057): what the kernel listed, a filter typed
+/// straight into the card, a sort, whether the bin is showing, the
+/// selection within what is visible, and any prompt in the footer. There
+/// are no folders: a file is found by name or tag, and by recency.
 #[derive(Debug, Clone, Default)]
 pub struct FilesView {
     pub entries: Vec<FileEntry>,
+    /// Index into [`FilesView::visible`].
     pub selection: usize,
     pub loaded: bool,
     pub scroll: usize,
     pub prompt: Option<FilesPrompt>,
+    /// Typed into the card: matches names and tags, case-insensitively.
+    pub filter: String,
+    /// Sorted by name rather than by recency.
+    pub by_name: bool,
+    /// Showing the bin instead of the files.
+    pub bin: bool,
 }
 
 impl FilesView {
+    /// Indices into `entries` that the card shows, in display order.
+    pub fn visible(&self) -> Vec<usize> {
+        let filter = self.filter.to_ascii_lowercase();
+        let mut shown: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.trashed == self.bin)
+            .filter(|(_, e)| {
+                filter.is_empty()
+                    || e.name.to_ascii_lowercase().contains(&filter)
+                    || e.tags
+                        .iter()
+                        .any(|t| t.to_ascii_lowercase().contains(&filter))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.by_name {
+            shown.sort_by(|a, b| self.entries[*a].name.cmp(&self.entries[*b].name));
+        } else {
+            shown.sort_by(|a, b| {
+                self.entries[*b]
+                    .modified_at
+                    .cmp(&self.entries[*a].modified_at)
+                    .then_with(|| self.entries[*a].name.cmp(&self.entries[*b].name))
+            });
+        }
+        shown
+    }
+
     fn select(&mut self, delta: isize) {
-        if self.entries.is_empty() {
+        let count = self.visible().len();
+        if count == 0 {
             self.selection = 0;
             return;
         }
-        let last = self.entries.len() as isize - 1;
+        let last = count as isize - 1;
         self.selection = (self.selection as isize + delta).clamp(0, last) as usize;
     }
 
-    fn selected(&self) -> Option<&FileEntry> {
-        self.entries.get(self.selection)
+    pub fn selected(&self) -> Option<&FileEntry> {
+        self.visible()
+            .get(self.selection)
+            .map(|index| &self.entries[*index])
     }
 
     /// The footer: a prompt while one is open, otherwise everything known
@@ -190,51 +253,90 @@ impl FilesView {
     fn footer(&self) -> String {
         match &self.prompt {
             Some(FilesPrompt::New(name)) => {
-                return alloc::format!("New file: {name}_   (Enter creates, Esc cancels)")
+                return alloc::format!("New: {name}_   a name, no suffix needed   (Enter, Esc)")
             }
             Some(FilesPrompt::Rename(name)) => {
                 return alloc::format!("Rename to: {name}_   (Enter renames, Esc cancels)")
             }
-            Some(FilesPrompt::ConfirmDelete) => {
+            Some(FilesPrompt::Tag(tags)) => {
+                return alloc::format!(
+                    "Tags: {tags}_   space-separated, -tag removes   (Enter, Esc)"
+                )
+            }
+            Some(FilesPrompt::ConfirmPurge) => {
                 let name = self.selected().map(|e| e.name.as_str()).unwrap_or("");
-                return alloc::format!("Delete {name}?   Enter deletes, Esc keeps it");
+                return alloc::format!("Remove {name} for good?   Enter removes, Esc keeps it");
             }
             None => {}
         }
         if !self.loaded {
             return "Reading the filesystem...".to_string();
         }
-        match self.selected() {
-            Some(entry) => alloc::format!(
-                "{}   {}   {}   written {}   Enter opens",
-                entry.name,
-                format_size(entry.size),
-                entry.kind,
-                crate::rtc::format_unix_minutes(entry.modified_at)
-            ),
-            None => "No files yet   N makes one".to_string(),
+        let mut text = String::new();
+        if !self.filter.is_empty() {
+            text.push_str(&alloc::format!(
+                "Filter: {}_   {} of {}   ",
+                self.filter,
+                self.visible().len(),
+                self.entries
+                    .iter()
+                    .filter(|e| e.trashed == self.bin)
+                    .count()
+            ));
         }
+        match self.selected() {
+            Some(entry) => {
+                text.push_str(&alloc::format!(
+                    "{}   {}   {}",
+                    entry.name,
+                    entry.kind_label(),
+                    format_size(entry.size)
+                ));
+                if !entry.tags.is_empty() {
+                    text.push_str(&alloc::format!("   #{}", entry.tags.join(" #")));
+                }
+                text.push_str(&alloc::format!(
+                    "   written {}",
+                    crate::rtc::format_unix_minutes(entry.modified_at)
+                ));
+                if entry.versions > 0 {
+                    text.push_str(&alloc::format!("   {} earlier", entry.versions));
+                }
+                text.push_str(if self.bin {
+                    "   Enter restores"
+                } else {
+                    "   Enter opens"
+                });
+            }
+            None if self.bin => text.push_str("The bin is empty"),
+            None if !self.filter.is_empty() => text.push_str("Nothing matches"),
+            None => {
+                text.push_str("No files yet   Ctrl+N makes one, or just start typing to search")
+            }
+        }
+        text
     }
 
-    /// One row: name, size, kind and time in columns that fit `columns`
-    /// character cells. The name column takes what the fixed columns
-    /// leave; narrow cards lose the rightmost columns first. The first
-    /// build gave the name 28 cells and the date then fell off a 63-cell
-    /// card, so stamped files showed less than unstamped ones.
+    /// One row: name, tags, type, size and time in columns that fit
+    /// `columns` character cells. The name column takes what the fixed
+    /// columns leave; narrow cards lose the rightmost columns first.
     fn line(entry: &FileEntry, columns: usize) -> String {
         let when = crate::rtc::format_unix_minutes(entry.modified_at);
         let size = format_size(entry.size);
+        let tags: String = entry.tags.iter().map(|t| alloc::format!("#{t} ")).collect();
+        let tags: String = tags.trim_end().chars().take(14).collect();
         let clipped = |width: usize| -> String { entry.name.chars().take(width).collect() };
-        // " {:>8}   {:<6}  {:16}" after the name.
-        const TAIL_FULL: usize = 1 + 8 + 3 + 6 + 2 + 16;
+        // " {:<14} {:<6} {:>8}  {:16}" after the name.
+        const TAIL_FULL: usize = 1 + 14 + 1 + 6 + 1 + 8 + 2 + 16;
         const TAIL_SHORT: usize = 1 + 8;
         if columns >= TAIL_FULL + 12 {
             let name_w = columns - TAIL_FULL;
             alloc::format!(
-                "{:<name_w$} {:>8}   {:<6}  {}",
+                "{:<name_w$} {:<14} {:<6} {:>8}  {}",
                 clipped(name_w),
+                tags,
+                entry.kind_label(),
                 size,
-                entry.kind,
                 when
             )
         } else if columns >= TAIL_SHORT + 8 {
@@ -244,6 +346,45 @@ impl FilesView {
             clipped(columns)
         }
     }
+
+    /// The header chips for this state (GFX-057): the bin has its own.
+    fn actions(&self) -> Vec<(String, u8)> {
+        let sort = if self.by_name { "A-Z" } else { "Recent" };
+        if self.bin {
+            alloc::vec![
+                ("Restore".to_string(), b'\n'),
+                ("Remove".to_string(), crate::notepad::KEY_DELETE),
+                (sort.to_string(), crate::notepad::CTRL_S),
+                ("Files".to_string(), CTRL_B),
+            ]
+        } else {
+            alloc::vec![
+                ("New".to_string(), crate::notepad::CTRL_N),
+                ("Rename".to_string(), CTRL_E),
+                ("Tag".to_string(), CTRL_K),
+                ("Bin it".to_string(), crate::notepad::KEY_DELETE),
+                (sort.to_string(), crate::notepad::CTRL_S),
+                ("Bin".to_string(), CTRL_B),
+            ]
+        }
+    }
+}
+
+/// `work draft -old` -> add `work`, `draft`; remove `old`.
+pub fn parse_tag_edit(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
+    for word in text.split_whitespace() {
+        let word = word.trim_start_matches('#');
+        if let Some(rest) = word.strip_prefix('-') {
+            if !rest.is_empty() {
+                remove.push(rest.to_ascii_lowercase());
+            }
+        } else if !word.is_empty() {
+            add.push(word.to_ascii_lowercase());
+        }
+    }
+    (add, remove)
 }
 
 /// Break `text` into lines of at most `columns` characters at spaces; a
@@ -380,8 +521,21 @@ pub enum DeskRequest {
         from: String,
         to: String,
     },
-    /// Remove `name`, then list again for `id`.
-    DeleteFile { id: ViewId, name: String },
+    /// Put `name` in the bin (or take it out), then list again (GFX-057).
+    TrashFile {
+        id: ViewId,
+        name: String,
+        trashed: bool,
+    },
+    /// Remove `name` for good, then list again.
+    PurgeFile { id: ViewId, name: String },
+    /// Add and remove tags on `name`, then list again.
+    TagFile {
+        id: ViewId,
+        name: String,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -631,8 +785,9 @@ impl Desk {
             let keep = files.selected().map(|e| e.name.clone());
             files.entries = entries;
             files.loaded = true;
+            let visible = files.visible();
             files.selection = keep
-                .and_then(|name| files.entries.iter().position(|e| e.name == name))
+                .and_then(|name| visible.iter().position(|i| files.entries[*i].name == name))
                 .unwrap_or(0);
             files.select(0);
         }
@@ -643,10 +798,10 @@ impl Desk {
 
     /// A header chip was pressed: the app's key for it (GFX-056).
     fn card_action(&mut self, id: ViewId, index: usize) -> (Option<DeskRequest>, bool) {
-        let Some(app) = self.window(id).map(|w| w.app) else {
+        let Some(actions) = self.window(id).map(|w| w.actions()) else {
             return (None, false);
         };
-        let Some((_, byte)) = app.actions().get(index) else {
+        let Some((_, byte)) = actions.get(index) else {
             return (None, false);
         };
         self.handle_app_key(id, *byte)
@@ -1127,7 +1282,7 @@ impl Desk {
                                 self.window_mut(*target).and_then(|w| w.files_mut())
                             {
                                 let row = files.scroll + line;
-                                if row < files.entries.len() {
+                                if row < files.visible().len() {
                                     open = files.selection == row;
                                     files.selection = row;
                                 }
@@ -1275,7 +1430,7 @@ impl Desk {
             return (None, false);
         };
         if byte == crate::notepad::CTRL_N
-            && self.window(id).map(|w| w.app) != Some(DeskApp::Notepad)
+            && self.window(id).map(|w| w.app) == Some(DeskApp::Terminal)
         {
             self.launch(DeskApp::Notepad);
             return (None, true);
@@ -1289,7 +1444,7 @@ impl Desk {
     /// selects, the next opens, and there is no double-click clock to beat.
     fn open_files_selection(&mut self, id: ViewId) -> Option<DeskRequest> {
         let files = self.window_mut(id).and_then(|w| w.files_mut())?;
-        let name = files.entries.get(files.selection).map(|e| e.name.clone())?;
+        let name = files.selected().map(|e| e.name.clone())?;
         let notepad_id = self.launch(DeskApp::Notepad);
         Some(DeskRequest::Io {
             id: notepad_id,
@@ -1322,6 +1477,7 @@ impl Desk {
                 if let Some(prompt) = files.prompt.clone() {
                     return Self::files_prompt_key(files, id, prompt, byte);
                 }
+                let in_bin = files.bin;
                 match byte {
                     crate::notepad::KEY_UP => {
                         files.select(-1);
@@ -1344,37 +1500,99 @@ impl Desk {
                         (None, true)
                     }
                     crate::notepad::KEY_END => {
-                        files.selection = files.entries.len().saturating_sub(1);
+                        files.selection = files.visible().len().saturating_sub(1);
                         (None, true)
                     }
                     CTRL_R => (Some(DeskRequest::ListFiles { id }), true),
-                    b'n' | b'N' => {
+                    crate::notepad::CTRL_S => {
+                        files.by_name = !files.by_name;
+                        files.selection = 0;
+                        (None, true)
+                    }
+                    CTRL_B => {
+                        files.bin = !files.bin;
+                        files.selection = 0;
+                        files.scroll = 0;
+                        (None, true)
+                    }
+                    crate::notepad::CTRL_N if !in_bin => {
                         files.prompt = Some(FilesPrompt::New(String::new()));
                         (None, true)
                     }
-                    b'r' | b'R' => match files.selected() {
+                    CTRL_E if !in_bin => match files.selected() {
                         Some(entry) => {
                             files.prompt = Some(FilesPrompt::Rename(entry.name.clone()));
                             (None, true)
                         }
                         None => (None, false),
                     },
-                    crate::notepad::KEY_DELETE | crate::notepad::BACKSPACE => {
-                        if files.selected().is_some() {
-                            files.prompt = Some(FilesPrompt::ConfirmDelete);
+                    CTRL_K if !in_bin => match files.selected() {
+                        Some(_) => {
+                            files.prompt = Some(FilesPrompt::Tag(String::new()));
+                            (None, true)
+                        }
+                        None => (None, false),
+                    },
+                    crate::notepad::KEY_DELETE => match files.selected() {
+                        Some(entry) if in_bin => {
+                            let _ = entry;
+                            files.prompt = Some(FilesPrompt::ConfirmPurge);
+                            (None, true)
+                        }
+                        Some(entry) => (
+                            Some(DeskRequest::TrashFile {
+                                id,
+                                name: entry.name.clone(),
+                                trashed: true,
+                            }),
+                            true,
+                        ),
+                        None => (None, false),
+                    },
+                    crate::notepad::BACKSPACE => {
+                        if files.filter.pop().is_some() {
+                            files.selection = 0;
                             (None, true)
                         } else {
                             (None, false)
+                        }
+                    }
+                    crate::notepad::ESC => {
+                        if files.filter.is_empty() {
+                            (None, false)
+                        } else {
+                            files.filter.clear();
+                            files.selection = 0;
+                            (None, true)
                         }
                     }
                     crate::notepad::CTRL_W => {
                         self.close(id);
                         (None, true)
                     }
+                    b'\n' | b'\r' if in_bin => match files.selected() {
+                        Some(entry) => (
+                            Some(DeskRequest::TrashFile {
+                                id,
+                                name: entry.name.clone(),
+                                trashed: false,
+                            }),
+                            true,
+                        ),
+                        None => (None, false),
+                    },
                     b'\n' | b'\r' => match self.open_files_selection(id) {
                         Some(request) => (Some(request), true),
                         None => (None, false),
                     },
+                    // Typing is searching: the filter is the card's search
+                    // line, and it matches tags as well as names.
+                    0x20..=0x7E if files.filter.len() < 40 => {
+                        files.filter.push(byte as char);
+                        files.selection = 0;
+                        files.scroll = 0;
+                        (None, true)
+                    }
                     _ => (None, false),
                 }
             }
@@ -1408,25 +1626,36 @@ impl Desk {
         prompt: FilesPrompt,
         byte: u8,
     ) -> (Option<DeskRequest>, bool) {
+        let selected = files.selected().map(|e| e.name.clone());
         match (prompt, byte) {
             (_, crate::notepad::ESC) => {
                 files.prompt = None;
                 (None, true)
             }
-            (FilesPrompt::ConfirmDelete, b'\n' | b'\r') => {
+            (FilesPrompt::ConfirmPurge, b'\n' | b'\r') => {
                 files.prompt = None;
-                match files.selected() {
-                    Some(entry) => (
-                        Some(DeskRequest::DeleteFile {
-                            id,
-                            name: entry.name.clone(),
-                        }),
-                        true,
-                    ),
+                match selected {
+                    Some(name) => (Some(DeskRequest::PurgeFile { id, name }), true),
                     None => (None, true),
                 }
             }
-            (FilesPrompt::ConfirmDelete, _) => (None, false),
+            (FilesPrompt::ConfirmPurge, _) => (None, false),
+            (FilesPrompt::Tag(text), b'\n' | b'\r') => {
+                files.prompt = None;
+                let (add, remove) = parse_tag_edit(&text);
+                match selected {
+                    Some(name) if !(add.is_empty() && remove.is_empty()) => (
+                        Some(DeskRequest::TagFile {
+                            id,
+                            name,
+                            add,
+                            remove,
+                        }),
+                        true,
+                    ),
+                    _ => (None, true),
+                }
+            }
             (FilesPrompt::New(name) | FilesPrompt::Rename(name), b'\n' | b'\r') => {
                 let name = name.trim().to_string();
                 let renaming = matches!(files.prompt, Some(FilesPrompt::Rename(_)));
@@ -1435,7 +1664,7 @@ impl Desk {
                 }
                 files.prompt = None;
                 if renaming {
-                    let from = files.selected().map(|e| e.name.clone()).unwrap_or_default();
+                    let from = selected.unwrap_or_default();
                     if from == name {
                         return (None, true);
                     }
@@ -1444,19 +1673,24 @@ impl Desk {
                     (Some(DeskRequest::CreateFile { id, name }), true)
                 }
             }
-            (FilesPrompt::New(mut name) | FilesPrompt::Rename(mut name), byte) => {
-                let renaming = matches!(files.prompt, Some(FilesPrompt::Rename(_)));
+            (
+                FilesPrompt::New(mut text)
+                | FilesPrompt::Rename(mut text)
+                | FilesPrompt::Tag(mut text),
+                byte,
+            ) => {
+                let kind = files.prompt.clone();
                 match byte {
                     crate::notepad::BACKSPACE => {
-                        name.pop();
+                        text.pop();
                     }
-                    0x20..=0x7E if name.len() < 64 => name.push(byte as char),
+                    0x20..=0x7E if text.len() < 64 => text.push(byte as char),
                     _ => return (None, false),
                 }
-                files.prompt = Some(if renaming {
-                    FilesPrompt::Rename(name)
-                } else {
-                    FilesPrompt::New(name)
+                files.prompt = Some(match kind {
+                    Some(FilesPrompt::Rename(_)) => FilesPrompt::Rename(text),
+                    Some(FilesPrompt::Tag(_)) => FilesPrompt::Tag(text),
+                    _ => FilesPrompt::New(text),
                 });
                 (None, true)
             }
@@ -1537,6 +1771,8 @@ impl Desk {
                     (lines, notepad.title(), notepad.footer(), cursor)
                 }
                 AppState::Files(files) => {
+                    let visible = files.visible();
+                    files.selection = files.selection.min(visible.len().saturating_sub(1));
                     if files.selection < files.scroll {
                         files.scroll = files.selection;
                     } else if rows > 0 && files.selection >= files.scroll + rows {
@@ -1547,17 +1783,17 @@ impl Desk {
                         .width
                         .saturating_sub(services_gui_host::CARD_PADDING * 2)
                         / GLYPH_WIDTH;
-                    let lines: Vec<String> = files
-                        .entries
+                    let lines: Vec<String> = visible
                         .iter()
                         .skip(files.scroll)
                         .take(rows)
-                        .map(|entry| FilesView::line(entry, columns))
+                        .map(|index| FilesView::line(&files.entries[*index], columns))
                         .collect();
-                    if !files.entries.is_empty() {
+                    if !visible.is_empty() {
                         highlight = Some(files.selection - files.scroll);
                     }
-                    (lines, "Files".to_string(), files.footer(), None)
+                    let title = if files.bin { "Files - Bin" } else { "Files" };
+                    (lines, title.to_string(), files.footer(), None)
                 }
                 AppState::Terminal => {
                     let view = terminal.cloned().unwrap_or_default();
@@ -1584,10 +1820,9 @@ impl Desk {
                 .with_selection(selection)
                 .with_actions(
                     window
-                        .app
                         .actions()
-                        .iter()
-                        .map(|(label, _)| label.to_string())
+                        .into_iter()
+                        .map(|(label, _)| label)
                         .collect(),
                 );
             if focused {
@@ -2269,15 +2504,20 @@ mod tests {
     }
 
     #[test]
-    fn files_shows_size_kind_and_time_and_narrows_to_the_name() {
+    fn files_shows_tags_type_size_and_time_and_narrows_to_the_name() {
         let entry = FileEntry {
-            name: "notes.txt".to_string(),
+            name: "notes".to_string(),
             size: 1536,
             kind: "file",
             modified_at: 1_789_946_225,
+            schema: Some("text/plain".to_string()),
+            tags: alloc::vec!["work".to_string()],
+            trashed: false,
+            versions: 2,
         };
-        let line = FilesView::line(&entry, 80);
-        assert!(line.starts_with("notes.txt"), "{line}");
+        let line = FilesView::line(&entry, 90);
+        assert!(line.starts_with("notes"), "{line}");
+        assert!(line.contains("#work") && line.contains("Text"), "{line}");
         assert!(
             line.contains("1.5 KB") && line.contains("2026-09-20 23:17"),
             "{line}"
@@ -2287,86 +2527,174 @@ mod tests {
             narrow.contains("1.5 KB") && !narrow.contains("2026"),
             "{narrow}"
         );
-        assert_eq!(FilesView::line(&entry, 5), "notes");
+        assert_eq!(FilesView::line(&entry, 3), "not");
         assert_eq!(format_size(12), "12 B");
-        assert_eq!(format_size(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
+        assert_eq!(FileEntry::named("x").kind_label(), "File");
 
         let mut files = FilesView::default();
         files.entries = alloc::vec![entry];
         files.loaded = true;
-        assert!(files.footer().contains("1.5 KB") && files.footer().contains("written 2026"));
+        let footer = files.footer();
+        assert!(
+            footer.contains("Text") && footer.contains("#work"),
+            "{footer}"
+        );
+        assert!(
+            footer.contains("2 earlier") && footer.contains("written 2026"),
+            "{footer}"
+        );
         files.entries.clear();
-        assert!(files.footer().contains("N makes one"));
+        assert!(files.footer().contains("start typing"));
     }
 
     #[test]
-    fn files_creates_renames_and_deletes_through_footer_prompts() {
+    fn typing_in_files_filters_by_name_or_tag_and_recency_sorts_first() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Files);
+        let mut old = FileEntry::named("alpha");
+        old.modified_at = 100;
+        let mut new = FileEntry::named("zeta");
+        new.modified_at = 900;
+        new.tags = alloc::vec!["work".to_string()];
+        let mut binned = FileEntry::named("gone");
+        binned.trashed = true;
+        desk.files_listed(id, alloc::vec![old, new, binned]);
+        let names = |desk: &Desk| -> Vec<String> {
+            let files = desk.window(id).unwrap().files().unwrap();
+            files
+                .visible()
+                .iter()
+                .map(|i| files.entries[*i].name.clone())
+                .collect()
+        };
+        // Recent first, the bin hidden.
+        assert_eq!(
+            names(&desk),
+            alloc::vec!["zeta".to_string(), "alpha".to_string()]
+        );
+        // Ctrl+S: by name.
+        desk.handle_key(crate::notepad::CTRL_S);
+        assert_eq!(
+            names(&desk),
+            alloc::vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        // Typing filters by tag too; Backspace and Esc undo it.
+        for byte in b"wor" {
+            desk.handle_key(*byte);
+        }
+        assert_eq!(names(&desk), alloc::vec!["zeta".to_string()]);
+        let footer = desk.window(id).unwrap().files().unwrap().footer();
+        assert!(footer.starts_with("Filter: wor_   1 of 2"), "{footer}");
+        desk.handle_key(crate::notepad::ESC);
+        assert_eq!(names(&desk).len(), 2);
+        // The bin shows only what is in it, with its own chips.
+        desk.handle_key(CTRL_B);
+        assert_eq!(names(&desk), alloc::vec!["gone".to_string()]);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.frame.title.as_deref(), Some("Files - Bin"));
+        assert_eq!(
+            card.actions,
+            alloc::vec!["Restore", "Remove", "A-Z", "Files"]
+        );
+        // Enter restores; Delete asks, then removes for good.
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::TrashFile {
+                id,
+                name: "gone".to_string(),
+                trashed: false
+            })
+        );
+        desk.handle_key(crate::notepad::KEY_DELETE);
+        assert!(desk
+            .window(id)
+            .unwrap()
+            .files()
+            .unwrap()
+            .footer()
+            .starts_with("Remove gone for good?"));
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::PurgeFile {
+                id,
+                name: "gone".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn files_creates_renames_tags_and_bins_through_footer_prompts() {
         let mut desk = Desk::new(1280, 800);
         let id = desk.launch(DeskApp::Files);
         desk.files_listed(
             id,
-            alloc::vec![FileEntry::named("a.txt"), FileEntry::named("b.txt")],
+            alloc::vec![FileEntry::named("a"), FileEntry::named("b")],
         );
-        // New: a name, Enter.
-        desk.handle_key(b'n');
-        for byte in b"c.txt" {
+        // Ctrl+N: a name, Enter. No suffix.
+        desk.handle_key(crate::notepad::CTRL_N);
+        for byte in b"memo" {
             desk.handle_key(*byte);
         }
         let footer = desk.window(id).unwrap().files().unwrap().footer();
-        assert!(footer.starts_with("New file: c.txt_"), "{footer}");
+        assert!(footer.starts_with("New: memo_"), "{footer}");
         let (request, _) = desk.handle_key(b'\n');
         assert_eq!(
             request,
             Some(DeskRequest::CreateFile {
                 id,
-                name: "c.txt".to_string()
+                name: "memo".to_string()
             })
         );
-        // Delete asks first; Esc keeps it, Enter does it.
+        // Delete bins without asking: it is reversible.
         desk.handle_key(crate::notepad::KEY_DOWN);
-        desk.handle_key(crate::notepad::KEY_DELETE);
-        assert!(desk
-            .window(id)
-            .unwrap()
-            .files()
-            .unwrap()
-            .footer()
-            .starts_with("Delete b.txt?"));
-        desk.handle_key(crate::notepad::ESC);
-        assert!(desk.window(id).unwrap().files().unwrap().prompt.is_none());
-        desk.handle_key(crate::notepad::KEY_DELETE);
-        let (request, _) = desk.handle_key(b'\n');
+        let (request, _) = desk.handle_key(crate::notepad::KEY_DELETE);
         assert_eq!(
             request,
-            Some(DeskRequest::DeleteFile {
+            Some(DeskRequest::TrashFile {
                 id,
-                name: "b.txt".to_string()
+                name: "b".to_string(),
+                trashed: true
             })
         );
         // Rename starts from the current name; an unchanged name is a no-op.
-        desk.handle_key(b'r');
+        desk.handle_key(CTRL_E);
         assert!(desk
             .window(id)
             .unwrap()
             .files()
             .unwrap()
             .footer()
-            .starts_with("Rename to: b.txt_"));
+            .starts_with("Rename to: b_"));
         let (request, _) = desk.handle_key(b'\n');
         assert_eq!(request, None);
-        desk.handle_key(b'r');
+        desk.handle_key(CTRL_E);
         desk.handle_key(crate::notepad::BACKSPACE);
-        desk.handle_key(crate::notepad::BACKSPACE);
-        desk.handle_key(crate::notepad::BACKSPACE);
-        desk.handle_key(b'm');
-        desk.handle_key(b'd');
+        desk.handle_key(b'c');
         let (request, _) = desk.handle_key(b'\n');
         assert_eq!(
             request,
             Some(DeskRequest::RenameFile {
                 id,
-                from: "b.txt".to_string(),
-                to: "b.md".to_string()
+                from: "b".to_string(),
+                to: "c".to_string()
+            })
+        );
+        // Tags: words add, -word removes, # is optional.
+        desk.handle_key(CTRL_K);
+        for byte in b"Work #draft -old" {
+            desk.handle_key(*byte);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::TagFile {
+                id,
+                name: "b".to_string(),
+                add: alloc::vec!["work".to_string(), "draft".to_string()],
+                remove: alloc::vec!["old".to_string()],
             })
         );
         // Ctrl+R lists again; a refresh keeps the selection by name.
@@ -2377,13 +2705,20 @@ mod tests {
         desk.files_listed(
             id,
             alloc::vec![
-                FileEntry::named("a.txt"),
-                FileEntry::named("b.md"),
-                FileEntry::named("c.txt")
+                FileEntry::named("a"),
+                FileEntry::named("b"),
+                FileEntry::named("memo")
             ],
         );
-        // "b.txt" is gone, so the selection falls back to the top.
-        assert_eq!(desk.window(id).unwrap().files().unwrap().selection, 0);
+        assert_eq!(
+            desk.window(id)
+                .unwrap()
+                .files()
+                .unwrap()
+                .selected()
+                .map(|e| e.name.as_str()),
+            Some("b")
+        );
     }
 
     #[test]
@@ -2419,7 +2754,7 @@ mod tests {
         let card = windows.iter().find(|w| w.frame.view_id == files).unwrap();
         assert_eq!(
             card.actions,
-            alloc::vec!["New", "Open", "Rename", "Delete", "Refresh"]
+            alloc::vec!["New", "Rename", "Tag", "Bin it", "Recent", "Bin"]
         );
         let terminal = desk.launch(DeskApp::Terminal);
         let windows = desk.windows("", true, None);
