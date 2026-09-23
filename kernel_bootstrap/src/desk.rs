@@ -33,6 +33,12 @@ pub const WALLPAPER: Wallpaper = Wallpaper {
 
 /// What Look calls the two backgrounds.
 pub const WALLPAPERS: [&str; 2] = ["Picture", "Gradient"];
+
+/// How many spaces the desk has (GFX-067): four desks on one screen, each
+/// with its own cards. Ctrl+1..4 switches, Ctrl+Shift+1..4 moves the
+/// focused card, and the strip in the middle of the top bar shows where
+/// you are and takes a click.
+pub const SPACES: usize = 4;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::notepad::{Notepad, NotepadEffect};
@@ -687,6 +693,8 @@ pub struct DeskWindow {
     pub restore: Option<RasterRect>,
     /// Tucked into the dock: not drawn, not focusable, waiting on its tile.
     pub tucked: bool,
+    /// Which space the card is on (GFX-067).
+    pub space: usize,
     pub state: AppState,
 }
 
@@ -827,10 +835,14 @@ pub enum PaletteAction {
     Find,
     ToggleTheme,
     History,
+    /// Go to space 1..4 (GFX-067).
+    Space(usize),
+    /// Move the focused card to space 1..4.
+    MoveToSpace(usize),
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 20] = [
+    pub const ALL: [PaletteAction; 28] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -851,6 +863,14 @@ impl PaletteAction {
         PaletteAction::Find,
         PaletteAction::ToggleTheme,
         PaletteAction::History,
+        PaletteAction::Space(0),
+        PaletteAction::Space(1),
+        PaletteAction::Space(2),
+        PaletteAction::Space(3),
+        PaletteAction::MoveToSpace(0),
+        PaletteAction::MoveToSpace(1),
+        PaletteAction::MoveToSpace(2),
+        PaletteAction::MoveToSpace(3),
     ];
 
     pub const fn label(self) -> &'static str {
@@ -875,6 +895,14 @@ impl PaletteAction {
             PaletteAction::Find => "Find...",
             PaletteAction::ToggleTheme => "Look: themes and accents",
             PaletteAction::History => "Earlier versions of this document",
+            PaletteAction::Space(0) => "Go to space 1",
+            PaletteAction::Space(1) => "Go to space 2",
+            PaletteAction::Space(2) => "Go to space 3",
+            PaletteAction::Space(_) => "Go to space 4",
+            PaletteAction::MoveToSpace(0) => "Move this card to space 1",
+            PaletteAction::MoveToSpace(1) => "Move this card to space 2",
+            PaletteAction::MoveToSpace(2) => "Move this card to space 3",
+            PaletteAction::MoveToSpace(_) => "Move this card to space 4",
         }
     }
 
@@ -900,6 +928,14 @@ impl PaletteAction {
             PaletteAction::Find => "Ctrl+F",
             PaletteAction::ToggleTheme => "",
             PaletteAction::History => "Ctrl+Y",
+            PaletteAction::Space(0) => "Ctrl+1",
+            PaletteAction::Space(1) => "Ctrl+2",
+            PaletteAction::Space(2) => "Ctrl+3",
+            PaletteAction::Space(_) => "Ctrl+4",
+            PaletteAction::MoveToSpace(0) => "Ctrl+Shift+1",
+            PaletteAction::MoveToSpace(1) => "Ctrl+Shift+2",
+            PaletteAction::MoveToSpace(2) => "Ctrl+Shift+3",
+            PaletteAction::MoveToSpace(_) => "Ctrl+Shift+4",
         }
     }
 
@@ -928,6 +964,7 @@ impl PaletteAction {
                 | PaletteAction::SnapRight
                 | PaletteAction::Maximise
                 | PaletteAction::Tuck
+                | PaletteAction::MoveToSpace(_)
         )
     }
 }
@@ -1073,6 +1110,8 @@ pub struct Desk {
     welcome_dismissed: bool,
     /// Notepads whose pending save is an autosave: no notice when it lands.
     quiet_saves: Vec<ViewId>,
+    /// The space on screen (GFX-067).
+    space: usize,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
@@ -1110,6 +1149,7 @@ impl Desk {
             recent: Vec::new(),
             welcome_dismissed: false,
             quiet_saves: Vec::new(),
+            space: 0,
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
@@ -1324,6 +1364,7 @@ impl Desk {
             z,
             restore: None,
             tucked: false,
+            space: self.space,
             state: match app {
                 DeskApp::Notepad => AppState::Notepad(Notepad::new()),
                 DeskApp::Files => AppState::Files(FilesView::default()),
@@ -1370,13 +1411,99 @@ impl Desk {
             window.tucked = true;
         }
         if self.focus == Some(id) {
-            self.focus = self
-                .windows
-                .iter()
-                .filter(|w| !w.tucked)
-                .max_by_key(|w| w.z)
-                .map(|w| w.id);
+            self.focus = self.topmost_on_stage();
         }
+    }
+
+    /// Whether a card is drawn and takes focus: on this space, not tucked.
+    fn on_stage(&self, window: &DeskWindow) -> bool {
+        !window.tucked && window.space == self.space
+    }
+
+    /// The highest card on this space, for focus to fall back to.
+    fn topmost_on_stage(&self) -> Option<ViewId> {
+        self.windows
+            .iter()
+            .filter(|w| self.on_stage(w))
+            .max_by_key(|w| w.z)
+            .map(|w| w.id)
+    }
+
+    /// The space on screen.
+    pub fn space(&self) -> usize {
+        self.space
+    }
+
+    /// Show space `index` (GFX-067): focus goes to its highest card, or to
+    /// nothing, and the palette closes. Returns whether anything changed.
+    pub fn go_to_space(&mut self, index: usize) -> bool {
+        if index >= SPACES || index == self.space {
+            return false;
+        }
+        self.space = index;
+        self.focus = self.topmost_on_stage();
+        self.palette = None;
+        self.drag = None;
+        self.resize = None;
+        self.text_select = None;
+        true
+    }
+
+    /// Move the focused card to space `index` and follow it there.
+    pub fn move_focused_to_space(&mut self, index: usize) -> bool {
+        if index >= SPACES {
+            return false;
+        }
+        let Some(id) = self.focus else {
+            return false;
+        };
+        if let Some(window) = self.window_mut(id) {
+            window.space = index;
+        }
+        self.space = index;
+        self.raise(id);
+        true
+    }
+
+    /// How many cards each space holds, for the strip.
+    fn space_counts(&self) -> [usize; SPACES] {
+        let mut counts = [0; SPACES];
+        for window in &self.windows {
+            if window.app != DeskApp::Welcome {
+                counts[window.space.min(SPACES - 1)] += 1;
+            }
+        }
+        counts
+    }
+
+    /// The top bar's centre text: `[1] 2 3 4`, with a dot after a space
+    /// that holds cards, so the strip says where things are.
+    fn space_strip(&self) -> String {
+        let counts = self.space_counts();
+        let mut strip = String::new();
+        for index in 0..SPACES {
+            if index > 0 {
+                strip.push_str("  ");
+            }
+            let mark = if counts[index] > 0 { "." } else { " " };
+            if index == self.space {
+                strip.push_str(&alloc::format!("[{}]{mark}", index + 1));
+            } else {
+                strip.push_str(&alloc::format!(" {} {mark}", index + 1));
+            }
+        }
+        strip
+    }
+
+    /// Which space a click on top-bar text cell `column` means, if any.
+    fn space_at_column(&self, column: usize) -> Option<usize> {
+        let strip = self.space_strip();
+        let start = services_gui_host::top_bar_centre_column(self.width, strip.chars().count());
+        let offset = column.checked_sub(start)?;
+        // Each space is 4 cells wide, with two between.
+        let cell = offset % 6;
+        let index = offset / 6;
+        (cell < 4 && index < SPACES).then_some(index)
     }
 
     fn untuck(&mut self, id: ViewId) {
@@ -1451,6 +1578,14 @@ impl Desk {
             PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
             PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
             PaletteAction::History => self.forward_to_notepad(crate::notepad::CTRL_Y),
+            PaletteAction::Space(index) => {
+                self.go_to_space(index);
+                None
+            }
+            PaletteAction::MoveToSpace(index) => {
+                self.move_focused_to_space(index);
+                None
+            }
             PaletteAction::CloseWindow => {
                 if let Some(id) = self.focus {
                     self.close(id);
@@ -1581,11 +1716,20 @@ impl Desk {
     /// Bring `id` to the front and give it focus.
     pub fn raise(&mut self, id: ViewId) {
         let z = self.next_z;
-        if let Some(window) = self.window_mut(id) {
-            window.z = z;
-            window.tucked = false;
-            self.next_z += 1;
-            self.focus = Some(id);
+        let Some(window) = self.window_mut(id) else {
+            return;
+        };
+        window.z = z;
+        window.tucked = false;
+        let space = window.space;
+        self.next_z += 1;
+        self.focus = Some(id);
+        // A card on another space brings you to it (GFX-067): the dock
+        // tile, a palette row, Ctrl+Tab never leave you looking at
+        // nothing.
+        if space != self.space {
+            self.space = space;
+            self.palette = None;
         }
     }
 
@@ -1605,19 +1749,14 @@ impl Desk {
         }
         if self.focus == Some(id) {
             // The top-most remaining window takes focus.
-            self.focus = self
-                .windows
-                .iter()
-                .filter(|w| !w.tucked)
-                .max_by_key(|w| w.z)
-                .map(|w| w.id);
+            self.focus = self.topmost_on_stage();
         }
     }
 
     /// Focus the next window in z order (Ctrl+Tab). Tucked windows are
     /// skipped; the dock is how they come back.
     pub fn cycle_focus(&mut self) -> bool {
-        if self.windows.iter().filter(|w| !w.tucked).count() < 2 {
+        if self.windows.iter().filter(|w| self.on_stage(w)).count() < 2 {
             return false;
         }
         // The lowest window comes to the top, so repeated presses walk the
@@ -1625,7 +1764,7 @@ impl Desk {
         let lowest = self
             .windows
             .iter()
-            .filter(|w| !w.tucked)
+            .filter(|w| self.on_stage(w))
             .min_by_key(|w| w.z)
             .map(|w| w.id);
         if let Some(id) = lowest {
@@ -1787,7 +1926,16 @@ impl Desk {
                     // The bar is the desk's own handle: a click opens the
                     // palette, the same as Ctrl+Space (GFX-063).
                     if press && *target == self.top_bar_id {
-                        self.palette = Some(Palette::default());
+                        let column = match region {
+                            Some(HitRegion::Content { column, .. }) => Some(column),
+                            _ => None,
+                        };
+                        match column.and_then(|c| self.space_at_column(c)) {
+                            Some(space) => {
+                                self.go_to_space(space);
+                            }
+                            None => self.palette = Some(Palette::default()),
+                        }
                         changed = true;
                         continue;
                     }
@@ -2008,6 +2156,21 @@ impl Desk {
         // from the bare desk, it opens one.
         if byte == KEY_CTRL_TAB {
             return (None, self.cycle_focus());
+        }
+        // The spaces (GFX-067).
+        if (crate::notepad::KEY_CTRL_1..crate::notepad::KEY_CTRL_1 + SPACES as u8).contains(&byte) {
+            return (
+                None,
+                self.go_to_space((byte - crate::notepad::KEY_CTRL_1) as usize),
+            );
+        }
+        if (crate::notepad::KEY_CTRL_SHIFT_1..crate::notepad::KEY_CTRL_SHIFT_1 + SPACES as u8)
+            .contains(&byte)
+        {
+            return (
+                None,
+                self.move_focused_to_space((byte - crate::notepad::KEY_CTRL_SHIFT_1) as usize),
+            );
         }
         // The window keys (GFX-062): Ctrl+Left/Right snap to a half,
         // Ctrl+Up fills the desk, Ctrl+Down goes back to the size before
@@ -2467,8 +2630,9 @@ impl Desk {
         let focus = self.focus;
         let kept_look = self.look.clone();
         let look_preview = self.look_preview.clone();
+        let space = self.space;
         for window in &mut self.windows {
-            if window.tucked {
+            if window.tucked || window.space != space {
                 continue;
             }
             let rows = Self::card_rows(window.bounds);
@@ -2695,7 +2859,7 @@ impl Desk {
                 }
             }
             (None, Some(w)) => w.app.name().to_string(),
-            (None, None) if self.windows.iter().all(|w| w.tucked) => {
+            (None, None) if !self.windows.iter().any(|w| self.on_stage(w)) => {
                 "PandaGen   -   type to search, Ctrl+Space for everything".to_string()
             }
             (None, None) => "PandaGen".to_string(),
@@ -2704,7 +2868,7 @@ impl Desk {
             self.top_bar_id,
             ViewKind::StatusLine,
             0,
-            ViewContent::text_buffer(alloc::vec![clock.to_string()]),
+            ViewContent::text_buffer(alloc::vec![clock.to_string(), self.space_strip()]),
             0,
         );
         bar_frame.title = Some(left);
@@ -3733,6 +3897,65 @@ mod tests {
         assert!(desk.window(id).is_none());
         assert_eq!(desk.tick(0), alloc::vec![DeskRequest::Welcomed]);
         assert!(desk.tick(1).is_empty());
+    }
+
+    #[test]
+    fn spaces_hold_their_own_cards_and_the_strip_says_where_things_are() {
+        let mut desk = Desk::new(1280, 800);
+        let a = desk.launch(DeskApp::Notepad);
+        assert_eq!(desk.space(), 0);
+        // Ctrl+2: an empty space; the card is not drawn, focus is nothing,
+        // the bar says so.
+        assert!(desk.handle_key(crate::notepad::KEY_CTRL_1 + 1).1);
+        assert_eq!(desk.space(), 1);
+        assert_eq!(desk.focus(), None);
+        let windows = desk.windows("", true, None);
+        assert!(!windows.iter().any(|w| w.frame.view_id == a));
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        let lines = match &bar.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(lines[1], " 1 .  [2]    3     4  ", "4 cells a space, 2 between");
+        assert!(bar.frame.title.as_deref().unwrap().contains("Ctrl+Space"));
+        // A card opened here is here; Ctrl+Tab stays on this space.
+        let b = desk.launch(DeskApp::Terminal);
+        assert!(!desk.cycle_focus(), "one card on this space");
+        // Ctrl+Shift+1 moves it to space 1 and follows.
+        assert!(desk.handle_key(crate::notepad::KEY_CTRL_SHIFT_1).1);
+        assert_eq!(desk.space(), 0);
+        assert_eq!(desk.window(b).unwrap().space, 0);
+        assert_eq!(desk.focus(), Some(b));
+        assert!(desk.cycle_focus(), "two cards here now");
+        // Raising a card on another space follows it there.
+        desk.handle_key(crate::notepad::KEY_CTRL_SHIFT_1 + 3);
+        assert_eq!(desk.space(), 3);
+        desk.go_to_space(0);
+        desk.raise(a);
+        assert_eq!(desk.space(), 3, "raising a card on space 4 goes there");
+        // Out of range and same-space are no-ops.
+        assert!(!desk.go_to_space(SPACES));
+        assert!(!desk.go_to_space(3));
+        // The strip takes a click: cell 0 of the centred text is space 1.
+        let strip = desk.space_strip();
+        let start = services_gui_host::top_bar_centre_column(1280, strip.chars().count());
+        assert_eq!(desk.space_at_column(start + 1), Some(0));
+        assert_eq!(desk.space_at_column(start + 6 + 1), Some(1));
+        assert_eq!(desk.space_at_column(start + 4), None, "the gap");
+        assert_eq!(desk.space_at_column(0), None);
+        let mut router = DesktopInputRouter::new();
+        let x = ((start + 1) * 8 + 2) as i32;
+        route(&mut desk, &mut router, press(x, 14));
+        route(&mut desk, &mut router, release(x, 14));
+        assert_eq!(desk.space(), 0);
+        assert_eq!(desk.focus(), Some(b), "b is what is left on space 1");
+        // The rest of the bar still opens the palette.
+        route(&mut desk, &mut router, press(300, 14));
+        route(&mut desk, &mut router, release(300, 14));
+        assert!(desk.palette_open());
     }
 
     #[test]

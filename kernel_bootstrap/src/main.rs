@@ -4372,6 +4372,16 @@ impl Ps2ParserState {
             0x02..=0x0B => {
                 // 1-9, 0
                 let digit = if code == 0x0B { 0 } else { code - 0x01 };
+                // Ctrl+1..4 are the spaces (GFX-067), Shift as well moves
+                // the card; private bytes, so they cannot be confused with
+                // Ctrl+letters (Ctrl+2 would otherwise be Ctrl+R).
+                if self.ctrl_pressed && (1..=crate::desk::SPACES as u8).contains(&digit) {
+                    return Some(if self.shift_pressed {
+                        crate::notepad::KEY_CTRL_SHIFT_1 + digit - 1
+                    } else {
+                        crate::notepad::KEY_CTRL_1 + digit - 1
+                    });
+                }
                 if self.shift_pressed {
                     match digit {
                         1 => b'!',
@@ -4770,8 +4780,21 @@ mod keyboard_scancode_tests {
             assert_eq!(parser.process_scancode(code, &mut writer), Some(byte));
         }
         assert_eq!(parser.process_scancode(0x2A | 0x80, &mut writer), None);
-        // Ctrl held: the arrows are the window keys (GFX-062).
+        // Ctrl held: the arrows are the window keys (GFX-062), and the
+        // digits are the spaces (GFX-067).
         assert_eq!(parser.process_scancode(0x1D, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x03, &mut writer),
+            Some(crate::notepad::KEY_CTRL_1 + 1)
+        );
+        assert_eq!(parser.process_scancode(0x2A, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x04, &mut writer),
+            Some(crate::notepad::KEY_CTRL_SHIFT_1 + 2)
+        );
+        assert_eq!(parser.process_scancode(0x2A | 0x80, &mut writer), None);
+        // Ctrl+5 is no space and stays the digit it always was.
+        assert_eq!(parser.process_scancode(0x06, &mut writer), Some(b'5'));
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
         assert_eq!(
             parser.process_scancode(0x4B, &mut writer),

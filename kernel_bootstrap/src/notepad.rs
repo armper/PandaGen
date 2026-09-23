@@ -54,6 +54,10 @@ pub const KEY_CTRL_UP: u8 = 0x92;
 pub const KEY_CTRL_DOWN: u8 = 0x93;
 pub const KEY_CTRL_LEFT: u8 = 0x94;
 pub const KEY_CTRL_RIGHT: u8 = 0x95;
+/// Ctrl+1..4 and Ctrl+Shift+1..4: the spaces (GFX-067). `KEY_CTRL_1 + n`
+/// goes to space n, `KEY_CTRL_SHIFT_1 + n` moves the focused card there.
+pub const KEY_CTRL_1: u8 = 0x96;
+pub const KEY_CTRL_SHIFT_1: u8 = 0x9A;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
 pub const CTRL_F: u8 = 0x06;

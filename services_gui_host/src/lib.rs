@@ -1685,7 +1685,12 @@ fn hit_region_for_style(window: &DesktopWindow, x: usize, y: usize) -> Option<Hi
                 None => HitRegion::Border,
             })
         }
-        WindowStyle::TopBar => Some(HitRegion::Border),
+        // The bar's text cells, so the desk can tell what was clicked
+        // (GFX-067): the space strip, the notices, or the rest.
+        WindowStyle::TopBar => Some(HitRegion::Content {
+            line: 0,
+            column: x.saturating_sub(window.bounds().x) / RASTER_CELL_WIDTH.max(1),
+        }),
     }
 }
 
@@ -1952,15 +1957,32 @@ fn raster_top_bar(
     let text_y = rect.y + (rect.height.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
     let left = window.frame.title.clone().unwrap_or_default();
     painter.draw_text_with_font(rect.x + 12, text_y, &left, &DESKTOP_FONT, theme.text);
-    if let Some(right) = render_content_lines(&window.frame.content)
-        .into_iter()
-        .next()
-    {
+    let lines = render_content_lines(&window.frame.content);
+    if let Some(right) = lines.first() {
         let width = right.chars().count() * RASTER_CELL_WIDTH;
         let x = rect.right().saturating_sub(width + 12);
-        painter.draw_text_with_font(x, text_y, &right, &DESKTOP_FONT, theme.text_muted);
+        painter.draw_text_with_font(x, text_y, right, &DESKTOP_FONT, theme.text_muted);
+    }
+    // A second content line is centred (GFX-067): the space strip. Its
+    // cells are what `top_bar_centre_column` reports, so a click lands on
+    // the character the eye sees.
+    if let Some(centre) = lines.get(1) {
+        let column = top_bar_centre_column(rect.width, centre.chars().count());
+        painter.draw_text_with_font(
+            rect.x + column * RASTER_CELL_WIDTH,
+            text_y,
+            centre,
+            &DESKTOP_FONT,
+            theme.text,
+        );
     }
     true
+}
+
+/// The first cell of a centred top-bar text `chars` wide on a bar
+/// `bar_width` pixels wide.
+pub fn top_bar_centre_column(bar_width: usize, chars: usize) -> usize {
+    (bar_width / RASTER_CELL_WIDTH).saturating_sub(chars) / 2
 }
 
 /// `text` cut to `max_chars`, with a trailing ellipsis mark when cut.
