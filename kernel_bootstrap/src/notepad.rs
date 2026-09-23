@@ -48,6 +48,12 @@ pub const KEY_SHIFT_HOME: u8 = 0x8E;
 pub const KEY_SHIFT_END: u8 = 0x8F;
 pub const KEY_PAGE_UP: u8 = 0x90;
 pub const KEY_PAGE_DOWN: u8 = 0x91;
+/// Ctrl+arrows: the desk's window keys (GFX-062) -- snap left/right,
+/// fill, and back to size.
+pub const KEY_CTRL_UP: u8 = 0x92;
+pub const KEY_CTRL_DOWN: u8 = 0x93;
+pub const KEY_CTRL_LEFT: u8 = 0x94;
+pub const KEY_CTRL_RIGHT: u8 = 0x95;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
 pub const CTRL_F: u8 = 0x06;
@@ -642,11 +648,18 @@ impl Notepad {
             .line(self.cursor.row)
             .map(|line| line[..self.cursor.col.min(line.len())].chars().count())
             .unwrap_or(0);
+        let words: usize = self
+            .buffer
+            .lines()
+            .iter()
+            .map(|l| l.split_whitespace().count())
+            .sum();
         let mut text = alloc::format!(
-            "Ln {}, Col {}   {} lines   {}",
+            "Ln {}, Col {}   {} lines   {} words   {}",
             self.cursor.row + 1,
             col + 1,
             self.buffer.line_count(),
+            words,
             if self.dirty { "Unsaved" } else { "Saved" }
         );
         if let Some(selected) = self.selected_text() {
@@ -1612,6 +1625,15 @@ mod tests {
         assert_eq!(pad.autosave_due(30_000), None);
         pad.handle_byte(ESC);
         assert!(pad.autosave_due(30_001).is_some());
+    }
+
+    #[test]
+    fn the_footer_counts_words() {
+        let mut pad = Notepad::new();
+        pad.load(None, "one two\n  three   four five\n\n");
+        assert!(pad.footer().contains("5 words"), "{}", pad.footer());
+        pad.load(None, "");
+        assert!(pad.footer().contains("0 words"), "{}", pad.footer());
     }
 
     #[test]

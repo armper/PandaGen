@@ -795,9 +795,9 @@ impl PaletteAction {
             PaletteAction::Open => "Ctrl+O",
             PaletteAction::CloseWindow => "Ctrl+W",
             PaletteAction::NextWindow => "Ctrl+Tab",
-            PaletteAction::SnapLeft | PaletteAction::SnapRight | PaletteAction::Maximise => {
-                "drag to the edge"
-            }
+            PaletteAction::SnapLeft => "Ctrl+Left",
+            PaletteAction::SnapRight => "Ctrl+Right",
+            PaletteAction::Maximise => "Ctrl+Up",
             PaletteAction::Tuck => "drag onto the dock",
             PaletteAction::TextConsole => "",
             PaletteAction::SelectAll => "Ctrl+A",
@@ -1242,6 +1242,23 @@ impl Desk {
             window.tucked = false;
         }
         self.raise(id);
+    }
+
+    /// Back to the size a window had before it was snapped, if it was.
+    fn unsnap(&mut self, id: ViewId) -> bool {
+        let area = self.work_area();
+        if let Some(window) = self.window_mut(id) {
+            if let Some(restore) = window.restore.take() {
+                window.bounds = RasterRect::new(
+                    restore.x.min(area.right().saturating_sub(restore.width)),
+                    restore.y.max(area.y),
+                    restore.width.min(area.width),
+                    restore.height.min(area.height),
+                );
+                return true;
+            }
+        }
+        false
     }
 
     /// Snap the focused window from the palette.
@@ -1793,6 +1810,28 @@ impl Desk {
         // from the bare desk, it opens one.
         if byte == KEY_CTRL_TAB {
             return (None, self.cycle_focus());
+        }
+        // The window keys (GFX-062): Ctrl+Left/Right snap to a half,
+        // Ctrl+Up fills the desk, Ctrl+Down goes back to the size before
+        // any of those -- the keyboard's version of dragging to an edge.
+        if let Some(how) = match byte {
+            crate::notepad::KEY_CTRL_LEFT => Some(Some(PaletteAction::SnapLeft)),
+            crate::notepad::KEY_CTRL_RIGHT => Some(Some(PaletteAction::SnapRight)),
+            crate::notepad::KEY_CTRL_UP => Some(Some(PaletteAction::Maximise)),
+            crate::notepad::KEY_CTRL_DOWN => Some(None),
+            _ => None,
+        } {
+            let Some(id) = self.focus else {
+                return (None, false);
+            };
+            let changed = match how {
+                Some(how) => {
+                    self.snap_focused(how);
+                    true
+                }
+                None => self.unsnap(id),
+            };
+            return (None, changed);
         }
         if byte == crate::notepad::CTRL_T {
             self.launch(DeskApp::Terminal);
@@ -2417,12 +2456,25 @@ impl Desk {
         // Top bar: the focused app's name on the left, the clock on the right.
         // With nothing open the bar says how to begin, once; a desk with
         // no hint on it is a desk the first visitor stares at.
-        let left = match self.focused_window() {
-            Some(w) => w.app.name().to_string(),
-            None if self.windows.iter().all(|w| w.tucked) => {
+        let left = match (
+            self.hovered_tile.and_then(|i| DeskApp::ALL.get(i)),
+            self.focused_window(),
+        ) {
+            // The dock has no labels; the bar says what the tile under the
+            // pointer is, and whether it is running (GFX-062).
+            (Some(app), _) => {
+                let running = self.windows.iter().filter(|w| w.app == *app).count();
+                match running {
+                    0 => alloc::format!("{}   -   click to open", app.name()),
+                    1 => alloc::format!("{}   -   open", app.name()),
+                    n => alloc::format!("{}   -   {n} open", app.name()),
+                }
+            }
+            (None, Some(w)) => w.app.name().to_string(),
+            (None, None) if self.windows.iter().all(|w| w.tucked) => {
                 "PandaGen   -   type to search, Ctrl+Space for everything".to_string()
             }
-            None => "PandaGen".to_string(),
+            (None, None) => "PandaGen".to_string(),
         };
         let mut bar_frame = ViewFrame::new(
             self.top_bar_id,
@@ -3205,6 +3257,74 @@ mod tests {
         let notepad = desk.window(id).unwrap().notepad().unwrap();
         assert_eq!(notepad.selected_text().as_deref(), Some("qui"));
         assert_eq!(notepad.cursor().row, 1);
+    }
+
+    #[test]
+    fn ctrl_arrows_snap_fill_and_put_a_window_back() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        let before = desk.window(id).unwrap().bounds;
+        let area = desk.work_area();
+        assert!(desk.handle_key(crate::notepad::KEY_CTRL_LEFT).1);
+        let bounds = desk.window(id).unwrap().bounds;
+        assert_eq!((bounds.x, bounds.width), (area.x, area.width / 2));
+        desk.handle_key(crate::notepad::KEY_CTRL_RIGHT);
+        let bounds = desk.window(id).unwrap().bounds;
+        assert_eq!(bounds.x, area.x + area.width / 2);
+        desk.handle_key(crate::notepad::KEY_CTRL_UP);
+        assert_eq!(desk.window(id).unwrap().bounds, area);
+        // Ctrl+Down: the size before the first snap, not the last one.
+        desk.handle_key(crate::notepad::KEY_CTRL_DOWN);
+        assert_eq!(desk.window(id).unwrap().bounds, before);
+        // Nothing snapped, nothing to put back.
+        assert!(!desk.handle_key(crate::notepad::KEY_CTRL_DOWN).1);
+        // With nothing focused the keys do nothing.
+        desk.close(id);
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_CTRL_LEFT),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn the_bar_names_the_dock_tile_under_the_pointer() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        desk.launch(DeskApp::Notepad);
+        let windows = desk.windows("", true, None);
+        let pill = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap()
+            .bounds();
+        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
+        let y = (pill.y + pill.height / 2) as i32;
+        route(
+            &mut desk,
+            &mut router,
+            moved(first_x, y, PointerButtons::none()),
+        );
+        let bar_title = |desk: &mut Desk| {
+            desk.windows("", true, None)
+                .iter()
+                .find(|w| w.style == WindowStyle::TopBar)
+                .and_then(|w| w.frame.title.clone())
+                .unwrap()
+        };
+        assert_eq!(bar_title(&mut desk), "Notepad   -   open");
+        route(
+            &mut desk,
+            &mut router,
+            moved(first_x + 48, y, PointerButtons::none()),
+        );
+        assert_eq!(bar_title(&mut desk), "Files   -   click to open");
+        // Off the dock: the focused card's name again.
+        route(
+            &mut desk,
+            &mut router,
+            moved(640, 400, PointerButtons::none()),
+        );
+        assert_eq!(bar_title(&mut desk), "Notepad");
     }
 
     #[test]

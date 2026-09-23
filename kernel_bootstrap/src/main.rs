@@ -4302,6 +4302,16 @@ impl Ps2ParserState {
             // With Shift held the arrows, Home and End grow a selection
             // (GFX-054); they are their own bytes so the app can tell.
             let shift = self.shift_pressed;
+            // Ctrl+arrows are the desk's window keys (GFX-062).
+            if self.ctrl_pressed {
+                return match code {
+                    0x48 => Some(crate::notepad::KEY_CTRL_UP),
+                    0x50 => Some(crate::notepad::KEY_CTRL_DOWN),
+                    0x4B => Some(crate::notepad::KEY_CTRL_LEFT),
+                    0x4D => Some(crate::notepad::KEY_CTRL_RIGHT),
+                    _ => None,
+                };
+            }
             return match (code, shift) {
                 (0x48, false) => Some(crate::notepad::KEY_UP),
                 (0x50, false) => Some(crate::notepad::KEY_DOWN),
@@ -4740,6 +4750,14 @@ mod keyboard_scancode_tests {
             assert_eq!(parser.process_scancode(code, &mut writer), Some(byte));
         }
         assert_eq!(parser.process_scancode(0x2A | 0x80, &mut writer), None);
+        // Ctrl held: the arrows are the window keys (GFX-062).
+        assert_eq!(parser.process_scancode(0x1D, &mut writer), None);
+        assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x4B, &mut writer),
+            Some(crate::notepad::KEY_CTRL_LEFT)
+        );
+        assert_eq!(parser.process_scancode(0x1D | 0x80, &mut writer), None);
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
         assert_eq!(
             parser.process_scancode(0x47, &mut writer),
