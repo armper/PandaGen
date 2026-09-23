@@ -2351,6 +2351,14 @@ impl Desk {
             let mut selection = Vec::new();
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
+                    // Long lines wrap to the card (GFX-064); the width is
+                    // whatever the card is this frame, so a resize reflows.
+                    let columns = window
+                        .bounds
+                        .width
+                        .saturating_sub(services_gui_host::CARD_PADDING * 2)
+                        / GLYPH_WIDTH;
+                    notepad.set_wrap(columns.saturating_sub(1));
                     let lines = notepad.viewport_lines(rows);
                     let cursor = notepad.viewport_cursor();
                     selection = notepad.viewport_selection(rows);

@@ -153,6 +153,9 @@ pub struct Notepad {
     edited: bool,
     /// Once the next `Open` lands, find and select this (GFX-061).
     pending_find: Option<String>,
+    /// Lines longer than this many characters wrap onto the next visual
+    /// row (GFX-064); 0 means no wrapping. Set by the card from its width.
+    wrap: usize,
     /// When the document was last edited, as `autosave_due` saw it.
     idle_since: Option<u64>,
     /// Names on the filesystem, for the prompt's completions.
@@ -188,7 +191,58 @@ impl Notepad {
             edited: false,
             idle_since: None,
             pending_find: None,
+            wrap: 0,
         }
+    }
+
+    /// Wrap at `columns` characters; the card sets this from its width
+    /// every frame, so a resize reflows.
+    pub fn set_wrap(&mut self, columns: usize) {
+        self.wrap = columns;
+    }
+
+    /// The visual rows: `(document row, first byte, end byte)` of each
+    /// segment, in order. A line breaks after the last space that fits,
+    /// or hard when a word is longer than the card.
+    fn visual_rows(&self) -> Vec<(usize, usize, usize)> {
+        let mut rows = Vec::new();
+        for (row, line) in self.buffer.lines().iter().enumerate() {
+            if self.wrap == 0 {
+                rows.push((row, 0, line.len()));
+                continue;
+            }
+            let chars: Vec<(usize, char)> = line.char_indices().collect();
+            let mut start = 0; // index into chars
+            while chars.len() - start > self.wrap {
+                let limit = start + self.wrap;
+                let break_at = (start + 1..=limit)
+                    .rev()
+                    .find(|i| chars[*i - 1].1 == ' ')
+                    .unwrap_or(limit);
+                rows.push((row, chars[start].0, chars[break_at].0));
+                start = break_at;
+            }
+            let start_byte = chars.get(start).map(|c| c.0).unwrap_or(line.len());
+            rows.push((row, start_byte, line.len()));
+        }
+        rows
+    }
+
+    /// The visual row the caret is on: the segment holding its byte, or
+    /// the next segment when it sits exactly on a break.
+    fn cursor_visual_row(&self, rows: &[(usize, usize, usize)]) -> usize {
+        let mut last = 0;
+        for (i, (row, start, end)) in rows.iter().enumerate() {
+            if *row != self.cursor.row {
+                continue;
+            }
+            last = i;
+            let is_last_segment = rows.get(i + 1).map(|r| r.0 != *row).unwrap_or(true);
+            if self.cursor.col < *end || (is_last_segment && self.cursor.col >= *start) {
+                return i;
+            }
+        }
+        last
     }
 
     /// When the next `Open` lands, select the first `query` in it.
@@ -371,29 +425,43 @@ impl Notepad {
     /// break shows as one cell past the line's end, so an empty selected
     /// line is still visibly selected.
     pub fn viewport_selection(&self, rows: usize) -> Vec<(usize, usize, usize)> {
-        let Some((start, end)) = self.selection() else {
+        let Some((sel_start, sel_end)) = self.selection() else {
             return Vec::new();
         };
-        let chars = |row: usize, col: usize| {
-            let line = self.line(row);
-            line[..col.min(line.len())].chars().count()
-        };
+        let visual = self.visual_rows();
         let mut spans = Vec::new();
-        for row in start.row..=end.row {
-            if row < self.scroll || row >= self.scroll + rows {
+        for (i, (row, seg_start, seg_end)) in visual.iter().enumerate() {
+            if i < self.scroll || i >= self.scroll + rows {
                 continue;
             }
-            let from = if row == start.row {
-                chars(row, start.col)
+            if *row < sel_start.row || *row > sel_end.row {
+                continue;
+            }
+            let line = self.line(*row);
+            // The selected byte range on this document row...
+            let from_byte = if *row == sel_start.row {
+                sel_start.col
             } else {
                 0
             };
-            let to = if row == end.row {
-                chars(row, end.col)
+            let to_byte = if *row == sel_end.row {
+                sel_end.col
             } else {
-                chars(row, self.line(row).len()) + 1
+                line.len()
             };
-            spans.push((row - self.scroll, from, to));
+            // ...clipped to this segment.
+            let from = from_byte.clamp(*seg_start, *seg_end);
+            let to = to_byte.clamp(*seg_start, *seg_end);
+            let is_last_segment = visual.get(i + 1).map(|r| r.0 != *row).unwrap_or(true);
+            let chars = |b: usize| line[*seg_start..b].chars().count();
+            let mut to_cells = chars(to);
+            // A selected line break shows as one cell past the line's end.
+            if is_last_segment && *row != sel_end.row {
+                to_cells += 1;
+            }
+            if to_cells > chars(from) || (is_last_segment && *row != sel_end.row) {
+                spans.push((i - self.scroll, chars(from), to_cells));
+            }
         }
         spans
     }
@@ -681,46 +749,57 @@ impl Notepad {
         text
     }
 
-    /// The lines the window shows, `rows` of them from `scroll`.
+    /// The visual rows the window shows, `rows` of them from `scroll`
+    /// (which counts visual rows, so a wrapped line scrolls by segment).
     pub fn viewport_lines(&mut self, rows: usize) -> Vec<String> {
         self.last_rows = rows.max(1);
         self.keep_cursor_visible(rows);
-        (self.scroll..self.scroll + rows)
-            .filter_map(|row| self.buffer.line(row).map(|l| l.to_string()))
+        let visual = self.visual_rows();
+        visual
+            .iter()
+            .skip(self.scroll)
+            .take(rows)
+            .map(|(row, start, end)| self.line(*row)[*start..*end].to_string())
             .collect()
     }
 
-    /// The caret within the viewport, as `(line, character column)`.
+    /// The caret within the viewport, as `(visual row, character column)`.
     pub fn viewport_cursor(&self) -> Option<(usize, usize)> {
-        let line = self.cursor.row.checked_sub(self.scroll)?;
-        let col = self
-            .buffer
-            .line(self.cursor.row)
-            .map(|text| text[..self.cursor.col.min(text.len())].chars().count())
-            .unwrap_or(0);
-        Some((line, col))
+        let visual = self.visual_rows();
+        let index = self.cursor_visual_row(&visual);
+        let (row, start, _) = *visual.get(index)?;
+        let line = self.line(row);
+        let col = self.cursor.col.clamp(start, line.len());
+        Some((
+            index.checked_sub(self.scroll)?,
+            line[start..col].chars().count(),
+        ))
     }
 
     /// Put the caret where the pointer clicked: `view_line` is relative to
-    /// the viewport and `column` counts characters, so both are mapped back
-    /// to the document (GFX-052).
+    /// the viewport in visual rows and `column` counts characters, so both
+    /// are mapped back to the document (GFX-052, GFX-064).
     pub fn place_cursor(&mut self, view_line: usize, column: usize) {
-        let row = (self.scroll + view_line).min(self.buffer.line_count().saturating_sub(1));
-        let line = self.buffer.line(row).unwrap_or("");
-        let byte_col = line
+        let visual = self.visual_rows();
+        let index = (self.scroll + view_line).min(visual.len().saturating_sub(1));
+        let Some((row, start, end)) = visual.get(index).copied() else {
+            return;
+        };
+        let segment = &self.line(row)[start..end];
+        let byte_col = segment
             .char_indices()
-            .map(|(index, _)| index)
+            .map(|(index, _)| start + index)
             .nth(column)
-            .unwrap_or(line.len());
+            .unwrap_or(end);
         self.cursor = Position::new(row, byte_col);
         self.close_armed = false;
         self.anchor = None;
     }
 
-    /// Scroll the view by `delta` lines (negative towards the top). The
-    /// caret stays where it is; the next key brings the view back to it.
+    /// Scroll the view by `delta` visual rows (negative towards the top).
+    /// The caret stays where it is; the next key brings the view back.
     pub fn scroll_by(&mut self, delta: i32) {
-        let max = self.buffer.line_count().saturating_sub(1);
+        let max = self.visual_rows().len().saturating_sub(1);
         let next = (self.scroll as i64 + delta as i64).clamp(0, max as i64) as usize;
         self.scroll = next;
         self.scrolled_away = true;
@@ -735,10 +814,12 @@ impl Notepad {
         if rows == 0 {
             return;
         }
-        if self.cursor.row < self.scroll {
-            self.scroll = self.cursor.row;
-        } else if self.cursor.row >= self.scroll + rows {
-            self.scroll = self.cursor.row + 1 - rows;
+        let visual = self.visual_rows();
+        let at = self.cursor_visual_row(&visual);
+        if at < self.scroll {
+            self.scroll = at;
+        } else if at >= self.scroll + rows {
+            self.scroll = at + 1 - rows;
         }
     }
 
@@ -1643,6 +1724,51 @@ mod tests {
         assert!(pad.footer().contains("5 words"), "{}", pad.footer());
         pad.load(None, "");
         assert!(pad.footer().contains("0 words"), "{}", pad.footer());
+    }
+
+    #[test]
+    fn long_lines_wrap_at_spaces_and_the_caret_and_clicks_map_through() {
+        let mut pad = Notepad::new();
+        pad.load(None, "hello wonderful world\nx");
+        pad.set_wrap(10);
+        assert_eq!(
+            pad.viewport_lines(10),
+            alloc::vec!["hello ", "wonderful ", "world", "x"]
+        );
+        // The caret at byte 8 ("wo|nderful") is on the second visual row.
+        pad.place_cursor(1, 2);
+        assert_eq!(pad.cursor(), Position::new(0, 8));
+        assert_eq!(pad.viewport_cursor(), Some((1, 2)));
+        // At the end of "hello " the caret sits at the start of the next
+        // segment, where typing would land.
+        pad.place_cursor(0, 6);
+        assert_eq!(pad.cursor(), Position::new(0, 6));
+        assert_eq!(pad.viewport_cursor(), Some((1, 0)));
+        // A click on the last row is the last line.
+        pad.place_cursor(3, 5);
+        assert_eq!(pad.cursor(), Position::new(1, 1));
+
+        // A selection across a wrap paints each segment it touches.
+        pad.place_cursor(0, 2);
+        pad.extend_selection_to(2, 2);
+        assert_eq!(pad.selected_text().as_deref(), Some("llo wonderful wo"));
+        assert_eq!(
+            pad.viewport_selection(10),
+            alloc::vec![(0, 2, 6), (1, 0, 10), (2, 0, 2)]
+        );
+        // A word longer than the card is cut, not lost.
+        pad.load(None, "abcdefghijklmnop");
+        assert_eq!(pad.viewport_lines(10), alloc::vec!["abcdefghij", "klmnop"]);
+        // No wrap: one visual row per line, as before.
+        pad.set_wrap(0);
+        assert_eq!(pad.viewport_lines(10), alloc::vec!["abcdefghijklmnop"]);
+
+        // Scrolling and the view following the caret count visual rows.
+        pad.set_wrap(10);
+        pad.load(None, "hello wonderful world\nx");
+        pad.handle_byte(KEY_DOWN);
+        assert_eq!(pad.cursor(), Position::new(1, 0));
+        assert_eq!(pad.viewport_lines(2), alloc::vec!["world", "x"]);
     }
 
     #[test]
