@@ -15,6 +15,8 @@ pub const TEXT_SCHEMA: &str = "text/plain";
 pub const SETTINGS_SCHEMA: &str = "settings/desk";
 /// Where the desk's look is kept.
 pub const LOOK_FILE: &str = ".look";
+/// Where the recently used files are kept (GFX-060).
+pub const RECENT_FILE: &str = ".recent";
 
 /// Editor I/O error
 #[derive(Debug)]

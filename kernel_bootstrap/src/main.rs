@@ -1973,6 +1973,13 @@ fn workspace_loop(
             }
         }
 
+        // Documents that have sat still save themselves (GFX-060).
+        if display_mode.is_desk() {
+            if let Some(desk) = desk.as_mut() {
+                desk_requests.extend(desk.tick(get_tick_count()));
+            }
+        }
+
         // Serve what the desk asked for (GFX-053).
         if !desk_requests.is_empty() {
             let pending: alloc::vec::Vec<desk::DeskRequest> = desk_requests.drain(..).collect();
@@ -2030,9 +2037,20 @@ fn workspace_loop(
                             let mut io =
                                 bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
                             let text = io.read_setting(bare_metal_editor_io::LOOK_FILE);
+                            let recent = io.read_setting(bare_metal_editor_io::RECENT_FILE);
                             workspace.set_filesystem(io.into_filesystem());
                             desk.apply_look(text.as_deref());
+                            desk.apply_recent(recent.as_deref());
                             output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::SaveRecent { text } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            // Quietly: a list of names is not news.
+                            let _ = io.write_setting(bare_metal_editor_io::RECENT_FILE, &text);
+                            workspace.set_filesystem(io.into_filesystem());
                         }
                     }
                     desk::DeskRequest::TerminalScroll { notches } => {
@@ -2174,7 +2192,9 @@ fn workspace_loop(
                             }
                             None => Err(alloc::string::String::from("no filesystem")),
                         };
-                        desk.io_done(id, &effect, result, now);
+                        if let Some(follow_up) = desk.io_done(id, &effect, result, now) {
+                            desk_requests.push(follow_up);
+                        }
                         output_dirty = true;
                     }
                 }

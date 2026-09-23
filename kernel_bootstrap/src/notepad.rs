@@ -69,6 +69,9 @@ pub const BACKSPACE: u8 = 0x08;
 
 /// Bounded undo, like the editor's.
 const MAX_UNDO: usize = 100;
+/// How long a named document sits unchanged before it saves itself, in
+/// ticks at 100 Hz (GFX-060).
+pub const AUTOSAVE_IDLE_TICKS: u64 = 200;
 
 /// What the app wants the desk to do after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +143,10 @@ pub struct Notepad {
     last_rows: usize,
     /// Set while the history browser is open.
     history: Option<HistoryBrowse>,
+    /// An edit landed since the last `autosave_due` call.
+    edited: bool,
+    /// When the document was last edited, as `autosave_due` saw it.
+    idle_since: Option<u64>,
     /// Names on the filesystem, for the prompt's completions.
     file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
@@ -170,7 +177,34 @@ impl Notepad {
             anchor: None,
             last_rows: 1,
             history: None,
+            edited: false,
+            idle_since: None,
         }
+    }
+
+    /// Called every tick with the time: a named, changed document that has
+    /// sat still for [`AUTOSAVE_IDLE_TICKS`] saves itself (GFX-060). No
+    /// prompt or browser may be open; an unnamed document never saves on
+    /// its own -- it has nowhere to go until it is given a name.
+    pub fn autosave_due(&mut self, now: u64) -> Option<NotepadEffect> {
+        if self.edited {
+            self.edited = false;
+            self.idle_since = Some(now);
+            return None;
+        }
+        if !self.dirty || self.prompt.is_some() || self.history.is_some() {
+            return None;
+        }
+        let path = self.path.clone()?;
+        let since = self.idle_since?;
+        if now.saturating_sub(since) < AUTOSAVE_IDLE_TICKS {
+            return None;
+        }
+        self.idle_since = None;
+        Some(NotepadEffect::Save {
+            path,
+            content: self.content(),
+        })
     }
 
     /// Whether the history browser is open.
@@ -505,6 +539,11 @@ impl Notepad {
         self.scroll = 0;
         self.close_armed = false;
         self.scrolled_away = false;
+    }
+
+    /// Put a message in the footer.
+    pub fn set_status(&mut self, text: &str) {
+        self.status = text.to_string();
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1082,6 +1121,7 @@ impl Notepad {
         }
         self.dirty = true;
         self.close_armed = false;
+        self.edited = true;
     }
 }
 
@@ -1513,6 +1553,50 @@ mod tests {
         pad.show_version(0, 0, None, 0);
         assert!(!pad.browsing_history());
         assert!(pad.footer().contains("No earlier versions"));
+    }
+
+    #[test]
+    fn a_named_document_saves_itself_after_sitting_still() {
+        let mut pad = Notepad::new();
+        // Unnamed: never on its own.
+        type_str(&mut pad, "x");
+        assert_eq!(pad.autosave_due(0), None);
+        assert_eq!(pad.autosave_due(10_000), None);
+
+        pad.load(Some("memo".to_string()), "");
+        type_str(&mut pad, "hi");
+        // The first tick after an edit only marks the time.
+        assert_eq!(pad.autosave_due(100), None);
+        assert_eq!(pad.autosave_due(100 + AUTOSAVE_IDLE_TICKS - 1), None);
+        // Another edit restarts the wait.
+        type_str(&mut pad, "!");
+        assert_eq!(pad.autosave_due(400), None);
+        assert_eq!(pad.autosave_due(400 + AUTOSAVE_IDLE_TICKS - 1), None);
+        assert_eq!(
+            pad.autosave_due(400 + AUTOSAVE_IDLE_TICKS),
+            Some(NotepadEffect::Save {
+                path: "memo".to_string(),
+                content: "hi!".to_string()
+            })
+        );
+        // Once, until the next edit.
+        assert_eq!(pad.autosave_due(10_000), None);
+        pad.io_done(
+            &NotepadEffect::Save {
+                path: "memo".to_string(),
+                content: "hi!".to_string(),
+            },
+            Ok(None),
+        );
+        assert!(!pad.is_dirty());
+
+        // Not while a prompt is open.
+        type_str(&mut pad, "?");
+        pad.autosave_due(20_000);
+        pad.handle_byte(CTRL_F);
+        assert_eq!(pad.autosave_due(30_000), None);
+        pad.handle_byte(ESC);
+        assert!(pad.autosave_due(30_001).is_some());
     }
 
     #[test]

@@ -701,6 +701,9 @@ pub enum DeskRequest {
     },
     /// Write the desk's look to disk (GFX-059).
     SaveLook { text: String },
+    /// Write the recently used files to disk (GFX-060); read back with
+    /// the look.
+    SaveRecent { text: String },
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
 }
@@ -842,20 +845,61 @@ pub struct Palette {
     pub selection: usize,
 }
 
+/// One row of the palette (GFX-060): an action, or a file opened lately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteRow {
+    Action(PaletteAction),
+    /// Open this file in a Notepad.
+    Recent(String),
+}
+
+impl PaletteRow {
+    pub fn label(&self) -> String {
+        match self {
+            PaletteRow::Action(action) => action.label().to_string(),
+            PaletteRow::Recent(name) => alloc::format!("Open {name}"),
+        }
+    }
+
+    pub fn shortcut(&self) -> &'static str {
+        match self {
+            PaletteRow::Action(action) => action.shortcut(),
+            PaletteRow::Recent(_) => "recent",
+        }
+    }
+}
+
+/// How many recently used files the palette offers.
+pub const RECENT_FILES: usize = 5;
+
 impl Palette {
-    /// The actions that match the query, in order, filtered for the state
-    /// of the desk so the list never offers something that would do nothing.
-    pub fn matches(&self, has_window: bool, has_notepad: bool) -> Vec<PaletteAction> {
+    /// The rows that match the query, in order: the files used lately
+    /// first, then the actions, filtered for the state of the desk so the
+    /// list never offers something that would do nothing.
+    pub fn matches(
+        &self,
+        has_window: bool,
+        has_notepad: bool,
+        recent: &[String],
+    ) -> Vec<PaletteRow> {
         let query = self.query.to_ascii_lowercase();
-        PaletteAction::ALL
+        let fits =
+            |label: &str| query.is_empty() || label.to_ascii_lowercase().contains(query.as_str());
+        let mut rows: Vec<PaletteRow> = recent
             .iter()
-            .copied()
-            .filter(|action| !(action.needs_notepad() && !has_notepad))
-            .filter(|action| !(action.needs_window() && !has_window))
-            .filter(|action| {
-                query.is_empty() || action.label().to_ascii_lowercase().contains(query.as_str())
-            })
-            .collect()
+            .filter(|name| fits(&alloc::format!("Open {name}")))
+            .map(|name| PaletteRow::Recent(name.clone()))
+            .collect();
+        rows.extend(
+            PaletteAction::ALL
+                .iter()
+                .copied()
+                .filter(|action| !(action.needs_notepad() && !has_notepad))
+                .filter(|action| !(action.needs_window() && !has_window))
+                .filter(|action| fits(action.label()))
+                .map(PaletteRow::Action),
+        );
+        rows
     }
 }
 
@@ -899,6 +943,10 @@ pub struct Desk {
     look: LookChoice,
     /// ...and the one being previewed from the Look card, if any.
     look_preview: Option<LookChoice>,
+    /// Files opened or saved lately, newest first (GFX-060).
+    recent: Vec<String>,
+    /// Notepads whose pending save is an autosave: no notice when it lands.
+    quiet_saves: Vec<ViewId>,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
@@ -927,6 +975,8 @@ impl Desk {
             clipboard: String::new(),
             look: LookChoice::default(),
             look_preview: None,
+            recent: Vec::new(),
+            quiet_saves: Vec::new(),
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
@@ -1004,6 +1054,58 @@ impl Desk {
             self.look = LookChoice::from_text(text);
         }
         self.look_preview = None;
+    }
+
+    /// The kernel read the recent-files list (GFX-060): one name a line.
+    pub fn apply_recent(&mut self, text: Option<&str>) {
+        if let Some(text) = text {
+            self.recent = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(RECENT_FILES)
+                .map(String::from)
+                .collect();
+        }
+    }
+
+    pub fn recent(&self) -> &[String] {
+        &self.recent
+    }
+
+    /// `name` was just used: to the front of the list, bounded. Returns the
+    /// request that keeps the list on disk when it changed.
+    fn touch_recent(&mut self, name: &str) -> Option<DeskRequest> {
+        if self.recent.first().map(String::as_str) == Some(name) {
+            return None;
+        }
+        self.recent.retain(|n| n != name);
+        self.recent.insert(0, name.to_string());
+        self.recent.truncate(RECENT_FILES);
+        let mut text = self.recent.join("\n");
+        text.push('\n');
+        Some(DeskRequest::SaveRecent { text })
+    }
+
+    /// Every tick (GFX-060): documents that have sat still save
+    /// themselves. The saves are quiet -- no notice card -- because a card
+    /// for something the person did not ask for is noise.
+    pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
+        let mut requests = Vec::new();
+        for window in &mut self.windows {
+            if let AppState::Notepad(notepad) = &mut window.state {
+                if let Some(effect) = notepad.autosave_due(now) {
+                    requests.push(DeskRequest::Io {
+                        id: window.id,
+                        effect,
+                    });
+                    if !self.quiet_saves.contains(&window.id) {
+                        self.quiet_saves.push(window.id);
+                    }
+                }
+            }
+        }
+        requests
     }
 
     pub fn focus(&self) -> Option<ViewId> {
@@ -1198,6 +1300,7 @@ impl Desk {
     fn handle_palette_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
         let has_window = self.focused_window().is_some();
         let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
+        let recent = self.recent.clone();
         let Some(palette) = self.palette.as_mut() else {
             return (None, false);
         };
@@ -1211,7 +1314,7 @@ impl Desk {
                 (None, true)
             }
             crate::notepad::KEY_DOWN => {
-                let count = palette.matches(has_window, has_notepad).len();
+                let count = palette.matches(has_window, has_notepad, &recent).len();
                 palette.selection = (palette.selection + 1).min(count.saturating_sub(1));
                 (None, true)
             }
@@ -1221,11 +1324,21 @@ impl Desk {
                 (None, true)
             }
             b'\n' | b'\r' => {
-                let matches = palette.matches(has_window, has_notepad);
-                let chosen = matches.get(palette.selection).copied();
+                let matches = palette.matches(has_window, has_notepad, &recent);
+                let chosen = matches.get(palette.selection).cloned();
                 self.palette = None;
                 match chosen {
-                    Some(action) => (self.run_action(action), true),
+                    Some(PaletteRow::Action(action)) => (self.run_action(action), true),
+                    Some(PaletteRow::Recent(name)) => {
+                        let id = self.launch(DeskApp::Notepad);
+                        (
+                            Some(DeskRequest::Io {
+                                id,
+                                effect: NotepadEffect::Open { path: name },
+                            }),
+                            true,
+                        )
+                    }
                     None => (None, true),
                 }
             }
@@ -1976,7 +2089,18 @@ impl Desk {
         effect: &NotepadEffect,
         result: Result<Option<String>, String>,
         now: u64,
-    ) {
+    ) -> Option<DeskRequest> {
+        let quiet = if let Some(at) = self.quiet_saves.iter().position(|q| *q == id) {
+            self.quiet_saves.remove(at);
+            matches!(effect, NotepadEffect::Save { .. })
+        } else {
+            false
+        };
+        let follow_up = match (effect, &result) {
+            (NotepadEffect::Save { path, .. }, Ok(_))
+            | (NotepadEffect::Open { path }, Ok(Some(_))) => self.touch_recent(path),
+            _ => None,
+        };
         let (level, text) = match (effect, &result) {
             (NotepadEffect::Save { path, .. }, Ok(_)) => {
                 (NoticeLevel::Info, alloc::format!("Saved {path}"))
@@ -1992,10 +2116,14 @@ impl Desk {
         };
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
             notepad.io_done(effect, result);
+            if quiet {
+                notepad.set_status("Saved itself");
+            }
         }
-        if !text.is_empty() {
+        if !text.is_empty() && !quiet {
             self.notify(level, text, now);
         }
+        follow_up
     }
 
     /// The window list for the compositor, top bar and dock included.
@@ -2131,7 +2259,7 @@ impl Desk {
                 .windows
                 .iter()
                 .any(|w| focus == Some(w.id) && w.notepad().is_some());
-            let matches = palette.matches(has_window, has_notepad);
+            let matches = palette.matches(has_window, has_notepad, &self.recent);
             let rows = matches.len().min(PALETTE_MAX_ROWS);
             let mut lines = Vec::with_capacity(rows + 1);
             let inner = PALETTE_WIDTH.saturating_sub(services_gui_host::CARD_PADDING * 2)
@@ -2141,7 +2269,7 @@ impl Desk {
                 let shortcut = action.shortcut();
                 let pad =
                     inner.saturating_sub(label.chars().count() + shortcut.chars().count() + 2);
-                let mut line = String::from(label);
+                let mut line = label.clone();
                 for _ in 0..pad {
                     line.push(' ');
                 }
@@ -2851,6 +2979,96 @@ mod tests {
             .find(|w| w.style == WindowStyle::TopBar)
             .unwrap();
         assert_eq!(bar.frame.title.as_deref(), Some("Notepad"));
+    }
+
+    #[test]
+    fn a_still_document_saves_itself_quietly_and_the_palette_remembers_it() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        desk.window_mut(id)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(Some("memo".to_string()), "");
+        desk.handle_key(b'h');
+        assert!(
+            desk.tick(1_000).is_empty(),
+            "the first tick only starts the clock"
+        );
+        assert!(desk
+            .tick(1_000 + crate::notepad::AUTOSAVE_IDLE_TICKS - 1)
+            .is_empty());
+        let requests = desk.tick(1_000 + crate::notepad::AUTOSAVE_IDLE_TICKS);
+        let effect = NotepadEffect::Save {
+            path: "memo".to_string(),
+            content: "h".to_string(),
+        };
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::Io {
+                id,
+                effect: effect.clone()
+            }]
+        );
+        // It lands quietly: no notice, a status, and the file is recent.
+        let follow_up = desk.io_done(id, &effect, Ok(None), 2_000);
+        assert_eq!(
+            follow_up,
+            Some(DeskRequest::SaveRecent {
+                text: "memo\n".to_string()
+            })
+        );
+        let windows = desk.windows_at("", true, None, 2_000, &[]);
+        assert!(!windows
+            .iter()
+            .any(|w| w.role == DesktopWindowRole::Notification));
+        assert!(desk
+            .window(id)
+            .unwrap()
+            .notepad()
+            .unwrap()
+            .footer()
+            .contains("Saved itself"));
+        assert_eq!(desk.recent(), &["memo".to_string()]);
+
+        // A save the person asked for still says so.
+        let follow_up = desk.io_done(id, &effect, Ok(None), 3_000);
+        assert_eq!(follow_up, None, "already at the front");
+        let windows = desk.windows_at("", true, None, 3_000, &[]);
+        assert!(windows
+            .iter()
+            .any(|w| w.role == DesktopWindowRole::Notification));
+
+        // The palette lists it first, and Enter opens it in a new Notepad.
+        desk.handle_key(KEY_CTRL_SPACE);
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(listed[0].starts_with("Open memo"), "{listed:?}");
+        let (request, _) = desk.handle_key(b'\n');
+        let new_id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_ne!(new_id, id);
+        assert_eq!(
+            request,
+            Some(DeskRequest::Io {
+                id: new_id,
+                effect: NotepadEffect::Open {
+                    path: "memo".to_string()
+                }
+            })
+        );
+
+        // The list reads back, bounded and newest first.
+        let mut fresh = Desk::new(1280, 800);
+        fresh.apply_recent(Some("a\nb\nc\nd\ne\nf\ng\n"));
+        assert_eq!(fresh.recent().len(), RECENT_FILES);
+        assert_eq!(fresh.recent()[0], "a");
     }
 
     #[test]
