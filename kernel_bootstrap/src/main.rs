@@ -2044,6 +2044,16 @@ fn workspace_loop(
                             output_dirty = true;
                         }
                     }
+                    desk::DeskRequest::SearchFiles { query } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let hits = io.search(&query, desk::SEARCH_MAX_HITS);
+                            workspace.set_filesystem(io.into_filesystem());
+                            desk.search_results(&query, hits);
+                            output_dirty = true;
+                        }
+                    }
                     desk::DeskRequest::SaveRecent { text } => {
                         if let Some(fs) = workspace.take_filesystem() {
                             let mut io =

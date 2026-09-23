@@ -704,6 +704,9 @@ pub enum DeskRequest {
     /// Write the recently used files to disk (GFX-060); read back with
     /// the look.
     SaveRecent { text: String },
+    /// Find lines containing `query` in the person's text files, then call
+    /// [`Desk::search_results`] (GFX-061).
+    SearchFiles { query: String },
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
 }
@@ -843,7 +846,18 @@ impl PaletteAction {
 pub struct Palette {
     pub query: String,
     pub selection: usize,
+    /// Lines inside files that contain the query, as the kernel found them
+    /// for this query (GFX-061): `(file, line)`. Empty until it answers.
+    pub hits: Vec<(String, String)>,
+    /// The query the hits were found for; stale hits are not shown.
+    pub hits_for: String,
 }
+
+/// Content search starts at this many characters, so one letter does not
+/// read every file.
+pub const SEARCH_MIN_CHARS: usize = 2;
+/// How many lines a content search returns at most.
+pub const SEARCH_MAX_HITS: usize = 6;
 
 /// One row of the palette (GFX-060): an action, or a file opened lately.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -851,6 +865,11 @@ pub enum PaletteRow {
     Action(PaletteAction),
     /// Open this file in a Notepad.
     Recent(String),
+    /// A line inside a file that contains the query: open the file there.
+    Hit {
+        file: String,
+        line: String,
+    },
 }
 
 impl PaletteRow {
@@ -858,6 +877,10 @@ impl PaletteRow {
         match self {
             PaletteRow::Action(action) => action.label().to_string(),
             PaletteRow::Recent(name) => alloc::format!("Open {name}"),
+            PaletteRow::Hit { file, line } => {
+                let line: String = line.trim().chars().take(40).collect();
+                alloc::format!("{file}: {line}")
+            }
         }
     }
 
@@ -865,6 +888,7 @@ impl PaletteRow {
         match self {
             PaletteRow::Action(action) => action.shortcut(),
             PaletteRow::Recent(_) => "recent",
+            PaletteRow::Hit { .. } => "in file",
         }
     }
 }
@@ -890,6 +914,12 @@ impl Palette {
             .filter(|name| fits(&alloc::format!("Open {name}")))
             .map(|name| PaletteRow::Recent(name.clone()))
             .collect();
+        if self.hits_for == self.query {
+            rows.extend(self.hits.iter().map(|(file, line)| PaletteRow::Hit {
+                file: file.clone(),
+                line: line.clone(),
+            }));
+        }
         rows.extend(
             PaletteAction::ALL
                 .iter()
@@ -1296,11 +1326,32 @@ impl Desk {
         request
     }
 
+    /// A content search for the palette's query, when it is long enough.
+    fn search_request(palette: &Palette) -> Option<DeskRequest> {
+        (palette.query.trim().len() >= SEARCH_MIN_CHARS).then(|| DeskRequest::SearchFiles {
+            query: palette.query.trim().to_string(),
+        })
+    }
+
+    /// The kernel found these lines for `query` (GFX-061). Shown only while
+    /// the palette still asks the same thing.
+    pub fn search_results(&mut self, query: &str, hits: Vec<(String, String)>) {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.hits = hits;
+            palette.hits_for = query.to_string();
+        }
+    }
+
     /// A key while the palette is open.
     fn handle_palette_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
         let has_window = self.focused_window().is_some();
         let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
         let recent = self.recent.clone();
+        let query = self
+            .palette
+            .as_ref()
+            .map(|p| p.query.clone())
+            .unwrap_or_default();
         let Some(palette) = self.palette.as_mut() else {
             return (None, false);
         };
@@ -1321,7 +1372,7 @@ impl Desk {
             crate::notepad::BACKSPACE => {
                 palette.query.pop();
                 palette.selection = 0;
-                (None, true)
+                (Self::search_request(palette), true)
             }
             b'\n' | b'\r' => {
                 let matches = palette.matches(has_window, has_notepad, &recent);
@@ -1339,6 +1390,21 @@ impl Desk {
                             true,
                         )
                     }
+                    Some(PaletteRow::Hit { file, .. }) => {
+                        // Open the file and land on the line: the Notepad
+                        // finds the query once the content arrives.
+                        let id = self.launch(DeskApp::Notepad);
+                        if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
+                            notepad.find_on_open(&query);
+                        }
+                        (
+                            Some(DeskRequest::Io {
+                                id,
+                                effect: NotepadEffect::Open { path: file },
+                            }),
+                            true,
+                        )
+                    }
                     None => (None, true),
                 }
             }
@@ -1347,7 +1413,7 @@ impl Desk {
                     palette.query.push(byte as char);
                     palette.selection = 0;
                 }
-                (None, true)
+                (Self::search_request(palette), true)
             }
             _ => (None, false),
         }
@@ -1746,7 +1812,7 @@ impl Desk {
             if (0x20..0x7f).contains(&byte) {
                 self.palette = Some(Palette {
                     query: String::from(byte as char),
-                    selection: 0,
+                    ..Palette::default()
                 });
                 return (None, true);
             }
@@ -3069,6 +3135,76 @@ mod tests {
         fresh.apply_recent(Some("a\nb\nc\nd\ne\nf\ng\n"));
         assert_eq!(fresh.recent().len(), RECENT_FILES);
         assert_eq!(fresh.recent()[0], "a");
+    }
+
+    #[test]
+    fn the_palette_searches_inside_files_and_enter_opens_the_file_on_the_line() {
+        let mut desk = Desk::new(1280, 800);
+        desk.handle_key(KEY_CTRL_SPACE);
+        // One letter is not a search; two are.
+        assert_eq!(desk.handle_key(b'q').0, None);
+        assert_eq!(
+            desk.handle_key(b'u').0,
+            Some(DeskRequest::SearchFiles {
+                query: "qu".to_string()
+            })
+        );
+        desk.search_results(
+            "qu",
+            alloc::vec![("memo".to_string(), "  the quick fox".to_string())],
+        );
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(listed[0].starts_with("memo: the quick fox"), "{listed:?}");
+        assert!(listed[0].trim_end().ends_with("in file"), "{listed:?}");
+
+        // A stale answer is not shown once the query moves on.
+        desk.handle_key(b'i');
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(!listed.iter().any(|l| l.starts_with("memo:")), "{listed:?}");
+        desk.search_results(
+            "qui",
+            alloc::vec![("memo".to_string(), "the quick fox".to_string())],
+        );
+
+        // Enter opens the file in a Notepad that will find the query.
+        let (request, _) = desk.handle_key(b'\n');
+        let id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(
+            request,
+            Some(DeskRequest::Io {
+                id,
+                effect: NotepadEffect::Open {
+                    path: "memo".to_string()
+                }
+            })
+        );
+        desk.io_done(
+            id,
+            &NotepadEffect::Open {
+                path: "memo".to_string(),
+            },
+            Ok(Some("slow\nthe quick fox\n".to_string())),
+            100,
+        );
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert_eq!(notepad.selected_text().as_deref(), Some("qui"));
+        assert_eq!(notepad.cursor().row, 1);
     }
 
     #[test]

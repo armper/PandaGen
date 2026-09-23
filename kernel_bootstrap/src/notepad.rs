@@ -145,6 +145,8 @@ pub struct Notepad {
     history: Option<HistoryBrowse>,
     /// An edit landed since the last `autosave_due` call.
     edited: bool,
+    /// Once the next `Open` lands, find and select this (GFX-061).
+    pending_find: Option<String>,
     /// When the document was last edited, as `autosave_due` saw it.
     idle_since: Option<u64>,
     /// Names on the filesystem, for the prompt's completions.
@@ -179,7 +181,13 @@ impl Notepad {
             history: None,
             edited: false,
             idle_since: None,
+            pending_find: None,
         }
+    }
+
+    /// When the next `Open` lands, select the first `query` in it.
+    pub fn find_on_open(&mut self, query: &str) {
+        self.pending_find = Some(query.to_string());
     }
 
     /// Called every tick with the time: a named, changed document that has
@@ -730,6 +738,13 @@ impl Notepad {
             (NotepadEffect::Open { path }, Ok(Some(content))) => {
                 self.load(Some(path.clone()), &content);
                 self.status = alloc::format!("Opened {path}");
+                if let Some(query) = self.pending_find.take() {
+                    // From the top: the caret is at (0,0) and the search
+                    // starts one past it, so wrap round to catch line 0.
+                    if !self.find_next(&query) {
+                        self.status = alloc::format!("Opened {path}; {query:?} is not in it now");
+                    }
+                }
             }
             (NotepadEffect::Open { path }, Ok(None)) => {
                 self.status = alloc::format!("Not found: {path}");

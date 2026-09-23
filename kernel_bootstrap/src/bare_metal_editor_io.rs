@@ -165,6 +165,38 @@ impl BareMetalEditorIo {
         String::from_utf8(bytes).ok()
     }
 
+    /// Lines in the person's text files that contain `query`, case-
+    /// insensitively: `(file, line)`, at most `max`, one per file, files
+    /// in name order (GFX-061). Dot-names and the bin are skipped.
+    pub fn search(&mut self, query: &str, max: usize) -> Vec<(String, String)> {
+        let needle = query.to_ascii_lowercase();
+        let mut hits = Vec::new();
+        let Ok(entries) = self.fs.list_entries() else {
+            return hits;
+        };
+        for entry in entries {
+            if hits.len() >= max {
+                break;
+            }
+            if entry.name.starts_with('.') || entry.trashed || entry.kind != "file" {
+                continue;
+            }
+            let Ok(bytes) = self.fs.read_file_by_name(&entry.name) else {
+                continue;
+            };
+            let Ok(text) = core::str::from_utf8(&bytes) else {
+                continue;
+            };
+            if let Some(line) = text
+                .lines()
+                .find(|l| l.to_ascii_lowercase().contains(&needle))
+            {
+                hits.push((entry.name.clone(), line.to_string()));
+            }
+        }
+        hits
+    }
+
     /// Add and remove tags on `name` (GFX-057).
     pub fn set_tags(
         &mut self,
