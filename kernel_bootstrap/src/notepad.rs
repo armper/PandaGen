@@ -53,6 +53,8 @@ pub const CTRL_C: u8 = 0x03;
 pub const CTRL_F: u8 = 0x06;
 pub const CTRL_V: u8 = 0x16;
 pub const CTRL_X: u8 = 0x18;
+/// Ctrl+Y: yesterday's text -- the history browser (GFX-058).
+pub const CTRL_Y: u8 = 0x19;
 pub const CTRL_N: u8 = 0x0E;
 pub const CTRL_O: u8 = 0x0F;
 pub const CTRL_S: u8 = 0x13;
@@ -87,6 +89,25 @@ pub enum NotepadEffect {
     /// Put this on the clipboard, which the desk owns so every card shares
     /// it (GFX-054).
     Copy(String),
+    /// Fetch kept version `index` of `path` (0 is the newest), then call
+    /// `show_version` (GFX-058).
+    Version { path: String, index: usize },
+}
+
+/// Browsing the kept versions of the document (GFX-058): the document as
+/// it was before browsing began, so Esc can put it back, and which version
+/// is on screen.
+#[derive(Debug, Clone)]
+struct HistoryBrowse {
+    saved: TextBuffer,
+    saved_cursor: Position,
+    saved_dirty: bool,
+    index: usize,
+    total: usize,
+    /// When the shown version was current; 0 when unknown.
+    when: u64,
+    /// Waiting for the kernel to deliver `index`.
+    loading: bool,
 }
 
 /// A one-line prompt in the footer, for a file name.
@@ -117,6 +138,8 @@ pub struct Notepad {
     anchor: Option<Position>,
     /// How many rows the card last showed: a page, for Page Up and Down.
     last_rows: usize,
+    /// Set while the history browser is open.
+    history: Option<HistoryBrowse>,
     /// Names on the filesystem, for the prompt's completions.
     file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
@@ -146,6 +169,101 @@ impl Notepad {
             file_names: Vec::new(),
             anchor: None,
             last_rows: 1,
+            history: None,
+        }
+    }
+
+    /// Whether the history browser is open.
+    pub fn browsing_history(&self) -> bool {
+        self.history.is_some()
+    }
+
+    /// The kernel delivers kept version `index` of this document, out of
+    /// `total`; `content` is `None` when there is no such version.
+    pub fn show_version(&mut self, index: usize, total: usize, content: Option<&str>, when: u64) {
+        let Some(content) = content else {
+            self.history = None;
+            self.status = if total == 0 {
+                "No earlier versions yet: each save keeps the one before".to_string()
+            } else {
+                "No such version".to_string()
+            };
+            return;
+        };
+        if self.history.is_none() {
+            self.history = Some(HistoryBrowse {
+                saved: self.buffer.clone(),
+                saved_cursor: self.cursor,
+                saved_dirty: self.dirty,
+                index,
+                total,
+                when,
+                loading: false,
+            });
+        }
+        if let Some(browse) = self.history.as_mut() {
+            browse.index = index;
+            browse.total = total;
+            browse.when = when;
+            browse.loading = false;
+        }
+        self.buffer = TextBuffer::from_string(content.to_string());
+        self.cursor = Position::new(0, 0);
+        self.anchor = None;
+        self.scroll = 0;
+        self.scrolled_away = false;
+    }
+
+    /// Leave the browser with the document as it was.
+    fn leave_history(&mut self) {
+        if let Some(browse) = self.history.take() {
+            self.buffer = browse.saved;
+            self.cursor = browse.saved_cursor;
+            self.dirty = browse.saved_dirty;
+            self.anchor = None;
+        }
+    }
+
+    /// A key while the history browser is open: Left is older, Right is
+    /// newer (past the newest is the document itself), Enter restores what
+    /// is shown by saving it -- the current text becomes a version, so
+    /// nothing is lost either way -- and Esc puts the document back.
+    fn handle_history_byte(&mut self, byte: u8) -> NotepadEffect {
+        let Some(browse) = self.history.as_mut() else {
+            return NotepadEffect::None;
+        };
+        let path = self.path.clone().unwrap_or_default();
+        match byte {
+            ESC => {
+                self.leave_history();
+                NotepadEffect::Redraw
+            }
+            KEY_LEFT | KEY_UP if browse.index + 1 < browse.total => {
+                browse.loading = true;
+                NotepadEffect::Version {
+                    path,
+                    index: browse.index + 1,
+                }
+            }
+            KEY_RIGHT | KEY_DOWN if browse.index > 0 => {
+                browse.loading = true;
+                NotepadEffect::Version {
+                    path,
+                    index: browse.index - 1,
+                }
+            }
+            KEY_RIGHT | KEY_DOWN => {
+                self.leave_history();
+                NotepadEffect::Redraw
+            }
+            b'\n' | b'\r' => {
+                let content = self.content();
+                self.history = None;
+                self.dirty = true;
+                self.status = "Restoring...".to_string();
+                NotepadEffect::Save { path, content }
+            }
+            _ => NotepadEffect::None,
         }
     }
 
@@ -377,6 +495,7 @@ impl Notepad {
 
     /// Replace the document with `content` from `path`.
     pub fn load(&mut self, path: Option<String>, content: &str) {
+        self.history = None;
         self.buffer = TextBuffer::from_string(content.to_string());
         self.cursor = Position::new(0, 0);
         self.undo.clear();
@@ -411,6 +530,9 @@ impl Notepad {
     /// The header text: `name — Notepad`, with a mark when unsaved.
     pub fn title(&self) -> String {
         let name = self.path.as_deref().unwrap_or("Untitled");
+        if self.history.is_some() {
+            return alloc::format!("{name} - earlier version");
+        }
         if self.dirty {
             alloc::format!("* {name} - Notepad")
         } else {
@@ -421,6 +543,20 @@ impl Notepad {
     /// The footer text: a prompt while one is open, otherwise position and
     /// saved state, with the last status message if there is one.
     pub fn footer(&self) -> String {
+        if let Some(browse) = &self.history {
+            let when = if browse.when == 0 {
+                String::new()
+            } else {
+                alloc::format!("   {}", crate::rtc::format_unix_minutes(browse.when))
+            };
+            return alloc::format!(
+                "History: {} of {} earlier{}   <- older   -> newer   Enter restores   Esc back{}",
+                browse.index + 1,
+                browse.total,
+                when,
+                if browse.loading { "   ..." } else { "" }
+            );
+        }
         match &self.prompt {
             Some(Prompt::Find(query)) => {
                 let count = self.match_count(query);
@@ -544,7 +680,13 @@ impl Notepad {
                 self.path = Some(path.clone());
                 self.dirty = false;
                 self.close_armed = false;
-                self.status = alloc::format!("Saved {path}");
+                self.status = if self.status == "Restoring..." {
+                    alloc::format!(
+                        "Restored, and saved as {path}; what it replaced is now a version"
+                    )
+                } else {
+                    alloc::format!("Saved {path}")
+                };
             }
             (NotepadEffect::Open { path }, Ok(Some(content))) => {
                 self.load(Some(path.clone()), &content);
@@ -565,8 +707,23 @@ impl Notepad {
         self.status.clear();
         // Any key brings the view back to the caret.
         self.scrolled_away = false;
+        if self.history.is_some() {
+            return self.handle_history_byte(byte);
+        }
         if self.prompt.is_some() {
             return self.handle_prompt_byte(byte);
+        }
+        if byte == CTRL_Y {
+            return match &self.path {
+                Some(path) => NotepadEffect::Version {
+                    path: path.clone(),
+                    index: 0,
+                },
+                None => {
+                    self.status = "Save first: history is kept per name".to_string();
+                    NotepadEffect::Redraw
+                }
+            };
         }
         // Selection first (GFX-054): Shift+movement grows it, plain
         // movement drops it, and an edit replaces it.
@@ -1264,6 +1421,98 @@ mod tests {
             pad.handle_byte(KEY_PAGE_DOWN);
         }
         assert_eq!(pad.cursor().row, 49, "clamped at the last line");
+    }
+
+    #[test]
+    fn history_browses_kept_versions_and_enter_restores_by_saving() {
+        let mut pad = Notepad::new();
+        // Unsaved: nothing to browse.
+        type_str(&mut pad, "now");
+        assert_eq!(pad.handle_byte(CTRL_Y), NotepadEffect::Redraw);
+        assert!(pad.footer().contains("Save first"));
+
+        pad.load(Some("memo".to_string()), "now");
+        type_str(&mut pad, "!");
+        assert!(pad.is_dirty());
+        assert_eq!(
+            pad.handle_byte(CTRL_Y),
+            NotepadEffect::Version {
+                path: "memo".to_string(),
+                index: 0
+            }
+        );
+        // The kernel answers: two earlier versions, the newest shown.
+        pad.show_version(0, 2, Some("before"), 1_789_946_225);
+        assert!(pad.browsing_history());
+        assert_eq!(pad.content(), "before");
+        assert!(pad.title().ends_with("earlier version"), "{}", pad.title());
+        assert!(
+            pad.footer()
+                .starts_with("History: 1 of 2 earlier   2026-09-20 23:17"),
+            "{}",
+            pad.footer()
+        );
+        // Typing does nothing while browsing.
+        assert_eq!(pad.handle_byte(b'x'), NotepadEffect::None);
+        // Left is older.
+        assert_eq!(
+            pad.handle_byte(KEY_LEFT),
+            NotepadEffect::Version {
+                path: "memo".to_string(),
+                index: 1
+            }
+        );
+        assert!(pad.footer().ends_with("..."), "{}", pad.footer());
+        pad.show_version(1, 2, Some("oldest"), 0);
+        assert_eq!(pad.content(), "oldest");
+        // Past the oldest there is nothing; Right goes newer.
+        assert_eq!(pad.handle_byte(KEY_LEFT), NotepadEffect::None);
+        assert_eq!(
+            pad.handle_byte(KEY_RIGHT),
+            NotepadEffect::Version {
+                path: "memo".to_string(),
+                index: 0
+            }
+        );
+        pad.show_version(0, 2, Some("before"), 0);
+        // Right past the newest is the document itself, unsaved edit intact.
+        assert_eq!(pad.handle_byte(KEY_RIGHT), NotepadEffect::Redraw);
+        assert!(!pad.browsing_history());
+        assert_eq!(pad.content(), "!now");
+        assert!(pad.is_dirty());
+
+        // Esc does the same from anywhere in the history.
+        pad.handle_byte(CTRL_Y);
+        pad.show_version(0, 2, Some("before"), 0);
+        pad.handle_byte(ESC);
+        assert_eq!(pad.content(), "!now");
+
+        // Enter restores by saving what is shown.
+        pad.handle_byte(CTRL_Y);
+        pad.show_version(1, 2, Some("oldest"), 0);
+        assert_eq!(
+            pad.handle_byte(b'\n'),
+            NotepadEffect::Save {
+                path: "memo".to_string(),
+                content: "oldest".to_string()
+            }
+        );
+        assert!(!pad.browsing_history());
+        pad.io_done(
+            &NotepadEffect::Save {
+                path: "memo".to_string(),
+                content: "oldest".to_string(),
+            },
+            Ok(None),
+        );
+        assert!(!pad.is_dirty());
+        assert!(pad.footer().contains("Restored"), "{}", pad.footer());
+
+        // No versions yet: the browser does not open.
+        pad.handle_byte(CTRL_Y);
+        pad.show_version(0, 0, None, 0);
+        assert!(!pad.browsing_history());
+        assert!(pad.footer().contains("No earlier versions"));
     }
 
     #[test]

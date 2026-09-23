@@ -102,6 +102,7 @@ impl DeskWindow {
                 ("Save as".to_string(), crate::notepad::CTRL_SHIFT_S),
                 ("Open".to_string(), crate::notepad::CTRL_O),
                 ("Find".to_string(), crate::notepad::CTRL_F),
+                ("History".to_string(), crate::notepad::CTRL_Y),
             ],
             AppState::Files(files) => files.actions(),
             AppState::Terminal => Vec::new(),
@@ -536,6 +537,13 @@ pub enum DeskRequest {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    /// Read kept version `index` of `name` for the Notepad `id`, then call
+    /// [`Desk::version_loaded`] (GFX-058).
+    ReadVersion {
+        id: ViewId,
+        name: String,
+        index: usize,
+    },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -560,10 +568,11 @@ pub enum PaletteAction {
     Paste,
     Find,
     ToggleTheme,
+    History,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 19] = [
+    pub const ALL: [PaletteAction; 20] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -583,6 +592,7 @@ impl PaletteAction {
         PaletteAction::Paste,
         PaletteAction::Find,
         PaletteAction::ToggleTheme,
+        PaletteAction::History,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -606,6 +616,7 @@ impl PaletteAction {
             PaletteAction::Paste => "Paste",
             PaletteAction::Find => "Find...",
             PaletteAction::ToggleTheme => "Switch between the dark and light themes",
+            PaletteAction::History => "Earlier versions of this document",
         }
     }
 
@@ -630,6 +641,7 @@ impl PaletteAction {
             PaletteAction::Paste => "Ctrl+V",
             PaletteAction::Find => "Ctrl+F",
             PaletteAction::ToggleTheme => "",
+            PaletteAction::History => "Ctrl+Y",
         }
     }
 
@@ -645,6 +657,7 @@ impl PaletteAction {
                 | PaletteAction::Cut
                 | PaletteAction::Paste
                 | PaletteAction::Find
+                | PaletteAction::History
         )
     }
 
@@ -970,6 +983,7 @@ impl Desk {
             PaletteAction::Cut => self.forward_to_notepad(crate::notepad::CTRL_X),
             PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
             PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
+            PaletteAction::History => self.forward_to_notepad(crate::notepad::CTRL_Y),
             PaletteAction::CloseWindow => {
                 if let Some(id) = self.focus {
                     self.close(id);
@@ -1608,6 +1622,14 @@ impl Desk {
                     self.clipboard = text;
                     (None, true)
                 }
+                NotepadEffect::Version { path, index } => (
+                    Some(DeskRequest::ReadVersion {
+                        id,
+                        name: path,
+                        index,
+                    }),
+                    true,
+                ),
                 NotepadEffect::Close => {
                     self.close(id);
                     (None, true)
@@ -1694,6 +1716,20 @@ impl Desk {
                 });
                 (None, true)
             }
+        }
+    }
+
+    /// The kernel delivers a kept version to the Notepad that asked.
+    pub fn version_loaded(
+        &mut self,
+        id: ViewId,
+        index: usize,
+        total: usize,
+        content: Option<&str>,
+        when: u64,
+    ) {
+        if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
+            notepad.show_version(index, total, content, when);
         }
     }
 
@@ -2729,7 +2765,10 @@ mod tests {
         desk.handle_key(b'x');
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.actions, alloc::vec!["Save", "Save as", "Open", "Find"]);
+        assert_eq!(
+            card.actions,
+            alloc::vec!["Save", "Save as", "Open", "Find", "History"]
+        );
         let save = card.action_rects()[0].expect("the Save chip is placed");
         let compositor = Compositor::new();
         let deliveries = router.route(
@@ -2763,6 +2802,42 @@ mod tests {
             .find(|w| w.frame.view_id == terminal)
             .unwrap();
         assert!(card.actions.is_empty());
+    }
+
+    #[test]
+    fn the_history_chip_asks_the_kernel_and_the_answer_reaches_the_notepad() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        desk.window_mut(id)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(Some("memo".to_string()), "now");
+        let (request, _) = desk.handle_key(crate::notepad::CTRL_Y);
+        assert_eq!(
+            request,
+            Some(DeskRequest::ReadVersion {
+                id,
+                name: "memo".to_string(),
+                index: 0
+            })
+        );
+        desk.version_loaded(id, 0, 1, Some("before"), 0);
+        let notepad = desk.window(id).unwrap().notepad().unwrap();
+        assert!(notepad.browsing_history());
+        assert_eq!(notepad.content(), "before");
+        // Enter restores: a Save request for what is shown.
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::Io {
+                id,
+                effect: NotepadEffect::Save {
+                    path: "memo".to_string(),
+                    content: "before".to_string()
+                }
+            })
+        );
     }
 
     #[test]

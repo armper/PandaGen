@@ -180,6 +180,16 @@ impl BareMetalEditorIo {
         }
     }
 
+    /// When each kept version of `name` was current, newest first.
+    pub fn list_versions(&mut self, name: &str) -> Result<Vec<(u64, u64)>, EditorIoError> {
+        Ok(self
+            .fs
+            .list_versions(name)?
+            .into_iter()
+            .map(|v| (v.modified_at, v.size))
+            .collect())
+    }
+
     /// An earlier content of `name`; 0 is the newest kept.
     pub fn read_version(&mut self, name: &str, index: usize) -> Result<String, EditorIoError> {
         let bytes = self.fs.read_version(name, index)?;

@@ -379,6 +379,20 @@ impl BareMetalFilesystem {
         self.fs.update_entry(self.root_id, name, now, change)
     }
 
+    /// The kept versions of `name`, newest first: when each was current
+    /// and how large it was.
+    pub fn list_versions(
+        &mut self,
+        name: &str,
+    ) -> Result<Vec<services_storage::persistent_fs::VersionRecord>, TransactionError> {
+        self.assert_boot_cpu();
+        let dir = self.fs.read_directory(self.root_id)?;
+        let entry = dir
+            .get_entry(name)
+            .ok_or_else(|| TransactionError::StorageError("File not found".into()))?;
+        Ok(entry.versions.clone())
+    }
+
     /// An earlier content of `name`: 0 is the newest kept version.
     pub fn read_version(&mut self, name: &str, index: usize) -> Result<Vec<u8>, TransactionError> {
         self.assert_boot_cpu();

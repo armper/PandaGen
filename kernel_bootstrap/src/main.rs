@@ -1985,6 +1985,23 @@ fn workspace_loop(
                 };
                 match request {
                     desk::DeskRequest::Terminal(_) => {}
+                    desk::DeskRequest::ReadVersion { id, name, index } => {
+                        let Some(fs) = workspace.take_filesystem() else {
+                            continue;
+                        };
+                        let mut io =
+                            bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                        let versions = io.list_versions(&name).unwrap_or_default();
+                        let content = if index < versions.len() {
+                            io.read_version(&name, index).ok()
+                        } else {
+                            None
+                        };
+                        workspace.set_filesystem(io.into_filesystem());
+                        let when = versions.get(index).map(|v| v.0).unwrap_or(0);
+                        desk.version_loaded(id, index, versions.len(), content.as_deref(), when);
+                        output_dirty = true;
+                    }
                     desk::DeskRequest::TerminalScroll { notches } => {
                         let visible = desk.terminal_rows().unwrap_or(1).saturating_sub(1);
                         if workspace.scroll_view(notches, visible) {

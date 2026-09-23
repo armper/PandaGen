@@ -567,6 +567,34 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: a document's history, browsed and restored");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Three saves of `hist`, then Ctrl+Y opens the newest kept version,
+        // Left steps older, Enter restores it -- which is a save, so the
+        // "Saved" notice card appears.
+        "sleep:6,ctrl-n,sleep:1,o,n,e,ctrl-s,sleep:1,h,i,s,t,ret,sleep:1,spc,t,w,o,ctrl-s,sleep:1,spc,t,h,r,e,e,ctrl-s,sleep:1,ctrl-y,sleep:2,left,sleep:2,ret,sleep:2,shot:restored"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_history".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The notice card at the top right is a card surface; without the
+        // restore there is only the gradient there.
+        "--expect-pixel".to_string(),
+        "1200,81,28,34,48".to_string(),
+        "--expect-pixel".to_string(),
+        "1200,50,28,34,48".to_string(),
+        // The Notepad card is focused and drawn.
+        "--expect-pixel".to_string(),
+        "400,44,52,211,153".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: the light theme, from the palette");
     let args = [
         "--port-base".to_string(),
