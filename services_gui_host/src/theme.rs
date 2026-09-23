@@ -118,6 +118,111 @@ impl Theme {
         ..Theme::DEFAULT
     };
 
+    /// The desk's presets (GFX-059), by the name the Look app shows.
+    pub const PRESETS: [(&'static str, Theme); 5] = [
+        ("Dusk", Theme::DESK),
+        ("Daylight", Theme::LIGHT),
+        ("Ember", Theme::EMBER),
+        ("Forest", Theme::FOREST),
+        ("Mono", Theme::MONO),
+    ];
+
+    /// Accent colours a preset can take (GFX-059): focus ring, caret,
+    /// the dock's running dot.
+    pub const ACCENTS: [(&'static str, RgbaColor); 4] = [
+        ("Mint", RgbaColor::new(52, 211, 153, 255)),
+        ("Sky", RgbaColor::new(96, 165, 250, 255)),
+        ("Amber", RgbaColor::new(251, 191, 36, 255)),
+        ("Rose", RgbaColor::new(244, 114, 182, 255)),
+    ];
+
+    /// A preset by name, case-insensitively.
+    pub fn named(name: &str) -> Option<Theme> {
+        Theme::PRESETS
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, t)| *t)
+    }
+
+    /// An accent by name, case-insensitively.
+    pub fn accent_named(name: &str) -> Option<RgbaColor> {
+        Theme::ACCENTS
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, c)| *c)
+    }
+
+    /// This theme with another accent: the ring, the caret's colour is
+    /// left alone (it is orange on purpose, to be found).
+    pub const fn with_accent(mut self, accent: RgbaColor) -> Theme {
+        self.accent = accent;
+        self.border_focused = accent;
+        self
+    }
+
+    /// Warm dark: embers under a night sky.
+    pub const EMBER: Theme = Theme {
+        background: RgbaColor::new(26, 16, 18, 255),
+        background_bottom: RgbaColor::new(44, 22, 26, 255),
+        surface: RgbaColor::new(40, 28, 30, 255),
+        surface_raised: RgbaColor::new(32, 22, 24, 255),
+        hairline: RgbaColor::new(70, 50, 52, 255),
+        shadow: RgbaColor::new(16, 10, 12, 255),
+        text: RgbaColor::new(244, 232, 226, 255),
+        text_muted: RgbaColor::new(176, 150, 142, 255),
+        selection: RgbaColor::new(98, 58, 52, 255),
+        tab_active: RgbaColor::new(40, 28, 30, 255),
+        tab_inactive: RgbaColor::new(64, 44, 46, 255),
+        title_focused: RgbaColor::new(70, 40, 36, 255),
+        title_unfocused: RgbaColor::new(50, 36, 38, 255),
+        title_notice: RgbaColor::new(90, 62, 30, 255),
+        title_palette: RgbaColor::new(78, 46, 44, 255),
+        border_unfocused: RgbaColor::new(120, 96, 92, 255),
+        ..Theme::DEFAULT
+    };
+
+    /// Deep green: a desk in the shade.
+    pub const FOREST: Theme = Theme {
+        background: RgbaColor::new(12, 24, 20, 255),
+        background_bottom: RgbaColor::new(18, 38, 30, 255),
+        surface: RgbaColor::new(24, 40, 34, 255),
+        surface_raised: RgbaColor::new(18, 32, 27, 255),
+        hairline: RgbaColor::new(44, 68, 58, 255),
+        shadow: RgbaColor::new(8, 16, 13, 255),
+        text: RgbaColor::new(226, 240, 232, 255),
+        text_muted: RgbaColor::new(140, 170, 154, 255),
+        selection: RgbaColor::new(40, 84, 66, 255),
+        tab_active: RgbaColor::new(24, 40, 34, 255),
+        tab_inactive: RgbaColor::new(40, 62, 52, 255),
+        title_focused: RgbaColor::new(30, 66, 52, 255),
+        title_unfocused: RgbaColor::new(30, 48, 40, 255),
+        title_notice: RgbaColor::new(78, 66, 30, 255),
+        title_palette: RgbaColor::new(34, 72, 58, 255),
+        border_unfocused: RgbaColor::new(96, 124, 110, 255),
+        ..Theme::DEFAULT
+    };
+
+    /// Greys only, for the accent to do all the pointing.
+    pub const MONO: Theme = Theme {
+        background: RgbaColor::new(18, 18, 20, 255),
+        background_bottom: RgbaColor::new(30, 30, 34, 255),
+        surface: RgbaColor::new(34, 34, 38, 255),
+        surface_raised: RgbaColor::new(26, 26, 30, 255),
+        hairline: RgbaColor::new(60, 60, 66, 255),
+        shadow: RgbaColor::new(10, 10, 12, 255),
+        text: RgbaColor::new(236, 236, 240, 255),
+        text_muted: RgbaColor::new(150, 150, 160, 255),
+        selection: RgbaColor::new(70, 70, 80, 255),
+        tab_active: RgbaColor::new(34, 34, 38, 255),
+        tab_inactive: RgbaColor::new(54, 54, 60, 255),
+        title_focused: RgbaColor::new(58, 58, 64, 255),
+        title_unfocused: RgbaColor::new(44, 44, 48, 255),
+        title_notice: RgbaColor::new(80, 70, 40, 255),
+        title_palette: RgbaColor::new(60, 60, 68, 255),
+        border_unfocused: RgbaColor::new(110, 110, 120, 255),
+        ..Theme::DEFAULT
+    };
+
     /// A light variant, mostly to prove the painter is theme-agnostic.
     pub const LIGHT: Theme = Theme {
         background: RgbaColor::new(226, 230, 236, 255),

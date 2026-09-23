@@ -1513,6 +1513,8 @@ fn workspace_loop(
     // What the desk asked the kernel for this iteration: file operations,
     // listings, a display switch. Served after input, once, in order.
     let mut desk_requests: alloc::vec::Vec<desk::DeskRequest> = alloc::vec::Vec::new();
+    // The desk's look is read from disk once, on the first desk frame.
+    let mut look_loaded = false;
     // GFX-048: degrade in a fixed order under memory pressure instead of
     // failing inside an allocation.
     let mut pressure_monitor = services_gui_host::PressureMonitor::new(
@@ -2002,6 +2004,37 @@ fn workspace_loop(
                         desk.version_loaded(id, index, versions.len(), content.as_deref(), when);
                         output_dirty = true;
                     }
+                    desk::DeskRequest::SaveLook { text } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let result = io.write_setting(bare_metal_editor_io::LOOK_FILE, &text);
+                            workspace.set_filesystem(io.into_filesystem());
+                            match result {
+                                Ok(()) => desk.notify(
+                                    services_gui_host::NoticeLevel::Success,
+                                    alloc::format!("Look kept: {}", text.replace('\n', " ").trim()),
+                                    now,
+                                ),
+                                Err(e) => desk.notify(
+                                    services_gui_host::NoticeLevel::Error,
+                                    alloc::format!("The look could not be kept: {e:?}"),
+                                    now,
+                                ),
+                            }
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::LoadLook => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let text = io.read_setting(bare_metal_editor_io::LOOK_FILE);
+                            workspace.set_filesystem(io.into_filesystem());
+                            desk.apply_look(text.as_deref());
+                            output_dirty = true;
+                        }
+                    }
                     desk::DeskRequest::TerminalScroll { notches } => {
                         let visible = desk.terminal_rows().unwrap_or(1).saturating_sub(1);
                         if workspace.scroll_view(notches, visible) {
@@ -2357,6 +2390,10 @@ fn workspace_loop(
                 if display_mode.is_desk() {
                     let (w, h) = (renderer.width(), renderer.height());
                     let desk = desk.get_or_insert_with(|| desk::Desk::new(w, h));
+                    if !look_loaded {
+                        look_loaded = true;
+                        desk_requests.push(desk::DeskRequest::LoadLook);
+                    }
                     // The desk decides focus; the router mirrors it, so
                     // `apply_focus` below paints the ring where the desk
                     // says. Two records of one thing with one writer.

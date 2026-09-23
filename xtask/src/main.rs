@@ -529,9 +529,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "1200,81,28,34,48".to_string(),
         // Two dock tiles lit: Notepad and Files.
         "--expect-pixel".to_string(),
-        "592,785,52,211,153".to_string(),
+        "568,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "640,785,52,211,153".to_string(),
+        "616,785,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -562,6 +562,34 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // ...and the Files card has focus.
         "--expect-pixel".to_string(),
         "333,300,52,211,153".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
+    println!("== the desk: Look previews a theme as the highlight moves");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // "look" from the bare desk opens the card on Dusk; Down twice is
+        // Ember, previewed at once. Nothing is kept, so the gauntlet's
+        // disk stays on the default look for every other shape.
+        "sleep:6,l,o,o,k,ret,sleep:2,down,down,sleep:2,shot:ember".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_look".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // Ember's gradient on the desk, its raised bar, the card's surface,
+        // and the Mint ring still on the focused card.
+        "--expect-pixel".to_string(),
+        "100,400,35,19,22".to_string(),
+        "--expect-pixel".to_string(),
+        "640,4,32,22,24".to_string(),
+        "--expect-pixel".to_string(),
+        "600,200,40,28,30".to_string(),
+        "--expect-pixel".to_string(),
+        "430,200,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -600,16 +628,16 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
-        // From the bare desk, "light" is a palette search that lands on
-        // "Switch between the dark and light themes"; open a Terminal
-        // after, so a card is drawn with the new theme too.
-        "sleep:6,l,i,g,h,t,ret,sleep:1,ctrl-t,sleep:2,shot:light".to_string(),
+        // From the bare desk, "look" opens the Look card on Dusk; Down is
+        // Daylight, previewed at once. The card itself is the surface the
+        // third pixel reads.
+        "sleep:6,l,o,o,k,ret,sleep:1,down,sleep:2,shot:light".to_string(),
         "--out".to_string(),
         "dist/qemu_desk_light".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
-        // The desk background, the top bar, and the Terminal card's
-        // surface, all in the light palette.
+        // The desk background, the top bar, and the Look card's surface,
+        // all in the light palette.
         "--expect-pixel".to_string(),
         "100,400,226,230,236".to_string(),
         "--expect-pixel".to_string(),

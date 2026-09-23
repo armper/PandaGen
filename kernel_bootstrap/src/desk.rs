@@ -60,16 +60,24 @@ pub enum DeskApp {
     /// The machine's console -- the `WS >` prompt and everything it can do --
     /// as a card, so the desk never has to be left to reach it.
     Terminal,
+    /// Themes and accents, previewed live and kept on disk (GFX-059).
+    Look,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 3] = [DeskApp::Notepad, DeskApp::Files, DeskApp::Terminal];
+    pub const ALL: [DeskApp; 4] = [
+        DeskApp::Notepad,
+        DeskApp::Files,
+        DeskApp::Terminal,
+        DeskApp::Look,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
             DeskApp::Notepad => "Notepad",
             DeskApp::Files => "Files",
             DeskApp::Terminal => "Terminal",
+            DeskApp::Look => "Look",
         }
     }
 
@@ -79,6 +87,7 @@ impl DeskApp {
             DeskApp::Notepad => "Np",
             DeskApp::Files => "Fi",
             DeskApp::Terminal => "Tm",
+            DeskApp::Look => "Lk",
         }
     }
 
@@ -87,7 +96,138 @@ impl DeskApp {
             DeskApp::Notepad => NOTEPAD_SIZE,
             DeskApp::Files => FILES_SIZE,
             DeskApp::Terminal => TERMINAL_SIZE,
+            DeskApp::Look => LOOK_SIZE,
         }
+    }
+}
+
+/// The Look card (GFX-059).
+pub const LOOK_SIZE: (usize, usize) = (420, 360);
+
+/// What the desk looks like: a preset and an accent, by name (GFX-059).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookChoice {
+    pub theme: String,
+    pub accent: String,
+}
+
+impl Default for LookChoice {
+    fn default() -> Self {
+        Self {
+            theme: "Dusk".to_string(),
+            accent: "Mint".to_string(),
+        }
+    }
+}
+
+impl LookChoice {
+    pub fn theme(&self) -> Theme {
+        let base = Theme::named(&self.theme).unwrap_or(Theme::DESK);
+        match Theme::accent_named(&self.accent) {
+            Some(accent) => base.with_accent(accent),
+            None => base,
+        }
+    }
+
+    /// The on-disk form: two lines, `theme=` and `accent=`.
+    pub fn to_text(&self) -> String {
+        alloc::format!("theme={}\naccent={}\n", self.theme, self.accent)
+    }
+
+    /// Parse the on-disk form; unknown names fall back to the defaults, so
+    /// a hand-edited or damaged file cannot leave the desk unreadable.
+    pub fn from_text(text: &str) -> Self {
+        let mut choice = Self::default();
+        for line in text.lines() {
+            if let Some(name) = line.strip_prefix("theme=") {
+                if let Some((canonical, _)) = Theme::PRESETS
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name.trim()))
+                {
+                    choice.theme = canonical.to_string();
+                }
+            } else if let Some(name) = line.strip_prefix("accent=") {
+                if let Some((canonical, _)) = Theme::ACCENTS
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name.trim()))
+                {
+                    choice.accent = canonical.to_string();
+                }
+            }
+        }
+        choice
+    }
+}
+
+/// The Look app's state: which row is under the highlight. Rows are the
+/// presets, then the accents; moving previews at once, Enter keeps.
+#[derive(Debug, Clone, Default)]
+pub struct LookView {
+    pub row: usize,
+}
+
+impl LookView {
+    const THEME_ROWS: usize = Theme::PRESETS.len();
+    const ROWS: usize = Theme::PRESETS.len() + Theme::ACCENTS.len();
+
+    /// The content lines: a heading, the presets, a gap, a heading, the
+    /// accents. `line_of_row` maps a row to its line for the highlight.
+    fn lines(kept: &LookChoice, preview: &LookChoice) -> Vec<String> {
+        let mark = |name: &str, current: &str| {
+            if name.eq_ignore_ascii_case(current) {
+                alloc::format!("  * {name}")
+            } else {
+                alloc::format!("    {name}")
+            }
+        };
+        let mut lines = alloc::vec!["Theme".to_string()];
+        for (name, _) in Theme::PRESETS.iter() {
+            let mut line = mark(name, &preview.theme);
+            if name.eq_ignore_ascii_case(&kept.theme) && !name.eq_ignore_ascii_case(&preview.theme)
+            {
+                line.push_str("   (kept)");
+            }
+            lines.push(line);
+        }
+        lines.push(String::new());
+        lines.push("Accent".to_string());
+        for (name, _) in Theme::ACCENTS.iter() {
+            let mut line = mark(name, &preview.accent);
+            if name.eq_ignore_ascii_case(&kept.accent)
+                && !name.eq_ignore_ascii_case(&preview.accent)
+            {
+                line.push_str("   (kept)");
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn line_of_row(row: usize) -> usize {
+        if row < Self::THEME_ROWS {
+            1 + row
+        } else {
+            3 + row
+        }
+    }
+
+    /// The choice the highlighted row stands for, given the current one.
+    fn choice_at(&self, current: &LookChoice) -> LookChoice {
+        let mut choice = current.clone();
+        if self.row < Self::THEME_ROWS {
+            choice.theme = Theme::PRESETS[self.row].0.to_string();
+        } else {
+            choice.accent = Theme::ACCENTS[self.row - Self::THEME_ROWS].0.to_string();
+        }
+        choice
+    }
+
+    /// The row that stands for `choice`'s theme (so the card opens on it).
+    fn row_of(choice: &LookChoice) -> usize {
+        Theme::PRESETS
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(&choice.theme))
+            .unwrap_or(0)
     }
 }
 
@@ -106,6 +246,10 @@ impl DeskWindow {
             ],
             AppState::Files(files) => files.actions(),
             AppState::Terminal => Vec::new(),
+            AppState::Look(_) => alloc::vec![
+                ("Keep".to_string(), b'\n'),
+                ("Revert".to_string(), crate::notepad::ESC),
+            ],
         }
     }
 }
@@ -210,6 +354,9 @@ impl FilesView {
             .iter()
             .enumerate()
             .filter(|(_, e)| e.trashed == self.bin)
+            // Names starting with '.' are the system's (the desk's look);
+            // Files is for the person's files.
+            .filter(|(_, e)| !e.name.starts_with('.'))
             .filter(|(_, e)| {
                 filter.is_empty()
                     || e.name.to_ascii_lowercase().contains(&filter)
@@ -435,6 +582,7 @@ pub enum AppState {
     Files(FilesView),
     /// The console's state lives in the workspace; the card only shows it.
     Terminal,
+    Look(LookView),
 }
 
 /// One open window.
@@ -469,6 +617,13 @@ impl DeskWindow {
     pub fn files(&self) -> Option<&FilesView> {
         match &self.state {
             AppState::Files(files) => Some(files),
+            _ => None,
+        }
+    }
+
+    pub fn look_mut(&mut self) -> Option<&mut LookView> {
+        match &mut self.state {
+            AppState::Look(look) => Some(look),
             _ => None,
         }
     }
@@ -544,6 +699,10 @@ pub enum DeskRequest {
         name: String,
         index: usize,
     },
+    /// Write the desk's look to disk (GFX-059).
+    SaveLook { text: String },
+    /// Read the desk's look from disk, then call [`Desk::apply_look`].
+    LoadLook,
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -615,7 +774,7 @@ impl PaletteAction {
             PaletteAction::Cut => "Cut",
             PaletteAction::Paste => "Paste",
             PaletteAction::Find => "Find...",
-            PaletteAction::ToggleTheme => "Switch between the dark and light themes",
+            PaletteAction::ToggleTheme => "Look: themes and accents",
             PaletteAction::History => "Earlier versions of this document",
         }
     }
@@ -736,8 +895,10 @@ pub struct Desk {
     palette_id: ViewId,
     /// One clipboard for every card (GFX-054).
     clipboard: String,
-    /// The light theme is on (GFX-055).
-    light: bool,
+    /// The look kept on disk (GFX-059)...
+    look: LookChoice,
+    /// ...and the one being previewed from the Look card, if any.
+    look_preview: Option<LookChoice>,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
@@ -764,7 +925,8 @@ impl Desk {
             palette: None,
             palette_id: ViewId::new(),
             clipboard: String::new(),
-            light: false,
+            look: LookChoice::default(),
+            look_preview: None,
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
@@ -824,13 +986,24 @@ impl Desk {
         self.windows.len()
     }
 
-    /// The theme the desk is drawn with.
+    /// The theme the desk is drawn with: the preview while one is open,
+    /// otherwise what is kept.
     pub fn theme(&self) -> Theme {
-        if self.light {
-            Theme::LIGHT
-        } else {
-            Theme::DESK
+        self.look_preview.as_ref().unwrap_or(&self.look).theme()
+    }
+
+    /// The kept look, by name.
+    pub fn look(&self) -> &LookChoice {
+        &self.look
+    }
+
+    /// The kernel read the look file (GFX-059); an unreadable or missing
+    /// file leaves the defaults.
+    pub fn apply_look(&mut self, text: Option<&str>) {
+        if let Some(text) = text {
+            self.look = LookChoice::from_text(text);
         }
+        self.look_preview = None;
     }
 
     pub fn focus(&self) -> Option<ViewId> {
@@ -908,6 +1081,9 @@ impl Desk {
                 DeskApp::Notepad => AppState::Notepad(Notepad::new()),
                 DeskApp::Files => AppState::Files(FilesView::default()),
                 DeskApp::Terminal => AppState::Terminal,
+                DeskApp::Look => AppState::Look(LookView {
+                    row: LookView::row_of(&self.look),
+                }),
             },
         });
         self.focus = Some(id);
@@ -1006,7 +1182,7 @@ impl Desk {
             }
             PaletteAction::TextConsole => Some(DeskRequest::TextConsole),
             PaletteAction::ToggleTheme => {
-                self.light = !self.light;
+                self.open_or_raise(DeskApp::Look);
                 None
             }
         }
@@ -1076,6 +1252,9 @@ impl Desk {
     }
 
     pub fn close(&mut self, id: ViewId) {
+        if self.window(id).map(|w| w.app) == Some(DeskApp::Look) {
+            self.look_preview = None;
+        }
         self.windows.retain(|w| w.id != id);
         if self.drag.map(|d| d.id) == Some(id) {
             self.drag = None;
@@ -1116,6 +1295,23 @@ impl Desk {
 
     /// A dock tile was pressed: focus the app's window if it has one, else
     /// launch it.
+    /// Bring an app's window to the front, or open one.
+    pub fn open_or_raise(&mut self, app: DeskApp) -> ViewId {
+        let existing = self
+            .windows
+            .iter()
+            .filter(|w| w.app == app)
+            .max_by_key(|w| w.z)
+            .map(|w| w.id);
+        match existing {
+            Some(id) => {
+                self.raise(id);
+                id
+            }
+            None => self.launch(app),
+        }
+    }
+
     pub fn activate_dock_tile(&mut self, index: usize) -> Option<DeskRequest> {
         let app = DeskApp::ALL.get(index).copied()?;
         // A tucked window of this app comes back first.
@@ -1469,6 +1665,11 @@ impl Desk {
     /// A key for window `id`'s app.
     fn handle_app_key(&mut self, id: ViewId, byte: u8) -> (Option<DeskRequest>, bool) {
         let clipboard = self.clipboard.clone();
+        let current_look = self
+            .look_preview
+            .clone()
+            .unwrap_or_else(|| self.look.clone());
+        let kept_row = LookView::row_of(&self.look);
         let Some(window) = self.window_mut(id) else {
             return (None, false);
         };
@@ -1605,6 +1806,40 @@ impl Desk {
                         files.filter.push(byte as char);
                         files.selection = 0;
                         files.scroll = 0;
+                        (None, true)
+                    }
+                    _ => (None, false),
+                }
+            }
+            AppState::Look(look) => {
+                let current = current_look;
+                match byte {
+                    crate::notepad::KEY_UP | crate::notepad::KEY_DOWN => {
+                        let row = if byte == crate::notepad::KEY_UP {
+                            look.row.saturating_sub(1)
+                        } else {
+                            (look.row + 1).min(LookView::ROWS - 1)
+                        };
+                        look.row = row;
+                        let preview = look.choice_at(&current);
+                        self.look_preview = Some(preview);
+                        (None, true)
+                    }
+                    b'\n' | b'\r' => {
+                        // Keep: what is previewed becomes the look, on disk.
+                        let chosen = self.look_preview.take().unwrap_or(current);
+                        let text = chosen.to_text();
+                        self.look = chosen;
+                        (Some(DeskRequest::SaveLook { text }), true)
+                    }
+                    crate::notepad::ESC => {
+                        look.row = kept_row;
+                        self.look_preview = None;
+                        (None, true)
+                    }
+                    crate::notepad::CTRL_W => {
+                        self.look_preview = None;
+                        self.close(id);
                         (None, true)
                     }
                     _ => (None, false),
@@ -1791,6 +2026,8 @@ impl Desk {
 
         // Cards.
         let focus = self.focus;
+        let kept_look = self.look.clone();
+        let look_preview = self.look_preview.clone();
         for window in &mut self.windows {
             if window.tucked {
                 continue;
@@ -1834,6 +2071,25 @@ impl Desk {
                 AppState::Terminal => {
                     let view = terminal.cloned().unwrap_or_default();
                     (view.lines, "Terminal".to_string(), view.status, view.cursor)
+                }
+                AppState::Look(look) => {
+                    let preview = look_preview.clone().unwrap_or_else(|| kept_look.clone());
+                    let lines = LookView::lines(&kept_look, &preview);
+                    highlight = Some(LookView::line_of_row(look.row));
+                    let footer = if look_preview.is_some() {
+                        alloc::format!(
+                            "Previewing {} + {}   Enter keeps it   Esc goes back",
+                            preview.theme,
+                            preview.accent
+                        )
+                    } else {
+                        alloc::format!(
+                            "{} + {}   arrows preview, and it changes as you go",
+                            preview.theme,
+                            preview.accent
+                        )
+                    };
+                    (lines, "Look".to_string(), footer, None)
                 }
             };
             let mut frame = ViewFrame::new(
@@ -2262,7 +2518,7 @@ mod tests {
         // Ctrl+Tab skips it; the dock tile brings it back.
         assert!(!desk.cycle_focus());
         let pill = dock.bounds();
-        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         route(&mut desk, &mut router, press(first_x, y));
         assert!(!desk.window(id).unwrap().tucked);
@@ -2279,7 +2535,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let files_x = (pill.x + (pill.width - 136) / 2 + 20 + 48) as i32;
+        let files_x = (pill.x + (pill.width - 184) / 2 + 20 + 48) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         let compositor = Compositor::new();
         let deliveries = router.route(&compositor, &windows, press(files_x, y));
@@ -2514,7 +2770,7 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_switches_the_theme_and_the_empty_desk_says_how_to_begin() {
+    fn the_look_card_previews_as_you_move_keeps_on_enter_and_reverts_on_esc() {
         let mut desk = Desk::new(1280, 800);
         assert_eq!(desk.theme(), Theme::DESK);
         let windows = desk.windows("", true, None);
@@ -2524,12 +2780,70 @@ mod tests {
             .unwrap();
         assert!(bar.frame.title.as_deref().unwrap().contains("Ctrl+Space"));
 
+        // The palette opens Look.
         desk.handle_key(KEY_CTRL_SPACE);
-        for byte in b"light" {
+        for byte in b"look" {
             desk.handle_key(*byte);
         }
         desk.handle_key(b'\n');
-        assert_eq!(desk.theme(), Theme::LIGHT);
+        let id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Look);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.actions, alloc::vec!["Keep", "Revert"]);
+        assert_eq!(
+            card.highlight_line,
+            Some(1),
+            "opens on the kept theme, Dusk"
+        );
+
+        // Down twice: Ember, previewed at once, not kept.
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        assert_eq!(desk.theme(), Theme::EMBER.with_accent(Theme::ACCENTS[0].1));
+        assert_eq!(desk.look().theme, "Dusk");
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert!(card
+            .footer
+            .as_deref()
+            .unwrap()
+            .starts_with("Previewing Ember + Mint"));
+        // Esc reverts.
+        desk.handle_key(crate::notepad::ESC);
+        assert_eq!(desk.theme(), Theme::DESK);
+
+        // Down to Ember again, then on to the accents: Sky. Enter keeps and
+        // asks the kernel to write it.
+        for _ in 0..(LookView::THEME_ROWS + 1) {
+            desk.handle_key(crate::notepad::KEY_DOWN);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            request,
+            Some(DeskRequest::SaveLook {
+                text: "theme=Mono\naccent=Sky\n".to_string()
+            })
+        );
+        assert_eq!(desk.look().theme, "Mono");
+        assert_eq!(desk.theme(), Theme::MONO.with_accent(Theme::ACCENTS[1].1));
+
+        // What was written reads back; nonsense reads as the defaults.
+        let mut fresh = Desk::new(1280, 800);
+        fresh.apply_look(Some("theme=mono\naccent=SKY\n"));
+        assert_eq!(fresh.look(), desk.look());
+        fresh.apply_look(Some("theme=plaid\n"));
+        assert_eq!(fresh.look(), &LookChoice::default());
+        fresh.apply_look(None);
+        assert_eq!(fresh.look(), &LookChoice::default());
+
+        // Closing the card drops any preview.
+        desk.handle_key(crate::notepad::KEY_UP);
+        assert_ne!(desk.theme(), desk.look().theme());
+        desk.close(id);
+        assert_eq!(desk.theme(), desk.look().theme());
+
+        // A card with focus names itself in the bar.
         desk.launch(DeskApp::Notepad);
         let windows = desk.windows("", true, None);
         let bar = windows
@@ -2537,6 +2851,19 @@ mod tests {
             .find(|w| w.style == WindowStyle::TopBar)
             .unwrap();
         assert_eq!(bar.frame.title.as_deref(), Some("Notepad"));
+    }
+
+    #[test]
+    fn files_hides_the_systems_dot_names() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Files);
+        desk.files_listed(
+            id,
+            alloc::vec![FileEntry::named(".look"), FileEntry::named("memo")],
+        );
+        let files = desk.window(id).unwrap().files().unwrap();
+        assert_eq!(files.visible().len(), 1);
+        assert_eq!(files.selected().map(|e| e.name.as_str()), Some("memo"));
     }
 
     #[test]
@@ -2902,10 +3229,10 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        // Three tiles: 3*40 + 2*8 = 136 wide, centred in the pill; the
+        // Four tiles: 4*40 + 3*8 = 184 wide, centred in the pill; the
         // first tile's centre is 20px into that row.
         let pill = dock.bounds();
-        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(&mut desk, &mut router, press(first_x, y)));
@@ -2929,7 +3256,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let first_x = (pill.x + (pill.width - 136) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(

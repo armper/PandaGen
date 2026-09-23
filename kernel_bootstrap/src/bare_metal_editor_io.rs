@@ -11,6 +11,10 @@ use services_storage::ObjectId;
 
 /// The schema Notepad writes (GFX-057).
 pub const TEXT_SCHEMA: &str = "text/plain";
+/// The schema of the desk's settings files (GFX-059).
+pub const SETTINGS_SCHEMA: &str = "settings/desk";
+/// Where the desk's look is kept.
+pub const LOOK_FILE: &str = ".look";
 
 /// Editor I/O error
 #[derive(Debug)]
@@ -143,6 +147,20 @@ impl BareMetalEditorIo {
                 .write_named(path, content.as_bytes(), self.now, Some(TEXT_SCHEMA))?;
         let handle = DocumentHandle::new(Some(object_id), Some(path.to_string()));
         Ok((alloc::format!("Saved as {}", path), handle))
+    }
+
+    /// Write a system setting under a dot-name with its own schema
+    /// (GFX-059); Files hides such names.
+    pub fn write_setting(&mut self, name: &str, content: &str) -> Result<(), EditorIoError> {
+        self.fs
+            .write_named(name, content.as_bytes(), self.now, Some(SETTINGS_SCHEMA))?;
+        Ok(())
+    }
+
+    /// Read a system setting, or `None` when it was never written.
+    pub fn read_setting(&mut self, name: &str) -> Option<String> {
+        let bytes = self.fs.read_file_by_name(name).ok()?;
+        String::from_utf8(bytes).ok()
     }
 
     /// Add and remove tags on `name` (GFX-057).
