@@ -17,6 +17,8 @@ pub const SETTINGS_SCHEMA: &str = "settings/desk";
 pub const LOOK_FILE: &str = ".look";
 /// Where the recently used files are kept (GFX-060).
 pub const RECENT_FILE: &str = ".recent";
+/// Present once the Welcome card has been closed (GFX-065).
+pub const WELCOMED_FILE: &str = ".welcomed";
 
 /// Editor I/O error
 #[derive(Debug)]

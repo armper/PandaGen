@@ -62,6 +62,9 @@ pub enum DeskApp {
     Terminal,
     /// Themes and accents, previewed live and kept on disk (GFX-059).
     Look,
+    /// The first-boot card: five lines on how the desk works (GFX-065).
+    /// Not on the dock; opened once by the kernel, closed by a click.
+    Welcome,
 }
 
 impl DeskApp {
@@ -78,6 +81,7 @@ impl DeskApp {
             DeskApp::Files => "Files",
             DeskApp::Terminal => "Terminal",
             DeskApp::Look => "Look",
+            DeskApp::Welcome => "Welcome",
         }
     }
 
@@ -88,6 +92,7 @@ impl DeskApp {
             DeskApp::Files => "Fi",
             DeskApp::Terminal => "Tm",
             DeskApp::Look => "Lk",
+            DeskApp::Welcome => "Hi",
         }
     }
 
@@ -97,9 +102,23 @@ impl DeskApp {
             DeskApp::Files => FILES_SIZE,
             DeskApp::Terminal => TERMINAL_SIZE,
             DeskApp::Look => LOOK_SIZE,
+            DeskApp::Welcome => WELCOME_SIZE,
         }
     }
 }
+
+/// The Welcome card (GFX-065): wide enough for its lines, low enough to
+/// sit above the dock without covering the middle of the desk.
+pub const WELCOME_SIZE: (usize, usize) = (440, 200);
+
+/// What the Welcome card says. Short, and every line is a thing to try.
+pub const WELCOME_LINES: [&str; 5] = [
+    "Just start typing to search files and actions.",
+    "Ctrl+Space or a click on the bar: the palette.",
+    "Everything a card can do is in its header chips.",
+    "Documents save themselves and keep every version.",
+    "Look, on the dock, changes the theme as you point.",
+];
 
 /// The Look card (GFX-059).
 pub const LOOK_SIZE: (usize, usize) = (420, 360);
@@ -268,6 +287,7 @@ impl DeskWindow {
                 ("Keep".to_string(), b'\n'),
                 ("Revert".to_string(), crate::notepad::ESC),
             ],
+            AppState::Welcome => alloc::vec![("Got it".to_string(), crate::notepad::CTRL_W)],
         }
     }
 }
@@ -601,6 +621,7 @@ pub enum AppState {
     /// The console's state lives in the workspace; the card only shows it.
     Terminal,
     Look(LookView),
+    Welcome,
 }
 
 /// One open window.
@@ -725,6 +746,8 @@ pub enum DeskRequest {
     /// Find lines containing `query` in the person's text files, then call
     /// [`Desk::search_results`] (GFX-061).
     SearchFiles { query: String },
+    /// The Welcome card was closed: remember that on disk (GFX-065).
+    Welcomed,
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
 }
@@ -993,6 +1016,9 @@ pub struct Desk {
     look_preview: Option<LookChoice>,
     /// Files opened or saved lately, newest first (GFX-060).
     recent: Vec<String>,
+    /// The Welcome card was closed this session; the kernel writes
+    /// `.welcomed` and never shows it again (GFX-065).
+    welcome_dismissed: bool,
     /// Notepads whose pending save is an autosave: no notice when it lands.
     quiet_saves: Vec<ViewId>,
     /// A pointer drag selecting text in this card.
@@ -1030,6 +1056,7 @@ impl Desk {
             look: LookChoice::default(),
             look_preview: None,
             recent: Vec::new(),
+            welcome_dismissed: false,
             quiet_saves: Vec::new(),
             text_select: None,
             notices: Vec::new(),
@@ -1148,6 +1175,10 @@ impl Desk {
     /// for something the person did not ask for is noise.
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        if self.welcome_dismissed {
+            self.welcome_dismissed = false;
+            requests.push(DeskRequest::Welcomed);
+        }
         for window in &mut self.windows {
             if let AppState::Notepad(notepad) = &mut window.state {
                 if let Some(effect) = notepad.autosave_due(now) {
@@ -1242,9 +1273,36 @@ impl Desk {
                 DeskApp::Look => AppState::Look(LookView {
                     row: LookView::row_of(&self.look),
                 }),
+                DeskApp::Welcome => AppState::Welcome,
             },
         });
         self.focus = Some(id);
+        id
+    }
+
+    /// The first boot (GFX-065): a Welcome card at the bottom left, above
+    /// the dock, that does not take focus -- typing on the bare desk is
+    /// still a search -- and does not use a cascade slot, so the first
+    /// Notepad opens where it always does.
+    pub fn show_welcome(&mut self) -> ViewId {
+        if let Some(existing) = self.windows.iter().find(|w| w.app == DeskApp::Welcome) {
+            return existing.id;
+        }
+        let focus_before = self.focus;
+        let opened_before = self.opened;
+        let id = self.launch(DeskApp::Welcome);
+        self.opened = opened_before;
+        self.focus = focus_before;
+        let area = self.work_area();
+        let (w, h) = WELCOME_SIZE;
+        if let Some(window) = self.window_mut(id) {
+            window.bounds = RasterRect::new(
+                area.x + 24,
+                area.bottom().saturating_sub(h + 12),
+                w.min(area.width),
+                h.min(area.height),
+            );
+        }
         id
     }
 
@@ -1476,6 +1534,9 @@ impl Desk {
     pub fn close(&mut self, id: ViewId) {
         if self.window(id).map(|w| w.app) == Some(DeskApp::Look) {
             self.look_preview = None;
+        }
+        if self.window(id).map(|w| w.app) == Some(DeskApp::Welcome) {
+            self.welcome_dismissed = true;
         }
         self.windows.retain(|w| w.id != id);
         if self.drag.map(|d| d.id) == Some(id) {
@@ -2108,6 +2169,13 @@ impl Desk {
                     _ => (None, false),
                 }
             }
+            AppState::Welcome => match byte {
+                crate::notepad::CTRL_W | crate::notepad::ESC | b'\n' | b'\r' => {
+                    self.close(id);
+                    (None, true)
+                }
+                _ => (None, false),
+            },
             AppState::Look(look) => {
                 let current = current_look;
                 match byte {
@@ -2393,6 +2461,12 @@ impl Desk {
                     let view = terminal.cloned().unwrap_or_default();
                     (view.lines, "Terminal".to_string(), view.status, view.cursor)
                 }
+                AppState::Welcome => (
+                    WELCOME_LINES.iter().map(|l| l.to_string()).collect(),
+                    "Welcome to PandaGen".to_string(),
+                    "Close this card and it stays closed".to_string(),
+                    None,
+                ),
                 AppState::Look(look) => {
                     let preview = look_preview.clone().unwrap_or_else(|| kept_look.clone());
                     let lines = LookView::lines(&kept_look, &preview);
@@ -2587,6 +2661,7 @@ impl Desk {
         // Dock: one tile per app, the running ones marked, the hovered one lit.
         let tabs: Vec<DesktopTab> = DeskApp::ALL
             .iter()
+            .filter(|app| **app != DeskApp::Welcome)
             .enumerate()
             .map(|(index, app)| {
                 let mut tab =
@@ -3540,6 +3615,47 @@ mod tests {
             .notepad()
             .unwrap()
             .browsing_history());
+    }
+
+    #[test]
+    fn the_welcome_card_sits_out_of_the_way_and_closes_for_good() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.show_welcome();
+        assert_eq!(desk.show_welcome(), id, "only one");
+        // No focus taken: typing is still a search.
+        assert_eq!(desk.focus(), None);
+        assert!(desk.handle_key(b't').1 && desk.palette_open());
+        desk.handle_key(crate::notepad::ESC);
+        // Not a cascade slot: the first Notepad opens where it always does.
+        let fresh = Desk::new(1280, 800).launch(DeskApp::Notepad);
+        let _ = fresh;
+        let mut plain = Desk::new(1280, 800);
+        let plain_id = plain.launch(DeskApp::Notepad);
+        let notepad = desk.launch(DeskApp::Notepad);
+        assert_eq!(
+            desk.window(notepad).unwrap().bounds,
+            plain.window(plain_id).unwrap().bounds
+        );
+        // Bottom left, above the dock; not on the dock.
+        let bounds = desk.window(id).unwrap().bounds;
+        let area = desk.work_area();
+        assert!(bounds.bottom() <= area.bottom() && bounds.x < 100);
+        let windows = desk.windows("", true, None);
+        let dock = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap();
+        assert_eq!(dock.tabs.len(), DeskApp::ALL.len(), "Welcome is not in ALL, so not a tile");
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.actions, alloc::vec!["Got it"]);
+        assert_eq!(card.frame.title.as_deref(), Some("Welcome to PandaGen"));
+        // The chip closes it and the kernel is told once.
+        desk.raise(id);
+        let (_, byte) = desk.window(id).unwrap().actions()[0].clone();
+        desk.handle_app_key(id, byte);
+        assert!(desk.window(id).is_none());
+        assert_eq!(desk.tick(0), alloc::vec![DeskRequest::Welcomed]);
+        assert!(desk.tick(1).is_empty());
     }
 
     #[test]

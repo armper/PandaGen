@@ -2038,9 +2038,16 @@ fn workspace_loop(
                                 bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
                             let text = io.read_setting(bare_metal_editor_io::LOOK_FILE);
                             let recent = io.read_setting(bare_metal_editor_io::RECENT_FILE);
+                            let welcomed = io
+                                .read_setting(bare_metal_editor_io::WELCOMED_FILE)
+                                .is_some();
                             workspace.set_filesystem(io.into_filesystem());
                             desk.apply_look(text.as_deref());
                             desk.apply_recent(recent.as_deref());
+                            if !welcomed {
+                                // The first boot of this disk (GFX-065).
+                                desk.show_welcome();
+                            }
                             output_dirty = true;
                         }
                     }
@@ -2052,6 +2059,14 @@ fn workspace_loop(
                             workspace.set_filesystem(io.into_filesystem());
                             desk.search_results(&query, hits);
                             output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::Welcomed => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let _ = io.write_setting(bare_metal_editor_io::WELCOMED_FILE, "yes\n");
+                            workspace.set_filesystem(io.into_filesystem());
                         }
                     }
                     desk::DeskRequest::SaveRecent { text } => {
