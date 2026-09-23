@@ -306,7 +306,21 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // The gauntlet runs on its own port base with its own private disk, so
     // it can run while `cargo xtask qemu` has the machine open on the
     // default ports for a person -- which is how the desk is being tried.
-    let _ = fs::remove_file(root.join(format!("dist/pandagen-{GAUNTLET_PORT_BASE}.disk")));
+    let private_disk = root.join(format!("dist/pandagen-{GAUNTLET_PORT_BASE}.disk"));
+    let _ = fs::remove_file(&private_disk);
+    // ...and a blank one, not a copy of the person's. `qemu-script` seeds a
+    // missing private disk from `dist/pandagen.disk`, which is the disk
+    // `cargo xtask qemu` gives a person: the first time someone kept a
+    // theme there, every desk shape here booted into it and failed on
+    // pixels that had nothing to do with the change under test (H1). The
+    // kernel formats an all-zero image on first mount.
+    {
+        let base_len = fs::metadata(root.join(DISK_OUTPUT))
+            .map(|m| m.len())
+            .unwrap_or(64 * 1024 * 1024);
+        let blank = fs::File::create(&private_disk)?;
+        blank.set_len(base_len)?;
+    }
 
     let mut judges: Vec<String> = fs::read_dir(root.join("gauntlet"))?
         .filter_map(|entry| entry.ok())

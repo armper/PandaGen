@@ -211,6 +211,11 @@ impl LookView {
         }
     }
 
+    /// The inverse of `line_of_row`: headings and the gap are no row.
+    fn row_of_line(line: usize) -> Option<usize> {
+        (0..Self::ROWS).find(|row| Self::line_of_row(*row) == line)
+    }
+
     /// The choice the highlighted row stands for, given the current one.
     fn choice_at(&self, current: &LookChoice) -> LookChoice {
         let mut choice = current.clone();
@@ -237,6 +242,19 @@ impl DeskWindow {
     /// on its state (GFX-057).
     pub fn actions(&self) -> Vec<(String, u8)> {
         match &self.state {
+            AppState::Notepad(notepad) if notepad.browsing_history() => alloc::vec![
+                ("Older".to_string(), crate::notepad::KEY_LEFT),
+                ("Newer".to_string(), crate::notepad::KEY_RIGHT),
+                ("Restore".to_string(), b'\n'),
+                ("Back".to_string(), crate::notepad::ESC),
+            ],
+            AppState::Notepad(notepad) if notepad.prompt_open() == Some("find") => alloc::vec![
+                ("Next".to_string(), b'\n'),
+                ("Close".to_string(), crate::notepad::ESC),
+            ],
+            AppState::Notepad(notepad) if notepad.prompt_open().is_some() => {
+                alloc::vec![("Cancel".to_string(), crate::notepad::ESC)]
+            }
             AppState::Notepad(_) => alloc::vec![
                 ("Save".to_string(), crate::notepad::CTRL_S),
                 ("Save as".to_string(), crate::notepad::CTRL_SHIFT_S),
@@ -981,6 +999,12 @@ pub struct Desk {
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
     notice_ids: Vec<ViewId>,
+    /// Shell notices the person clicked away (GFX-063): hidden until the
+    /// workspace's list changes.
+    dismissed_shell: Vec<ShellNotice>,
+    /// The workspace's notices as of the last frame, so a click can
+    /// dismiss them.
+    last_shell_notices: Vec<ShellNotice>,
     /// The last file listing, for save-as and open autocomplete.
     file_names_cache: Vec<String>,
 }
@@ -1010,6 +1034,8 @@ impl Desk {
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
+            dismissed_shell: Vec::new(),
+            last_shell_notices: Vec::new(),
             file_names_cache: Vec::new(),
         }
     }
@@ -1622,10 +1648,37 @@ impl Desk {
                         }
                         continue;
                     }
+                    // A row of the palette runs on a click (GFX-063).
+                    if press && *target == self.palette_id {
+                        if let (Some(HitRegion::Content { line, .. }), Some(palette)) =
+                            (region, self.palette.as_mut())
+                        {
+                            palette.selection = line;
+                            let (request, _) = self.handle_palette_key(b'\n');
+                            requests.extend(request);
+                        }
+                        changed = true;
+                        continue;
+                    }
                     // A click anywhere while the palette is open closes it.
                     if press && self.palette.is_some() && *target != self.palette_id {
                         self.palette = None;
                         changed = true;
+                    }
+                    // The bar is the desk's own handle: a click opens the
+                    // palette, the same as Ctrl+Space (GFX-063).
+                    if press && *target == self.top_bar_id {
+                        self.palette = Some(Palette::default());
+                        changed = true;
+                        continue;
+                    }
+                    // A notice goes away when clicked (GFX-063).
+                    if press && self.notice_ids.contains(target) {
+                        self.notices.clear();
+                        let shell = core::mem::take(&mut self.last_shell_notices);
+                        self.dismissed_shell = shell;
+                        changed = true;
+                        continue;
                     }
                     if self.window(*target).is_none() {
                         continue;
@@ -1695,6 +1748,32 @@ impl Desk {
                             }
                             if open {
                                 requests.extend(self.open_files_selection(*target));
+                            }
+                            // Look: a click on a row previews it; a click on
+                            // the row already under the highlight keeps it.
+                            let look_row = self
+                                .window(*target)
+                                .filter(|w| w.app == DeskApp::Look)
+                                .and_then(|_| LookView::row_of_line(line));
+                            if let Some(row) = look_row {
+                                let current = self
+                                    .look_preview
+                                    .clone()
+                                    .unwrap_or_else(|| self.look.clone());
+                                let mut keep = false;
+                                if let Some(look) =
+                                    self.window_mut(*target).and_then(|w| w.look_mut())
+                                {
+                                    keep = look.row == row;
+                                    look.row = row;
+                                    if !keep {
+                                        self.look_preview = Some(look.choice_at(&current));
+                                    }
+                                }
+                                if keep {
+                                    let (request, _) = self.handle_app_key(*target, b'\n');
+                                    requests.extend(request);
+                                }
                             }
                             changed = true;
                         }
@@ -2255,6 +2334,7 @@ impl Desk {
         shell_notices: &[ShellNotice],
     ) -> Vec<DesktopWindow> {
         self.notices.retain(|n| n.expires_at > now);
+        self.last_shell_notices = shell_notices.to_vec();
         let mut out = Vec::with_capacity(self.windows.len() + 8);
 
         // Cards.
@@ -2420,7 +2500,11 @@ impl Desk {
         // Notices: small cards at the top right, newest highest. The
         // workspace's own (a display switch, an error) and the desk's (a
         // save that landed) share one look.
-        let mut all: Vec<ShellNotice> = shell_notices.to_vec();
+        let mut all: Vec<ShellNotice> = shell_notices
+            .iter()
+            .filter(|n| !self.dismissed_shell.contains(n))
+            .cloned()
+            .collect();
         all.extend(self.notices.iter().map(|n| n.notice.clone()));
         let mut y = TOP_BAR_HEIGHT + NOTICE_MARGIN;
         let columns = (NOTICE_WIDTH - services_gui_host::CARD_PADDING * 2) / GLYPH_WIDTH;
@@ -3325,6 +3409,129 @@ mod tests {
             moved(640, 400, PointerButtons::none()),
         );
         assert_eq!(bar_title(&mut desk), "Notepad");
+    }
+
+    #[test]
+    fn the_pointer_alone_runs_the_palette_dismisses_notices_and_picks_a_look() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let compositor = Compositor::new();
+        // The bar opens the palette.
+        route(&mut desk, &mut router, press(300, 14));
+        route(&mut desk, &mut router, release(300, 14));
+        assert!(desk.palette_open());
+        // Row 1 is "New Terminal" on the bare desk; a click runs it.
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let (ox, oy, pitch) = palette.card_text_origin();
+        let deliveries = router.route(
+            &compositor,
+            &windows,
+            press((ox + 4) as i32, (oy + pitch + 4) as i32),
+        );
+        desk.handle_deliveries_with_requests(&deliveries);
+        route(
+            &mut desk,
+            &mut router,
+            release((ox + 4) as i32, (oy + pitch + 4) as i32),
+        );
+        assert!(!desk.palette_open());
+        assert_eq!(
+            desk.focused_window().map(|w| w.app),
+            Some(DeskApp::Terminal)
+        );
+
+        // A notice goes when clicked.
+        desk.notify(NoticeLevel::Info, "hello", 100);
+        let windows = desk.windows_at("", true, None, 100, &[]);
+        let notice = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Notification)
+            .unwrap();
+        let b = notice.bounds();
+        let deliveries = router.route(
+            &compositor,
+            &windows,
+            press((b.x + 20) as i32, (b.y + 40) as i32),
+        );
+        desk.handle_deliveries_with_requests(&deliveries);
+        route(
+            &mut desk,
+            &mut router,
+            release((b.x + 20) as i32, (b.y + 40) as i32),
+        );
+        let windows = desk.windows_at("", true, None, 101, &[]);
+        assert!(!windows
+            .iter()
+            .any(|w| w.role == DesktopWindowRole::Notification));
+
+        // Look: click a theme row to preview, click it again to keep.
+        let id = desk.launch(DeskApp::Look);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let (ox, oy, pitch) = card.card_text_origin();
+        let ember_line = LookView::line_of_row(2);
+        let (cx, cy) = ((ox + 40) as i32, (oy + pitch * ember_line + 4) as i32);
+        let click = press(cx, cy);
+        let deliveries = router.route(&compositor, &windows, click);
+        desk.handle_deliveries_with_requests(&deliveries);
+        route(&mut desk, &mut router, release(cx, cy));
+        assert_eq!(desk.theme(), Theme::EMBER.with_accent(Theme::ACCENTS[0].1));
+        assert_eq!(desk.look().theme, "Dusk");
+        let windows = desk.windows("", true, None);
+        let deliveries = router.route(&compositor, &windows, click);
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        assert_eq!(desk.look().theme, "Ember");
+        assert!(matches!(
+            requests.first(),
+            Some(DeskRequest::SaveLook { .. })
+        ));
+        // A heading is no row.
+        let heading = press((ox + 4) as i32, (oy + 4) as i32);
+        let windows = desk.windows("", true, None);
+        let deliveries = router.route(&compositor, &windows, heading);
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        assert!(requests.is_empty());
+        assert_eq!(desk.look().theme, "Ember");
+    }
+
+    #[test]
+    fn notepad_chips_follow_its_mode() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        desk.handle_key(crate::notepad::CTRL_F);
+        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Next");
+        desk.handle_key(crate::notepad::ESC);
+        desk.handle_key(crate::notepad::CTRL_O);
+        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Cancel");
+        desk.handle_key(crate::notepad::ESC);
+        desk.window_mut(id)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(Some("m".to_string()), "x");
+        desk.handle_key(crate::notepad::CTRL_Y);
+        desk.version_loaded(id, 0, 1, Some("old"), 0);
+        let labels: Vec<String> = desk
+            .window(id)
+            .unwrap()
+            .actions()
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        assert_eq!(labels, alloc::vec!["Older", "Newer", "Restore", "Back"]);
+        // The Back chip is Esc.
+        let (_, byte) = desk.window(id).unwrap().actions()[3].clone();
+        desk.handle_app_key(id, byte);
+        assert!(!desk
+            .window(id)
+            .unwrap()
+            .notepad()
+            .unwrap()
+            .browsing_history());
     }
 
     #[test]

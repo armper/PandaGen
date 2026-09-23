@@ -221,6 +221,15 @@ impl Notepad {
         })
     }
 
+    /// Which footer prompt is open: "find", "name", or none.
+    pub fn prompt_open(&self) -> Option<&'static str> {
+        match self.prompt {
+            Some(Prompt::Find(_)) => Some("find"),
+            Some(Prompt::SaveAs(_)) | Some(Prompt::Open(_)) => Some("name"),
+            None => None,
+        }
+    }
+
     /// Whether the history browser is open.
     pub fn browsing_history(&self) -> bool {
         self.history.is_some()
