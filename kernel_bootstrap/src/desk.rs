@@ -90,6 +90,9 @@ pub enum DeskApp {
     /// The first-boot card: five lines on how the desk works (GFX-065).
     /// Not on the dock; opened once by the kernel, closed by a click.
     Welcome,
+    /// Every notice the desk has shown, newest first (GFX-069). Not on the
+    /// dock: the bar's "N new" and the palette open it.
+    Notices,
 }
 
 impl DeskApp {
@@ -107,6 +110,7 @@ impl DeskApp {
             DeskApp::Terminal => "Terminal",
             DeskApp::Look => "Look",
             DeskApp::Welcome => "Welcome",
+            DeskApp::Notices => "Notices",
         }
     }
 
@@ -118,6 +122,7 @@ impl DeskApp {
             DeskApp::Terminal => "Tm",
             DeskApp::Look => "Lk",
             DeskApp::Welcome => "Hi",
+            DeskApp::Notices => "Nt",
         }
     }
 
@@ -128,9 +133,15 @@ impl DeskApp {
             DeskApp::Terminal => TERMINAL_SIZE,
             DeskApp::Look => LOOK_SIZE,
             DeskApp::Welcome => WELCOME_SIZE,
+            DeskApp::Notices => NOTICES_SIZE,
         }
     }
 }
+
+/// The Notices card (GFX-069).
+pub const NOTICES_SIZE: (usize, usize) = (560, 400);
+/// How many notices the log keeps.
+pub const NOTICE_LOG: usize = 50;
 
 /// The Welcome card (GFX-065): wide enough for its lines, low enough to
 /// sit above the dock without covering the middle of the desk.
@@ -351,6 +362,10 @@ impl DeskWindow {
                 ("Revert".to_string(), crate::notepad::ESC),
             ],
             AppState::Welcome => alloc::vec![("Got it".to_string(), crate::notepad::CTRL_W)],
+            AppState::Notices => alloc::vec![
+                ("Clear".to_string(), crate::notepad::KEY_DELETE),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
         }
     }
 }
@@ -685,6 +700,7 @@ pub enum AppState {
     Terminal,
     Look(LookView),
     Welcome,
+    Notices,
 }
 
 /// One open window.
@@ -846,10 +862,12 @@ pub enum PaletteAction {
     MoveToSpace(usize),
     /// Every card at once (GFX-068).
     Overview,
+    /// Every notice, newest first (GFX-069).
+    Notices,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 29] = [
+    pub const ALL: [PaletteAction; 30] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -879,6 +897,7 @@ impl PaletteAction {
         PaletteAction::MoveToSpace(2),
         PaletteAction::MoveToSpace(3),
         PaletteAction::Overview,
+        PaletteAction::Notices,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -912,6 +931,7 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(2) => "Move this card to space 3",
             PaletteAction::MoveToSpace(_) => "Move this card to space 4",
             PaletteAction::Overview => "Overview: every card at once",
+            PaletteAction::Notices => "Notices: everything the desk has said",
         }
     }
 
@@ -946,6 +966,7 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(2) => "Ctrl+Shift+3",
             PaletteAction::MoveToSpace(_) => "Ctrl+Shift+4",
             PaletteAction::Overview => "Ctrl+Tab",
+            PaletteAction::Notices => "",
         }
     }
 
@@ -1135,6 +1156,13 @@ pub struct Desk {
     /// The workspace's notices as of the last frame, so a click can
     /// dismiss them.
     last_shell_notices: Vec<ShellNotice>,
+    /// Every notice shown, newest first, with the tick it arrived
+    /// (GFX-069); bounded by `NOTICE_LOG`.
+    notice_log: Vec<(u64, ShellNotice)>,
+    /// Notices logged since the Notices card was last looked at.
+    unseen_notices: usize,
+    /// The tick `windows_at` last saw, for "ago" in the Notices card.
+    last_tick: u64,
     /// The last file listing, for save-as and open autocomplete.
     file_names_cache: Vec<String>,
 }
@@ -1169,6 +1197,9 @@ impl Desk {
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
             dismissed_shell: Vec::new(),
             last_shell_notices: Vec::new(),
+            notice_log: Vec::new(),
+            unseen_notices: 0,
+            last_tick: 0,
             file_names_cache: Vec::new(),
         }
     }
@@ -1179,8 +1210,10 @@ impl Desk {
 
     /// Raise a notice card for a few seconds (GFX-053).
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>, now: u64) {
+        let notice = ShellNotice::new(level, text);
+        self.log_notice(now, notice.clone());
         self.notices.push(DeskNotice {
-            notice: ShellNotice::new(level, text),
+            notice,
             expires_at: now.saturating_add(NOTICE_TTL_TICKS),
         });
         let max = self.notice_ids.len();
@@ -1387,6 +1420,7 @@ impl Desk {
                     row: LookView::row_of(&self.look),
                 }),
                 DeskApp::Welcome => AppState::Welcome,
+                DeskApp::Notices => AppState::Notices,
             },
         });
         self.focus = Some(id);
@@ -1446,6 +1480,60 @@ impl Desk {
     /// The space on screen.
     pub fn space(&self) -> usize {
         self.space
+    }
+
+    /// Remember a notice (GFX-069), newest first, bounded.
+    fn log_notice(&mut self, now: u64, notice: ShellNotice) {
+        self.notice_log.insert(0, (now, notice));
+        self.notice_log.truncate(NOTICE_LOG);
+        self.unseen_notices += 1;
+    }
+
+    /// The log, newest first, as `(tick, notice)`.
+    pub fn notice_log(&self) -> &[(u64, ShellNotice)] {
+        &self.notice_log
+    }
+
+    /// Notices that arrived since the Notices card was last looked at.
+    pub fn unseen_notices(&self) -> usize {
+        self.unseen_notices
+    }
+
+    /// `12s ago`, `3m ago`, `2h ago`, at 100 ticks a second.
+    pub fn ago(now: u64, then: u64) -> String {
+        let secs = now.saturating_sub(then) / 100;
+        if secs < 60 {
+            alloc::format!("{secs}s ago")
+        } else if secs < 3600 {
+            alloc::format!("{}m ago", secs / 60)
+        } else {
+            alloc::format!("{}h ago", secs / 3600)
+        }
+    }
+
+    /// The bar's right-hand text: "3 new   12:34", or just the clock.
+    fn bar_right(&self, clock: &str) -> String {
+        if self.unseen_notices > 0 {
+            alloc::format!("{} new   {clock}", self.unseen_notices)
+        } else {
+            clock.to_string()
+        }
+    }
+
+    /// Whether top-bar text cell `column` is on the "N new" indicator.
+    fn notices_at_column(&self, column: usize, clock_len: usize) -> bool {
+        if self.unseen_notices == 0 {
+            return false;
+        }
+        // The same right-alignment the compositor paints with: a 12px
+        // margin, then the text; the indicator is its first word.
+        let clock: String = core::iter::repeat('0').take(clock_len).collect();
+        let total = self.bar_right(&clock).chars().count();
+        let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH) / GLYPH_WIDTH;
+        let indicator = alloc::format!("{} new", self.unseen_notices)
+            .chars()
+            .count();
+        (start..start + indicator).contains(&column)
     }
 
     /// Whether the overview is open.
@@ -1538,6 +1626,10 @@ impl Desk {
                 alloc::vec!["themes and accents".to_string()],
             ),
             AppState::Welcome => ("Welcome".to_string(), Vec::new()),
+            AppState::Notices => (
+                "Notices".to_string(),
+                alloc::vec![alloc::format!("{} kept", self.notice_log.len())],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -1716,6 +1808,10 @@ impl Desk {
             }
             PaletteAction::Overview => {
                 self.open_overview();
+                None
+            }
+            PaletteAction::Notices => {
+                self.open_or_raise(DeskApp::Notices);
                 None
             }
             PaletteAction::CloseWindow => {
@@ -2075,11 +2171,20 @@ impl Desk {
                             Some(HitRegion::Content { column, .. }) => Some(column),
                             _ => None,
                         };
-                        match column.and_then(|c| self.space_at_column(c)) {
-                            Some(space) => {
-                                self.go_to_space(space);
+                        // The clock is five cells wide ("12:34"); the indicator
+                        // sits just before it.
+                        if column
+                            .map(|c| self.notices_at_column(c, 5))
+                            .unwrap_or(false)
+                        {
+                            self.open_or_raise(DeskApp::Notices);
+                        } else {
+                            match column.and_then(|c| self.space_at_column(c)) {
+                                Some(space) => {
+                                    self.go_to_space(space);
+                                }
+                                None => self.palette = Some(Palette::default()),
                             }
-                            None => self.palette = Some(Palette::default()),
                         }
                         changed = true;
                         continue;
@@ -2568,6 +2673,18 @@ impl Desk {
                 }
                 _ => (None, false),
             },
+            AppState::Notices => match byte {
+                crate::notepad::CTRL_W | crate::notepad::ESC => {
+                    self.close(id);
+                    (None, true)
+                }
+                crate::notepad::KEY_DELETE => {
+                    self.notice_log.clear();
+                    self.unseen_notices = 0;
+                    (None, true)
+                }
+                _ => (None, false),
+            },
             AppState::Look(look) => {
                 let current = current_look;
                 match byte {
@@ -2794,13 +2911,42 @@ impl Desk {
         shell_notices: &[ShellNotice],
     ) -> Vec<DesktopWindow> {
         self.notices.retain(|n| n.expires_at > now);
+        self.last_tick = now;
+        // The workspace's notices that are new this frame go in the log.
+        // "New" means not in the previous frame's list and not the same
+        // notice logged in the last half minute -- a frame built without
+        // the workspace's list (the pointer path does that) must not make
+        // every notice new again.
+        let fresh: Vec<ShellNotice> = shell_notices
+            .iter()
+            .filter(|n| !self.last_shell_notices.contains(n))
+            .filter(|n| {
+                !self
+                    .notice_log
+                    .iter()
+                    .any(|(then, logged)| logged == *n && now.saturating_sub(*then) < 3_000)
+            })
+            .cloned()
+            .collect();
+        for notice in fresh {
+            self.log_notice(now, notice);
+        }
         self.last_shell_notices = shell_notices.to_vec();
+        if self
+            .focused_window()
+            .map(|w| w.app == DeskApp::Notices)
+            .unwrap_or(false)
+        {
+            self.unseen_notices = 0;
+        }
         let mut out = Vec::with_capacity(self.windows.len() + 8);
 
         // Cards.
         let focus = self.focus;
         let kept_look = self.look.clone();
         let look_preview = self.look_preview.clone();
+        let notice_log = self.notice_log.clone();
+        let now_tick = self.last_tick;
         let space = self.space;
         let overview_open = self.overview.is_some();
         if let Some(highlight) = self.overview {
@@ -2885,6 +3031,26 @@ impl Desk {
                     "Close this card and it stays closed".to_string(),
                     None,
                 ),
+                AppState::Notices => {
+                    let lines: Vec<String> = notice_log
+                        .iter()
+                        .take(rows)
+                        .map(|(then, notice)| {
+                            alloc::format!(
+                                "{:>8}   {:<5}  {}",
+                                Desk::ago(now_tick, *then),
+                                notice.card_title(),
+                                notice.text
+                            )
+                        })
+                        .collect();
+                    let footer = if notice_log.is_empty() {
+                        "Nothing yet: saves, opens and the console's warnings land here".to_string()
+                    } else {
+                        alloc::format!("{} kept, newest first   Delete clears", notice_log.len())
+                    };
+                    (lines, "Notices".to_string(), footer, None)
+                }
                 AppState::Look(look) => {
                     let preview = look_preview.clone().unwrap_or_else(|| kept_look.clone());
                     let lines = LookView::lines(&kept_look, &preview);
@@ -3067,7 +3233,7 @@ impl Desk {
             self.top_bar_id,
             ViewKind::StatusLine,
             0,
-            ViewContent::text_buffer(alloc::vec![clock.to_string(), self.space_strip()]),
+            ViewContent::text_buffer(alloc::vec![self.bar_right(clock), self.space_strip()]),
             0,
         );
         bar_frame.title = Some(left);
@@ -3082,7 +3248,7 @@ impl Desk {
         // Dock: one tile per app, the running ones marked, the hovered one lit.
         let tabs: Vec<DesktopTab> = DeskApp::ALL
             .iter()
-            .filter(|app| **app != DeskApp::Welcome)
+            .filter(|app| **app != DeskApp::Welcome && **app != DeskApp::Notices)
             .enumerate()
             .map(|(index, app)| {
                 let mut tab =
@@ -4158,6 +4324,86 @@ mod tests {
         route(&mut desk, &mut router, press(300, 14));
         route(&mut desk, &mut router, release(300, 14));
         assert!(desk.palette_open());
+    }
+
+    #[test]
+    fn every_notice_is_kept_and_the_bar_counts_the_unseen_ones() {
+        let mut desk = Desk::new(1280, 800);
+        desk.notify(NoticeLevel::Info, "Saved memo", 1_000);
+        let shell = alloc::vec![ShellNotice::new(NoticeLevel::Warning, "Unknown command: x")];
+        let windows = desk.windows_at("12:34", true, None, 7_000, &shell);
+        // The same shell notice next frame is not logged twice.
+        let _ = desk.windows_at("12:34", true, None, 7_100, &shell);
+        assert_eq!(desk.notice_log().len(), 2);
+        assert_eq!(
+            desk.notice_log()[0].1.text,
+            "Unknown command: x",
+            "newest first"
+        );
+        assert_eq!(desk.unseen_notices(), 2);
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        let lines = match &bar.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(lines[0], "2 new   12:34");
+        assert_eq!(Desk::ago(7_000, 1_000), "1m ago");
+        assert_eq!(Desk::ago(6_900, 1_000), "59s ago");
+        assert_eq!(Desk::ago(100_000, 1_000), "16m ago");
+        assert_eq!(Desk::ago(1_000_000, 0), "2h ago");
+
+        // A click on "2 new" opens the card; looking at it clears the count.
+        let mut router = DesktopInputRouter::new();
+        let start = (1280 - 12 - "2 new   12:34".len() * 8) / 8;
+        let x = (start * 8 + 4) as i32;
+        route(&mut desk, &mut router, press(x, 14));
+        route(&mut desk, &mut router, release(x, 14));
+        let id = desk.focused_window().map(|w| w.id).expect("Notices opened");
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Notices);
+        let windows = desk.windows_at("12:34", true, None, 8_000, &shell);
+        assert_eq!(desk.unseen_notices(), 0);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(
+            rows[0].contains("WARN") && rows[0].ends_with("Unknown command: x"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("  1m ago") && rows[1].contains("Saved memo"),
+            "{rows:?}"
+        );
+        assert_eq!(card.actions, alloc::vec!["Clear", "Close"]);
+        // Delete clears; Esc closes; the bar is just the clock again.
+        desk.handle_key(crate::notepad::KEY_DELETE);
+        assert!(desk.notice_log().is_empty());
+        desk.handle_key(crate::notepad::ESC);
+        assert!(desk.window(id).is_none());
+        let windows = desk.windows_at("12:34", true, None, 9_000, &shell);
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        let lines = match &bar.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(lines[0], "12:34");
+        // Not a dock tile; bounded.
+        let dock = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap();
+        assert_eq!(dock.tabs.len(), 4);
+        for i in 0..(NOTICE_LOG + 10) {
+            desk.notify(NoticeLevel::Info, alloc::format!("n{i}"), 10_000 + i as u64);
+        }
+        assert_eq!(desk.notice_log().len(), NOTICE_LOG);
     }
 
     #[test]
