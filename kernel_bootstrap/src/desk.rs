@@ -17,8 +17,22 @@ use graphics_rasterizer::RasterRect;
 use input_types::{PointerButton, PointerEventKind};
 use services_gui_host::{
     Delivery, DesktopTab, DesktopWindow, DesktopWindowLayer, DesktopWindowRole, HitRegion,
-    NoticeLevel, ShellNotice, SurfaceRect, Theme, WindowStyle,
+    NoticeLevel, ShellNotice, SurfaceRect, Theme, Wallpaper, WindowStyle,
 };
+
+/// The default wallpaper (GFX-066): the person's own picture, 1280x800 in
+/// 256 colours (one megabyte), built into the kernel so the first frame
+/// already has it. The compositor samples it to whatever size the screen
+/// is.
+pub const WALLPAPER: Wallpaper = Wallpaper {
+    width: 1280,
+    height: 800,
+    palette: include_bytes!("../assets/wallpaper.pal"),
+    indices: include_bytes!("../assets/wallpaper.idx"),
+};
+
+/// What Look calls the two backgrounds.
+pub const WALLPAPERS: [&str; 2] = ["Picture", "Gradient"];
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::notepad::{Notepad, NotepadEffect};
@@ -121,13 +135,15 @@ pub const WELCOME_LINES: [&str; 5] = [
 ];
 
 /// The Look card (GFX-059).
-pub const LOOK_SIZE: (usize, usize) = (420, 360);
+pub const LOOK_SIZE: (usize, usize) = (420, 420);
 
 /// What the desk looks like: a preset and an accent, by name (GFX-059).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookChoice {
     pub theme: String,
     pub accent: String,
+    /// "Picture" or "Gradient" (GFX-066).
+    pub wallpaper: String,
 }
 
 impl Default for LookChoice {
@@ -135,6 +151,7 @@ impl Default for LookChoice {
         Self {
             theme: "Dusk".to_string(),
             accent: "Mint".to_string(),
+            wallpaper: "Picture".to_string(),
         }
     }
 }
@@ -150,7 +167,19 @@ impl LookChoice {
 
     /// The on-disk form: two lines, `theme=` and `accent=`.
     pub fn to_text(&self) -> String {
-        alloc::format!("theme={}\naccent={}\n", self.theme, self.accent)
+        alloc::format!(
+            "theme={}\naccent={}\nwallpaper={}\n",
+            self.theme,
+            self.accent,
+            self.wallpaper
+        )
+    }
+
+    /// The picture, when the choice is the picture.
+    pub fn wallpaper(&self) -> Option<Wallpaper> {
+        self.wallpaper
+            .eq_ignore_ascii_case("Picture")
+            .then_some(WALLPAPER)
     }
 
     /// Parse the on-disk form; unknown names fall back to the defaults, so
@@ -164,6 +193,13 @@ impl LookChoice {
                     .find(|(n, _)| n.eq_ignore_ascii_case(name.trim()))
                 {
                     choice.theme = canonical.to_string();
+                }
+            } else if let Some(name) = line.strip_prefix("wallpaper=") {
+                if let Some(canonical) = WALLPAPERS
+                    .iter()
+                    .find(|n| n.eq_ignore_ascii_case(name.trim()))
+                {
+                    choice.wallpaper = canonical.to_string();
                 }
             } else if let Some(name) = line.strip_prefix("accent=") {
                 if let Some((canonical, _)) = Theme::ACCENTS
@@ -187,7 +223,8 @@ pub struct LookView {
 
 impl LookView {
     const THEME_ROWS: usize = Theme::PRESETS.len();
-    const ROWS: usize = Theme::PRESETS.len() + Theme::ACCENTS.len();
+    const ACCENT_ROWS: usize = Theme::PRESETS.len() + Theme::ACCENTS.len();
+    const ROWS: usize = Self::ACCENT_ROWS + WALLPAPERS.len();
 
     /// The content lines: a heading, the presets, a gap, a heading, the
     /// accents. `line_of_row` maps a row to its line for the highlight.
@@ -219,14 +256,27 @@ impl LookView {
             }
             lines.push(line);
         }
+        lines.push(String::new());
+        lines.push("Wallpaper".to_string());
+        for name in WALLPAPERS.iter() {
+            let mut line = mark(name, &preview.wallpaper);
+            if name.eq_ignore_ascii_case(&kept.wallpaper)
+                && !name.eq_ignore_ascii_case(&preview.wallpaper)
+            {
+                line.push_str("   (kept)");
+            }
+            lines.push(line);
+        }
         lines
     }
 
     fn line_of_row(row: usize) -> usize {
         if row < Self::THEME_ROWS {
             1 + row
-        } else {
+        } else if row < Self::ACCENT_ROWS {
             3 + row
+        } else {
+            5 + row
         }
     }
 
@@ -240,8 +290,10 @@ impl LookView {
         let mut choice = current.clone();
         if self.row < Self::THEME_ROWS {
             choice.theme = Theme::PRESETS[self.row].0.to_string();
-        } else {
+        } else if self.row < Self::ACCENT_ROWS {
             choice.accent = Theme::ACCENTS[self.row - Self::THEME_ROWS].0.to_string();
+        } else {
+            choice.wallpaper = WALLPAPERS[self.row - Self::ACCENT_ROWS].to_string();
         }
         choice
     }
@@ -1128,6 +1180,12 @@ impl Desk {
     /// The kept look, by name.
     pub fn look(&self) -> &LookChoice {
         &self.look
+    }
+
+    /// The wallpaper behind the cards: the preview's while one is open,
+    /// otherwise the kept choice's; `None` is the theme's gradient.
+    pub fn wallpaper(&self) -> Option<Wallpaper> {
+        self.look_preview.as_ref().unwrap_or(&self.look).wallpaper()
     }
 
     /// The kernel read the look file (GFX-059); an unreadable or missing
@@ -3235,9 +3293,24 @@ mod tests {
         assert_eq!(
             request,
             Some(DeskRequest::SaveLook {
-                text: "theme=Mono\naccent=Sky\n".to_string()
+                text: "theme=Mono\naccent=Sky\nwallpaper=Picture\n".to_string()
             })
         );
+        // The third section: the picture is on by default; Gradient turns
+        // it off, previewed like everything else.
+        assert!(desk.wallpaper().is_some());
+        for _ in 0..(LookView::ROWS) {
+            desk.handle_key(crate::notepad::KEY_DOWN);
+        }
+        assert!(desk.wallpaper().is_none(), "the last row is Gradient");
+        desk.handle_key(crate::notepad::ESC);
+        assert!(desk.wallpaper().is_some());
+        let mut parsed = Desk::new(1280, 800);
+        parsed.apply_look(Some("wallpaper=gradient\n"));
+        assert!(parsed.wallpaper().is_none());
+        assert_eq!(parsed.look().theme, "Dusk");
+        assert_eq!(WALLPAPER.indices.len(), WALLPAPER.width * WALLPAPER.height);
+        assert_eq!(WALLPAPER.palette.len(), 256 * 3);
         assert_eq!(desk.look().theme, "Mono");
         assert_eq!(desk.theme(), Theme::MONO.with_accent(Theme::ACCENTS[1].1));
 
@@ -3645,7 +3718,11 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs.len(), DeskApp::ALL.len(), "Welcome is not in ALL, so not a tile");
+        assert_eq!(
+            dock.tabs.len(),
+            DeskApp::ALL.len(),
+            "Welcome is not in ALL, so not a tile"
+        );
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.actions, alloc::vec!["Got it"]);
         assert_eq!(card.frame.title.as_deref(), Some("Welcome to PandaGen"));

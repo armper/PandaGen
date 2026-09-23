@@ -575,7 +575,22 @@ impl DesktopFrameRenderer {
         pointer: Option<(usize, usize)>,
         theme: Theme,
     ) -> usize {
-        let scene = self.scene(windows, pointer).with_theme(theme);
+        self.render_windows_with_look(windows, pointer, theme, None)
+    }
+
+    /// As `render_windows_with_theme`, with a wallpaper behind everything
+    /// (GFX-066); `None` paints the theme's gradient.
+    pub fn render_windows_with_look(
+        &mut self,
+        windows: Vec<DesktopWindow>,
+        pointer: Option<(usize, usize)>,
+        theme: Theme,
+        wallpaper: Option<services_gui_host::Wallpaper>,
+    ) -> usize {
+        let scene = self
+            .scene(windows, pointer)
+            .with_theme(theme)
+            .with_wallpaper(wallpaper);
         match self.backend.render(&scene) {
             Ok(stats) => stats.painted_windows,
             Err(_) => 0,

@@ -200,6 +200,8 @@ pub fn apply_delta(base: &DesktopScene, delta: &SceneDelta) -> DesktopScene {
         cursor: delta.cursor.unwrap_or(base.cursor),
         theme: delta.theme.unwrap_or(base.theme),
         damage: delta.damage,
+        // The wallpaper is the machine's; a delta never carries one.
+        wallpaper: base.wallpaper,
     }
 }
 
@@ -643,6 +645,7 @@ mod duplicate_view_id_tests {
             cursor: None,
             theme: None,
             damage: None,
+            wallpaper: None,
         }
     }
 

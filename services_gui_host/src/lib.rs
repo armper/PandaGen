@@ -588,6 +588,41 @@ pub struct RasterRenderStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Compositor {
     theme: Theme,
+    /// Painted behind everything instead of the theme's gradient (GFX-066).
+    wallpaper: Option<Wallpaper>,
+}
+
+/// A picture for the desk (GFX-066): 256 colours, one byte a pixel plus a
+/// palette, sampled nearest-neighbour to the surface, so one image serves
+/// any screen. Static because the kernel builds it in; a loaded picture
+/// would be a leaked `Vec` behind the same reference. Indexed rather than
+/// RGB because the first RGB build made the kernel 11 MB and a 16 MiB
+/// machine no longer booted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wallpaper {
+    pub width: usize,
+    pub height: usize,
+    /// 256 RGB triples.
+    pub palette: &'static [u8],
+    /// `width * height` palette indices, row-major.
+    pub indices: &'static [u8],
+}
+
+impl Wallpaper {
+    /// The colour at surface pixel `(x, y)` on a `surface_w` x `surface_h`
+    /// surface.
+    pub fn sample(&self, x: usize, y: usize, surface_w: usize, surface_h: usize) -> RgbaColor {
+        if self.width == 0 || self.height == 0 || surface_w == 0 || surface_h == 0 {
+            return RgbaColor::new(0, 0, 0, 255);
+        }
+        let sx = (x * self.width / surface_w).min(self.width - 1);
+        let sy = (y * self.height / surface_h).min(self.height - 1);
+        let index = self.indices.get(sy * self.width + sx).copied().unwrap_or(0) as usize;
+        match self.palette.get(index * 3..index * 3 + 3) {
+            Some(px) => RgbaColor::new(px[0], px[1], px[2], 255),
+            None => RgbaColor::new(0, 0, 0, 255),
+        }
+    }
 }
 
 impl Default for Compositor {
@@ -600,12 +635,23 @@ impl Compositor {
     pub fn new() -> Self {
         Self {
             theme: Theme::DEFAULT,
+            wallpaper: None,
         }
     }
 
     /// Compositor painting with `theme` (GFX-035).
     pub const fn with_theme(theme: Theme) -> Self {
-        Self { theme }
+        Self {
+            theme,
+            wallpaper: None,
+        }
+    }
+
+    /// Paint `wallpaper` behind everything (GFX-066); `None` is the
+    /// theme's gradient.
+    pub const fn with_wallpaper(mut self, wallpaper: Option<Wallpaper>) -> Self {
+        self.wallpaper = wallpaper;
+        self
     }
 
     pub const fn theme(&self) -> &Theme {
@@ -737,6 +783,7 @@ impl Compositor {
             damage_rect.unwrap_or(whole),
             whole.height,
             &self.theme,
+            self.wallpaper,
         );
 
         windows.sort_by_key(composition_sort_key);
@@ -885,6 +932,10 @@ pub struct DesktopScene {
     /// Region that changed since the previous scene, if known.
     #[serde(default)]
     pub damage: Option<RasterRect>,
+    /// The picture behind everything (GFX-066). The machine's, not the
+    /// remote viewer's: it is not serialised.
+    #[serde(skip)]
+    pub wallpaper: Option<Wallpaper>,
 }
 
 impl DesktopScene {
@@ -895,7 +946,13 @@ impl DesktopScene {
             cursor: None,
             theme: None,
             damage: None,
+            wallpaper: None,
         }
+    }
+
+    pub fn with_wallpaper(mut self, wallpaper: Option<Wallpaper>) -> Self {
+        self.wallpaper = wallpaper;
+        self
     }
 
     pub fn with_cursor(mut self, cursor: Option<DesktopCursor>) -> Self {
@@ -953,7 +1010,8 @@ impl Compositor {
         let painter = match scene.theme {
             Some(theme) => Compositor::with_theme(theme),
             None => *self,
-        };
+        }
+        .with_wallpaper(scene.wallpaper.or(self.wallpaper));
         painter.render_desktop_to_target_with_cursor(
             target,
             scene.windows.clone(),
@@ -1511,7 +1569,19 @@ fn fill_background(
     rect: RasterRect,
     surface_height: usize,
     theme: &Theme,
+    wallpaper: Option<Wallpaper>,
 ) {
+    // A wallpaper (GFX-066) is sampled per pixel, so a damage repaint of
+    // any rectangle reads the same pixels the full frame did.
+    if let Some(picture) = wallpaper {
+        let surface_w = target.width();
+        for y in rect.y..rect.bottom().min(surface_height) {
+            for x in rect.x..rect.right().min(surface_w) {
+                target.write_pixel(x, y, picture.sample(x, y, surface_w, surface_height));
+            }
+        }
+        return;
+    }
     let (top, bottom) = (theme.background, theme.background_bottom);
     if top == bottom || surface_height <= 1 {
         target.fill_rect(rect, top);

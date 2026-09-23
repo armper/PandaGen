@@ -3,8 +3,8 @@
 
 use graphics_rasterizer::{RasterRect, RgbaBuffer, RgbaColor};
 use services_gui_host::{
-    Compositor, DesktopTab, DesktopWindow, HitRegion, Theme, WindowStyle, CARD_HEADER_HEIGHT,
-    CARD_LINE_HEIGHT, CARD_PADDING, CARD_RADIUS, DOCK_TILE,
+    Compositor, DesktopTab, DesktopWindow, HitRegion, Theme, Wallpaper, WindowStyle,
+    CARD_HEADER_HEIGHT, CARD_LINE_HEIGHT, CARD_PADDING, CARD_RADIUS, DOCK_TILE,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -162,6 +162,65 @@ fn the_caret_and_a_footer_are_drawn_where_the_geometry_says() {
         card.content_rows(),
         (240 - CARD_HEADER_HEIGHT - CARD_PADDING * 2 - 20) / CARD_LINE_HEIGHT
     );
+}
+
+/// A wallpaper is sampled to the surface, behind the cards, and a damage
+/// repaint reads the same pixels (GFX-066).
+#[test]
+fn a_wallpaper_is_sampled_to_the_surface_behind_the_cards() {
+    // A 2x2 picture: red, green / blue, white.
+    static PALETTE: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+    static INDICES: [u8; 4] = [0, 1, 2, 3];
+    let picture = Wallpaper {
+        width: 2,
+        height: 2,
+        palette: &PALETTE,
+        indices: &INDICES,
+    };
+    let compositor = Compositor::new().with_wallpaper(Some(picture));
+    let card = DesktopWindow::card(
+        frame("Notepad", &["hi"]),
+        RasterRect::new(100, 80, 200, 100),
+    );
+    let mut target = RgbaBuffer::new(W, H, RgbaColor::new(0, 0, 0, 255));
+    compositor.render_desktop_to_target(&mut target, vec![card.clone()]);
+    assert_eq!(px(&target, 1, 1), RgbaColor::new(255, 0, 0, 255));
+    assert_eq!(px(&target, W - 1, 1), RgbaColor::new(0, 255, 0, 255));
+    assert_eq!(px(&target, 1, H - 1), RgbaColor::new(0, 0, 255, 255));
+    assert_eq!(
+        px(&target, W - 1, H - 1),
+        RgbaColor::new(255, 255, 255, 255)
+    );
+    // The card is on top of it.
+    assert_eq!(px(&target, 200, 130), Theme::DEFAULT.surface);
+    // A damage repaint of the bottom-right quarter shows the same pixels.
+    compositor.render_desktop_to_target_with_damage(
+        &mut target,
+        vec![card],
+        Some(RasterRect::new(W / 2, H / 2, W / 2, H / 2)),
+    );
+    assert_eq!(
+        px(&target, W - 1, H - 1),
+        RgbaColor::new(255, 255, 255, 255)
+    );
+    assert_eq!(
+        px(&target, W / 2 + 1, H / 2 + 1),
+        RgbaColor::new(255, 255, 255, 255)
+    );
+    // The scene carries it too.
+    let scene = services_gui_host::DesktopScene::new(
+        services_gui_host::SurfaceSize {
+            width: W / 8,
+            height: H / 18,
+        },
+        vec![],
+    )
+    .with_wallpaper(Some(picture));
+    let mut plain = Compositor::new();
+    plain = plain.with_wallpaper(None);
+    let mut target2 = RgbaBuffer::new(W, H, RgbaColor::new(0, 0, 0, 255));
+    plain.render_scene_full(&mut target2, &scene);
+    assert_eq!(px(&target2, 1, 1), RgbaColor::new(255, 0, 0, 255));
 }
 
 /// Header chips sit between the title and the close glyph, in order, and

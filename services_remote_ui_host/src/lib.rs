@@ -680,6 +680,7 @@ mod joining_viewer_tests {
             cursor: None,
             theme: None,
             damage: None,
+            wallpaper: None,
         }
     }
 

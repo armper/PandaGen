@@ -597,7 +597,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // Ember's gradient on the desk, its raised bar, the card's surface,
         // and the Mint ring still on the focused card.
         "--expect-pixel".to_string(),
-        "100,400,35,19,22".to_string(),
+        // (100,400) is the wallpaper now, whatever the theme (GFX-066).
+        "100,400,2,2,5".to_string(),
         "--expect-pixel".to_string(),
         "640,4,32,22,24".to_string(),
         "--expect-pixel".to_string(),
@@ -653,7 +654,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // The desk background, the top bar, and the Look card's surface,
         // all in the light palette.
         "--expect-pixel".to_string(),
-        "100,400,226,230,236".to_string(),
+        "100,400,2,2,5".to_string(),
         "--expect-pixel".to_string(),
         "640,4,238,241,246".to_string(),
         "--expect-pixel".to_string(),

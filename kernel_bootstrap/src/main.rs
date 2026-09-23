@@ -2461,7 +2461,12 @@ fn workspace_loop(
                         &shell_notices,
                     );
                     input_router.apply_focus(&mut windows);
-                    renderer.render_windows_with_theme(windows, model.pointer, desk.theme());
+                    renderer.render_windows_with_look(
+                        windows,
+                        model.pointer,
+                        desk.theme(),
+                        desk.wallpaper(),
+                    );
                 } else {
                     let mut windows = renderer.windows(&model);
                     input_router.apply_focus(&mut windows);
