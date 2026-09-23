@@ -58,6 +58,8 @@ pub const KEY_CTRL_RIGHT: u8 = 0x95;
 /// goes to space n, `KEY_CTRL_SHIFT_1 + n` moves the focused card there.
 pub const KEY_CTRL_1: u8 = 0x96;
 pub const KEY_CTRL_SHIFT_1: u8 = 0x9A;
+/// Ctrl was released (GFX-068): the overview picks what is highlighted.
+pub const KEY_CTRL_RELEASED: u8 = 0x9F;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
 pub const CTRL_F: u8 = 0x06;

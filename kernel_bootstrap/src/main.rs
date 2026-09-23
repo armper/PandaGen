@@ -4307,7 +4307,10 @@ impl Ps2ParserState {
         if code == 0x1D {
             self.ctrl_pressed = !is_break;
             self.pending_e0 = false;
-            return None;
+            // Letting go of Ctrl is a key of its own (GFX-068): held
+            // Ctrl+Tab shows the overview, and the release picks. The
+            // workspace ignores bytes above ASCII, as it does the arrows.
+            return is_break.then_some(crate::notepad::KEY_CTRL_RELEASED);
         }
 
         // E0-prefixed keys: the arrows and Delete (GFX-051). These were
@@ -4800,7 +4803,11 @@ mod keyboard_scancode_tests {
             parser.process_scancode(0x4B, &mut writer),
             Some(crate::notepad::KEY_CTRL_LEFT)
         );
-        assert_eq!(parser.process_scancode(0x1D | 0x80, &mut writer), None);
+        assert_eq!(
+            parser.process_scancode(0x1D | 0x80, &mut writer),
+            Some(crate::notepad::KEY_CTRL_RELEASED),
+            "letting go of Ctrl is a key (GFX-068)"
+        );
         assert_eq!(parser.process_scancode(0xE0, &mut writer), None);
         assert_eq!(
             parser.process_scancode(0x47, &mut writer),
@@ -4832,7 +4839,10 @@ mod keyboard_scancode_tests {
             Some(crate::notepad::CTRL_Z)
         );
         assert_eq!(parser.process_scancode(0x19, &mut writer), Some(0x10));
-        assert_eq!(parser.process_scancode(0x1D | 0x80, &mut writer), None); // ctrl up
+        assert_eq!(
+            parser.process_scancode(0x1D | 0x80, &mut writer),
+            Some(crate::notepad::KEY_CTRL_RELEASED)
+        ); // ctrl up
         assert_eq!(parser.process_scancode(0x1F, &mut writer), Some(b's'));
     }
 

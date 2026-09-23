@@ -39,6 +39,11 @@ pub const WALLPAPERS: [&str; 2] = ["Picture", "Gradient"];
 /// focused card, and the strip in the middle of the top bar shows where
 /// you are and takes a click.
 pub const SPACES: usize = 4;
+
+/// The overview's mini cards (GFX-068): four to a row.
+pub const OVERVIEW_COLUMNS: usize = 4;
+pub const OVERVIEW_CARD: (usize, usize) = (280, 150);
+pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::notepad::{Notepad, NotepadEffect};
@@ -839,10 +844,12 @@ pub enum PaletteAction {
     Space(usize),
     /// Move the focused card to space 1..4.
     MoveToSpace(usize),
+    /// Every card at once (GFX-068).
+    Overview,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 28] = [
+    pub const ALL: [PaletteAction; 29] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -871,6 +878,7 @@ impl PaletteAction {
         PaletteAction::MoveToSpace(1),
         PaletteAction::MoveToSpace(2),
         PaletteAction::MoveToSpace(3),
+        PaletteAction::Overview,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -903,6 +911,7 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(1) => "Move this card to space 2",
             PaletteAction::MoveToSpace(2) => "Move this card to space 3",
             PaletteAction::MoveToSpace(_) => "Move this card to space 4",
+            PaletteAction::Overview => "Overview: every card at once",
         }
     }
 
@@ -915,7 +924,7 @@ impl PaletteAction {
             PaletteAction::SaveAs => "",
             PaletteAction::Open => "Ctrl+O",
             PaletteAction::CloseWindow => "Ctrl+W",
-            PaletteAction::NextWindow => "Ctrl+Tab",
+            PaletteAction::NextWindow => "",
             PaletteAction::SnapLeft => "Ctrl+Left",
             PaletteAction::SnapRight => "Ctrl+Right",
             PaletteAction::Maximise => "Ctrl+Up",
@@ -936,6 +945,7 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(1) => "Ctrl+Shift+2",
             PaletteAction::MoveToSpace(2) => "Ctrl+Shift+3",
             PaletteAction::MoveToSpace(_) => "Ctrl+Shift+4",
+            PaletteAction::Overview => "Ctrl+Tab",
         }
     }
 
@@ -1112,6 +1122,9 @@ pub struct Desk {
     quiet_saves: Vec<ViewId>,
     /// The space on screen (GFX-067).
     space: usize,
+    /// The overview is open (GFX-068), with this entry of
+    /// `overview_order` highlighted.
+    overview: Option<usize>,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
     notices: Vec<DeskNotice>,
@@ -1150,6 +1163,7 @@ impl Desk {
             welcome_dismissed: false,
             quiet_saves: Vec::new(),
             space: 0,
+            overview: None,
             text_select: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
@@ -1434,6 +1448,120 @@ impl Desk {
         self.space
     }
 
+    /// Whether the overview is open.
+    pub fn overview_open(&self) -> bool {
+        self.overview.is_some()
+    }
+
+    /// Every card, in the order the overview shows them: this space first,
+    /// highest on top, then the other spaces in order. Tucked cards are
+    /// here too -- the overview is where a tucked card is found without
+    /// remembering which tile it went into. The Welcome card is not a
+    /// card to switch to.
+    fn overview_order(&self) -> Vec<ViewId> {
+        let mut cards: Vec<&DeskWindow> = self
+            .windows
+            .iter()
+            .filter(|w| w.app != DeskApp::Welcome)
+            .collect();
+        let current = self.space;
+        cards.sort_by(|a, b| {
+            let space = |w: &DeskWindow| (w.space != current, w.space);
+            space(a).cmp(&space(b)).then_with(|| b.z.cmp(&a.z))
+        });
+        cards.iter().map(|w| w.id).collect()
+    }
+
+    /// Open the overview on the next card (GFX-068). Nothing to show with
+    /// no cards.
+    pub fn open_overview(&mut self) -> bool {
+        let count = self.overview_order().len();
+        if count == 0 {
+            return false;
+        }
+        self.palette = None;
+        self.overview = Some(if count > 1 { 1 } else { 0 });
+        true
+    }
+
+    /// Move the highlight by `delta`, wrapping.
+    fn overview_step(&mut self, delta: isize) {
+        let count = self.overview_order().len() as isize;
+        if let (Some(index), true) = (self.overview, count > 0) {
+            let next = (index as isize + delta).rem_euclid(count) as usize;
+            self.overview = Some(next);
+        }
+    }
+
+    /// Take the highlighted card: raised, untucked, its space shown.
+    fn overview_pick(&mut self) -> bool {
+        let Some(index) = self.overview.take() else {
+            return false;
+        };
+        match self.overview_order().get(index).copied() {
+            Some(id) => {
+                self.raise(id);
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// The overview's mini card for a window: the title, a few lines of
+    /// what is in it, and which space it is on.
+    fn overview_card(
+        &self,
+        window: &DeskWindow,
+        bounds: RasterRect,
+        highlighted: bool,
+    ) -> DesktopWindow {
+        let (title, lines) = match &window.state {
+            AppState::Notepad(notepad) => (
+                notepad.title(),
+                notepad
+                    .content()
+                    .lines()
+                    .take(3)
+                    .map(|l| l.chars().take(32).collect::<String>())
+                    .collect::<Vec<_>>(),
+            ),
+            AppState::Files(files) => (
+                "Files".to_string(),
+                alloc::vec![alloc::format!("{} files", files.entries.len())],
+            ),
+            AppState::Terminal => (
+                "Terminal".to_string(),
+                alloc::vec!["the console".to_string()],
+            ),
+            AppState::Look(_) => (
+                "Look".to_string(),
+                alloc::vec!["themes and accents".to_string()],
+            ),
+            AppState::Welcome => ("Welcome".to_string(), Vec::new()),
+        };
+        let mut frame = ViewFrame::new(
+            window.id,
+            ViewKind::TextBuffer,
+            0,
+            ViewContent::text_buffer(lines),
+            0,
+        );
+        frame.title = Some(title);
+        let footer = alloc::format!(
+            "space {}{}",
+            window.space + 1,
+            if window.tucked { "   tucked" } else { "" }
+        );
+        let mut card = DesktopWindow::card(frame, bounds)
+            .with_z_index(usize::MAX / 2 - 2)
+            .with_footer(Some(footer));
+        card.closable = false;
+        if highlighted {
+            card = card.focused();
+        }
+        card
+    }
+
     /// Show space `index` (GFX-067): focus goes to its highest card, or to
     /// nothing, and the palette closes. Returns whether anything changed.
     pub fn go_to_space(&mut self, index: usize) -> bool {
@@ -1584,6 +1712,10 @@ impl Desk {
             }
             PaletteAction::MoveToSpace(index) => {
                 self.move_focused_to_space(index);
+                None
+            }
+            PaletteAction::Overview => {
+                self.open_overview();
                 None
             }
             PaletteAction::CloseWindow => {
@@ -1889,6 +2021,19 @@ impl Desk {
                     let px = event.position.x.max(0) as usize;
                     let py = event.position.y.max(0) as usize;
 
+                    if self.overview.is_some() && press {
+                        // A mini card is the window it stands for.
+                        let order = self.overview_order();
+                        match order.iter().position(|id| id == target) {
+                            Some(index) => {
+                                self.overview = Some(index);
+                                self.overview_pick();
+                            }
+                            None => self.overview = None,
+                        }
+                        changed = true;
+                        continue;
+                    }
                     if *target == self.dock_id {
                         let tile = match region {
                             Some(HitRegion::DockTile { index }) => Some(index),
@@ -2154,8 +2299,34 @@ impl Desk {
         // there is nothing to use it on. Ctrl+N stays the Notepad's own
         // "new document" while a Notepad is focused; from a Terminal, or
         // from the bare desk, it opens one.
+        // The overview (GFX-068) owns the keys while it is open: Ctrl+Tab
+        // or Right/Down highlights the next card, Left/Up the previous,
+        // letting go of Ctrl or Enter takes it, Esc leaves things as they
+        // were. Anything else is swallowed -- there is no card under the
+        // keys to type into.
+        if self.overview.is_some() {
+            return match byte {
+                KEY_CTRL_TAB | crate::notepad::KEY_RIGHT | crate::notepad::KEY_DOWN => {
+                    self.overview_step(1);
+                    (None, true)
+                }
+                crate::notepad::KEY_LEFT | crate::notepad::KEY_UP => {
+                    self.overview_step(-1);
+                    (None, true)
+                }
+                crate::notepad::KEY_CTRL_RELEASED | b'\n' | b'\r' => (None, self.overview_pick()),
+                crate::notepad::ESC => {
+                    self.overview = None;
+                    (None, true)
+                }
+                _ => (None, false),
+            };
+        }
+        if byte == crate::notepad::KEY_CTRL_RELEASED {
+            return (None, false);
+        }
         if byte == KEY_CTRL_TAB {
-            return (None, self.cycle_focus());
+            return (None, self.open_overview());
         }
         // The spaces (GFX-067).
         if (crate::notepad::KEY_CTRL_1..crate::notepad::KEY_CTRL_1 + SPACES as u8).contains(&byte) {
@@ -2631,8 +2802,33 @@ impl Desk {
         let kept_look = self.look.clone();
         let look_preview = self.look_preview.clone();
         let space = self.space;
+        let overview_open = self.overview.is_some();
+        if let Some(highlight) = self.overview {
+            // The overview (GFX-068): every card as a small card, in a
+            // grid, the highlighted one ringed. Real cards stay hidden.
+            let order = self.overview_order();
+            let area = self.work_area();
+            let (w, h) = OVERVIEW_CARD;
+            let step_x = w + OVERVIEW_GAP;
+            let step_y = h + OVERVIEW_GAP + 10;
+            let total_w = OVERVIEW_COLUMNS.min(order.len().max(1)) * step_x - OVERVIEW_GAP;
+            let x0 = area.x + area.width.saturating_sub(total_w) / 2;
+            let y0 = area.y + 40;
+            for (index, id) in order.iter().enumerate() {
+                let Some(window) = self.windows.iter().find(|w| w.id == *id) else {
+                    continue;
+                };
+                let bounds = RasterRect::new(
+                    x0 + (index % OVERVIEW_COLUMNS) * step_x,
+                    y0 + (index / OVERVIEW_COLUMNS) * step_y,
+                    w,
+                    h,
+                );
+                out.push(self.overview_card(window, bounds, index == highlight));
+            }
+        }
         for window in &mut self.windows {
-            if window.tucked || window.space != space {
+            if window.tucked || window.space != space || overview_open {
                 continue;
             }
             let rows = Self::card_rows(window.bounds);
@@ -2848,6 +3044,9 @@ impl Desk {
             self.hovered_tile.and_then(|i| DeskApp::ALL.get(i)),
             self.focused_window(),
         ) {
+            _ if self.overview.is_some() => {
+                "Overview   -   Ctrl+Tab again, let go to pick, Esc to stay".to_string()
+            }
             // The dock has no labels; the bar says what the tile under the
             // pointer is, and whether it is running (GFX-062).
             (Some(app), _) => {
@@ -3919,7 +4118,10 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert_eq!(lines[1], " 1 .  [2]    3     4  ", "4 cells a space, 2 between");
+        assert_eq!(
+            lines[1], " 1 .  [2]    3     4  ",
+            "4 cells a space, 2 between"
+        );
         assert!(bar.frame.title.as_deref().unwrap().contains("Ctrl+Space"));
         // A card opened here is here; Ctrl+Tab stays on this space.
         let b = desk.launch(DeskApp::Terminal);
@@ -4549,18 +4751,86 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_tab_walks_the_stack() {
+    fn ctrl_tab_shows_the_overview_and_letting_go_picks() {
         let mut desk = Desk::new(1280, 800);
         let a = desk.launch(DeskApp::Notepad);
         let b = desk.launch(DeskApp::Terminal);
         let c = desk.launch(DeskApp::Notepad);
         assert_eq!(desk.focus(), Some(c));
+        // Ctrl+Tab: the overview, with the next card (b, just under c)
+        // highlighted; the real cards are hidden, the mini cards are drawn
+        // with the windows' own ids.
+        assert!(desk.handle_key(KEY_CTRL_TAB).1);
+        assert!(desk.overview_open());
+        assert_eq!(desk.focus(), Some(c), "nothing picked yet");
+        let windows = desk.windows("", true, None);
+        let minis: Vec<&DesktopWindow> = windows
+            .iter()
+            .filter(|w| w.style == WindowStyle::Card && w.role == DesktopWindowRole::Main)
+            .collect();
+        assert_eq!(minis.len(), 3);
+        assert!(minis.iter().all(|w| w.bounds().width == OVERVIEW_CARD.0));
+        let ringed: Vec<ViewId> = minis
+            .iter()
+            .filter(|w| w.focused)
+            .map(|w| w.frame.view_id)
+            .collect();
+        assert_eq!(ringed, alloc::vec![b]);
+        let bar = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap();
+        assert!(bar.frame.title.as_deref().unwrap().starts_with("Overview"));
+        // Typing is swallowed; Ctrl+Tab again moves on to a; release picks.
+        assert_eq!(desk.handle_key(b'x'), (None, false));
         desk.handle_key(KEY_CTRL_TAB);
+        assert!(desk.handle_key(crate::notepad::KEY_CTRL_RELEASED).1);
+        assert!(!desk.overview_open());
         assert_eq!(desk.focus(), Some(a));
+        // Esc leaves things as they were.
         desk.handle_key(KEY_CTRL_TAB);
-        assert_eq!(desk.focus(), Some(b));
+        desk.handle_key(crate::notepad::ESC);
+        assert_eq!(desk.focus(), Some(a));
+        // A tucked card on another space is in the overview and comes
+        // back on its own space when picked.
+        desk.tuck(a);
+        desk.go_to_space(2);
+        assert!(desk.handle_key(KEY_CTRL_TAB).1);
+        let order = desk.overview_order();
+        assert_eq!(order.len(), 3, "tucked cards are in the overview");
+        // Nothing is on space 3, so every card is "elsewhere", by height:
+        // a was raised last, so it is first even though it is tucked.
+        assert_eq!(order[0], a);
+        let target = order.iter().position(|id| *id == a).unwrap();
+        while desk.overview != Some(target) {
+            desk.handle_key(KEY_CTRL_TAB);
+        }
+        desk.handle_key(crate::notepad::KEY_CTRL_RELEASED);
+        assert_eq!(desk.focus(), Some(a));
+        assert_eq!(desk.space(), 0);
+        assert!(!desk.window(a).unwrap().tucked);
+        // A click on a mini card picks it.
         desk.handle_key(KEY_CTRL_TAB);
+        let windows = desk.windows("", true, None);
+        let mini_c = windows
+            .iter()
+            .find(|w| w.frame.view_id == c)
+            .unwrap()
+            .bounds();
+        let mut router = DesktopInputRouter::new();
+        let (x, y) = ((mini_c.x + 40) as i32, (mini_c.y + 60) as i32);
+        route(&mut desk, &mut router, press(x, y));
+        route(&mut desk, &mut router, release(x, y));
+        assert!(!desk.overview_open());
         assert_eq!(desk.focus(), Some(c));
+        // With nothing open there is no overview.
+        let mut empty = Desk::new(1280, 800);
+        assert!(!empty.handle_key(KEY_CTRL_TAB).1);
+        // Letting go of Ctrl with no overview is nothing.
+        assert_eq!(
+            empty.handle_key(crate::notepad::KEY_CTRL_RELEASED),
+            (None, false)
+        );
     }
 
     #[test]
