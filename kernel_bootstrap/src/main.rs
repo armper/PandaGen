@@ -2061,6 +2061,44 @@ fn workspace_loop(
                             output_dirty = true;
                         }
                     }
+                    desk::DeskRequest::Vitals => {
+                        // The machine, this second (GFX-072): the same
+                        // numbers `mem` and `cpus` print, as a card.
+                        let files = match workspace.take_filesystem() {
+                            Some(fs) => {
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::with_clock(
+                                    fs, now_secs,
+                                );
+                                let n = io
+                                    .list_entries()
+                                    .map(|e| {
+                                        e.iter()
+                                            .filter(|e| !e.name.starts_with('.') && !e.trashed)
+                                            .count()
+                                    })
+                                    .unwrap_or(0);
+                                workspace.set_filesystem(io.into_filesystem());
+                                n
+                            }
+                            None => 0,
+                        };
+                        #[cfg(not(test))]
+                        let heap = GLOBAL_HEAP.stats();
+                        #[cfg(not(test))]
+                        let (heap_used_kib, heap_total_kib) = (heap.used / 1024, heap.total / 1024);
+                        #[cfg(test)]
+                        let (heap_used_kib, heap_total_kib) = (0usize, 0usize);
+                        desk.vitals_loaded(desk::Vitals {
+                            uptime_ticks: now,
+                            heap_used_kib,
+                            heap_total_kib,
+                            cpus_online: CPUS.online(),
+                            cpus_total: CPU_TOTAL.load(core::sync::atomic::Ordering::Acquire)
+                                as usize,
+                            files,
+                        });
+                        output_dirty = true;
+                    }
                     desk::DeskRequest::PreviewFile { id, name } => {
                         if let Some(fs) = workspace.take_filesystem() {
                             let mut io =

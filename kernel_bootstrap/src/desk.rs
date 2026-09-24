@@ -93,6 +93,11 @@ pub enum DeskApp {
     /// Every notice the desk has shown, newest first (GFX-069). Not on the
     /// dock: the bar's "N new" and the palette open it.
     Notices,
+    /// The machine, now: clock, uptime, memory, CPUs, what is open
+    /// (GFX-072). A click on the clock opens it.
+    Now,
+    /// Every key the desk answers, in one card (GFX-072).
+    Shortcuts,
 }
 
 impl DeskApp {
@@ -111,6 +116,8 @@ impl DeskApp {
             DeskApp::Look => "Look",
             DeskApp::Welcome => "Welcome",
             DeskApp::Notices => "Notices",
+            DeskApp::Now => "Now",
+            DeskApp::Shortcuts => "Shortcuts",
         }
     }
 
@@ -123,6 +130,8 @@ impl DeskApp {
             DeskApp::Look => "Lk",
             DeskApp::Welcome => "Hi",
             DeskApp::Notices => "Nt",
+            DeskApp::Now => "Nw",
+            DeskApp::Shortcuts => "Ky",
         }
     }
 
@@ -134,9 +143,42 @@ impl DeskApp {
             DeskApp::Look => LOOK_SIZE,
             DeskApp::Welcome => WELCOME_SIZE,
             DeskApp::Notices => NOTICES_SIZE,
+            DeskApp::Now => NOW_SIZE,
+            DeskApp::Shortcuts => SHORTCUTS_SIZE,
         }
     }
 }
+
+/// The Now card (GFX-072).
+pub const NOW_SIZE: (usize, usize) = (440, 260);
+/// The shortcut sheet (GFX-072).
+pub const SHORTCUTS_SIZE: (usize, usize) = (560, 520);
+/// How often the Now card asks the kernel for fresh vitals, in ticks.
+pub const VITALS_EVERY: u64 = 100;
+
+/// What the kernel knows about the machine right now (GFX-072).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Vitals {
+    pub uptime_ticks: u64,
+    pub heap_used_kib: usize,
+    pub heap_total_kib: usize,
+    pub cpus_online: usize,
+    pub cpus_total: usize,
+    pub files: usize,
+}
+
+/// The desk's own keys, for the sheet: the ones no palette row carries.
+pub const DESK_KEYS: [(&str, &str); 9] = [
+    ("Search files and actions", "type on the desk"),
+    ("The palette", "Ctrl+Space, or click the bar"),
+    ("Every card at once", "Ctrl+Tab (hold; let go to pick)"),
+    ("Snap left / right", "Ctrl+Left / Ctrl+Right"),
+    ("Fill the desk / put back", "Ctrl+Up / Ctrl+Down"),
+    ("Go to a space", "Ctrl+1..4"),
+    ("Move the card to a space", "Ctrl+Shift+1..4"),
+    ("Close the card", "Ctrl+W"),
+    ("Tuck a card", "drag it onto the dock"),
+];
 
 /// The Notices card (GFX-069).
 pub const NOTICES_SIZE: (usize, usize) = (560, 400);
@@ -366,6 +408,13 @@ impl DeskWindow {
                 ("Clear".to_string(), crate::notepad::KEY_DELETE),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
+            AppState::Now => alloc::vec![
+                ("Notices".to_string(), b'n'),
+                ("Look".to_string(), b'l'),
+                ("Shortcuts".to_string(), b'k'),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Shortcuts(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
         }
     }
 }
@@ -760,6 +809,9 @@ pub enum AppState {
     Look(LookView),
     Welcome,
     Notices,
+    Now,
+    /// The sheet, with how many rows it has scrolled.
+    Shortcuts(usize),
 }
 
 /// One open window.
@@ -891,6 +943,8 @@ pub enum DeskRequest {
     /// Read the first lines of `name` for the Files card `id`, then call
     /// [`Desk::preview_loaded`] (GFX-071).
     PreviewFile { id: ViewId, name: String },
+    /// Say how the machine is, then call [`Desk::vitals_loaded`] (GFX-072).
+    Vitals,
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
 }
@@ -926,10 +980,14 @@ pub enum PaletteAction {
     Overview,
     /// Every notice, newest first (GFX-069).
     Notices,
+    /// The machine, now (GFX-072).
+    Now,
+    /// Every key (GFX-072).
+    Shortcuts,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 30] = [
+    pub const ALL: [PaletteAction; 32] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -960,6 +1018,8 @@ impl PaletteAction {
         PaletteAction::MoveToSpace(3),
         PaletteAction::Overview,
         PaletteAction::Notices,
+        PaletteAction::Now,
+        PaletteAction::Shortcuts,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -994,6 +1054,8 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(_) => "Move this card to space 4",
             PaletteAction::Overview => "Overview: every card at once",
             PaletteAction::Notices => "Notices: everything the desk has said",
+            PaletteAction::Now => "Now: the machine, this second",
+            PaletteAction::Shortcuts => "Shortcuts: every key the desk answers",
         }
     }
 
@@ -1029,6 +1091,8 @@ impl PaletteAction {
             PaletteAction::MoveToSpace(_) => "Ctrl+Shift+4",
             PaletteAction::Overview => "Ctrl+Tab",
             PaletteAction::Notices => "",
+            PaletteAction::Now => "click the clock",
+            PaletteAction::Shortcuts => "",
         }
     }
 
@@ -1251,6 +1315,13 @@ pub struct Desk {
     unseen_notices: usize,
     /// The tick `windows_at` last saw, for "ago" in the Notices card.
     last_tick: u64,
+    /// What the kernel last said about the machine (GFX-072), and when it
+    /// was asked.
+    vitals: Vitals,
+    /// When vitals were last asked for, and whether the answer is still
+    /// outstanding.
+    vitals_asked_at: Option<u64>,
+    vitals_pending: bool,
     /// The last file listing, for save-as and open autocomplete.
     file_names_cache: Vec<String>,
 }
@@ -1289,6 +1360,9 @@ impl Desk {
             notice_log: Vec::new(),
             unseen_notices: 0,
             last_tick: 0,
+            vitals: Vitals::default(),
+            vitals_asked_at: None,
+            vitals_pending: false,
             file_names_cache: Vec::new(),
         }
     }
@@ -1419,6 +1493,84 @@ impl Desk {
         Some(DeskRequest::SaveRecent { text })
     }
 
+    /// The kernel answers `Vitals` (GFX-072).
+    pub fn vitals_loaded(&mut self, vitals: Vitals) {
+        self.vitals = vitals;
+        self.vitals_pending = false;
+    }
+
+    /// `1h 02m` / `3m 07s` from ticks at 100 Hz.
+    pub fn uptime(ticks: u64) -> String {
+        let secs = ticks / 100;
+        if secs >= 3600 {
+            alloc::format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+        } else {
+            alloc::format!("{}m {:02}s", secs / 60, secs % 60)
+        }
+    }
+
+    /// The Now card's lines (GFX-072).
+    fn now_lines(&self, clock: &str) -> Vec<String> {
+        let v = &self.vitals;
+        let cards = self
+            .windows
+            .iter()
+            .filter(|w| w.app != DeskApp::Welcome)
+            .count();
+        let spaces_used = self.space_counts().iter().filter(|c| **c > 0).count();
+        let mut lines = alloc::vec![
+            alloc::format!("Clock        {clock}"),
+            alloc::format!("Up           {}", Self::uptime(v.uptime_ticks)),
+        ];
+        if v.heap_total_kib > 0 {
+            lines.push(alloc::format!(
+                "Memory       {} MiB of {} MiB in use",
+                v.heap_used_kib / 1024,
+                v.heap_total_kib / 1024
+            ));
+        }
+        lines.push(alloc::format!(
+            "CPUs         {} online of {}",
+            v.cpus_online,
+            v.cpus_total.max(v.cpus_online)
+        ));
+        lines.push(alloc::format!("Files        {}", v.files));
+        lines.push(alloc::format!(
+            "Cards        {cards} open on {spaces_used} space{}",
+            if spaces_used == 1 { "" } else { "s" }
+        ));
+        lines.push(alloc::format!(
+            "Look         {} + {}",
+            self.look.theme,
+            self.look.accent
+        ));
+        lines.push(alloc::format!(
+            "Notices      {} kept",
+            self.notice_log.len()
+        ));
+        lines
+    }
+
+    /// The shortcut sheet's lines (GFX-072): the desk's keys, then every
+    /// palette row that has one -- generated, so it cannot go stale.
+    fn shortcut_lines() -> Vec<String> {
+        let mut lines: Vec<String> = DESK_KEYS
+            .iter()
+            .map(|(what, key)| alloc::format!("{what:<34} {key}"))
+            .collect();
+        lines.push(String::new());
+        for action in PaletteAction::ALL.iter() {
+            if !action.shortcut().is_empty() {
+                lines.push(alloc::format!(
+                    "{:<34} {}",
+                    action.label(),
+                    action.shortcut()
+                ));
+            }
+        }
+        lines
+    }
+
     /// The kernel read `name` for the Files card `id` (GFX-071).
     pub fn preview_loaded(&mut self, id: ViewId, name: &str, text: &str) {
         if let Some(files) = self.window_mut(id).and_then(|w| w.files_mut()) {
@@ -1441,6 +1593,19 @@ impl Desk {
     /// from the preview they hold (GFX-071).
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        // A Now card asks once a second (GFX-072), and never twice at once.
+        if self.windows.iter().any(|w| w.app == DeskApp::Now) {
+            let due = !self.vitals_pending
+                && self
+                    .vitals_asked_at
+                    .map(|asked| now.saturating_sub(asked) >= VITALS_EVERY)
+                    .unwrap_or(true);
+            if due {
+                self.vitals_asked_at = Some(now);
+                self.vitals_pending = true;
+                requests.push(DeskRequest::Vitals);
+            }
+        }
         for window in &mut self.windows {
             if let AppState::Files(files) = &mut window.state {
                 if files.list_only || files.bin {
@@ -1560,6 +1725,8 @@ impl Desk {
                 }),
                 DeskApp::Welcome => AppState::Welcome,
                 DeskApp::Notices => AppState::Notices,
+                DeskApp::Now => AppState::Now,
+                DeskApp::Shortcuts => AppState::Shortcuts(0),
             },
         });
         self.focus = Some(id);
@@ -1675,6 +1842,15 @@ impl Desk {
         (start..start + indicator).contains(&column)
     }
 
+    /// Whether top-bar text cell `column` is on the clock, the last
+    /// `clock_len` cells of the right-hand text.
+    fn clock_at_column(&self, column: usize, clock_len: usize) -> bool {
+        let clock: String = core::iter::repeat('0').take(clock_len).collect();
+        let total = self.bar_right(&clock).chars().count();
+        let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH) / GLYPH_WIDTH;
+        (start + total - clock_len..start + total).contains(&column)
+    }
+
     /// Whether the overview is open.
     pub fn overview_open(&self) -> bool {
         self.overview.is_some()
@@ -1768,6 +1944,11 @@ impl Desk {
             AppState::Notices => (
                 "Notices".to_string(),
                 alloc::vec![alloc::format!("{} kept", self.notice_log.len())],
+            ),
+            AppState::Now => ("Now".to_string(), alloc::vec!["the machine".to_string()]),
+            AppState::Shortcuts(_) => (
+                "Shortcuts".to_string(),
+                alloc::vec!["every key".to_string()],
             ),
         };
         let mut frame = ViewFrame::new(
@@ -1951,6 +2132,14 @@ impl Desk {
             }
             PaletteAction::Notices => {
                 self.open_or_raise(DeskApp::Notices);
+                None
+            }
+            PaletteAction::Now => {
+                self.open_or_raise(DeskApp::Now);
+                None
+            }
+            PaletteAction::Shortcuts => {
+                self.open_or_raise(DeskApp::Shortcuts);
                 None
             }
             PaletteAction::CloseWindow => {
@@ -2329,6 +2518,9 @@ impl Desk {
                             .unwrap_or(false)
                         {
                             self.open_or_raise(DeskApp::Notices);
+                        } else if column.map(|c| self.clock_at_column(c, 5)).unwrap_or(false) {
+                            // The clock is the way into Now (GFX-072).
+                            self.open_or_raise(DeskApp::Now);
                         } else {
                             match column.and_then(|c| self.space_at_column(c)) {
                                 Some(space) => {
@@ -2460,6 +2652,13 @@ impl Desk {
                                 // The console's scrollback is the
                                 // workspace's; ask for it.
                                 requests.push(DeskRequest::TerminalScroll { notches: *dy * 3 });
+                                changed = true;
+                            } else if let Some(AppState::Shortcuts(scroll)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                let max = Self::shortcut_lines().len().saturating_sub(1);
+                                *scroll =
+                                    (*scroll as i64 - *dy as i64 * 3).clamp(0, max as i64) as usize;
                                 changed = true;
                             }
                         }
@@ -2832,6 +3031,52 @@ impl Desk {
                 }
                 _ => (None, false),
             },
+            AppState::Now => match byte {
+                crate::notepad::CTRL_W | crate::notepad::ESC => {
+                    self.close(id);
+                    (None, true)
+                }
+                b'n' | b'N' => {
+                    self.open_or_raise(DeskApp::Notices);
+                    (None, true)
+                }
+                b'l' | b'L' => {
+                    self.open_or_raise(DeskApp::Look);
+                    (None, true)
+                }
+                b'k' | b'K' => {
+                    self.open_or_raise(DeskApp::Shortcuts);
+                    (None, true)
+                }
+                _ => (None, false),
+            },
+            AppState::Shortcuts(scroll) => match byte {
+                crate::notepad::CTRL_W | crate::notepad::ESC => {
+                    self.close(id);
+                    (None, true)
+                }
+                // The sheet is longer than a card: it scrolls (GFX-072).
+                crate::notepad::KEY_DOWN | crate::notepad::KEY_PAGE_DOWN => {
+                    let step = if byte == crate::notepad::KEY_DOWN {
+                        1
+                    } else {
+                        10
+                    };
+                    let max = Self::shortcut_lines().len().saturating_sub(1);
+                    *scroll = (*scroll + step).min(max);
+                    (None, true)
+                }
+                crate::notepad::KEY_UP | crate::notepad::KEY_PAGE_UP => {
+                    let step = if byte == crate::notepad::KEY_UP {
+                        1
+                    } else {
+                        10
+                    };
+                    *scroll = scroll.saturating_sub(step);
+                    (None, true)
+                }
+                _ => (None, false),
+            },
             AppState::Notices => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3107,6 +3352,7 @@ impl Desk {
         let look_preview = self.look_preview.clone();
         let notice_log = self.notice_log.clone();
         let now_tick = self.last_tick;
+        let now_lines = self.now_lines(clock);
         let space = self.space;
         let overview_open = self.overview.is_some();
         if let Some(highlight) = self.overview {
@@ -3222,6 +3468,26 @@ impl Desk {
                     "Close this card and it stays closed".to_string(),
                     None,
                 ),
+                AppState::Now => (
+                    now_lines.clone(),
+                    "Now".to_string(),
+                    "The machine, this second; refreshed every second".to_string(),
+                    None,
+                ),
+                AppState::Shortcuts(scroll) => {
+                    let all = Self::shortcut_lines();
+                    let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
+                    let footer = if all.len() > rows {
+                        alloc::format!(
+                            "{} of {} keys   arrows and the wheel scroll",
+                            (*scroll + rows).min(all.len()),
+                            all.len()
+                        )
+                    } else {
+                        "Every key the desk answers; the palette lists the rest".to_string()
+                    };
+                    (shown, "Shortcuts".to_string(), footer, None)
+                }
                 AppState::Notices => {
                     let lines: Vec<String> = notice_log
                         .iter()
@@ -3444,7 +3710,12 @@ impl Desk {
         // Dock: one tile per app, the running ones marked, the hovered one lit.
         let tabs: Vec<DesktopTab> = DeskApp::ALL
             .iter()
-            .filter(|app| **app != DeskApp::Welcome && **app != DeskApp::Notices)
+            .filter(|app| {
+                !matches!(
+                    app,
+                    DeskApp::Welcome | DeskApp::Notices | DeskApp::Now | DeskApp::Shortcuts
+                )
+            })
             .enumerate()
             .map(|(index, app)| {
                 let mut tab =
@@ -4758,6 +5029,99 @@ mod tests {
         let files = desk.window(id).unwrap().files().unwrap();
         assert_eq!(files.tag_filter, None);
         assert_eq!(files.visible().len(), 3);
+    }
+
+    #[test]
+    fn the_clock_opens_now_which_asks_the_kernel_once_a_second() {
+        let mut desk = Desk::new(1280, 800);
+        // No Now card: no asking.
+        assert!(desk.tick(0).is_empty());
+        // Click the clock.
+        let mut router = DesktopInputRouter::new();
+        let start = (1280 - 12 - 5 * 8) / 8;
+        let x = (start * 8 + 4) as i32;
+        route(&mut desk, &mut router, press(x, 14));
+        route(&mut desk, &mut router, release(x, 14));
+        let id = desk.focused_window().map(|w| w.id).expect("Now opened");
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Now);
+        // It asks, and not again until a second has passed.
+        assert_eq!(desk.tick(500), alloc::vec![DeskRequest::Vitals]);
+        assert!(desk.tick(550).is_empty());
+        desk.vitals_loaded(Vitals {
+            uptime_ticks: 372_500,
+            heap_used_kib: 12 * 1024,
+            heap_total_kib: 32 * 1024,
+            cpus_online: 4,
+            cpus_total: 4,
+            files: 6,
+        });
+        assert_eq!(desk.tick(600), alloc::vec![DeskRequest::Vitals]);
+        let windows = desk.windows_at("12:34", true, None, 600, &[]);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(rows[0].ends_with("12:34"), "{rows:?}");
+        assert!(rows[1].ends_with("1h 02m"), "{rows:?}");
+        assert!(rows[2].contains("12 MiB of 32 MiB"), "{rows:?}");
+        assert!(rows[3].contains("4 online of 4"), "{rows:?}");
+        assert!(rows[4].ends_with("6"), "{rows:?}");
+        assert!(rows[5].contains("1 open on 1 space"), "{rows:?}");
+        assert_eq!(Desk::uptime(6_100), "1m 01s");
+        // Its chips open the other system cards.
+        assert_eq!(card.actions[2], "Shortcuts");
+        desk.handle_key(b'k');
+        let (sheet_id, sheet_app) = desk.focused_window().map(|w| (w.id, w.app)).unwrap();
+        assert_eq!(sheet_app, DeskApp::Shortcuts);
+        let windows = desk.windows("", true, None);
+        let card = windows
+            .iter()
+            .find(|w| w.frame.view_id == sheet_id)
+            .unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(rows[0].contains("type on the desk"), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("Save") && r.ends_with("Ctrl+S")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("Ctrl+Shift+1..4")),
+            "{rows:?}"
+        );
+        // The sheet scrolls: Down moves the first row on; PageUp comes back.
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        let windows = desk.windows("", true, None);
+        let card = windows
+            .iter()
+            .find(|w| w.frame.view_id == sheet_id)
+            .unwrap();
+        let scrolled = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(scrolled[0], rows[1]);
+        desk.handle_key(crate::notepad::KEY_PAGE_UP);
+        let windows = desk.windows("", true, None);
+        let card = windows
+            .iter()
+            .find(|w| w.frame.view_id == sheet_id)
+            .unwrap();
+        let back = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(back[0], rows[0]);
+        // Neither is a dock tile.
+        let dock = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap();
+        assert_eq!(dock.tabs.len(), 4);
     }
 
     #[test]
