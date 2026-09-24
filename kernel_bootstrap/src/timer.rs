@@ -8,22 +8,47 @@
 //! says -- so the card need not be on screen, or even on this space, to
 //! be heard.
 //!
-//! Every control is a `[ button ]` in the text, hit by line and column,
-//! and every button has a key.
+//! Every control is a real button (GFX-082) that stands for a key, so
+//! the pointer and the keyboard reach the same code; the time is drawn
+//! three times the font's size, and a countdown shows what is left as a
+//! bar.
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use view_types::PixelRect;
+
+use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
 
 /// Ticks per second.
 pub const HZ: u64 = 100;
 /// The countdown presets, in minutes, as the card offers them.
 pub const PRESETS: [u64; 4] = [1, 5, 10, 25];
-/// The content line the controls are on, and the presets.
-pub const CONTROLS_LINE: usize = 3;
-pub const PRESETS_LINE: usize = 5;
-pub const LAPS_LINE: usize = 7;
+/// Where the card's parts go, top to bottom, in canvas pixels.
+pub const TIME_TOP: i32 = 20;
+pub const BAR_TOP: i32 = 76;
+pub const CONTROLS_TOP: i32 = 96;
+pub const PRESETS_TOP: i32 = 172;
+pub const LAPS_TOP: i32 = 222;
+const LAP_PITCH: i32 = 18;
+
+/// The controls' and presets' rectangles for a canvas `width` wide
+/// (GFX-082): what the drawing and the desk's hit test agree on.
+#[derive(Debug, Clone)]
+pub struct TimerLayout {
+    pub controls: Vec<PixelRect>,
+    pub presets: Vec<PixelRect>,
+}
+
+impl TimerLayout {
+    pub fn new(width: u32) -> Self {
+        Self {
+            controls: grid(rect(0, CONTROLS_TOP, width, 44), 3, 1, 6),
+            presets: grid(rect(0, PRESETS_TOP, width, 36), 4, 1, 6),
+        }
+    }
+}
 /// Laps kept.
 pub const MAX_LAPS: usize = 6;
 
@@ -164,69 +189,75 @@ impl TimerView {
         TimerEffect::Redraw
     }
 
-    /// A click on the content: a control or a preset.
-    pub fn click(&mut self, line: usize, column: usize) -> TimerEffect {
-        let lines = self.lines();
-        let Some(text) = lines.get(line) else {
-            return TimerEffect::None;
-        };
-        let Some(index) = button_at(text, column) else {
-            return TimerEffect::None;
-        };
-        match (line, index) {
-            (CONTROLS_LINE, 0) => self.start_or_pause(),
-            (CONTROLS_LINE, 1) => {
-                if self.mode == Mode::Stopwatch {
-                    self.lap()
-                } else {
-                    self.mode = Mode::Stopwatch;
-                    self.reset();
-                }
-            }
-            (CONTROLS_LINE, 2) => self.reset(),
-            (PRESETS_LINE, i) if i < PRESETS.len() => self.set_countdown(PRESETS[i]),
-            _ => return TimerEffect::None,
-        }
-        TimerEffect::Redraw
-    }
-
-    pub fn lines(&self) -> Vec<String> {
+    /// The card, drawn (GFX-082): the mode, the time large, a bar of
+    /// what is left while counting down, the controls, the presets, the
+    /// laps. `hover` is the pointer in canvas pixels, if over the card.
+    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+        let layout = TimerLayout::new(width);
+        let mut ui = Ui::new(palette, hover);
+        let p = *ui.palette();
         let heading = match self.mode {
             Mode::Stopwatch => "Stopwatch".to_string(),
             Mode::Countdown(total) => alloc::format!("Countdown  {}", describe(total)),
         };
+        ui.text(0, 0, &heading, p.muted, 1);
+        let time_ink = if self.fired { p.accent } else { p.text };
+        ui.text_centered(
+            &rect(0, TIME_TOP, width, 48),
+            &format_ticks(self.shown_ticks()),
+            time_ink,
+            3,
+        );
+        if let Mode::Countdown(total) = self.mode {
+            // What is left, as a bar.
+            ui.fill(rect(0, BAR_TOP, width, 8), p.raised, 4);
+            let left = self.shown_ticks().min(total);
+            let filled = ((width as u64 * left) / total.max(1)) as u32;
+            if filled > 0 {
+                ui.fill(rect(0, BAR_TOP, filled, 8), p.accent, 4);
+            }
+        }
         let start = if self.running() { "Pause" } else { "Start" };
-        let second = if self.mode == Mode::Stopwatch {
-            "Lap"
+        let start_kind = if self.running() {
+            ButtonKind::Plain
         } else {
-            "Stopwatch"
+            ButtonKind::Primary
         };
-        let presets: Vec<String> = PRESETS.iter().map(|m| alloc::format!("[ {m}m ]")).collect();
-        let mut lines = alloc::vec![
-            heading,
-            alloc::format!("        {}", format_ticks(self.shown_ticks())),
-            String::new(),
-            alloc::format!("[ {start} ] [ {second} ] [ Reset ]"),
-            String::new(),
-            alloc::format!("Countdown  {}", presets.join(" ")),
-            String::new(),
-        ];
+        ui.button(layout.controls[0], start, b' ', start_kind);
+        if self.mode == Mode::Stopwatch {
+            ui.button(layout.controls[1], "Lap", b'l', ButtonKind::Plain);
+        } else {
+            ui.button(layout.controls[1], "Stopwatch", b's', ButtonKind::Plain);
+        }
+        ui.button(layout.controls[2], "Reset", b'r', ButtonKind::Quiet);
+        ui.text(0, PRESETS_TOP - 20, "Countdown", p.muted, 1);
+        for (i, (cell, minutes)) in layout.presets.iter().zip(PRESETS.iter()).enumerate() {
+            let label = alloc::format!("{minutes}m");
+            ui.button(*cell, &label, b'1' + i as u8, ButtonKind::Accent);
+        }
+        let mut y = LAPS_TOP;
         if !self.laps.is_empty() {
-            lines.push("Laps".to_string());
+            ui.text(0, y, "Laps", p.muted, 1);
+            y += LAP_PITCH;
             let count = self.laps.len();
             for (i, lap) in self.laps.iter().enumerate() {
+                if y + LAP_PITCH > height as i32 {
+                    break;
+                }
                 let previous = self.laps.get(i + 1).copied().unwrap_or(0);
-                lines.push(alloc::format!(
-                    "  {:>2}   {}   +{}",
+                let line = alloc::format!(
+                    "{:>2}   {}   +{}",
                     count - i,
                     format_ticks(*lap),
                     format_ticks(lap - previous)
-                ));
+                );
+                ui.text(8, y, &line, p.text, 1);
+                y += LAP_PITCH;
             }
         } else if self.fired {
-            lines.push("Done".to_string());
+            ui.text(0, y, "Done", p.accent, 1);
         }
-        lines
+        ui
     }
 
     pub fn footer(&self) -> String {
@@ -285,74 +316,143 @@ pub fn describe(ticks: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use services_gui_host::Theme;
+    use view_types::DrawOp;
+
+    fn palette() -> Palette {
+        Palette::from_theme(&Theme::DEFAULT)
+    }
+
+    fn texts(timer: &TimerView) -> Vec<String> {
+        timer
+            .ui(384, 360, palette(), None)
+            .into_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                DrawOp::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn the_stopwatch_runs_on_the_desks_ticks_pauses_and_laps() {
         let mut timer = TimerView::new();
         timer.poll(1_000);
-        assert_eq!(timer.lines()[1].trim(), "00:00.0");
+        assert!(texts(&timer).contains(&"00:00.0".to_string()));
         assert_eq!(timer.handle_byte(b' '), TimerEffect::Redraw);
         timer.poll(1_230);
-        assert_eq!(timer.lines()[1].trim(), "00:02.3");
+        assert!(texts(&timer).contains(&"00:02.3".to_string()));
         timer.handle_byte(b'l');
         timer.poll(1_500);
         timer.handle_byte(b'l');
-        assert_eq!(timer.lines()[LAPS_LINE], "Laps");
-        assert_eq!(timer.lines()[LAPS_LINE + 1], "   2   00:05.0   +00:02.7");
-        assert_eq!(timer.lines()[LAPS_LINE + 2], "   1   00:02.3   +00:02.3");
+        let shown = texts(&timer);
+        assert!(shown.contains(&"Laps".to_string()));
+        assert!(
+            shown.contains(&" 2   00:05.0   +00:02.7".to_string()),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(&" 1   00:02.3   +00:02.3".to_string()),
+            "{shown:?}"
+        );
         // Pause holds; resume continues from where it was.
         timer.handle_byte(b' ');
         timer.poll(9_000);
         assert_eq!(timer.elapsed(), 500);
-        assert!(timer.lines()[CONTROLS_LINE].starts_with("[ Start ]"));
+        assert!(texts(&timer).contains(&"Start".to_string()));
         timer.handle_byte(b' ');
         timer.poll(9_100);
         assert_eq!(timer.elapsed(), 600);
-        assert!(timer.lines()[CONTROLS_LINE].starts_with("[ Pause ]"));
+        assert!(texts(&timer).contains(&"Pause".to_string()));
         assert_eq!(format_ticks(3_661 * HZ), "1:01:01");
         timer.handle_byte(b'r');
         assert_eq!(timer.elapsed(), 0);
-        assert_eq!(timer.lines().len(), LAPS_LINE);
+        assert!(!texts(&timer).contains(&"Laps".to_string()));
     }
 
     #[test]
-    fn a_countdown_says_so_once_when_it_is_up_and_buttons_are_hit_by_column() {
+    fn a_countdown_says_so_once_when_it_is_up_and_buttons_are_hit_by_pixel() {
         let mut timer = TimerView::new();
         timer.poll(0);
-        // The presets line: "Countdown  [ 1m ] [ 5m ] [ 10m ] [ 25m ]".
-        let presets = timer.lines()[PRESETS_LINE].clone();
-        assert_eq!(button_at(&presets, 11), Some(0));
-        assert_eq!(button_at(&presets, 10), None, "the gap before");
-        assert_eq!(button_at(&presets, 19), Some(1));
-        assert_eq!(button_at(&presets, 35), Some(3));
-        assert_eq!(timer.click(PRESETS_LINE, 19), TimerEffect::Redraw);
+        let layout = TimerLayout::new(384);
+        assert_eq!(layout.controls.len(), 3);
+        assert_eq!(layout.presets.len(), 4);
+        // The second preset, clicked: five minutes, running at once.
+        let cell = layout.presets[1];
+        let key = timer
+            .ui(384, 360, palette(), None)
+            .hit(cell.x as i32 + 3, cell.y as i32 + 3)
+            .expect("a preset there");
+        assert_eq!(key, b'2');
+        assert_eq!(
+            timer
+                .ui(384, 360, palette(), None)
+                .hit(cell.x as i32 - 2, cell.y as i32 + 3),
+            None,
+            "the gap"
+        );
+        assert_eq!(timer.handle_byte(key), TimerEffect::Redraw);
         assert_eq!(timer.mode, Mode::Countdown(5 * 60 * HZ));
         assert!(timer.running());
-        assert_eq!(timer.lines()[0], "Countdown  5 minutes");
-        assert_eq!(timer.lines()[1].trim(), "05:00.0");
+        let shown = texts(&timer);
+        assert!(shown.contains(&"Countdown  5 minutes".to_string()));
+        assert!(shown.contains(&"05:00.0".to_string()));
         assert_eq!(timer.poll(100), None);
-        assert_eq!(timer.lines()[1].trim(), "04:59.0");
+        assert!(texts(&timer).contains(&"04:59.0".to_string()));
+        // The bar: a full-width track and an accent fill nearly as wide.
+        let ops = timer.ui(384, 360, palette(), None).into_ops();
+        let bars: Vec<u32> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOp::RoundedFill { rect, .. } if rect.y == BAR_TOP as u32 => Some(rect.width),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0], 384);
+        assert!((380..384).contains(&bars[1]), "{bars:?}");
         assert_eq!(
             timer.poll(5 * 60 * HZ + 7),
             Some("Timer: 5 minutes up".to_string())
         );
         assert_eq!(timer.poll(5 * 60 * HZ + 200), None, "said once");
         assert!(!timer.running());
-        assert_eq!(timer.lines()[1].trim(), "00:00.0");
-        assert_eq!(timer.lines()[LAPS_LINE], "Done");
+        let shown = texts(&timer);
+        assert!(shown.contains(&"00:00.0".to_string()));
+        assert!(shown.contains(&"Done".to_string()));
         assert!(timer.footer().starts_with("Done"));
-        // Start runs it again from the top.
-        timer.click(CONTROLS_LINE, 26);
+        // Reset, then Start runs it again from the top.
+        let reset = layout.controls[2];
+        let key = timer
+            .ui(384, 360, palette(), None)
+            .hit(reset.x as i32 + 3, reset.y as i32 + 3)
+            .unwrap();
+        assert_eq!(key, b'r');
+        timer.handle_byte(key);
         assert_eq!(timer.elapsed(), 0);
         timer.handle_byte(b' ');
         timer.poll(5 * 60 * HZ + 300);
-        assert_eq!(timer.lines()[1].trim(), "04:59.0");
+        assert!(texts(&timer).contains(&"04:59.0".to_string()));
         // The second control is "Stopwatch" while counting down.
-        assert!(timer.lines()[CONTROLS_LINE].contains("[ Stopwatch ]"));
-        timer.click(CONTROLS_LINE, 12);
+        let second = layout.controls[1];
+        assert!(texts(&timer).contains(&"Stopwatch".to_string()));
+        let key = timer
+            .ui(384, 360, palette(), None)
+            .hit(second.x as i32 + 3, second.y as i32 + 3)
+            .unwrap();
+        assert_eq!(key, b's');
+        timer.handle_byte(key);
         assert_eq!(timer.mode, Mode::Stopwatch);
         assert_eq!(timer.handle_byte(0x1B), TimerEffect::Close);
         assert_eq!(describe(90 * HZ), "90 seconds");
         assert_eq!(describe(60 * HZ), "1 minute");
+    }
+
+    #[test]
+    fn bracketed_words_are_still_found_by_column() {
+        assert_eq!(button_at("[ Add ] [ Done ]", 3), Some(0));
+        assert_eq!(button_at("[ Add ] [ Done ]", 7), None);
+        assert_eq!(button_at("[ Add ] [ Done ]", 12), Some(1));
     }
 }

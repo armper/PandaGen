@@ -3050,17 +3050,31 @@ impl Desk {
                             if let CalendarEffect::OpenNote { name, exists } = effect {
                                 requests.extend(self.open_note(name, exists));
                             }
-                            // Timer: its buttons are in the text (GFX-077).
-                            if let Some(AppState::Timer(timer)) =
-                                self.window_mut(*target).map(|w| &mut w.state)
-                            {
-                                timer.click(line, column);
-                            }
-                            // Tiles: the moves are buttons too (GFX-078).
-                            if let Some(AppState::Tiles(game)) =
-                                self.window_mut(*target).map(|w| &mut w.state)
-                            {
-                                game.click(line, column);
+                            // Timer and Tiles: real buttons, hit by pixel
+                            // (GFX-082); the hit is the key the button is.
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                let bounds = self.window(*target).map(|w| w.bounds);
+                                let palette = crate::widgets::Palette::from_theme(&self.theme());
+                                if let Some(bounds) = bounds {
+                                    let (w, h) = Self::canvas_size(bounds);
+                                    match self.window_mut(*target).map(|w| &mut w.state) {
+                                        Some(AppState::Timer(timer)) => {
+                                            if let Some(key) =
+                                                timer.ui(w, h, palette, None).hit(x, y)
+                                            {
+                                                timer.handle_byte(key);
+                                            }
+                                        }
+                                        Some(AppState::Tiles(game)) => {
+                                            if let Some(key) =
+                                                game.ui(w, h, palette, None).hit(x, y)
+                                            {
+                                                game.handle_byte(key);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                             // Tasks: a row, or a button (GFX-079).
                             if let Some(AppState::Tasks(tasks)) =
@@ -4042,9 +4056,15 @@ impl Desk {
                     } else {
                         "Timer".to_string()
                     };
-                    (timer.lines(), title, timer.footer(), None)
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(timer.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), title, timer.footer(), None)
                 }
-                AppState::Tiles(game) => (game.lines(), "Tiles".to_string(), game.footer(), None),
+                AppState::Tiles(game) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(game.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Tiles".to_string(), game.footer(), None)
+                }
                 AppState::Tasks(tasks) => {
                     highlight = tasks.highlight();
                     (tasks.lines(), "Tasks".to_string(), tasks.footer(), None)
@@ -6267,9 +6287,12 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.actions, alloc::vec!["New", "Close"]);
-        let (ox, oy, pitch) = card.card_text_origin();
-        let x = (ox + 31 * 8 + 4) as i32;
-        let y = (oy + crate::game::CONTROLS_LINE * pitch + 4) as i32;
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
+        let (ox, oy, _) = card.card_text_origin();
+        let (w, h) = Desk::canvas_size(desk.window(id).unwrap().bounds);
+        let new = crate::game::GameLayout::new(w, h).buttons[4];
+        let x = (ox as u32 + new.x + new.width / 2) as i32;
+        let y = (oy as u32 + new.y + new.height / 2) as i32;
         let deliveries = router.route(&compositor, &windows, press(x, y));
         desk.handle_deliveries_with_requests(&deliveries);
         let deliveries = router.route(&compositor, &windows, release(x, y));

@@ -6,23 +6,69 @@
 //! a test can play a whole game and know what it will see, and the desk
 //! seeds it from the tick at launch so no two games are alike.
 //!
-//! Every move is also a `[ button ]` in the text, so it plays with the
-//! pointer alone.
+//! The board is drawn (GFX-082): coloured tiles on a grid, the moves as
+//! real buttons under it, so it plays with the pointer alone.
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use view_types::{Color, PixelRect};
 
-use crate::timer::button_at;
+use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
 
 pub const SIZE: usize = 4;
-/// The content line the first row of cells is on (score, then the top
-/// border).
-pub const FIRST_CELL_LINE: usize = 2;
-/// The controls: `[ Up ]` on one line, the rest on the next.
-pub const UP_LINE: usize = 11;
-pub const CONTROLS_LINE: usize = 12;
+/// The board's top, under the score line, and the buttons' height.
+pub const BOARD_TOP: i32 = 24;
+pub const BUTTONS_H: u32 = 44;
+
+/// The board's cells and the five buttons for a canvas of a size
+/// (GFX-082): what the drawing and the desk's hit test agree on.
+#[derive(Debug, Clone)]
+pub struct GameLayout {
+    pub board: PixelRect,
+    pub cells: Vec<PixelRect>,
+    /// Left, Up, Down, Right, New.
+    pub buttons: Vec<PixelRect>,
+}
+
+impl GameLayout {
+    pub fn new(width: u32, height: u32) -> Self {
+        let side = width.min(height.saturating_sub(BOARD_TOP as u32 + BUTTONS_H + 12));
+        let board = rect(((width - side) / 2) as i32, BOARD_TOP, side, side);
+        Self {
+            board,
+            cells: grid(board, SIZE as u32, SIZE as u32, 6),
+            buttons: grid(
+                rect(0, height as i32 - BUTTONS_H as i32, width, BUTTONS_H),
+                5,
+                1,
+                6,
+            ),
+        }
+    }
+}
+
+/// A tile's fill and ink by its value: warm for the low ones, gold for
+/// the high ones, the classic way.
+pub fn tile_colors(value: u32) -> (Color, Color) {
+    let dark = Color::rgb(119, 110, 101);
+    let light = Color::rgb(249, 246, 242);
+    match value {
+        2 => (Color::rgb(238, 228, 218), dark),
+        4 => (Color::rgb(237, 224, 200), dark),
+        8 => (Color::rgb(242, 177, 121), light),
+        16 => (Color::rgb(245, 149, 99), light),
+        32 => (Color::rgb(246, 124, 95), light),
+        64 => (Color::rgb(246, 94, 59), light),
+        128 => (Color::rgb(237, 207, 114), light),
+        256 => (Color::rgb(237, 204, 97), light),
+        512 => (Color::rgb(237, 200, 80), light),
+        1024 => (Color::rgb(237, 197, 63), light),
+        2048 => (Color::rgb(237, 194, 46), light),
+        _ => (Color::rgb(60, 58, 50), light),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
@@ -183,46 +229,43 @@ impl Game {
         }
     }
 
-    /// A click on a control.
-    pub fn click(&mut self, line: usize, column: usize) -> GameEffect {
-        let lines = self.lines();
-        let Some(text) = lines.get(line) else {
-            return GameEffect::None;
-        };
-        let byte = match (line, button_at(text, column)) {
-            (UP_LINE, Some(0)) => b'w',
-            (CONTROLS_LINE, Some(0)) => b'a',
-            (CONTROLS_LINE, Some(1)) => b's',
-            (CONTROLS_LINE, Some(2)) => b'd',
-            (CONTROLS_LINE, Some(3)) => b'n',
-            _ => return GameEffect::None,
-        };
-        self.handle_byte(byte)
-    }
-
-    pub fn lines(&self) -> Vec<String> {
-        let border = "+------".repeat(SIZE) + "+";
-        let mut lines = alloc::vec![
-            alloc::format!("Score {:<8}   Best {}", self.score, self.best),
-            border.clone(),
-        ];
-        for row in &self.cells {
-            let mut text = String::new();
-            for value in row {
-                if *value == 0 {
-                    text.push_str("|      ");
-                } else {
-                    text.push_str(&alloc::format!("|{:>5} ", value));
-                }
+    /// The card, drawn (GFX-082): the score, the board as coloured
+    /// tiles, the moves as buttons. `hover` is the pointer in canvas
+    /// pixels, if over the card.
+    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+        let layout = GameLayout::new(width, height);
+        let mut ui = Ui::new(palette, hover);
+        let p = *ui.palette();
+        ui.text(0, 2, &alloc::format!("Score {}", self.score), p.text, 1);
+        ui.text_right(
+            width as i32,
+            2,
+            &alloc::format!("Best {}", self.best),
+            p.muted,
+            1,
+        );
+        for (cell, value) in layout.cells.iter().zip(self.cells.iter().flatten()) {
+            if *value == 0 {
+                ui.fill(*cell, p.raised, 6);
+                continue;
             }
-            text.push('|');
-            lines.push(text);
-            lines.push(border.clone());
+            let (fill, ink) = tile_colors(*value);
+            ui.fill(*cell, fill, 6);
+            let label = value.to_string();
+            let scale = if label.len() <= 3 { 2 } else { 1 };
+            ui.text_centered(cell, &label, ink, scale);
         }
-        lines.push(String::new());
-        lines.push("          [ Up ]".to_string());
-        lines.push("[ Left ] [ Down ] [ Right ]   [ New ]".to_string());
-        lines
+        let buttons: [(&str, u8, ButtonKind); 5] = [
+            ("Left", b'a', ButtonKind::Accent),
+            ("Up", b'w', ButtonKind::Accent),
+            ("Down", b's', ButtonKind::Accent),
+            ("Right", b'd', ButtonKind::Accent),
+            ("New", b'n', ButtonKind::Quiet),
+        ];
+        for (cell, (label, key, kind)) in layout.buttons.iter().zip(buttons.iter()) {
+            ui.button(*cell, label, *key, *kind);
+        }
+        ui
     }
 
     pub fn footer(&self) -> String {
@@ -266,6 +309,8 @@ pub fn slide_line(line: &[u32]) -> (Vec<u32>, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use services_gui_host::Theme;
+    use view_types::DrawOp;
 
     #[test]
     fn a_line_slides_and_merges_once_per_pair() {
@@ -282,6 +327,7 @@ mod tests {
 
     #[test]
     fn the_board_slides_in_four_directions_scores_and_knows_the_end() {
+        let palette = Palette::from_theme(&Theme::DEFAULT);
         let mut game = Game::new(7);
         let tiles = game.cells().iter().flatten().filter(|v| **v != 0).count();
         assert_eq!(tiles, 2, "two tiles to start");
@@ -306,18 +352,44 @@ mod tests {
         assert_eq!(game.score(), score);
         assert!(game.over());
         assert!(game.footer().starts_with("No moves left"));
-        // Lines: the board's rows, and the buttons where the clicks go.
-        let lines = game.lines();
-        assert_eq!(lines[FIRST_CELL_LINE], "|    2 |    4 |    2 |    4 |");
-        assert_eq!(lines[UP_LINE], "          [ Up ]");
-        assert_eq!(button_at(&lines[CONTROLS_LINE], 31), Some(3));
-        assert_eq!(game.click(CONTROLS_LINE, 31), GameEffect::Redraw, "New");
+        // Drawn: sixteen tiles with their values at twice the size, and
+        // five buttons; the New button, hit by pixel, starts over.
+        let layout = GameLayout::new(324, 340);
+        assert_eq!(layout.cells.len(), 16);
+        assert_eq!(layout.board, rect(32, BOARD_TOP, 260, 260));
+        assert_eq!(layout.buttons.len(), 5);
+        let ops = game.ui(324, 340, palette, None).into_ops();
+        let big: Vec<&String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOp::Text { text, style, .. }
+                    if style.scale == 2 && text.parse::<u32>().is_ok() =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(big.len(), 16);
+        let new = layout.buttons[4];
+        let key = game
+            .ui(324, 340, palette, None)
+            .hit(new.x as i32 + 4, new.y as i32 + 4)
+            .expect("the New button");
+        assert_eq!(key, b'n');
+        assert_eq!(game.handle_byte(key), GameEffect::Redraw);
         assert_eq!(game.score(), 0);
         assert!(!game.over());
+        assert_eq!(
+            game.ui(324, 340, palette, None).hit(0, BOARD_TOP + 10),
+            None,
+            "the board is not a button"
+        );
         // A seeded game is the same game every time.
         let mut a = Game::new(42);
         let b = Game::new(42);
         assert_eq!(a.cells(), b.cells());
         assert_eq!(a.handle_byte(0x1B), GameEffect::Close);
+        assert_eq!(tile_colors(2048).0, Color::rgb(237, 194, 46));
     }
 }

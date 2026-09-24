@@ -581,9 +581,11 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
         "640,44,52,211,153".to_string(),
-        // ...and its body, right of the text, the plain surface.
+        // ...and the Reset key (third of three on the controls row, canvas
+        // 456,76) is the raised surface, checked right of its label
+        // (GFX-082).
         "--expect-pixel".to_string(),
-        "810,200,28,34,48".to_string(),
+        "830,200,22,28,40".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
