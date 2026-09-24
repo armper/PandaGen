@@ -51,6 +51,7 @@ use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::game::{Game, GameEffect};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
+pub use crate::speaker::Sound;
 use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
 use crate::timer::{TimerEffect, TimerView};
 
@@ -1330,6 +1331,8 @@ pub enum DeskRequest {
     /// Draw the desk again: something on it moved on its own -- a running
     /// timer (GFX-077).
     Repaint,
+    /// Play this on the speaker (GFX-087).
+    Sound(Sound),
     /// List the filesystem, then call [`Desk::files_listed`] for `id`.
     ListFiles { id: ViewId },
     /// Leave the desk for the text console.
@@ -1836,6 +1839,8 @@ pub struct Desk {
     motion_clock: u64,
     /// When the overview opened, for its cards to fly to their slots.
     overview_since: Option<u64>,
+    /// Sounds to play, handed to the kernel on the next tick (GFX-087).
+    pending_sounds: Vec<Sound>,
 }
 
 impl Desk {
@@ -1884,6 +1889,7 @@ impl Desk {
             ghosts: Vec::new(),
             motion_clock: 0,
             overview_since: None,
+            pending_sounds: Vec::new(),
         }
     }
 
@@ -1947,6 +1953,11 @@ impl Desk {
     /// Raise a notice card for a few seconds (GFX-053).
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>, now: u64) {
         let notice = ShellNotice::new(level, text);
+        // A notice is heard as well as seen (GFX-087); a chime already
+        // says the timer, so it does not blip on top.
+        if !self.pending_sounds.contains(&Sound::Chime) {
+            self.say(Sound::Blip);
+        }
         self.log_notice(now, notice.clone());
         self.notices.push(DeskNotice {
             notice,
@@ -1990,6 +2001,8 @@ impl Desk {
         let Some((_, byte)) = actions.get(index) else {
             return (None, false);
         };
+        // A chip pressed is a tick under the finger (GFX-087).
+        self.say(Sound::Click);
         self.handle_app_key(id, *byte)
     }
 
@@ -2199,6 +2212,7 @@ impl Desk {
             if let AppState::Timer(timer) = &mut window.state {
                 if let Some(message) = timer.poll(now) {
                     done.push(message);
+                    self.pending_sounds.push(Sound::Chime);
                 }
             }
         }
@@ -2303,6 +2317,10 @@ impl Desk {
                     }
                 }
             }
+        }
+        // What the desk has to say out loud (GFX-087).
+        for sound in self.pending_sounds.drain(..) {
+            requests.push(DeskRequest::Sound(sound));
         }
         requests
     }
@@ -2548,6 +2566,14 @@ impl Desk {
             space(a).cmp(&space(b)).then_with(|| b.z.cmp(&a.z))
         });
         cards.iter().map(|w| w.id).collect()
+    }
+
+    /// Say `sound` on the next tick (GFX-087): the kernel owns the
+    /// speaker, so the desk only asks.
+    fn say(&mut self, sound: Sound) {
+        if self.pending_sounds.len() < 8 {
+            self.pending_sounds.push(sound);
+        }
     }
 
     /// Start card `id` moving from `from` to wherever its bounds are
@@ -3461,6 +3487,8 @@ impl Desk {
                         }
                         (true, _, Some(HitRegion::Content { line, column }), _) => {
                             self.raise(*target);
+                            // A drawn button that was hit says so (GFX-087).
+                            let mut clicked = false;
                             if let Some(notepad) =
                                 self.window_mut(*target).and_then(|w| w.notepad_mut())
                             {
@@ -3491,6 +3519,7 @@ impl Desk {
                                     let (w, h) = Self::canvas_size(bounds);
                                     if let Some(key) = calc.ui(w, h, palette, None).hit(x, y) {
                                         calc.press(key as char);
+                                        clicked = true;
                                     }
                                 }
                             }
@@ -3506,6 +3535,7 @@ impl Desk {
                                     let (w, h) = Self::canvas_size(bounds);
                                     if let Some(key) = calendar.ui(w, h, palette, None).hit(x, y) {
                                         effect = calendar.handle_byte(key);
+                                        clicked = true;
                                     }
                                 }
                             }
@@ -3525,6 +3555,7 @@ impl Desk {
                                                 timer.ui(w, h, palette, None).hit(x, y)
                                             {
                                                 timer.handle_byte(key);
+                                                clicked = true;
                                             }
                                         }
                                         Some(AppState::Tiles(game)) => {
@@ -3532,6 +3563,7 @@ impl Desk {
                                                 game.ui(w, h, palette, None).hit(x, y)
                                             {
                                                 game.handle_byte(key);
+                                                clicked = true;
                                             }
                                         }
                                         _ => {}
@@ -3548,6 +3580,7 @@ impl Desk {
                                     let (w, h) = Self::canvas_size(bounds);
                                     if let Some(key) = tasks.ui(w, h, palette, None).hit(x, y) {
                                         tasks.handle_byte(key);
+                                        clicked = true;
                                     }
                                 }
                             }
@@ -3560,6 +3593,9 @@ impl Desk {
                                     sketch.begin(x, y);
                                     self.sketching = Some(*target);
                                 }
+                            }
+                            if clicked {
+                                self.say(Sound::Click);
                             }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
@@ -6738,7 +6774,12 @@ mod tests {
             content: "x".to_string(),
         };
         desk.io_done(pad_id, &effect, Ok(None), 10);
-        assert_eq!(desk.tick(11), alloc::vec![DeskRequest::ListFiles { id }]);
+        let asked: Vec<DeskRequest> = desk
+            .tick(11)
+            .into_iter()
+            .filter(|r| !matches!(r, DeskRequest::Sound(_)))
+            .collect();
+        assert_eq!(asked, alloc::vec![DeskRequest::ListFiles { id }]);
         assert!(desk.tick(12).is_empty());
         // A day with a note opens by reading it.
         desk.raise(id);
@@ -7126,6 +7167,39 @@ mod tests {
             mini.overlay.as_slice(),
             [view_types::DrawOp::Icon { scale: 2, .. }]
         ));
+    }
+
+    /// Sound (GFX-087): a chip pressed asks for a click, a notice for a
+    /// blip, a countdown that is up for a chime (and no blip on top),
+    /// all handed to the kernel on the next tick and then forgotten.
+    #[test]
+    fn the_desk_asks_the_kernel_to_click_blip_and_chime() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Timer);
+        desk.tick(1_000);
+        // A chip.
+        let (_, _) = desk.card_action(id, 1);
+        let requests = desk.tick(1_001);
+        assert!(
+            requests.contains(&DeskRequest::Sound(Sound::Click)),
+            "{requests:?}"
+        );
+        assert!(desk
+            .tick(1_002)
+            .iter()
+            .all(|r| !matches!(r, DeskRequest::Sound(_))));
+        // A notice.
+        desk.notify(NoticeLevel::Info, "Saved memo", 1_003);
+        assert!(desk.tick(1_003).contains(&DeskRequest::Sound(Sound::Blip)));
+        // A countdown that is up: one chime, no blip.
+        desk.handle_key(b'1');
+        let requests = desk.tick(1_003 + 60 * crate::timer::HZ + 1);
+        let sounds: Vec<&DeskRequest> = requests
+            .iter()
+            .filter(|r| matches!(r, DeskRequest::Sound(_)))
+            .collect();
+        assert_eq!(sounds, alloc::vec![&DeskRequest::Sound(Sound::Chime)]);
+        assert_eq!(Sound::Chime.notes().len(), 5);
     }
 
     #[test]

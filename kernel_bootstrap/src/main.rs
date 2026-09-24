@@ -38,6 +38,7 @@ mod present_policy;
 mod render_stats;
 mod rtc;
 mod sketch;
+mod speaker;
 mod tasks;
 mod timer;
 mod vga;
@@ -1517,6 +1518,8 @@ fn workspace_loop(
     // windows keep their places across mode switches.
     let mut desk: Option<desk::Desk> = None;
     let mut rtc_port = hal_x86_64::RealPortIo::new();
+    // The speaker (GFX-087): what the desk says out loud, polled by tick.
+    let mut speaker = speaker::Speaker::new(hal_x86_64::RealPortIo::new());
     // What the desk asked the kernel for this iteration: file operations,
     // listings, a display switch. Served after input, once, in order.
     let mut desk_requests: alloc::vec::Vec<desk::DeskRequest> = alloc::vec::Vec::new();
@@ -1986,6 +1989,8 @@ fn workspace_loop(
                 desk_requests.extend(desk.tick(get_tick_count()));
             }
         }
+        // The speaker plays what was queued, note by note (GFX-087).
+        speaker.poll(get_tick_count());
 
         // Serve what the desk asked for (GFX-053).
         if !desk_requests.is_empty() {
@@ -2002,6 +2007,7 @@ fn workspace_loop(
                 match request {
                     desk::DeskRequest::Terminal(_) => {}
                     desk::DeskRequest::Repaint => output_dirty = true,
+                    desk::DeskRequest::Sound(sound) => speaker.play(sound.notes()),
                     desk::DeskRequest::ReadVersion { id, name, index } => {
                         let Some(fs) = workspace.take_filesystem() else {
                             continue;

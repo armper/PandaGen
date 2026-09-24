@@ -1459,10 +1459,22 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {}", qemu_cmd);
     println!();
 
-    run(Command::new("qemu-system-x86_64")
-        .current_dir(&root)
+    // The speaker (GFX-087): an audio backend for this host, and the PC
+    // speaker wired to it, so a chime is heard at the desk. QEMU_AUDIO=none
+    // keeps it quiet; the gauntlet and the smoke run never ask for one.
+    let audio = select_qemu_audio();
+    let machine = match &audio {
+        Some(_) => "pc,pcspk-audiodev=snd0".to_string(),
+        None => "pc".to_string(),
+    };
+    let mut command = Command::new("qemu-system-x86_64");
+    command.current_dir(&root);
+    if let Some(backend) = &audio {
+        command.arg("-audiodev").arg(format!("{backend},id=snd0"));
+    }
+    run(command
         .arg("-machine")
-        .arg("pc")
+        .arg(&machine)
         .arg("-smp")
         .arg(QEMU_SMP)
         .arg("-m")
@@ -2016,6 +2028,25 @@ fn cmd_qemu_script(
             "qemu-script: FAIL, unmet expectations: {missing:?}"
         ))
         .into())
+    }
+}
+
+/// The audio backend for an interactive run, or none: `QEMU_AUDIO` names
+/// one (`none` for silence), otherwise the host's usual.
+fn select_qemu_audio() -> Option<String> {
+    if let Ok(value) = env::var("QEMU_AUDIO") {
+        let trimmed = value.trim();
+        return match trimmed {
+            "" | "none" | "off" => None,
+            other => Some(other.to_string()),
+        };
+    }
+    if cfg!(target_os = "macos") {
+        Some("coreaudio".to_string())
+    } else if cfg!(target_os = "linux") {
+        Some("pa".to_string())
+    } else {
+        None
     }
 }
 
