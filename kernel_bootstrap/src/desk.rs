@@ -120,6 +120,20 @@ struct Ghost {
     start: u64,
 }
 
+/// A one-bit icon as a draw operation, `scale` pixels a bit (GFX-086).
+fn icon_op(x: u32, y: u32, scale: u32, bits: [u16; 16]) -> view_types::DrawOp {
+    view_types::DrawOp::Icon {
+        x,
+        y,
+        scale,
+        bits,
+        color: None,
+    }
+}
+
+/// The row pitch of a card's text, and where a row's icon sits in it.
+const ROW_ICON_Y: u32 = ((services_gui_host::CARD_LINE_HEIGHT - 16) / 2) as u32;
+
 /// Where `id` is drawn this frame: partway, if it is on its way.
 fn motion_bounds(motions: &[Motion], clock: u64, id: ViewId, target: RasterRect) -> RasterRect {
     match motions.iter().find(|m| m.id == id) {
@@ -832,6 +846,25 @@ impl FileEntry {
             (_, Some(_)) => "Data",
             (_, None) => "File",
         }
+    }
+
+    /// The icon for a row (GFX-086): the app that made the document, by
+    /// its name or its schema -- a day's note is the Calendar's, the task
+    /// list the Tasks card's, a drawing the Sketch's, text the Notepad's,
+    /// anything else a plain document.
+    pub fn icon(&self) -> [u16; 16] {
+        let app = if crate::calendar::Date::parse(&self.name).is_some() {
+            DeskApp::Calendar
+        } else if self.name == crate::tasks::TASKS_FILE {
+            DeskApp::Tasks
+        } else if self.name == crate::sketch::SKETCH_FILE {
+            DeskApp::Sketch
+        } else if self.schema.as_deref() == Some("text/plain") {
+            DeskApp::Notepad
+        } else {
+            DeskApp::Files
+        };
+        app.icon().unwrap_or([0; 16])
     }
 }
 
@@ -1629,6 +1662,28 @@ impl PaletteRow {
             PaletteRow::Recent(_) => "recent",
             PaletteRow::Hit { .. } => "in file",
             PaletteRow::Paste(_) => "clipboard",
+        }
+    }
+
+    /// The icon beside the row (GFX-086): the app a launch row opens, a
+    /// document for a recent or a search hit, nothing for the rest.
+    pub fn icon(&self) -> Option<[u16; 16]> {
+        match self {
+            PaletteRow::Action(action) => match action {
+                PaletteAction::NewNotepad => DeskApp::Notepad.icon(),
+                PaletteAction::NewTerminal => DeskApp::Terminal.icon(),
+                PaletteAction::OpenFiles => DeskApp::Files.icon(),
+                PaletteAction::ToggleTheme => DeskApp::Look.icon(),
+                PaletteAction::Calculator => DeskApp::Calculator.icon(),
+                PaletteAction::Calendar => DeskApp::Calendar.icon(),
+                PaletteAction::Timer => DeskApp::Timer.icon(),
+                PaletteAction::Tiles => DeskApp::Tiles.icon(),
+                PaletteAction::Tasks => DeskApp::Tasks.icon(),
+                PaletteAction::Sketch => DeskApp::Sketch.icon(),
+                _ => None,
+            },
+            PaletteRow::Recent(_) | PaletteRow::Hit { .. } => DeskApp::Files.icon(),
+            PaletteRow::Paste(_) => None,
         }
     }
 }
@@ -2673,9 +2728,22 @@ impl Desk {
             window.space + 1,
             if window.tucked { "   tucked" } else { "" }
         );
+        // The app's icon, large, in the mini card's top-right (GFX-086).
+        let badge: Vec<view_types::DrawOp> = window
+            .app
+            .icon()
+            .map(|bits| {
+                let content_w = bounds
+                    .width
+                    .saturating_sub(services_gui_host::CARD_PADDING * 2)
+                    as u32;
+                alloc::vec![icon_op(content_w.saturating_sub(34), 0, 2, bits)]
+            })
+            .unwrap_or_default();
         let mut card = DesktopWindow::card(frame, bounds)
             .with_z_index(usize::MAX / 2 - 2)
-            .with_footer(Some(footer));
+            .with_footer(Some(footer))
+            .with_overlay(badge);
         card.closable = false;
         if highlighted {
             card = card.focused();
@@ -4362,6 +4430,7 @@ impl Desk {
             let mut selection = Vec::new();
             let mut styles = Vec::new();
             let mut graphics: Option<Vec<view_types::DrawOp>> = None;
+            let mut overlay: Vec<view_types::DrawOp> = Vec::new();
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
                     // Long lines wrap to the card (GFX-064); the width is
@@ -4416,7 +4485,16 @@ impl Desk {
                         .map(|i| {
                             let left = visible
                                 .get(files.scroll + i)
-                                .map(|index| FilesView::line(&files.entries[*index], list_w))
+                                .map(|index| {
+                                    // Three columns for the icon (GFX-086).
+                                    alloc::format!(
+                                        "   {}",
+                                        FilesView::line(
+                                            &files.entries[*index],
+                                            list_w.saturating_sub(3)
+                                        )
+                                    )
+                                })
                                 .unwrap_or_default();
                             if !with_preview {
                                 return left;
@@ -4430,6 +4508,18 @@ impl Desk {
                         .collect();
                     if !visible.is_empty() {
                         highlight = Some(files.selection - files.scroll);
+                    }
+                    // An icon a row, beside the name (GFX-086).
+                    for i in 0..rows {
+                        if let Some(index) = visible.get(files.scroll + i) {
+                            let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
+                            overlay.push(icon_op(
+                                2,
+                                i as u32 * pitch + ROW_ICON_Y,
+                                1,
+                                files.entries[*index].icon(),
+                            ));
+                        }
                     }
                     let title = if files.bin { "Files - Bin" } else { "Files" };
                     (lines, title.to_string(), files.footer(), None)
@@ -4572,6 +4662,7 @@ impl Desk {
                 .with_highlight(highlight)
                 .with_selection(selection)
                 .with_line_styles(styles)
+                .with_overlay(overlay)
                 .with_actions(
                     window
                         .actions()
@@ -4608,7 +4699,9 @@ impl Desk {
                 let shortcut = action.shortcut();
                 let pad =
                     inner.saturating_sub(label.chars().count() + shortcut.chars().count() + 2);
-                let mut line = label.clone();
+                // Three columns for the icon (GFX-086).
+                let mut line = alloc::format!("   {label}");
+                let pad = pad.saturating_sub(3);
                 for _ in 0..pad {
                     line.push(' ');
                 }
@@ -4641,6 +4734,19 @@ impl Desk {
                 ),
             )
             .with_role(DesktopWindowRole::Palette)
+            .with_overlay(
+                matches
+                    .iter()
+                    .take(rows)
+                    .enumerate()
+                    .filter_map(|(i, row)| {
+                        row.icon().map(|bits| {
+                            let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
+                            icon_op(2, i as u32 * pitch + ROW_ICON_Y, 1, bits)
+                        })
+                    })
+                    .collect(),
+            )
             .with_z_index(usize::MAX / 2)
             .with_footer(Some("Enter runs   Esc closes   type to filter".to_string()))
             .with_highlight(
@@ -4955,8 +5061,12 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(listed.iter().any(|l| l.starts_with("New Notepad window")));
-        assert!(!listed.iter().any(|l| l.starts_with("Close window")));
+        assert!(listed
+            .iter()
+            .any(|l| l.trim_start().starts_with("New Notepad window")));
+        assert!(!listed
+            .iter()
+            .any(|l| l.trim_start().starts_with("Close window")));
 
         // Typing filters; Enter runs the selected row.
         for byte in b"term" {
@@ -5232,7 +5342,7 @@ mod tests {
             _ => panic!(),
         };
         assert!(
-            listed.iter().any(|l| l.starts_with("Find...")),
+            listed.iter().any(|l| l.trim_start().starts_with("Find...")),
             "{listed:?}"
         );
         desk.handle_key(b'\n');
@@ -5438,7 +5548,10 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(listed[0].starts_with("Open memo"), "{listed:?}");
+        assert!(
+            listed[0].trim_start().starts_with("Open memo"),
+            "{listed:?}"
+        );
         let (request, _) = desk.handle_key(b'\n');
         let new_id = desk.focused_window().map(|w| w.id).unwrap();
         assert_ne!(new_id, id);
@@ -5484,7 +5597,10 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(listed[0].starts_with("memo: the quick fox"), "{listed:?}");
+        assert!(
+            listed[0].trim_start().starts_with("memo: the quick fox"),
+            "{listed:?}"
+        );
         assert!(listed[0].trim_end().ends_with("in file"), "{listed:?}");
 
         // A stale answer is not shown once the query moves on.
@@ -5498,7 +5614,10 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(!listed.iter().any(|l| l.starts_with("memo:")), "{listed:?}");
+        assert!(
+            !listed.iter().any(|l| l.trim_start().starts_with("memo:")),
+            "{listed:?}"
+        );
         desk.search_results(
             "qui",
             alloc::vec![("memo".to_string(), "the quick fox".to_string())],
@@ -5938,7 +6057,10 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(listed[0].starts_with("Paste: two"), "{listed:?}");
+        assert!(
+            listed[0].trim_start().starts_with("Paste: two"),
+            "{listed:?}"
+        );
         desk.handle_key(b'\n');
         assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "two");
         assert_eq!(
@@ -5962,7 +6084,7 @@ mod tests {
             _ => panic!(),
         };
         assert!(
-            !listed.iter().any(|l| l.starts_with("Paste:")),
+            !listed.iter().any(|l| l.trim_start().starts_with("Paste:")),
             "{listed:?}"
         );
     }
@@ -5995,15 +6117,15 @@ mod tests {
             _ => panic!(),
         };
         assert!(
-            rows[0].starts_with("alpha") && rows[0].contains("| first line"),
+            rows[0].trim_start().starts_with("alpha") && rows[0].contains("| first line"),
             "{rows:?}"
         );
         assert!(
-            rows[1].starts_with("beta") && rows[1].contains("| second line"),
+            rows[1].trim_start().starts_with("beta") && rows[1].contains("| second line"),
             "{rows:?}"
         );
         assert!(
-            rows[2].starts_with("gamma") && rows[2].trim_end().ends_with('|'),
+            rows[2].trim_start().starts_with("gamma") && rows[2].trim_end().ends_with('|'),
             "{rows:?}"
         );
         // Moving the selection asks for the next file; until it arrives
@@ -6945,6 +7067,65 @@ mod tests {
         let a = RasterRect::new(0, 0, 100, 100);
         let b = RasterRect::new(100, 200, 300, 400);
         assert_eq!(lerp_rect(a, b, 500), RasterRect::new(50, 100, 200, 250));
+    }
+
+    /// Icons on text cards (GFX-086): a Files row carries the icon of the
+    /// app that made the document, a palette launch row the app's icon,
+    /// an overview card its app's badge.
+    #[test]
+    fn files_the_palette_and_the_overview_carry_icons_over_their_text() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Files);
+        let mut note = FileEntry::named("2026-09-24");
+        note.schema = Some("text/plain".to_string());
+        let mut memo = FileEntry::named("memo");
+        memo.schema = Some("text/plain".to_string());
+        desk.files_listed(
+            id,
+            alloc::vec![note.clone(), memo.clone(), FileEntry::named("tasks")],
+        );
+        assert_eq!(note.icon(), DeskApp::Calendar.icon().unwrap());
+        assert_eq!(memo.icon(), DeskApp::Notepad.icon().unwrap());
+        assert_eq!(
+            FileEntry::named("tasks").icon(),
+            DeskApp::Tasks.icon().unwrap()
+        );
+        assert_eq!(
+            FileEntry::named("blob").icon(),
+            DeskApp::Files.icon().unwrap()
+        );
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.overlay.len(), 3, "an icon a row");
+        let lines = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(lines[0].starts_with("   "), "{:?}", lines[0]);
+        // The palette: launch rows carry icons, others do not.
+        desk.handle_key(KEY_CTRL_SPACE);
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        assert!(!palette.overlay.is_empty());
+        assert!(PaletteRow::Action(PaletteAction::Calculator)
+            .icon()
+            .is_some());
+        assert!(PaletteRow::Action(PaletteAction::Save).icon().is_none());
+        desk.handle_key(crate::notepad::ESC);
+        // The overview: each mini card has its app's badge, drawn large.
+        desk.open_overview();
+        let windows = desk.windows("", true, None);
+        let mini = windows
+            .iter()
+            .find(|w| w.frame.title.as_deref() == Some("Files"))
+            .unwrap();
+        assert!(matches!(
+            mini.overlay.as_slice(),
+            [view_types::DrawOp::Icon { scale: 2, .. }]
+        ));
     }
 
     #[test]

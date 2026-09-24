@@ -240,6 +240,12 @@ pub struct DesktopWindow {
     /// size stays the grid's; hierarchy comes from tone and rule.
     #[serde(default)]
     pub line_styles: Vec<(usize, LineStyle)>,
+    /// Draw operations laid over the content after the text (GFX-086), in
+    /// the content area's pixel space: icons beside rows, a badge in a
+    /// corner. This is how a text card gets pictures without giving up
+    /// its lines.
+    #[serde(default)]
+    pub overlay: Vec<view_types::DrawOp>,
     /// How the window is painted and hit-tested (GFX-050).
     #[serde(default)]
     pub style: WindowStyle,
@@ -366,6 +372,7 @@ impl DesktopWindow {
             highlight_line: None,
             selection_spans: Vec::new(),
             line_styles: Vec::new(),
+            overlay: Vec::new(),
             style: WindowStyle::Classic,
             pixel_rect: None,
             closable: false,
@@ -546,6 +553,12 @@ impl DesktopWindow {
     /// Style particular content lines (GFX-073).
     pub fn with_line_styles(mut self, styles: Vec<(usize, LineStyle)>) -> Self {
         self.line_styles = styles;
+        self
+    }
+
+    /// Lay draw operations over the content, after the text (GFX-086).
+    pub fn with_overlay(mut self, ops: Vec<view_types::DrawOp>) -> Self {
+        self.overlay = ops;
         self
     }
 
@@ -1372,6 +1385,31 @@ fn raster_graphics(
                 *y1 as i64,
                 to_color(*color),
             ),
+            DrawOp::Icon {
+                x,
+                y,
+                scale,
+                bits,
+                color,
+            } => {
+                let color = color.map(to_color).unwrap_or(theme.text);
+                let scale = (*scale).max(1) as usize;
+                for (row, row_bits) in bits.iter().enumerate() {
+                    for col in 0..16 {
+                        if row_bits & (1 << (15 - col)) != 0 {
+                            canvas.fill_rect(
+                                RasterRect::new(
+                                    *x as usize + col * scale,
+                                    *y as usize + row * scale,
+                                    scale,
+                                    scale,
+                                ),
+                                color,
+                            );
+                        }
+                    }
+                }
+            }
             DrawOp::Text {
                 x,
                 y,
@@ -1944,6 +1982,9 @@ fn raster_card(
                         color,
                     );
                 }
+            }
+            if !window.overlay.is_empty() {
+                raster_graphics(&mut content_painter, content_clip, &window.overlay, theme);
             }
             if let Some(cursor) = window.frame.cursor {
                 content_painter.fill_rect(

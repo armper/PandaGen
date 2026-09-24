@@ -316,6 +316,16 @@ pub enum DrawOp {
         #[serde(default)]
         style: TextStyle,
     },
+    /// A 16x16 one-bit icon (GFX-086), `scale` pixels a bit, in `color`
+    /// or the host's text colour. Row 0 is the top; bit 15 is the left.
+    Icon {
+        x: u32,
+        y: u32,
+        scale: u32,
+        bits: [u16; 16],
+        #[serde(default)]
+        color: Option<Color>,
+    },
 }
 
 impl ViewContent {

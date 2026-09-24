@@ -267,6 +267,37 @@ fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
     assert!(middle.contains(&theme.text));
 }
 
+/// A text card can carry an overlay (GFX-086): an icon drawn beside a
+/// row, over the content, while the text is still there.
+#[test]
+fn a_text_card_draws_its_overlay_over_the_lines() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let mut bits = [0u16; 16];
+    bits[0] = 0xFFFF;
+    let card = DesktopWindow::card(frame("Files", &["   memo", "   other"]), bounds)
+        .focused()
+        .with_overlay(vec![view_types::DrawOp::Icon {
+            x: 2,
+            y: 2,
+            scale: 1,
+            bits,
+            color: Some(view_types::Color::rgb(52, 211, 153)),
+        }]);
+    let (ox, oy, _) = card.card_text_origin();
+    let target = render(vec![card]);
+    // The icon's top row, sixteen pixels of accent, two in from the origin.
+    for x in ox + 2..ox + 18 {
+        assert_eq!(px(&target, x, oy + 2), theme.accent, "x={x}");
+    }
+    assert_eq!(px(&target, ox + 2, oy + 3), theme.surface, "one bit tall");
+    // The text is still drawn after the indent.
+    let row: Vec<RgbaColor> = (ox + 24..ox + 24 + 4 * 8)
+        .map(|x| px(&target, x, oy + 10))
+        .collect();
+    assert!(row.contains(&theme.text));
+}
+
 /// A wallpaper is sampled to the surface, behind the cards, and a damage
 /// repaint reads the same pixels (GFX-066).
 #[test]
