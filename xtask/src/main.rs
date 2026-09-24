@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
         Some("gauntlet") => cmd_gauntlet(),
+        Some("wallpaper") => cmd_wallpaper(args),
         _ => usage(),
     }
 }
@@ -598,7 +599,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // and the Mint ring still on the focused card.
         "--expect-pixel".to_string(),
         // (100,400) is the wallpaper now, whatever the theme (GFX-066).
-        "100,400,2,2,5".to_string(),
+        "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
         "640,4,32,22,24".to_string(),
         "--expect-pixel".to_string(),
@@ -654,7 +655,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // The desk background, the top bar, and the Look card's surface,
         // all in the light palette.
         "--expect-pixel".to_string(),
-        "100,400,2,2,5".to_string(),
+        "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
         "640,4,238,241,246".to_string(),
         "--expect-pixel".to_string(),
@@ -747,8 +748,155 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
         "  cargo xtask remote-key <caller>       (derive a caller's key from the master token)"
     );
     println!("  cargo xtask image");
+    println!(
+        "  cargo xtask wallpaper <picture.ppm>   (1280x800 P6; becomes the built-in wallpaper)"
+    );
     println!("  cargo xtask limine-fetch [--repo <url>] [--branch <name>] [--source <path>]");
     Err(io::Error::other("unknown xtask command").into())
+}
+
+/// Make `picture.ppm` the desk's built-in wallpaper (GFX-070): quantised
+/// to 256 colours with a median-cut palette and Floyd-Steinberg dithering,
+/// written as `kernel_bootstrap/assets/wallpaper.{pal,idx}` for the
+/// kernel's `include_bytes!`. A P6 of exactly 1280x800 is what it takes;
+/// any image tool writes one (`convert in.png -resize 1280x800^ -gravity
+/// center -extent 1280x800 out.ppm`).
+fn cmd_wallpaper(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = args.next() else {
+        return Err(io::Error::other("wallpaper: a P6 ppm path is needed").into());
+    };
+    let picture = read_ppm(&path)?;
+    if (picture.width, picture.height) != (1280, 800) {
+        return Err(format!(
+            "{path}: {}x{}, and the wallpaper is 1280x800",
+            picture.width, picture.height
+        )
+        .into());
+    }
+    let pixels: Vec<[u8; 3]> = picture
+        .data
+        .chunks_exact(3)
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let palette = median_cut(&pixels, 256);
+    let indices = dither(&pixels, picture.width, &palette);
+    let root = repo_root();
+    let mut pal = Vec::with_capacity(768);
+    for entry in &palette {
+        pal.extend_from_slice(entry);
+    }
+    fs::write(root.join("kernel_bootstrap/assets/wallpaper.pal"), &pal)?;
+    fs::write(root.join("kernel_bootstrap/assets/wallpaper.idx"), &indices)?;
+    println!(
+        "wallpaper: {} colours, {} bytes; rebuild with `cargo xtask iso`",
+        palette.len(),
+        indices.len()
+    );
+    Ok(())
+}
+
+/// Median-cut palette of at most `count` colours.
+fn median_cut(pixels: &[[u8; 3]], count: usize) -> Vec<[u8; 3]> {
+    let mut boxes: Vec<Vec<[u8; 3]>> = vec![pixels.to_vec()];
+    while boxes.len() < count {
+        // Split the box with the widest channel range.
+        let (index, channel) = boxes
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.len() > 1)
+            .map(|(i, b)| {
+                let (c, range) = (0..3)
+                    .map(|c| {
+                        let (lo, hi) = b
+                            .iter()
+                            .fold((255u8, 0u8), |(lo, hi), p| (lo.min(p[c]), hi.max(p[c])));
+                        (c, hi as i32 - lo as i32)
+                    })
+                    .max_by_key(|(_, r)| *r)
+                    .unwrap();
+                (i, c, range)
+            })
+            .max_by_key(|(_, _, range)| *range)
+            .map(|(i, c, _)| (i, c))
+            .unwrap_or((usize::MAX, 0));
+        if index == usize::MAX {
+            break;
+        }
+        let mut b = boxes.swap_remove(index);
+        b.sort_by_key(|p| p[channel]);
+        let half = b.len() / 2;
+        let rest = b.split_off(half);
+        boxes.push(b);
+        boxes.push(rest);
+    }
+    boxes
+        .iter()
+        .map(|b| {
+            let n = b.len().max(1) as u32;
+            let sum = b.iter().fold([0u32; 3], |s, p| {
+                [s[0] + p[0] as u32, s[1] + p[1] as u32, s[2] + p[2] as u32]
+            });
+            [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8]
+        })
+        .collect()
+}
+
+/// Floyd-Steinberg dithering onto `palette`, one index a pixel.
+fn dither(pixels: &[[u8; 3]], width: usize, palette: &[[u8; 3]]) -> Vec<u8> {
+    let height = pixels.len() / width.max(1);
+    let mut work: Vec<[i32; 3]> = pixels
+        .iter()
+        .map(|p| [p[0] as i32, p[1] as i32, p[2] as i32])
+        .collect();
+    let nearest = |c: [i32; 3]| -> usize {
+        let mut best = (0usize, i64::MAX);
+        for (i, p) in palette.iter().enumerate() {
+            let d = (0..3)
+                .map(|k| {
+                    let e = c[k] as i64 - p[k] as i64;
+                    e * e
+                })
+                .sum::<i64>();
+            if d < best.1 {
+                best = (i, d);
+            }
+        }
+        best.0
+    };
+    let mut out = vec![0u8; pixels.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let at = y * width + x;
+            let c = [
+                work[at][0].clamp(0, 255),
+                work[at][1].clamp(0, 255),
+                work[at][2].clamp(0, 255),
+            ];
+            let index = nearest(c);
+            out[at] = index as u8;
+            let chosen = palette[index];
+            let err = [
+                c[0] - chosen[0] as i32,
+                c[1] - chosen[1] as i32,
+                c[2] - chosen[2] as i32,
+            ];
+            let mut spread = |dx: isize, dy: usize, weight: i32| {
+                let nx = x as isize + dx;
+                if nx < 0 || nx as usize >= width || y + dy >= height {
+                    return;
+                }
+                let n = (y + dy) * width + nx as usize;
+                for k in 0..3 {
+                    work[n][k] += err[k] * weight / 16;
+                }
+            };
+            spread(1, 0, 7);
+            spread(-1, 1, 3);
+            spread(0, 1, 5);
+            spread(1, 1, 1);
+        }
+    }
+    out
 }
 
 fn repo_root() -> PathBuf {

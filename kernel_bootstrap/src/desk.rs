@@ -1031,7 +1031,12 @@ pub enum PaletteRow {
         file: String,
         line: String,
     },
+    /// Something copied lately: paste it into the focused Notepad (GFX-070).
+    Paste(String),
 }
+
+/// How many copied texts the palette remembers.
+pub const CLIPBOARD_HISTORY: usize = 10;
 
 impl PaletteRow {
     pub fn label(&self) -> String {
@@ -1042,6 +1047,14 @@ impl PaletteRow {
                 let line: String = line.trim().chars().take(40).collect();
                 alloc::format!("{file}: {line}")
             }
+            PaletteRow::Paste(text) => {
+                let flat: String = text
+                    .chars()
+                    .map(|c| if c == '\n' { ' ' } else { c })
+                    .take(40)
+                    .collect();
+                alloc::format!("Paste: {}", flat.trim())
+            }
         }
     }
 
@@ -1050,6 +1063,7 @@ impl PaletteRow {
             PaletteRow::Action(action) => action.shortcut(),
             PaletteRow::Recent(_) => "recent",
             PaletteRow::Hit { .. } => "in file",
+            PaletteRow::Paste(_) => "clipboard",
         }
     }
 }
@@ -1066,6 +1080,7 @@ impl Palette {
         has_window: bool,
         has_notepad: bool,
         recent: &[String],
+        clips: &[String],
     ) -> Vec<PaletteRow> {
         let query = self.query.to_ascii_lowercase();
         let fits =
@@ -1080,6 +1095,15 @@ impl Palette {
                 file: file.clone(),
                 line: line.clone(),
             }));
+        }
+        // Copied texts paste into a Notepad, so they are offered over one.
+        if has_notepad {
+            rows.extend(
+                clips
+                    .iter()
+                    .map(|c| PaletteRow::Paste(c.clone()))
+                    .filter(|row| fits(&row.label())),
+            );
         }
         rows.extend(
             PaletteAction::ALL
@@ -1128,8 +1152,10 @@ pub struct Desk {
     hovered_tile: Option<usize>,
     palette: Option<Palette>,
     palette_id: ViewId,
-    /// One clipboard for every card (GFX-054).
+    /// One clipboard for every card (GFX-054)...
     clipboard: String,
+    /// ...and what it held before, newest first (GFX-070).
+    clipboard_history: Vec<String>,
     /// The look kept on disk (GFX-059)...
     look: LookChoice,
     /// ...and the one being previewed from the Look card, if any.
@@ -1185,6 +1211,7 @@ impl Desk {
             palette: None,
             palette_id: ViewId::new(),
             clipboard: String::new(),
+            clipboard_history: Vec::new(),
             look: LookChoice::default(),
             look_preview: None,
             recent: Vec::new(),
@@ -1262,6 +1289,21 @@ impl Desk {
     /// otherwise what is kept.
     pub fn theme(&self) -> Theme {
         self.look_preview.as_ref().unwrap_or(&self.look).theme()
+    }
+
+    /// A text was copied: to the front of the history, once, bounded.
+    fn remember_copy(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.clipboard_history.retain(|t| *t != text);
+        self.clipboard_history.insert(0, text);
+        self.clipboard_history.truncate(CLIPBOARD_HISTORY);
+    }
+
+    /// What has been copied, newest first.
+    pub fn clipboard_history(&self) -> &[String] {
+        &self.clipboard_history
     }
 
     /// The kept look, by name.
@@ -1869,6 +1911,7 @@ impl Desk {
         let has_window = self.focused_window().is_some();
         let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
         let recent = self.recent.clone();
+        let clips = self.clipboard_history.clone();
         let query = self
             .palette
             .as_ref()
@@ -1887,7 +1930,9 @@ impl Desk {
                 (None, true)
             }
             crate::notepad::KEY_DOWN => {
-                let count = palette.matches(has_window, has_notepad, &recent).len();
+                let count = palette
+                    .matches(has_window, has_notepad, &recent, &clips)
+                    .len();
                 palette.selection = (palette.selection + 1).min(count.saturating_sub(1));
                 (None, true)
             }
@@ -1897,7 +1942,7 @@ impl Desk {
                 (Self::search_request(palette), true)
             }
             b'\n' | b'\r' => {
-                let matches = palette.matches(has_window, has_notepad, &recent);
+                let matches = palette.matches(has_window, has_notepad, &recent, &clips);
                 let chosen = matches.get(palette.selection).cloned();
                 self.palette = None;
                 match chosen {
@@ -1911,6 +1956,15 @@ impl Desk {
                             }),
                             true,
                         )
+                    }
+                    Some(PaletteRow::Paste(text)) => {
+                        // Paste it: it becomes the clipboard, then Ctrl+V.
+                        self.remember_copy(text.clone());
+                        self.clipboard = text;
+                        match self.focus {
+                            Some(id) => self.handle_app_key(id, crate::notepad::CTRL_V),
+                            None => (None, true),
+                        }
                     }
                     Some(PaletteRow::Hit { file, .. }) => {
                         // Open the file and land on the line: the Notepad
@@ -2728,6 +2782,7 @@ impl Desk {
                 NotepadEffect::Redraw => (None, true),
                 NotepadEffect::ListFiles => (Some(DeskRequest::ListFiles { id }), true),
                 NotepadEffect::Copy(text) => {
+                    self.remember_copy(text.clone());
                     self.clipboard = text;
                     (None, true)
                 }
@@ -3110,7 +3165,12 @@ impl Desk {
                 .windows
                 .iter()
                 .any(|w| focus == Some(w.id) && w.notepad().is_some());
-            let matches = palette.matches(has_window, has_notepad, &self.recent);
+            let matches = palette.matches(
+                has_window,
+                has_notepad,
+                &self.recent,
+                &self.clipboard_history,
+            );
             let rows = matches.len().min(PALETTE_MAX_ROWS);
             let mut lines = Vec::with_capacity(rows + 1);
             let inner = PALETTE_WIDTH.saturating_sub(services_gui_host::CARD_PADDING * 2)
@@ -4404,6 +4464,66 @@ mod tests {
             desk.notify(NoticeLevel::Info, alloc::format!("n{i}"), 10_000 + i as u64);
         }
         assert_eq!(desk.notice_log().len(), NOTICE_LOG);
+    }
+
+    #[test]
+    fn the_palette_offers_what_was_copied_before() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        for word in ["one", "two", "one"] {
+            for byte in word.bytes() {
+                desk.handle_key(byte);
+            }
+            desk.handle_key(crate::notepad::CTRL_A);
+            desk.handle_key(crate::notepad::CTRL_C);
+            desk.handle_key(crate::notepad::KEY_DELETE);
+        }
+        // "one" copied again moves to the front; no duplicate.
+        assert_eq!(
+            desk.clipboard_history(),
+            &["one".to_string(), "two".to_string()]
+        );
+        // Over a Notepad the palette lists them; "two" pastes.
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"two" {
+            desk.handle_key(*byte);
+        }
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(listed[0].starts_with("Paste: two"), "{listed:?}");
+        desk.handle_key(b'\n');
+        assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "two");
+        assert_eq!(
+            desk.clipboard_history()[0],
+            "two",
+            "pasting makes it the latest"
+        );
+        // Not offered with no Notepad to paste into.
+        desk.close(id);
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"paste" {
+            desk.handle_key(*byte);
+        }
+        let windows = desk.windows("", true, None);
+        let palette = windows
+            .iter()
+            .find(|w| w.role == DesktopWindowRole::Palette)
+            .unwrap();
+        let listed = match &palette.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(
+            !listed.iter().any(|l| l.starts_with("Paste:")),
+            "{listed:?}"
+        );
     }
 
     #[test]

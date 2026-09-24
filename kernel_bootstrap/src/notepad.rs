@@ -431,6 +431,24 @@ impl Notepad {
     /// break shows as one cell past the line's end, so an empty selected
     /// line is still visibly selected.
     pub fn viewport_selection(&self, rows: usize) -> Vec<(usize, usize, usize)> {
+        // While browsing history the fill marks what differs from the
+        // document (GFX-070): every visual row whose line is not in it.
+        if let Some(browse) = &self.history {
+            let visual = self.visual_rows();
+            return visual
+                .iter()
+                .enumerate()
+                .skip(self.scroll)
+                .take(rows)
+                .filter(|(_, (row, _, _))| {
+                    !browse.saved.lines().iter().any(|l| l == self.line(*row))
+                })
+                .map(|(i, (row, start, end))| {
+                    let cells = self.line(*row)[*start..*end].chars().count();
+                    (i - self.scroll, 0, cells.max(1))
+                })
+                .collect();
+        }
         let Some((sel_start, sel_end)) = self.selection() else {
             return Vec::new();
         };
@@ -685,11 +703,18 @@ impl Notepad {
             } else {
                 alloc::format!("   {}", crate::rtc::format_unix_minutes(browse.when))
             };
+            let differing = self
+                .buffer
+                .lines()
+                .iter()
+                .filter(|l| !browse.saved.lines().contains(l))
+                .count();
             return alloc::format!(
-                "History: {} of {} earlier{}   <- older   -> newer   Enter restores   Esc back{}",
+                "History: {} of {} earlier{}   {} lines differ   <- older   -> newer   Enter restores   Esc back{}",
                 browse.index + 1,
                 browse.total,
                 when,
+                differing,
                 if browse.loading { "   ..." } else { "" }
             );
         }
@@ -1775,6 +1800,25 @@ mod tests {
         pad.handle_byte(KEY_DOWN);
         assert_eq!(pad.cursor(), Position::new(1, 0));
         assert_eq!(pad.viewport_lines(2), alloc::vec!["world", "x"]);
+    }
+
+    #[test]
+    fn browsing_history_marks_the_lines_that_differ() {
+        let mut pad = Notepad::new();
+        pad.load(Some("memo".to_string()), "a\nb\nc");
+        pad.handle_byte(CTRL_Y);
+        pad.show_version(0, 1, Some("a\nX\nc\nd"), 0);
+        // Rows 1 and 3 are not in the document: marked across their width.
+        assert_eq!(
+            pad.viewport_selection(10),
+            alloc::vec![(1, 0, 1), (3, 0, 1)]
+        );
+        assert!(pad.footer().contains("2 lines differ"), "{}", pad.footer());
+        // An empty added line still shows as one cell.
+        pad.show_version(0, 1, Some("a\n\nc"), 0);
+        assert_eq!(pad.viewport_selection(10), alloc::vec![(1, 0, 1)]);
+        pad.handle_byte(ESC);
+        assert!(pad.viewport_selection(10).is_empty());
     }
 
     #[test]
