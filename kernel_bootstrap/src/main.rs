@@ -20,6 +20,7 @@ mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
 mod bare_metal_net;
 mod bare_metal_storage;
+mod calculator;
 mod desk;
 mod desktop_frame;
 mod display_mode;

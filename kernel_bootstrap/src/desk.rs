@@ -46,6 +46,7 @@ pub const OVERVIEW_CARD: (usize, usize) = (280, 150);
 pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
+use crate::calculator::Calculator;
 use crate::notepad::{Notepad, NotepadEffect};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
@@ -98,14 +99,17 @@ pub enum DeskApp {
     Now,
     /// Every key the desk answers, in one card (GFX-072).
     Shortcuts,
+    /// Exact decimal arithmetic with keys to click and a tape (GFX-075).
+    Calculator,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 4] = [
+    pub const ALL: [DeskApp; 5] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
         DeskApp::Look,
+        DeskApp::Calculator,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -118,6 +122,7 @@ impl DeskApp {
             DeskApp::Notices => "Notices",
             DeskApp::Now => "Now",
             DeskApp::Shortcuts => "Shortcuts",
+            DeskApp::Calculator => "Calculator",
         }
     }
 
@@ -132,6 +137,7 @@ impl DeskApp {
             DeskApp::Notices => "Nt",
             DeskApp::Now => "Nw",
             DeskApp::Shortcuts => "Ky",
+            DeskApp::Calculator => "Ca",
         }
     }
 
@@ -145,9 +151,13 @@ impl DeskApp {
             DeskApp::Notices => NOTICES_SIZE,
             DeskApp::Now => NOW_SIZE,
             DeskApp::Shortcuts => SHORTCUTS_SIZE,
+            DeskApp::Calculator => CALCULATOR_SIZE,
         }
     }
 }
+
+/// The Calculator card (GFX-075): the key grid and six lines of tape.
+pub const CALCULATOR_SIZE: (usize, usize) = (280, 440);
 
 /// The Now card (GFX-072).
 pub const NOW_SIZE: (usize, usize) = (440, 260);
@@ -416,6 +426,10 @@ impl DeskWindow {
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
             AppState::Shortcuts(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
+            AppState::Calculator(_) => alloc::vec![
+                ("Clear".to_string(), crate::notepad::ESC),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
         }
     }
 }
@@ -813,6 +827,7 @@ pub enum AppState {
     Now,
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
+    Calculator(Calculator),
 }
 
 /// One open window.
@@ -987,10 +1002,12 @@ pub enum PaletteAction {
     Now,
     /// Every key (GFX-072).
     Shortcuts,
+    /// The Calculator card (GFX-075).
+    Calculator,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 33] = [
+    pub const ALL: [PaletteAction; 34] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1024,6 +1041,7 @@ impl PaletteAction {
         PaletteAction::Notices,
         PaletteAction::Now,
         PaletteAction::Shortcuts,
+        PaletteAction::Calculator,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1061,6 +1079,7 @@ impl PaletteAction {
             PaletteAction::Notices => "Notices: everything the desk has said",
             PaletteAction::Now => "Now: the machine, this second",
             PaletteAction::Shortcuts => "Shortcuts: every key the desk answers",
+            PaletteAction::Calculator => "Calculator",
         }
     }
 
@@ -1099,6 +1118,7 @@ impl PaletteAction {
             PaletteAction::Notices => "",
             PaletteAction::Now => "click the clock",
             PaletteAction::Shortcuts => "",
+            PaletteAction::Calculator => "",
         }
     }
 
@@ -1734,6 +1754,7 @@ impl Desk {
                 DeskApp::Notices => AppState::Notices,
                 DeskApp::Now => AppState::Now,
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
+                DeskApp::Calculator => AppState::Calculator(Calculator::new()),
             },
         });
         self.focus = Some(id);
@@ -1957,6 +1978,7 @@ impl Desk {
                 "Shortcuts".to_string(),
                 alloc::vec!["every key".to_string()],
             ),
+            AppState::Calculator(calc) => ("Calculator".to_string(), alloc::vec![calc.shown()]),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2160,6 +2182,10 @@ impl Desk {
             }
             PaletteAction::Overview => {
                 self.open_overview();
+                None
+            }
+            PaletteAction::Calculator => {
+                self.open_or_raise(DeskApp::Calculator);
                 None
             }
             PaletteAction::Notices => {
@@ -2641,6 +2667,12 @@ impl Desk {
                             if open {
                                 requests.extend(self.open_files_selection(*target));
                             }
+                            // Calculator: the keys are in the content (GFX-075).
+                            if let Some(AppState::Calculator(calc)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                calc.click(line, column);
+                            }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
                             let look_row = self
@@ -3086,6 +3118,13 @@ impl Desk {
                 }
                 _ => (None, false),
             },
+            AppState::Calculator(calc) => {
+                if byte == crate::notepad::CTRL_W {
+                    self.close(id);
+                    return (None, true);
+                }
+                (None, calc.handle_byte(byte))
+            }
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3512,6 +3551,9 @@ impl Desk {
                     "The machine, this second; refreshed every second".to_string(),
                     None,
                 ),
+                AppState::Calculator(calc) => {
+                    (calc.lines(), "Calculator".to_string(), calc.footer(), None)
+                }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
                     let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
@@ -3795,6 +3837,13 @@ impl Desk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dock's tile row: every tile and the gaps between, so a test
+    /// finds the first tile whatever the number of apps.
+    fn dock_row_width() -> usize {
+        let n = DeskApp::ALL.len();
+        n * services_gui_host::DOCK_TILE + (n - 1) * services_gui_host::DOCK_TILE_GAP
+    }
     use input_types::{ButtonState, Modifiers, PointerButtons, PointerEvent, PointerPosition};
     use services_gui_host::{Compositor, DesktopInputRouter};
 
@@ -4024,7 +4073,7 @@ mod tests {
         // Ctrl+Tab skips it; the dock tile brings it back.
         assert!(!desk.cycle_focus());
         let pill = dock.bounds();
-        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         route(&mut desk, &mut router, press(first_x, y));
         assert!(!desk.window(id).unwrap().tucked);
@@ -4041,7 +4090,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let files_x = (pill.x + (pill.width - 184) / 2 + 20 + 48) as i32;
+        let files_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20 + 48) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         let compositor = Compositor::new();
         let deliveries = router.route(&compositor, &windows, press(files_x, y));
@@ -4572,7 +4621,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         route(
             &mut desk,
@@ -4905,7 +4954,7 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs.len(), 4);
+        assert_eq!(dock.tabs.len(), DeskApp::ALL.len());
         for i in 0..(NOTICE_LOG + 10) {
             desk.notify(NoticeLevel::Info, alloc::format!("n{i}"), 10_000 + i as u64);
         }
@@ -5160,7 +5209,7 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs.len(), 4);
+        assert_eq!(dock.tabs.len(), DeskApp::ALL.len());
     }
 
     #[test]
@@ -5495,6 +5544,65 @@ mod tests {
         ));
     }
 
+    /// The Calculator (GFX-075): on the dock and in the palette; its keys
+    /// are clicked in the content and typed on the keyboard, and the card
+    /// shows the expression, the result and the tape.
+    #[test]
+    fn the_calculator_takes_clicks_on_its_keys_and_typed_keys_alike() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let compositor = Compositor::new();
+        assert!(DeskApp::ALL.contains(&DeskApp::Calculator));
+        assert!(PaletteAction::ALL.contains(&PaletteAction::Calculator));
+        let id = desk.launch(DeskApp::Calculator);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.actions, alloc::vec!["Clear", "Close"]);
+        let (ox, oy, pitch) = card.card_text_origin();
+        // Click "7" (row 1 of the grid, first key), "+" (row 3, last), "8",
+        // then "=".
+        let click = |desk: &mut Desk, router: &mut DesktopInputRouter, line: usize, col: usize| {
+            let windows = desk.windows("", true, None);
+            let x = (ox + col * 8 + 4) as i32;
+            let y = (oy + line * pitch + 4) as i32;
+            let deliveries = router.route(&compositor, &windows, press(x, y));
+            desk.handle_deliveries_with_requests(&deliveries);
+            let deliveries = router.route(&compositor, &windows, release(x, y));
+            desk.handle_deliveries_with_requests(&deliveries);
+        };
+        let first = crate::calculator::FIRST_KEY_LINE;
+        click(&mut desk, &mut router, first + 1, 2);
+        click(&mut desk, &mut router, first + 3, 20);
+        click(&mut desk, &mut router, first + 1, 8);
+        click(&mut desk, &mut router, first + 4, 20);
+        let lines = match &desk
+            .windows("", true, None)
+            .iter()
+            .find(|w| w.frame.view_id == id)
+            .unwrap()
+            .frame
+            .content
+        {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(lines[1].ends_with("15"), "{lines:?}");
+        assert!(lines.last().unwrap().ends_with("7+8 = 15"), "{lines:?}");
+        // Typed: the result carries on. Esc clears rather than closing.
+        desk.handle_key(b'*');
+        desk.handle_key(b'2');
+        desk.handle_key(b'\n');
+        let calc = match &desk.window(id).unwrap().state {
+            AppState::Calculator(calc) => calc.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(calc.shown(), "30");
+        desk.handle_key(crate::notepad::ESC);
+        assert!(desk.window(id).is_some());
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
+    }
+
     #[test]
     fn the_history_chip_asks_the_kernel_and_the_answer_reaches_the_notepad() {
         let mut desk = Desk::new(1280, 800);
@@ -5593,10 +5701,10 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        // Four tiles: 4*40 + 3*8 = 184 wide, centred in the pill; the
-        // first tile's centre is 20px into that row.
+        // The tile row is centred in the pill; the first tile's centre is
+        // 20px into that row.
         let pill = dock.bounds();
-        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(&mut desk, &mut router, press(first_x, y)));
@@ -5620,7 +5728,7 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let first_x = (pill.x + (pill.width - 184) / 2 + 20) as i32;
+        let first_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20) as i32;
         let y = (pill.y + pill.height / 2) as i32;
 
         assert!(route(
