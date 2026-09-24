@@ -48,6 +48,7 @@ use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
+use crate::game::{Game, GameEffect};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::timer::{TimerEffect, TimerView};
 
@@ -109,10 +110,12 @@ pub enum DeskApp {
     /// A stopwatch with laps and a countdown that says when it is up
     /// (GFX-077).
     Timer,
+    /// The sliding-tiles game (GFX-078).
+    Tiles,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 7] = [
+    pub const ALL: [DeskApp; 8] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
@@ -120,6 +123,7 @@ impl DeskApp {
         DeskApp::Calculator,
         DeskApp::Calendar,
         DeskApp::Timer,
+        DeskApp::Tiles,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -135,6 +139,7 @@ impl DeskApp {
             DeskApp::Calculator => "Calculator",
             DeskApp::Calendar => "Calendar",
             DeskApp::Timer => "Timer",
+            DeskApp::Tiles => "Tiles",
         }
     }
 
@@ -152,6 +157,7 @@ impl DeskApp {
             DeskApp::Calculator => "Ca",
             DeskApp::Calendar => "Cl",
             DeskApp::Timer => "Ti",
+            DeskApp::Tiles => "2k",
         }
     }
 
@@ -168,9 +174,13 @@ impl DeskApp {
             DeskApp::Calculator => CALCULATOR_SIZE,
             DeskApp::Calendar => CALENDAR_SIZE,
             DeskApp::Timer => TIMER_SIZE,
+            DeskApp::Tiles => TILES_SIZE,
         }
     }
 }
+
+/// The Tiles card (GFX-078): the board and its buttons.
+pub const TILES_SIZE: (usize, usize) = (340, 400);
 
 /// The Timer card (GFX-077): the controls, the presets, six laps.
 pub const TIMER_SIZE: (usize, usize) = (400, 420);
@@ -465,6 +475,10 @@ impl DeskWindow {
                     b' ',
                 ),
                 ("Reset".to_string(), b'r'),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Tiles(_) => alloc::vec![
+                ("New".to_string(), b'n'),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
         }
@@ -867,6 +881,7 @@ pub enum AppState {
     Calculator(Calculator),
     Calendar(CalendarView),
     Timer(TimerView),
+    Tiles(Game),
 }
 
 /// One open window.
@@ -1050,10 +1065,12 @@ pub enum PaletteAction {
     Calendar,
     /// The Timer card (GFX-077).
     Timer,
+    /// The Tiles game (GFX-078).
+    Tiles,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 36] = [
+    pub const ALL: [PaletteAction; 37] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1090,6 +1107,7 @@ impl PaletteAction {
         PaletteAction::Calculator,
         PaletteAction::Calendar,
         PaletteAction::Timer,
+        PaletteAction::Tiles,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1130,6 +1148,7 @@ impl PaletteAction {
             PaletteAction::Calculator => "Calculator",
             PaletteAction::Calendar => "Calendar",
             PaletteAction::Timer => "Timer: stopwatch and countdown",
+            PaletteAction::Tiles => "Tiles: the 2048 game",
         }
     }
 
@@ -1171,6 +1190,7 @@ impl PaletteAction {
             PaletteAction::Calculator => "",
             PaletteAction::Calendar => "",
             PaletteAction::Timer => "",
+            PaletteAction::Tiles => "",
         }
     }
 
@@ -1885,6 +1905,11 @@ impl Desk {
                 DeskApp::Calculator => AppState::Calculator(Calculator::new()),
                 DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
                 DeskApp::Timer => AppState::Timer(TimerView::new()),
+                // Seeded from the clock and the launch count: no two games
+                // alike, and the same game under test.
+                DeskApp::Tiles => AppState::Tiles(Game::new(
+                    self.last_tick.wrapping_mul(6_364_136_223_846_793_005) ^ self.opened as u64,
+                )),
             },
         });
         self.focus = Some(id);
@@ -2117,6 +2142,10 @@ impl Desk {
                 "Timer".to_string(),
                 alloc::vec![crate::timer::format_ticks(timer.shown_ticks())],
             ),
+            AppState::Tiles(game) => (
+                "Tiles".to_string(),
+                alloc::vec![alloc::format!("score {}", game.score())],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2328,6 +2357,10 @@ impl Desk {
             }
             PaletteAction::Timer => {
                 self.open_or_raise(DeskApp::Timer);
+                None
+            }
+            PaletteAction::Tiles => {
+                self.open_or_raise(DeskApp::Tiles);
                 None
             }
             PaletteAction::Calendar => {
@@ -2835,6 +2868,12 @@ impl Desk {
                             {
                                 timer.click(line, column);
                             }
+                            // Tiles: the moves are buttons too (GFX-078).
+                            if let Some(AppState::Tiles(game)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                game.click(line, column);
+                            }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
                             let look_row = self
@@ -3304,6 +3343,14 @@ impl Desk {
                     (None, true)
                 }
             },
+            AppState::Tiles(game) => match game.handle_byte(byte) {
+                GameEffect::None => (None, false),
+                GameEffect::Redraw => (None, true),
+                GameEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3754,6 +3801,7 @@ impl Desk {
                     };
                     (timer.lines(), title, timer.footer(), None)
                 }
+                AppState::Tiles(game) => (game.lines(), "Tiles".to_string(), game.footer(), None),
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
                     let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
@@ -5897,6 +5945,57 @@ mod tests {
         desk.go_to_space(0);
         assert_eq!(desk.window(id).unwrap().actions()[0].0, "Start");
         desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
+    }
+
+    /// Tiles (GFX-078): on the dock and in the palette; arrows and the
+    /// buttons both play, and a click on a button is a move.
+    #[test]
+    fn tiles_plays_by_arrow_and_by_button() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let compositor = Compositor::new();
+        assert!(DeskApp::ALL.contains(&DeskApp::Tiles));
+        let id = desk.launch(DeskApp::Tiles);
+        let count = |desk: &Desk| match &desk.window(id).unwrap().state {
+            AppState::Tiles(game) => game.cells().iter().flatten().filter(|v| **v != 0).count(),
+            _ => panic!(),
+        };
+        assert_eq!(count(&desk), 2);
+        let board = |desk: &Desk| match &desk.window(id).unwrap().state {
+            AppState::Tiles(game) => *game.cells(),
+            _ => panic!(),
+        };
+        let before = board(&desk);
+        // An arrow that moves something changes the board (two equal
+        // tiles may merge, so the count is not the measure).
+        let mut moved = false;
+        for key in [
+            crate::notepad::KEY_LEFT,
+            crate::notepad::KEY_UP,
+            crate::notepad::KEY_RIGHT,
+            crate::notepad::KEY_DOWN,
+        ] {
+            if desk.handle_key(key).1 {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved);
+        assert_ne!(board(&desk), before);
+        // The New button, clicked: two tiles again.
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.actions, alloc::vec!["New", "Close"]);
+        let (ox, oy, pitch) = card.card_text_origin();
+        let x = (ox + 31 * 8 + 4) as i32;
+        let y = (oy + crate::game::CONTROLS_LINE * pitch + 4) as i32;
+        let deliveries = router.route(&compositor, &windows, press(x, y));
+        desk.handle_deliveries_with_requests(&deliveries);
+        let deliveries = router.route(&compositor, &windows, release(x, y));
+        desk.handle_deliveries_with_requests(&deliveries);
+        assert_eq!(count(&desk), 2);
+        desk.handle_key(crate::notepad::ESC);
         assert!(desk.window(id).is_none());
     }
 
