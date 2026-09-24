@@ -208,12 +208,21 @@ impl Ui {
             };
             self.outline(area, outline, BUTTON_RADIUS, 2);
         }
-        let scale = if area.height >= 2 * GLYPH_H + 12 && text_width(label, 2) + 8 <= area.width {
+        // One character reads as a key and is drawn large when the key is
+        // tall enough; words stay at the font's size, so a row of buttons
+        // is one size (GFX-083).
+        let scale = if label.chars().count() == 1 && area.height >= 2 * GLYPH_H + 12 {
             2
         } else {
             1
         };
         self.text_centered(&area, label, ink, scale);
+        self.hits.push((area, key));
+    }
+
+    /// Make `area` answer `key` to a click without drawing anything: for
+    /// controls the app draws itself, such as a day or a row (GFX-083).
+    pub fn hit_area(&mut self, area: PixelRect, key: u8) {
         self.hits.push((area, key));
     }
 

@@ -3042,11 +3042,21 @@ impl Desk {
                                     }
                                 }
                             }
-                            // Calendar: a day, or the month's ends (GFX-076).
-                            let effect = match self.window_mut(*target).map(|w| &mut w.state) {
-                                Some(AppState::Calendar(calendar)) => calendar.click(line, column),
-                                _ => CalendarEffect::None,
-                            };
+                            // Calendar: a day cell or a month button, by
+                            // pixel (GFX-083); the hit is a key the card answers.
+                            let mut effect = CalendarEffect::None;
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                let bounds = self.window(*target).map(|w| w.bounds);
+                                let palette = crate::widgets::Palette::from_theme(&self.theme());
+                                if let (Some(bounds), Some(AppState::Calendar(calendar))) =
+                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
+                                {
+                                    let (w, h) = Self::canvas_size(bounds);
+                                    if let Some(key) = calendar.ui(w, h, palette, None).hit(x, y) {
+                                        effect = calendar.handle_byte(key);
+                                    }
+                                }
+                            }
                             if let CalendarEffect::OpenNote { name, exists } = effect {
                                 requests.extend(self.open_note(name, exists));
                             }
@@ -3076,11 +3086,18 @@ impl Desk {
                                     }
                                 }
                             }
-                            // Tasks: a row, or a button (GFX-079).
-                            if let Some(AppState::Tasks(tasks)) =
-                                self.window_mut(*target).map(|w| &mut w.state)
-                            {
-                                tasks.click(line, column);
+                            // Tasks: a row or a button, by pixel (GFX-083).
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                let bounds = self.window(*target).map(|w| w.bounds);
+                                let palette = crate::widgets::Palette::from_theme(&self.theme());
+                                if let (Some(bounds), Some(AppState::Tasks(tasks))) =
+                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
+                                {
+                                    let (w, h) = Self::canvas_size(bounds);
+                                    if let Some(key) = tasks.ui(w, h, palette, None).hit(x, y) {
+                                        tasks.handle_byte(key);
+                                    }
+                                }
                             }
                             // Sketch: a stroke begins where the pointer
                             // pressed, in the canvas's own pixels (GFX-080).
@@ -4039,13 +4056,9 @@ impl Desk {
                     (Vec::new(), "Calculator".to_string(), calc.footer(), None)
                 }
                 AppState::Calendar(calendar) => {
-                    selection = calendar.selection();
-                    (
-                        calendar.lines(),
-                        "Calendar".to_string(),
-                        calendar.footer(),
-                        None,
-                    )
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(calendar.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Calendar".to_string(), calendar.footer(), None)
                 }
                 AppState::Timer(timer) => {
                     let title = if timer.running() {
@@ -4066,8 +4079,9 @@ impl Desk {
                     (Vec::new(), "Tiles".to_string(), game.footer(), None)
                 }
                 AppState::Tasks(tasks) => {
-                    highlight = tasks.highlight();
-                    (tasks.lines(), "Tasks".to_string(), tasks.footer(), None)
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(tasks.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Tasks".to_string(), tasks.footer(), None)
                 }
                 AppState::Sketch(sketch) => {
                     let canvas_width = window
@@ -6173,14 +6187,18 @@ mod tests {
         );
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        let lines = match &card.frame.content {
-            ViewContent::TextBuffer { lines } => lines.clone(),
-            _ => panic!(),
+        let texts: Vec<String> = match &card.frame.content {
+            ViewContent::Graphics { ops } => ops
+                .iter()
+                .filter_map(|op| match op {
+                    view_types::DrawOp::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => panic!("a drawn card"),
         };
-        assert_eq!(lines[0], "<      September 2026      >");
-        assert!(lines[2].contains(" 3."), "{:?}", lines[2]);
-        assert!(lines[5].contains("*24"), "{:?}", lines[5]);
-        assert_eq!(card.selection_spans, alloc::vec![(5, 12, 15)]);
+        assert!(texts.contains(&"September 2026".to_string()), "{texts:?}");
+        assert!(texts.contains(&"Today  Thursday 24 September 2026".to_string()));
         assert_eq!(card.actions[0], "Today");
         // Enter on today: a new Notepad named by the day, nothing to read.
         let (request, changed) = desk.handle_key(b'\n');
@@ -6325,7 +6343,7 @@ mod tests {
         desk.preview_loaded(id, "tasks", "[ ] one\n[x] two\n");
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.highlight_line, Some(0));
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         assert_eq!(card.actions, alloc::vec!["Add", "Done", "Remove", "Close"]);
         // Add through the footer: the chips become Add / Cancel.
         desk.tick(10);

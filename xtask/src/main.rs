@@ -557,9 +557,10 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
         "640,44,52,211,153".to_string(),
-        // ...and its body, right of the grid, the plain surface.
+        // ...and a day cell (Sunday of the second week, canvas 438,76) is
+        // the raised surface, left of its number (GFX-083).
         "--expect-pixel".to_string(),
-        "800,200,28,34,48".to_string(),
+        "800,200,22,28,40".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

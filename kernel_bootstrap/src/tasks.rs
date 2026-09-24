@@ -3,16 +3,25 @@
 //! The list is kept as the document named `tasks`, one line per task,
 //! `[x] done` or `[ ] not yet` -- readable in a Notepad, kept in versions
 //! like everything else, and saved by the desk a second after it changes.
-//! The card is the pleasant way to use it: a row is a task, Enter or a
-//! click ticks it, `a` asks for a new one in the footer, Delete removes,
-//! and every action is a `[ button ]` too.
+//! The card is the pleasant way to use it: a row is a task with a real
+//! checkbox, Enter or a click ticks it, `a` asks for a new one in the
+//! footer, Delete removes, and every action is a button too (GFX-083).
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use view_types::PixelRect;
 
-use crate::timer::button_at;
+use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
+
+/// A row as a key byte (GFX-083): `ROW_KEY_FIRST` is the first task
+/// shown; the desk sends it for a click on the row.
+pub const ROW_KEY_FIRST: u8 = 0xC0;
+pub const ROW_KEY_LAST: u8 = 0xFF;
+/// A row's height in canvas pixels, and the buttons' height.
+pub const ROW_H: u32 = 28;
+pub const BUTTONS_H: u32 = 44;
 
 /// The document the list lives in.
 pub const TASKS_FILE: &str = "tasks";
@@ -45,6 +54,8 @@ pub struct TasksView {
     /// Changed since it was last saved, and when.
     changed_at: Option<u64>,
     now: u64,
+    /// The first row shown, so the selection is always on screen.
+    scroll: usize,
 }
 
 impl Default for TasksView {
@@ -62,6 +73,7 @@ impl TasksView {
             loaded: false,
             changed_at: None,
             now: 0,
+            scroll: 0,
         }
     }
 
@@ -208,61 +220,100 @@ impl TasksView {
             b'u' | b'U' => self.shift(-1),
             b'd' | b'D' => self.shift(1),
             b'c' | b'C' => self.clear_done(),
+            // A row's own key (GFX-083): the desk sends it for a click on
+            // the row. The selected row ticks; another selects.
+            key @ ROW_KEY_FIRST..=ROW_KEY_LAST => {
+                let index = self.scroll + (key - ROW_KEY_FIRST) as usize;
+                if index >= self.tasks.len() {
+                    return TasksEffect::None;
+                }
+                if index == self.selection {
+                    self.toggle();
+                } else {
+                    self.selection = index;
+                }
+            }
             CTRL_W | ESC => return TasksEffect::Close,
             _ => return TasksEffect::None,
         }
         TasksEffect::Redraw
     }
 
-    /// The content line the buttons are on: after the tasks and a gap.
-    pub fn buttons_line(&self) -> usize {
-        self.tasks.len().max(1) + 1
+    /// How many rows fit above the buttons on a canvas `height` tall.
+    pub fn rows_that_fit(height: u32) -> usize {
+        (height.saturating_sub(BUTTONS_H + 12) / ROW_H).max(1) as usize
     }
 
-    /// A click: a row selects, the selected row ticks, a button acts.
-    pub fn click(&mut self, line: usize, column: usize) -> TasksEffect {
-        if line < self.tasks.len() {
-            if line == self.selection {
-                self.toggle();
-            } else {
-                self.selection = line;
-            }
-            return TasksEffect::Redraw;
+    /// The buttons' rectangles for a canvas: Add, Done, Remove, Clear done.
+    pub fn buttons(width: u32, height: u32) -> Vec<PixelRect> {
+        grid(
+            rect(0, height as i32 - BUTTONS_H as i32, width, BUTTONS_H),
+            4,
+            1,
+            6,
+        )
+    }
+
+    /// The card, drawn (GFX-083): a row a task with a checkbox, the
+    /// selected row raised, the buttons under. Rows that do not fit
+    /// scroll so the selection is always shown. `hover` is the pointer in
+    /// canvas pixels.
+    pub fn ui(
+        &mut self,
+        width: u32,
+        height: u32,
+        palette: Palette,
+        hover: Option<(i32, i32)>,
+    ) -> Ui {
+        let mut ui = Ui::new(palette, hover);
+        let p = *ui.palette();
+        let rows = Self::rows_that_fit(height);
+        if self.selection < self.scroll {
+            self.scroll = self.selection;
+        } else if self.selection >= self.scroll + rows {
+            self.scroll = self.selection + 1 - rows;
         }
-        if line == self.buttons_line() {
-            let text = self.lines()[line].clone();
-            return match button_at(&text, column) {
-                Some(0) => self.handle_byte(b'a'),
-                Some(1) => self.handle_byte(b'\n'),
-                Some(2) => self.handle_byte(crate::notepad::KEY_DELETE),
-                Some(3) => self.handle_byte(b'c'),
-                _ => TasksEffect::None,
+        if self.tasks.is_empty() {
+            let note = if self.loaded {
+                "Nothing to do. Add something."
+            } else {
+                "Reading the list..."
             };
+            ui.text(6, 6, note, p.muted, 1);
         }
-        TasksEffect::None
-    }
-
-    pub fn lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
-            .tasks
-            .iter()
-            .map(|t| alloc::format!("{} {}", if t.done { "[x]" } else { "[ ]" }, t.text))
-            .collect();
-        if lines.is_empty() {
-            lines.push(if self.loaded {
-                "Nothing to do. Add something.".to_string()
+        for (i, task) in self.tasks.iter().skip(self.scroll).take(rows).enumerate() {
+            let index = self.scroll + i;
+            let row = rect(0, (i as u32 * ROW_H) as i32, width, ROW_H);
+            if index == self.selection {
+                ui.fill(row, p.raised, 6);
+            }
+            let check = rect(8, row.y as i32 + 5, 18, 18);
+            if task.done {
+                ui.fill(check, p.accent, 4);
+                ui.text_centered(&check, "x", p.on_accent, 1);
             } else {
-                "Reading the list...".to_string()
-            });
+                ui.outline(check, p.muted, 4, 2);
+            }
+            let ink = if task.done { p.muted } else { p.text };
+            ui.text(36, row.y as i32 + 6, &task.text, ink, 1);
+            if ui.hovered(&row) && index != self.selection {
+                ui.outline(row, p.raised, 6, 1);
+            }
+            if i < (ROW_KEY_LAST - ROW_KEY_FIRST) as usize {
+                ui.hit_area(row, ROW_KEY_FIRST + i as u8);
+            }
         }
-        lines.push(String::new());
-        lines.push("[ Add ] [ Done ] [ Remove ] [ Clear done ]".to_string());
-        lines
-    }
-
-    /// The highlighted row, if there is a task under it.
-    pub fn highlight(&self) -> Option<usize> {
-        (!self.tasks.is_empty()).then_some(self.selection)
+        let buttons = Self::buttons(width, height);
+        ui.button(buttons[0], "Add", b'a', ButtonKind::Primary);
+        ui.button(buttons[1], "Done", b'\n', ButtonKind::Plain);
+        ui.button(
+            buttons[2],
+            "Remove",
+            crate::notepad::KEY_DELETE,
+            ButtonKind::Quiet,
+        );
+        ui.button(buttons[3], "Clear done", b'c', ButtonKind::Quiet);
+        ui
     }
 
     pub fn footer(&self) -> String {
@@ -283,11 +334,29 @@ impl TasksView {
 mod tests {
     use super::*;
     use crate::notepad::{KEY_DELETE, KEY_DOWN, KEY_UP};
+    use services_gui_host::Theme;
+    use view_types::DrawOp;
+
+    fn palette() -> Palette {
+        Palette::from_theme(&Theme::DEFAULT)
+    }
+
+    fn texts(tasks: &mut TasksView) -> Vec<String> {
+        tasks
+            .ui(444, 340, palette(), None)
+            .into_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                DrawOp::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn the_list_is_a_document_and_round_trips() {
         let mut tasks = TasksView::new();
-        assert_eq!(tasks.lines()[0], "Reading the list...");
+        assert!(texts(&mut tasks).contains(&"Reading the list...".to_string()));
         tasks.load("[x] Buy milk\n[ ] Write the summary\nno mark\n\n");
         assert_eq!(tasks.tasks().len(), 3);
         assert!(tasks.tasks()[0].done && !tasks.tasks()[2].done);
@@ -296,8 +365,11 @@ mod tests {
             tasks.content(),
             "[x] Buy milk\n[ ] Write the summary\n[ ] no mark\n"
         );
-        assert_eq!(tasks.lines()[1], "[ ] Write the summary");
-        assert_eq!(tasks.buttons_line(), 4);
+        let shown = texts(&mut tasks);
+        assert!(shown.contains(&"Write the summary".to_string()));
+        assert!(shown.contains(&"Clear done".to_string()));
+        // One tick mark: the done one's checkbox.
+        assert_eq!(shown.iter().filter(|t| *t == "x").count(), 1);
         assert_eq!(tasks.footer(), "2 of 3 to do   Enter ticks   A adds");
         assert!(!tasks.is_dirty());
     }
@@ -336,28 +408,55 @@ mod tests {
         assert_eq!(tasks.tasks()[0].text, "three");
         tasks.handle_byte(KEY_DOWN);
         assert_eq!(tasks.selection, 1);
-        // Clicks: another row selects, the same row ticks, buttons act.
-        assert_eq!(tasks.click(0, 3), TasksEffect::Redraw);
+        // Clicks, by pixel: another row selects, the same row ticks,
+        // buttons act.
+        let row0 = rect(0, 0, 444, ROW_H);
+        let key = tasks
+            .ui(444, 340, palette(), None)
+            .hit(row0.x as i32 + 100, row0.y as i32 + 10)
+            .expect("a row there");
+        assert_eq!(key, ROW_KEY_FIRST);
+        assert_eq!(tasks.handle_byte(key), TasksEffect::Redraw);
         assert_eq!(tasks.selection, 0);
-        tasks.click(0, 3);
+        tasks.handle_byte(key);
         assert!(tasks.tasks()[0].done);
-        let buttons = tasks.buttons_line();
-        assert_eq!(
-            tasks.lines()[buttons],
-            "[ Add ] [ Done ] [ Remove ] [ Clear done ]"
-        );
-        assert_eq!(tasks.click(buttons, 31), TasksEffect::Redraw, "Clear done");
+        let buttons = TasksView::buttons(444, 340);
+        let clear = buttons[3];
+        let key = tasks
+            .ui(444, 340, palette(), None)
+            .hit(clear.x as i32 + 4, clear.y as i32 + 4)
+            .unwrap();
+        assert_eq!(key, b'c');
+        assert_eq!(tasks.handle_byte(key), TasksEffect::Redraw, "Clear done");
         assert_eq!(tasks.tasks().len(), 1);
         assert_eq!(tasks.tasks()[0].text, "two");
-        let buttons = tasks.buttons_line();
-        tasks.click(buttons, 2);
+        let add = buttons[0];
+        let key = tasks
+            .ui(444, 340, palette(), None)
+            .hit(add.x as i32 + 4, add.y as i32 + 4)
+            .unwrap();
+        assert_eq!(key, b'a');
+        tasks.handle_byte(key);
         assert!(tasks.prompt_open());
         assert_eq!(tasks.handle_byte(0x1B), TasksEffect::Redraw);
         assert!(!tasks.prompt_open());
+        assert_eq!(
+            tasks.handle_byte(ROW_KEY_FIRST + 5),
+            TasksEffect::None,
+            "no such row"
+        );
         assert_eq!(tasks.handle_byte(0x1B), TasksEffect::Close);
         // An empty list says so once it has been read.
         tasks.load("");
-        assert_eq!(tasks.lines()[0], "Nothing to do. Add something.");
+        assert!(texts(&mut tasks).contains(&"Nothing to do. Add something.".to_string()));
         assert_eq!(tasks.footer(), "A adds a task");
+        // A long list scrolls so the selection is shown.
+        let many: String = (0..30).map(|i| alloc::format!("[ ] t{i}\n")).collect();
+        tasks.load(&many);
+        tasks.selection = 29;
+        let shown = texts(&mut tasks);
+        assert!(shown.contains(&"t29".to_string()));
+        assert!(!shown.contains(&"t0".to_string()));
+        assert_eq!(TasksView::rows_that_fit(340), 10);
     }
 }

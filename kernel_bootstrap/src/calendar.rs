@@ -15,15 +15,41 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use view_types::PixelRect;
 
 use crate::rtc;
+use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
 
-/// The grid's width in characters: seven cells of four.
-pub const WIDTH: usize = 28;
-/// The content line of the first week row: the month title and the
-/// weekday header come first.
-pub const FIRST_WEEK_LINE: usize = 2;
-const CELL: usize = 4;
+/// A day of the month as a key byte (GFX-083): the desk's own range,
+/// above anything the keyboard parser produces. `DAY_KEY_FIRST` is the
+/// 1st.
+pub const DAY_KEY_FIRST: u8 = 0xC1;
+pub const DAY_KEY_LAST: u8 = DAY_KEY_FIRST + 30;
+/// Where the card's parts go, in canvas pixels.
+pub const HEADER_H: u32 = 32;
+pub const WEEKDAYS_TOP: i32 = 40;
+pub const DAYS_TOP: i32 = 60;
+pub const DAYS_H: u32 = 236;
+pub const TEXT_TOP: i32 = 304;
+
+/// The header's month buttons and the six-by-seven day cells for a canvas
+/// (GFX-083): what the drawing and the desk's hit test agree on.
+#[derive(Debug, Clone)]
+pub struct CalendarLayout {
+    pub earlier: PixelRect,
+    pub later: PixelRect,
+    pub cells: Vec<PixelRect>,
+}
+
+impl CalendarLayout {
+    pub fn new(width: u32) -> Self {
+        Self {
+            earlier: rect(0, 0, 36, HEADER_H),
+            later: rect(width as i32 - 36, 0, 36, HEADER_H),
+            cells: grid(rect(0, DAYS_TOP, width, DAYS_H), 7, 6, 4),
+        }
+    }
+}
 
 pub const MONTHS: [&str; 12] = [
     "January",
@@ -210,6 +236,20 @@ impl CalendarView {
                 }
             }
             b'\n' | b'\r' => return self.open_selected(),
+            // A day's own key (GFX-083): the desk sends it for a click on
+            // the day's cell. The selected day opens; another selects.
+            key @ DAY_KEY_FIRST..=DAY_KEY_LAST => {
+                let day = key - DAY_KEY_FIRST + 1;
+                let (_, days) = self.shape();
+                if day > days {
+                    return CalendarEffect::None;
+                }
+                let date = Date::new(self.selected.year, self.selected.month, day);
+                if date == self.selected {
+                    return self.open_selected();
+                }
+                self.selected = date;
+            }
             CTRL_W | ESC => return CalendarEffect::Close,
             _ => return CalendarEffect::None,
         }
@@ -222,101 +262,81 @@ impl CalendarView {
         (first.weekday(), rtc::days_in_month(first.year, first.month))
     }
 
-    /// The day drawn at content `line`, `column`, if any.
-    pub fn day_at(&self, line: usize, column: usize) -> Option<Date> {
-        let row = line.checked_sub(FIRST_WEEK_LINE)?;
-        let (lead, days) = self.shape();
-        let index = row * 7 + column / CELL;
-        let day = (index + 1).checked_sub(lead)?;
-        if day == 0 || day > days as usize {
+    /// The cell that shows `date` in the month on screen, if it is in it.
+    pub fn cell_of(&self, layout: &CalendarLayout, date: Date) -> Option<PixelRect> {
+        if date.year != self.selected.year || date.month != self.selected.month {
             return None;
         }
-        Some(Date::new(
-            self.selected.year,
-            self.selected.month,
-            day as u8,
-        ))
-    }
-
-    /// A click: the title's ends turn the month, a day selects it, and
-    /// the selected day opens its note.
-    pub fn click(&mut self, line: usize, column: usize) -> CalendarEffect {
-        if line == 0 {
-            if column < 2 {
-                self.selected = self.selected.plus_months(-1);
-                return CalendarEffect::Redraw;
-            }
-            if column + 2 >= WIDTH {
-                self.selected = self.selected.plus_months(1);
-                return CalendarEffect::Redraw;
-            }
-            return CalendarEffect::None;
-        }
-        match self.day_at(line, column) {
-            Some(day) if day == self.selected => self.open_selected(),
-            Some(day) => {
-                self.selected = day;
-                CalendarEffect::Redraw
-            }
-            None => CalendarEffect::None,
-        }
-    }
-
-    /// The selected day's cell, for the card's selection fill: `(line,
-    /// first column, end column)`.
-    pub fn selection(&self) -> Vec<(usize, usize, usize)> {
         let (lead, _) = self.shape();
-        let index = lead + self.selected.day as usize - 1;
-        let line = FIRST_WEEK_LINE + index / 7;
-        let column = (index % 7) * CELL;
-        alloc::vec![(line, column, column + CELL - 1)]
+        layout.cells.get(lead + date.day as usize - 1).copied()
     }
 
-    pub fn lines(&self) -> Vec<String> {
+    /// The card, drawn (GFX-083): the month with its turn buttons, the
+    /// weekday names, a cell a day -- today outlined, the selected day
+    /// filled, a dot on a day with a note -- then today and the selected
+    /// day in words. `hover` is the pointer in canvas pixels.
+    pub fn ui(&self, width: u32, _height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+        use crate::notepad::{KEY_PAGE_DOWN, KEY_PAGE_UP};
+        let layout = CalendarLayout::new(width);
+        let mut ui = Ui::new(palette, hover);
+        let p = *ui.palette();
+        ui.button(layout.earlier, "<", KEY_PAGE_UP, ButtonKind::Quiet);
+        ui.button(layout.later, ">", KEY_PAGE_DOWN, ButtonKind::Quiet);
         let title = alloc::format!(
             "{} {}",
             MONTHS[self.selected.month as usize - 1],
             self.selected.year
         );
-        let mut lines = alloc::vec![
-            alloc::format!("<{:^26}>", title),
-            WEEKDAYS
-                .iter()
-                .map(|d| alloc::format!(" {} ", &d[..2]))
-                .collect::<Vec<_>>()
-                .join(""),
-        ];
+        ui.text_centered(&rect(36, 0, width - 72, HEADER_H), &title, p.text, 2);
+        for (cell, name) in grid(rect(0, WEEKDAYS_TOP, width, 16), 7, 1, 4)
+            .iter()
+            .zip(WEEKDAYS.iter())
+        {
+            ui.text_centered(cell, &name[..2], p.muted, 1);
+        }
         let (lead, days) = self.shape();
-        let mut row = String::new();
-        for _ in 0..lead {
-            row.push_str("    ");
-        }
         for day in 1..=days {
+            let Some(cell) = layout.cells.get(lead + day as usize - 1).copied() else {
+                break;
+            };
             let date = Date::new(self.selected.year, self.selected.month, day);
-            let mark = if self.today == Some(date) { '*' } else { ' ' };
-            let dot = if self.has_note(date) { '.' } else { ' ' };
-            row.push_str(&alloc::format!("{mark}{day:>2}{dot}"));
-            if row.len() >= WIDTH {
-                lines.push(core::mem::take(&mut row));
+            let selected = date == self.selected;
+            let (fill, ink) = if selected {
+                (p.accent, p.on_accent)
+            } else {
+                (p.raised, p.text)
+            };
+            ui.fill(cell, fill, 6);
+            if self.today == Some(date) && !selected {
+                ui.outline(cell, p.accent, 6, 2);
             }
+            if ui.hovered(&cell) && !selected {
+                ui.outline(cell, p.text, 6, 1);
+            }
+            ui.text_centered(&cell, &day.to_string(), ink, 1);
+            if self.has_note(date) {
+                let dot = rect(
+                    (cell.x + cell.width) as i32 - 11,
+                    (cell.y + cell.height) as i32 - 11,
+                    6,
+                    6,
+                );
+                ui.fill(dot, if selected { p.on_accent } else { p.accent }, 3);
+            }
+            ui.hit_area(cell, DAY_KEY_FIRST + day - 1);
         }
-        if !row.is_empty() {
-            lines.push(row);
-        }
-        while lines.len() < FIRST_WEEK_LINE + 6 {
-            lines.push(String::new());
-        }
-        lines.push(String::new());
-        lines.push(match self.today {
+        let today_line = match self.today {
             Some(today) => alloc::format!("Today  {}", today.long()),
             None => "The clock is not set".to_string(),
-        });
-        lines.push(if self.has_note(self.selected) {
+        };
+        ui.text(0, TEXT_TOP, &today_line, p.muted, 1);
+        let state = if self.has_note(self.selected) {
             alloc::format!("{}   a note is kept", self.selected.short())
         } else {
             alloc::format!("{}   no note yet", self.selected.short())
-        });
-        lines
+        };
+        ui.text(0, TEXT_TOP + 18, &state, p.text, 1);
+        ui
     }
 
     pub fn footer(&self) -> String {
@@ -333,6 +353,23 @@ impl CalendarView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use services_gui_host::Theme;
+    use view_types::DrawOp;
+
+    fn palette() -> Palette {
+        Palette::from_theme(&Theme::DEFAULT)
+    }
+
+    fn texts(cal: &CalendarView) -> Vec<String> {
+        cal.ui(404, 340, palette(), None)
+            .into_ops()
+            .into_iter()
+            .filter_map(|op| match op {
+                DrawOp::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn september_2026_starts_on_a_tuesday_and_the_grid_says_so() {
@@ -346,16 +383,35 @@ mod tests {
         assert_eq!(Date::parse("memo.txt"), None);
         let mut cal = CalendarView::new(Some(today));
         cal.set_file_names(&["2026-09-03".to_string(), "notes".to_string()]);
-        let lines = cal.lines();
-        assert_eq!(lines[0], "<      September 2026      >");
-        assert_eq!(lines[1], " Mo  Tu  We  Th  Fr  Sa  Su ");
-        assert_eq!(lines[2], "      1   2   3.  4   5   6 ");
-        assert!(lines[5].contains("*24 "), "{:?}", lines[5]);
-        assert_eq!(lines[6], " 28  29  30 ");
-        assert_eq!(lines[9], "Today  Thursday 24 September 2026");
-        assert_eq!(lines[10], "Thu 24 Sep   no note yet");
-        // The selection sits on the 24th: row 3 of the grid, Thursday.
-        assert_eq!(cal.selection(), alloc::vec![(5, 12, 15)]);
+        let layout = CalendarLayout::new(404);
+        assert_eq!(layout.cells.len(), 42);
+        // The 1st sits in the second column (Tuesday); the 24th in row 3.
+        assert_eq!(
+            cal.cell_of(&layout, Date::new(2026, 9, 1)),
+            Some(layout.cells[1])
+        );
+        assert_eq!(cal.cell_of(&layout, today), Some(layout.cells[24]));
+        assert_eq!(cal.cell_of(&layout, Date::new(2026, 10, 1)), None);
+        let shown = texts(&cal);
+        assert!(shown.contains(&"September 2026".to_string()));
+        assert!(shown.contains(&"Today  Thursday 24 September 2026".to_string()));
+        assert!(shown.contains(&"Thu 24 Sep   no note yet".to_string()));
+        // The selected day is the one accent fill among the cells; the
+        // noted 3rd carries a dot; today (selected) has no outline.
+        let ops = cal.ui(404, 340, palette(), None).into_ops();
+        let accent_cells = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DrawOp::RoundedFill { rect, color, radius: 6 }
+                    if *color == palette().accent && rect.height == layout.cells[0].height)
+            })
+            .count();
+        assert_eq!(accent_cells, 1);
+        let dots = ops
+            .iter()
+            .filter(|op| matches!(op, DrawOp::RoundedFill { radius: 3, .. }))
+            .count();
+        assert_eq!(dots, 1);
         assert_eq!(
             cal.footer(),
             "1 note this month   Enter opens the day's note"
@@ -374,7 +430,7 @@ mod tests {
             Date::new(2026, 10, 1),
             "a week on crosses the month"
         );
-        assert!(cal.lines()[10].ends_with("a note is kept"));
+        assert!(texts(&cal).contains(&"Thu 1 Oct   a note is kept".to_string()));
         cal.handle_byte(KEY_UP);
         cal.handle_byte(KEY_LEFT);
         assert_eq!(cal.selected, Date::new(2026, 9, 23));
@@ -393,22 +449,36 @@ mod tests {
         assert_eq!(cal.selected, Date::new(2027, 1, 30));
         assert_eq!(cal.handle_byte(b't'), CalendarEffect::Redraw);
         assert_eq!(cal.selected, today);
-        // Clicks: the title's ends turn the month; a day selects; again opens.
-        assert_eq!(cal.click(0, 27), CalendarEffect::Redraw);
+        // Clicks, by pixel: the header's buttons turn the month; a day
+        // cell selects; the selected cell opens.
+        let layout = CalendarLayout::new(404);
+        let hit = |cal: &CalendarView, cell: PixelRect| {
+            cal.ui(404, 340, palette(), None)
+                .hit(cell.x as i32 + 3, cell.y as i32 + 3)
+        };
+        assert_eq!(hit(&cal, layout.later), Some(KEY_PAGE_DOWN));
+        cal.handle_byte(KEY_PAGE_DOWN);
         assert_eq!(cal.selected.month, 10);
-        assert_eq!(cal.click(0, 0), CalendarEffect::Redraw);
+        assert_eq!(hit(&cal, layout.earlier), Some(KEY_PAGE_UP));
+        cal.handle_byte(KEY_PAGE_UP);
         assert_eq!(cal.selected.month, 9);
-        assert_eq!(cal.day_at(2, 0), None, "before the 1st");
-        assert_eq!(cal.day_at(2, 5), Some(Date::new(2026, 9, 1)));
-        assert_eq!(cal.day_at(6, 12), None, "after the 30th");
-        assert_eq!(cal.click(3, 9), CalendarEffect::Redraw);
+        assert_eq!(hit(&cal, layout.cells[0]), None, "before the 1st");
+        let ninth = cal.cell_of(&layout, Date::new(2026, 9, 9)).unwrap();
+        let key = hit(&cal, ninth).expect("a day there");
+        assert_eq!(key, DAY_KEY_FIRST + 8);
+        assert_eq!(cal.handle_byte(key), CalendarEffect::Redraw);
         assert_eq!(cal.selected, Date::new(2026, 9, 9));
         assert_eq!(
-            cal.click(3, 9),
+            cal.handle_byte(key),
             CalendarEffect::OpenNote {
                 name: "2026-09-09".to_string(),
                 exists: false
             }
+        );
+        assert_eq!(
+            cal.handle_byte(DAY_KEY_FIRST + 30),
+            CalendarEffect::None,
+            "no 31st"
         );
         cal.selected = Date::new(2026, 10, 1);
         assert_eq!(
@@ -420,7 +490,7 @@ mod tests {
         );
         // No clock: a grid all the same, and it says so.
         let mut blind = CalendarView::new(None);
-        assert_eq!(blind.lines()[9], "The clock is not set");
+        assert!(texts(&blind).contains(&"The clock is not set".to_string()));
         assert_eq!(blind.handle_byte(b't'), CalendarEffect::Redraw);
     }
 }
