@@ -26,6 +26,7 @@ pub mod palette_overlay;
 pub mod present_policy;
 pub mod render_stats;
 pub mod rtc;
+pub mod tasks;
 pub mod timer;
 
 // Storage modules (available in both test and non-test)

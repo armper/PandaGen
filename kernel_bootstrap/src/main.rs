@@ -37,6 +37,7 @@ mod palette_overlay;
 mod present_policy;
 mod render_stats;
 mod rtc;
+mod tasks;
 mod timer;
 mod vga;
 mod workspace;

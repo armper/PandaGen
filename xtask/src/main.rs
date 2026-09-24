@@ -608,6 +608,29 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: Tasks from the palette, one added and saved");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,t,a,s,k,s,ret,sleep:2,a,m,i,l,k,ret,sleep:3,shot:tasks"
+            .to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_tasks".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The card: 460 wide, centred (x=410), first cascade step at y=44,
+        // focused, so its top edge is the accent ring...
+        "--expect-pixel".to_string(),
+        "640,44,52,211,153".to_string(),
+        // ...and its body, right of the text, the plain surface.
+        "--expect-pixel".to_string(),
+        "850,200,28,34,48".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: a save, Files from the palette, a file opened from it");
     let args = [
         "--port-base".to_string(),
@@ -636,12 +659,12 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // the bare gradient would otherwise be.
         "--expect-pixel".to_string(),
         "1200,81,28,34,48".to_string(),
-        // Two dock tiles lit: Notepad and Files. Eight tiles (GFX-078) are
-        // 376px wide centred on 640, so the first centre is at 472.
+        // Two dock tiles lit: Notepad and Files. Nine tiles (GFX-079) are
+        // 424px wide centred on 640, so the first centre is at 448.
         "--expect-pixel".to_string(),
-        "472,785,52,211,153".to_string(),
+        "448,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "520,785,52,211,153".to_string(),
+        "496,785,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

@@ -50,6 +50,7 @@ use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::game::{Game, GameEffect};
 use crate::notepad::{Notepad, NotepadEffect};
+use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
 use crate::timer::{TimerEffect, TimerView};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
@@ -112,10 +113,12 @@ pub enum DeskApp {
     Timer,
     /// The sliding-tiles game (GFX-078).
     Tiles,
+    /// The to-do list, kept as the document `tasks` (GFX-079).
+    Tasks,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 8] = [
+    pub const ALL: [DeskApp; 9] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
@@ -124,7 +127,21 @@ impl DeskApp {
         DeskApp::Calendar,
         DeskApp::Timer,
         DeskApp::Tiles,
+        DeskApp::Tasks,
     ];
+
+    /// What the desk must ask the kernel for right after `app` opens in
+    /// card `id`: the cards that show a document need it read.
+    pub fn launch_request(self, id: ViewId) -> Option<DeskRequest> {
+        match self {
+            DeskApp::Files | DeskApp::Calendar => Some(DeskRequest::ListFiles { id }),
+            DeskApp::Tasks => Some(DeskRequest::PreviewFile {
+                id,
+                name: TASKS_FILE.to_string(),
+            }),
+            _ => None,
+        }
+    }
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -140,6 +157,7 @@ impl DeskApp {
             DeskApp::Calendar => "Calendar",
             DeskApp::Timer => "Timer",
             DeskApp::Tiles => "Tiles",
+            DeskApp::Tasks => "Tasks",
         }
     }
 
@@ -158,6 +176,7 @@ impl DeskApp {
             DeskApp::Calendar => "Cl",
             DeskApp::Timer => "Ti",
             DeskApp::Tiles => "2k",
+            DeskApp::Tasks => "Td",
         }
     }
 
@@ -175,9 +194,13 @@ impl DeskApp {
             DeskApp::Calendar => CALENDAR_SIZE,
             DeskApp::Timer => TIMER_SIZE,
             DeskApp::Tiles => TILES_SIZE,
+            DeskApp::Tasks => TASKS_SIZE,
         }
     }
 }
+
+/// The Tasks card (GFX-079).
+pub const TASKS_SIZE: (usize, usize) = (460, 400);
 
 /// The Tiles card (GFX-078): the board and its buttons.
 pub const TILES_SIZE: (usize, usize) = (340, 400);
@@ -479,6 +502,16 @@ impl DeskWindow {
             ],
             AppState::Tiles(_) => alloc::vec![
                 ("New".to_string(), b'n'),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
+                ("Add".to_string(), b'\n'),
+                ("Cancel".to_string(), crate::notepad::ESC),
+            ],
+            AppState::Tasks(_) => alloc::vec![
+                ("Add".to_string(), b'a'),
+                ("Done".to_string(), b'\n'),
+                ("Remove".to_string(), crate::notepad::KEY_DELETE),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
         }
@@ -882,6 +915,7 @@ pub enum AppState {
     Calendar(CalendarView),
     Timer(TimerView),
     Tiles(Game),
+    Tasks(TasksView),
 }
 
 /// One open window.
@@ -1067,10 +1101,12 @@ pub enum PaletteAction {
     Timer,
     /// The Tiles game (GFX-078).
     Tiles,
+    /// The Tasks card (GFX-079).
+    Tasks,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 37] = [
+    pub const ALL: [PaletteAction; 38] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1108,6 +1144,7 @@ impl PaletteAction {
         PaletteAction::Calendar,
         PaletteAction::Timer,
         PaletteAction::Tiles,
+        PaletteAction::Tasks,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1149,6 +1186,7 @@ impl PaletteAction {
             PaletteAction::Calendar => "Calendar",
             PaletteAction::Timer => "Timer: stopwatch and countdown",
             PaletteAction::Tiles => "Tiles: the 2048 game",
+            PaletteAction::Tasks => "Tasks: the to-do list",
         }
     }
 
@@ -1191,6 +1229,7 @@ impl PaletteAction {
             PaletteAction::Calendar => "",
             PaletteAction::Timer => "",
             PaletteAction::Tiles => "",
+            PaletteAction::Tasks => "",
         }
     }
 
@@ -1728,6 +1767,12 @@ impl Desk {
                 files.preview_pending = None;
             }
         }
+        // The Tasks card reads its whole document the same way (GFX-079).
+        if let Some(AppState::Tasks(tasks)) = self.window_mut(id).map(|w| &mut w.state) {
+            if name == TASKS_FILE {
+                tasks.load(text);
+            }
+        }
     }
 
     /// Every tick (GFX-060): documents that have sat still save
@@ -1809,6 +1854,21 @@ impl Desk {
                     requests.push(DeskRequest::Io {
                         id: window.id,
                         effect,
+                    });
+                    if !self.quiet_saves.contains(&window.id) {
+                        self.quiet_saves.push(window.id);
+                    }
+                }
+            }
+            // The task list saves itself the same way (GFX-079).
+            if let AppState::Tasks(tasks) = &mut window.state {
+                if let Some(content) = tasks.save_due(now) {
+                    requests.push(DeskRequest::Io {
+                        id: window.id,
+                        effect: NotepadEffect::Save {
+                            path: TASKS_FILE.to_string(),
+                            content,
+                        },
                     });
                     if !self.quiet_saves.contains(&window.id) {
                         self.quiet_saves.push(window.id);
@@ -1910,6 +1970,7 @@ impl Desk {
                 DeskApp::Tiles => AppState::Tiles(Game::new(
                     self.last_tick.wrapping_mul(6_364_136_223_846_793_005) ^ self.opened as u64,
                 )),
+                DeskApp::Tasks => AppState::Tasks(TasksView::new()),
             },
         });
         self.focus = Some(id);
@@ -2146,6 +2207,13 @@ impl Desk {
                 "Tiles".to_string(),
                 alloc::vec![alloc::format!("score {}", game.score())],
             ),
+            AppState::Tasks(tasks) => (
+                "Tasks".to_string(),
+                alloc::vec![alloc::format!(
+                    "{} to do",
+                    tasks.tasks().iter().filter(|t| !t.done).count()
+                )],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2362,6 +2430,15 @@ impl Desk {
             PaletteAction::Tiles => {
                 self.open_or_raise(DeskApp::Tiles);
                 None
+            }
+            PaletteAction::Tasks => {
+                let had = self.windows.iter().any(|w| w.app == DeskApp::Tasks);
+                let id = self.open_or_raise(DeskApp::Tasks);
+                if had {
+                    None
+                } else {
+                    DeskApp::Tasks.launch_request(id)
+                }
             }
             PaletteAction::Calendar => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Calendar);
@@ -2624,8 +2701,7 @@ impl Desk {
             }
             None => {
                 let id = self.launch(app);
-                matches!(app, DeskApp::Files | DeskApp::Calendar)
-                    .then_some(DeskRequest::ListFiles { id })
+                app.launch_request(id)
             }
         }
     }
@@ -2873,6 +2949,12 @@ impl Desk {
                                 self.window_mut(*target).map(|w| &mut w.state)
                             {
                                 game.click(line, column);
+                            }
+                            // Tasks: a row, or a button (GFX-079).
+                            if let Some(AppState::Tasks(tasks)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                tasks.click(line, column);
                             }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
@@ -3351,6 +3433,14 @@ impl Desk {
                     (None, true)
                 }
             },
+            AppState::Tasks(tasks) => match tasks.handle_byte(byte) {
+                TasksEffect::None => (None, false),
+                TasksEffect::Redraw => (None, true),
+                TasksEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3802,6 +3892,10 @@ impl Desk {
                     (timer.lines(), title, timer.footer(), None)
                 }
                 AppState::Tiles(game) => (game.lines(), "Tiles".to_string(), game.footer(), None),
+                AppState::Tasks(tasks) => {
+                    highlight = tasks.highlight();
+                    (tasks.lines(), "Tasks".to_string(), tasks.footer(), None)
+                }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
                     let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
@@ -5997,6 +6091,72 @@ mod tests {
         assert_eq!(count(&desk), 2);
         desk.handle_key(crate::notepad::ESC);
         assert!(desk.window(id).is_none());
+    }
+
+    /// Tasks (GFX-079): opening asks for the `tasks` document, the card
+    /// shows it with the selected row highlighted, a change saves itself
+    /// quietly a second later, and the chips follow the footer prompt.
+    #[test]
+    fn tasks_is_a_document_that_saves_itself_quietly() {
+        let mut desk = Desk::new(1280, 800);
+        assert!(DeskApp::ALL.contains(&DeskApp::Tasks));
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"tasks" {
+            desk.handle_key(*byte);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        let id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(
+            request,
+            Some(DeskRequest::PreviewFile {
+                id,
+                name: "tasks".to_string()
+            })
+        );
+        desk.preview_loaded(id, "tasks", "[ ] one\n[x] two\n");
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.highlight_line, Some(0));
+        assert_eq!(card.actions, alloc::vec!["Add", "Done", "Remove", "Close"]);
+        // Add through the footer: the chips become Add / Cancel.
+        desk.tick(10);
+        desk.handle_key(b'a');
+        assert_eq!(desk.window(id).unwrap().actions()[1].0, "Cancel");
+        for byte in b"three" {
+            desk.handle_key(*byte);
+        }
+        desk.handle_key(b'\n');
+        // Nothing yet; a second later, a quiet save of the whole document.
+        assert!(desk.tick(50).is_empty());
+        let requests = desk.tick(10 + crate::tasks::SAVE_AFTER_TICKS);
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::Io {
+                id,
+                effect: NotepadEffect::Save {
+                    path: "tasks".to_string(),
+                    content: "[ ] one\n[x] two\n[ ] three\n".to_string()
+                }
+            }]
+        );
+        let before = desk.notice_log.len();
+        let effect = match &requests[0] {
+            DeskRequest::Io { effect, .. } => effect.clone(),
+            _ => panic!(),
+        };
+        desk.io_done(id, &effect, Ok(None), 200);
+        assert_eq!(desk.notice_log.len(), before, "a quiet save");
+        // The dock tile asks for the document too.
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
+        let (request, _) = desk.handle_key(KEY_CTRL_SPACE);
+        assert!(request.is_none());
+        desk.handle_key(crate::notepad::ESC);
+        let fresh = desk.launch(DeskApp::Tasks);
+        assert!(matches!(
+            DeskApp::Tasks.launch_request(fresh),
+            Some(DeskRequest::PreviewFile { .. })
+        ));
     }
 
     #[test]
