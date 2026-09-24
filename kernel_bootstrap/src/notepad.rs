@@ -28,8 +28,10 @@
 
 extern crate alloc;
 
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::{Ref, RefCell, RefMut};
 use editor_core::{Position, TextBuffer};
 use services_gui_host::LineStyle;
 
@@ -63,6 +65,9 @@ pub const KEY_CTRL_SHIFT_1: u8 = 0x9A;
 pub const KEY_CTRL_RELEASED: u8 = 0x9F;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
+/// Ctrl+D: this document in a second card (GFX-074). The desk answers it;
+/// the Notepad itself never sees it.
+pub const CTRL_D: u8 = 0x04;
 pub const CTRL_F: u8 = 0x06;
 pub const CTRL_V: u8 = 0x16;
 pub const CTRL_X: u8 = 0x18;
@@ -110,14 +115,14 @@ pub enum NotepadEffect {
     Version { path: String, index: usize },
 }
 
-/// Browsing the kept versions of the document (GFX-058): the document as
-/// it was before browsing began, so Esc can put it back, and which version
-/// is on screen.
+/// Browsing the kept versions of the document (GFX-058): the version on
+/// screen, laid over the document in this card only -- the document itself
+/// is untouched until Enter restores, so another card on the same document
+/// (GFX-074) goes on showing it -- and where the caret was before.
 #[derive(Debug, Clone)]
 struct HistoryBrowse {
-    saved: TextBuffer,
+    shown: TextBuffer,
     saved_cursor: Position,
-    saved_dirty: bool,
     index: usize,
     total: usize,
     /// When the shown version was current; 0 when unknown.
@@ -135,14 +140,47 @@ enum Prompt {
     Find(String),
 }
 
-/// The Notepad's whole state.
-#[derive(Debug, Clone)]
-pub struct Notepad {
+/// The text itself and what belongs to it rather than to any one card
+/// (GFX-074): the buffer, its undo history, whether it is saved, its name,
+/// and the autosave clock. Cards share one through `Rc<RefCell<_>>`: the
+/// desk runs on one thread, and every borrow here is scoped to a single
+/// statement, so two cards can never hold it at once.
+#[derive(Debug)]
+pub struct Document {
     buffer: TextBuffer,
-    cursor: Position,
     undo: Vec<(TextBuffer, Position)>,
     dirty: bool,
     path: Option<String>,
+    /// An edit landed since the last `autosave_due` call.
+    edited: bool,
+    /// When the document was last edited, as `autosave_due` saw it.
+    idle_since: Option<u64>,
+}
+
+impl Document {
+    fn new(path: Option<String>, content: &str) -> Self {
+        Self {
+            buffer: TextBuffer::from_string(content.to_string()),
+            undo: Vec::new(),
+            dirty: false,
+            path,
+            edited: false,
+            idle_since: None,
+        }
+    }
+}
+
+/// One card's view of a [`Document`]: the caret, the selection, the scroll,
+/// the prompts and the history browser are this card's own; the text, the
+/// name and the saved state are the document's, and shared with every
+/// other card that [`Notepad::share`] made from it (GFX-074).
+///
+/// Cloning a Notepad is sharing: the clone is another view of the same
+/// document, which is what `share` does with a fresh caret.
+#[derive(Debug, Clone)]
+pub struct Notepad {
+    doc: Rc<RefCell<Document>>,
+    cursor: Position,
     status: String,
     prompt: Option<Prompt>,
     /// First document line shown.
@@ -156,15 +194,11 @@ pub struct Notepad {
     last_rows: usize,
     /// Set while the history browser is open.
     history: Option<HistoryBrowse>,
-    /// An edit landed since the last `autosave_due` call.
-    edited: bool,
     /// Once the next `Open` lands, find and select this (GFX-061).
     pending_find: Option<String>,
     /// Lines longer than this many characters wrap onto the next visual
     /// row (GFX-064); 0 means no wrapping. Set by the card from its width.
     wrap: usize,
-    /// When the document was last edited, as `autosave_due` saw it.
-    idle_since: Option<u64>,
     /// Names on the filesystem, for the prompt's completions.
     file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
@@ -181,11 +215,8 @@ impl Default for Notepad {
 impl Notepad {
     pub fn new() -> Self {
         Self {
-            buffer: TextBuffer::new(),
+            doc: Rc::new(RefCell::new(Document::new(None, ""))),
             cursor: Position::new(0, 0),
-            undo: Vec::new(),
-            dirty: false,
-            path: None,
             status: String::new(),
             prompt: None,
             scroll: 0,
@@ -195,10 +226,78 @@ impl Notepad {
             anchor: None,
             last_rows: 1,
             history: None,
-            edited: false,
-            idle_since: None,
             pending_find: None,
             wrap: 0,
+        }
+    }
+
+    /// Another card on the same document (GFX-074): its own caret,
+    /// selection, scroll and prompts, the same text, name, undo and saved
+    /// state. What is typed in either appears in both.
+    pub fn share(&self) -> Notepad {
+        let mut view = Notepad::new();
+        view.doc = Rc::clone(&self.doc);
+        view.cursor = self.cursor;
+        view.scroll = self.scroll;
+        view.wrap = self.wrap;
+        view.file_names = self.file_names.clone();
+        view
+    }
+
+    /// Whether the two show one document.
+    pub fn shares_with(&self, other: &Notepad) -> bool {
+        Rc::ptr_eq(&self.doc, &other.doc)
+    }
+
+    /// Whether another card shows this document too. Closing or replacing
+    /// a shared document in one card loses nothing, so those stop asking.
+    pub fn shared(&self) -> bool {
+        Rc::strong_count(&self.doc) > 1
+    }
+
+    fn doc(&self) -> Ref<'_, Document> {
+        self.doc.borrow()
+    }
+
+    fn doc_mut(&self) -> RefMut<'_, Document> {
+        self.doc.borrow_mut()
+    }
+
+    /// The text this card shows: a kept version while browsing history,
+    /// otherwise the document.
+    fn with_text<T>(&self, f: impl FnOnce(&TextBuffer) -> T) -> T {
+        match &self.history {
+            Some(browse) => f(&browse.shown),
+            None => f(&self.doc().buffer),
+        }
+    }
+
+    fn line(&self, row: usize) -> String {
+        self.with_text(|text| text.line(row).unwrap_or("").to_string())
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.with_text(|text| text.lines().to_vec())
+    }
+
+    fn line_length(&self, row: usize) -> usize {
+        self.with_text(|text| text.line_length(row))
+    }
+
+    /// Another card may have edited the document under this caret: bring
+    /// the caret and the anchor back inside the text (GFX-074).
+    fn clamp_cursor(&mut self) {
+        let last = self.line_count().saturating_sub(1);
+        self.cursor.row = self.cursor.row.min(last);
+        let line = self.line(self.cursor.row);
+        self.cursor.col = floor_boundary(&line, self.cursor.col);
+        if let Some(anchor) = self.anchor {
+            if anchor.row > last {
+                self.anchor = None;
+            } else {
+                let line = self.line(anchor.row);
+                self.anchor = Some(Position::new(anchor.row, floor_boundary(&line, anchor.col)));
+            }
         }
     }
 
@@ -213,7 +312,8 @@ impl Notepad {
     /// or hard when a word is longer than the card.
     fn visual_rows(&self) -> Vec<(usize, usize, usize)> {
         let mut rows = Vec::new();
-        for (row, line) in self.buffer.lines().iter().enumerate() {
+        let lines = self.lines();
+        for (row, line) in lines.iter().enumerate() {
             if self.wrap == 0 {
                 rows.push((row, 0, line.len()));
                 continue;
@@ -262,23 +362,26 @@ impl Notepad {
     /// prompt or browser may be open; an unnamed document never saves on
     /// its own -- it has nowhere to go until it is given a name.
     pub fn autosave_due(&mut self, now: u64) -> Option<NotepadEffect> {
-        if self.edited {
-            self.edited = false;
-            self.idle_since = Some(now);
+        // The clock is the document's, so a document in two cards saves
+        // once: whichever card asks first takes the save (GFX-074).
+        let mut doc = self.doc_mut();
+        if doc.edited {
+            doc.edited = false;
+            doc.idle_since = Some(now);
             return None;
         }
-        if !self.dirty || self.prompt.is_some() || self.history.is_some() {
+        if !doc.dirty || self.prompt.is_some() || self.history.is_some() {
             return None;
         }
-        let path = self.path.clone()?;
-        let since = self.idle_since?;
+        let path = doc.path.clone()?;
+        let since = doc.idle_since?;
         if now.saturating_sub(since) < AUTOSAVE_IDLE_TICKS {
             return None;
         }
-        self.idle_since = None;
+        doc.idle_since = None;
         Some(NotepadEffect::Save {
             path,
-            content: self.content(),
+            content: doc.buffer.as_string(),
         })
     }
 
@@ -310,9 +413,8 @@ impl Notepad {
         };
         if self.history.is_none() {
             self.history = Some(HistoryBrowse {
-                saved: self.buffer.clone(),
+                shown: TextBuffer::new(),
                 saved_cursor: self.cursor,
-                saved_dirty: self.dirty,
                 index,
                 total,
                 when,
@@ -320,25 +422,27 @@ impl Notepad {
             });
         }
         if let Some(browse) = self.history.as_mut() {
+            browse.shown = TextBuffer::from_string(content.to_string());
             browse.index = index;
             browse.total = total;
             browse.when = when;
             browse.loading = false;
         }
-        self.buffer = TextBuffer::from_string(content.to_string());
         self.cursor = Position::new(0, 0);
         self.anchor = None;
         self.scroll = 0;
         self.scrolled_away = false;
     }
 
-    /// Leave the browser with the document as it was.
+    /// Leave the browser; the document was never touched, so there is
+    /// only the caret to put back.
     fn leave_history(&mut self) {
         if let Some(browse) = self.history.take() {
-            self.buffer = browse.saved;
             self.cursor = browse.saved_cursor;
-            self.dirty = browse.saved_dirty;
             self.anchor = None;
+            self.scroll = 0;
+            self.scrolled_away = false;
+            self.clamp_cursor();
         }
     }
 
@@ -347,10 +451,10 @@ impl Notepad {
     /// is shown by saving it -- the current text becomes a version, so
     /// nothing is lost either way -- and Esc puts the document back.
     fn handle_history_byte(&mut self, byte: u8) -> NotepadEffect {
+        let path = self.doc().path.clone().unwrap_or_default();
         let Some(browse) = self.history.as_mut() else {
             return NotepadEffect::None;
         };
-        let path = self.path.clone().unwrap_or_default();
         match byte {
             ESC => {
                 self.leave_history();
@@ -375,9 +479,15 @@ impl Notepad {
                 NotepadEffect::Redraw
             }
             b'\n' | b'\r' => {
+                // The shown version becomes the document -- in every card
+                // on it -- and is saved; what it replaced becomes a version.
                 let content = self.content();
                 self.history = None;
-                self.dirty = true;
+                {
+                    let mut doc = self.doc_mut();
+                    doc.buffer = TextBuffer::from_string(content.clone());
+                    doc.dirty = true;
+                }
                 self.status = "Restoring...".to_string();
                 NotepadEffect::Save { path, content }
             }
@@ -434,16 +544,15 @@ impl Notepad {
     pub fn viewport_selection(&self, rows: usize) -> Vec<(usize, usize, usize)> {
         // While browsing history the fill marks what differs from the
         // document (GFX-070): every visual row whose line is not in it.
-        if let Some(browse) = &self.history {
+        if self.history.is_some() {
             let visual = self.visual_rows();
+            let document: Vec<String> = self.doc().buffer.lines().to_vec();
             return visual
                 .iter()
                 .enumerate()
                 .skip(self.scroll)
                 .take(rows)
-                .filter(|(_, (row, _, _))| {
-                    !browse.saved.lines().iter().any(|l| l == self.line(*row))
-                })
+                .filter(|(_, (row, _, _))| !document.contains(&self.line(*row)))
                 .map(|(i, (row, start, end))| {
                     let cells = self.line(*row)[*start..*end].chars().count();
                     (i - self.scroll, 0, cells.max(1))
@@ -520,7 +629,7 @@ impl Notepad {
             .skip(self.scroll)
             .take(rows)
             .filter_map(|(i, (row, _, _))| {
-                let mut style = Self::line_style(self.line(*row))?;
+                let mut style = Self::line_style(&self.line(*row))?;
                 let last_segment = visual.get(i + 1).map(|r| r.0 != *row).unwrap_or(true);
                 style.underline = style.underline && last_segment;
                 Some((i - self.scroll, style))
@@ -541,6 +650,11 @@ impl Notepad {
     pub fn paste(&mut self, text: &str) -> NotepadEffect {
         self.status.clear();
         self.scrolled_away = false;
+        if self.history.is_some() {
+            // A kept version is read-only; Enter restores it.
+            return NotepadEffect::None;
+        }
+        self.clamp_cursor();
         if self.prompt.is_some() {
             // Into the prompt's name, one line of it.
             let line: String = text.chars().take_while(|c| *c != '\n').collect();
@@ -567,8 +681,8 @@ impl Notepad {
             self.anchor = None;
             return false;
         };
-        let mut lines: Vec<String> = self.buffer.lines().to_vec();
-        let trailing = self.buffer.as_string().ends_with('\n');
+        let mut lines: Vec<String> = self.lines();
+        let trailing = self.content().ends_with('\n');
         let head = lines[start.row][..start.col.min(lines[start.row].len())].to_string();
         let tail = lines[end.row][end.col.min(lines[end.row].len())..].to_string();
         lines[start.row] = head + &tail;
@@ -577,7 +691,7 @@ impl Notepad {
         if trailing {
             content.push('\n');
         }
-        self.buffer = TextBuffer::from_string(content);
+        self.doc_mut().buffer = TextBuffer::from_string(content);
         self.cursor = start;
         self.anchor = None;
         true
@@ -586,12 +700,16 @@ impl Notepad {
     fn insert_text(&mut self, text: &str) {
         for ch in text.chars() {
             if ch == '\n' {
-                if self.buffer.insert_newline(self.cursor) {
+                let broke = self.doc_mut().buffer.insert_newline(self.cursor);
+                if broke {
                     self.cursor.row += 1;
                     self.cursor.col = 0;
                 }
-            } else if ch != '\r' && self.buffer.insert_char(self.cursor, ch) {
-                self.cursor.col += ch.len_utf8();
+            } else if ch != '\r' {
+                let put = self.doc_mut().buffer.insert_char(self.cursor, ch);
+                if put {
+                    self.cursor.col += ch.len_utf8();
+                }
             }
         }
     }
@@ -606,18 +724,18 @@ impl Notepad {
 
     fn move_left(&mut self) {
         if self.cursor.col > 0 {
-            self.cursor.col = floor_boundary(self.line(self.cursor.row), self.cursor.col - 1);
+            self.cursor.col = floor_boundary(&self.line(self.cursor.row), self.cursor.col - 1);
         } else if self.cursor.row > 0 {
             self.cursor.row -= 1;
-            self.cursor.col = self.buffer.line_length(self.cursor.row);
+            self.cursor.col = self.line_length(self.cursor.row);
         }
     }
 
     fn move_right(&mut self) {
-        let len = self.buffer.line_length(self.cursor.row);
+        let len = self.line_length(self.cursor.row);
         if self.cursor.col < len {
-            self.cursor.col = ceil_boundary(self.line(self.cursor.row), self.cursor.col + 1);
-        } else if self.cursor.row + 1 < self.buffer.line_count() {
+            self.cursor.col = ceil_boundary(&self.line(self.cursor.row), self.cursor.col + 1);
+        } else if self.cursor.row + 1 < self.line_count() {
             self.cursor.row += 1;
             self.cursor.col = 0;
         }
@@ -630,12 +748,12 @@ impl Notepad {
             return false;
         }
         let from = self.selection().map(|(s, _)| s).unwrap_or(self.cursor);
-        let count = self.buffer.line_count();
+        let count = self.line_count();
         for step in 0..=count {
             let row = (from.row + step) % count;
             let line = self.line(row);
             let start_at = if step == 0 {
-                ceil_boundary(line, (from.col + 1).min(line.len()))
+                ceil_boundary(&line, (from.col + 1).min(line.len()))
             } else {
                 0
             };
@@ -659,11 +777,7 @@ impl Notepad {
         if query.is_empty() {
             return 0;
         }
-        self.buffer
-            .lines()
-            .iter()
-            .map(|l| l.matches(query).count())
-            .sum()
+        self.lines().iter().map(|l| l.matches(query).count()).sum()
     }
 
     /// The names a prompt completes against.
@@ -680,14 +794,14 @@ impl Notepad {
             .collect()
     }
 
-    /// Replace the document with `content` from `path`.
+    /// Show `content` from `path` in this card: a new document. A card
+    /// that shared its document leaves the other cards on it (GFX-074) --
+    /// opening another file here does not change what they show.
     pub fn load(&mut self, path: Option<String>, content: &str) {
         self.history = None;
-        self.buffer = TextBuffer::from_string(content.to_string());
+        self.doc = Rc::new(RefCell::new(Document::new(path, content)));
         self.cursor = Position::new(0, 0);
-        self.undo.clear();
-        self.dirty = false;
-        self.path = path;
+        self.anchor = None;
         self.prompt = None;
         self.scroll = 0;
         self.close_armed = false;
@@ -700,15 +814,17 @@ impl Notepad {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.doc().dirty
     }
 
-    pub fn path(&self) -> Option<&str> {
-        self.path.as_deref()
+    pub fn path(&self) -> Option<String> {
+        self.doc().path.clone()
     }
 
+    /// The text this card shows: the document, or the kept version being
+    /// browsed.
     pub fn content(&self) -> String {
-        self.buffer.as_string()
+        self.with_text(|text| text.as_string())
     }
 
     pub fn cursor(&self) -> Position {
@@ -716,16 +832,17 @@ impl Notepad {
     }
 
     pub fn line_count(&self) -> usize {
-        self.buffer.line_count()
+        self.with_text(|text| text.line_count())
     }
 
     /// The header text: `name — Notepad`, with a mark when unsaved.
     pub fn title(&self) -> String {
-        let name = self.path.as_deref().unwrap_or("Untitled");
+        let doc = self.doc();
+        let name = doc.path.as_deref().unwrap_or("Untitled");
         if self.history.is_some() {
             return alloc::format!("{name} - earlier version");
         }
-        if self.dirty {
+        if doc.dirty {
             alloc::format!("* {name} - Notepad")
         } else {
             alloc::format!("{name} - Notepad")
@@ -741,11 +858,12 @@ impl Notepad {
             } else {
                 alloc::format!("   {}", crate::rtc::format_unix_minutes(browse.when))
             };
-            let differing = self
-                .buffer
+            let doc = self.doc();
+            let differing = browse
+                .shown
                 .lines()
                 .iter()
-                .filter(|l| !browse.saved.lines().contains(l))
+                .filter(|l| !doc.buffer.lines().contains(l))
                 .count();
             return alloc::format!(
                 "History: {} of {} earlier{}   {} lines differ   <- older   -> newer   Enter restores   Esc back{}",
@@ -789,13 +907,9 @@ impl Notepad {
             }
             None => {}
         }
-        let col = self
-            .buffer
-            .line(self.cursor.row)
-            .map(|line| line[..self.cursor.col.min(line.len())].chars().count())
-            .unwrap_or(0);
+        let line = self.line(self.cursor.row);
+        let col = line[..self.cursor.col.min(line.len())].chars().count();
         let words: usize = self
-            .buffer
             .lines()
             .iter()
             .map(|l| l.split_whitespace().count())
@@ -804,12 +918,16 @@ impl Notepad {
             "Ln {}, Col {}   {} lines   {} words   {}",
             self.cursor.row + 1,
             col + 1,
-            self.buffer.line_count(),
+            self.line_count(),
             words,
-            if self.dirty { "Unsaved" } else { "Saved" }
+            if self.is_dirty() { "Unsaved" } else { "Saved" }
         );
         if let Some(selected) = self.selected_text() {
             text.push_str(&alloc::format!("   {} selected", selected.chars().count()));
+        }
+        let cards = Rc::strong_count(&self.doc);
+        if cards > 1 {
+            text.push_str(&alloc::format!("   in {cards} cards"));
         }
         if !self.status.is_empty() {
             text.push_str("   ");
@@ -822,6 +940,7 @@ impl Notepad {
     /// (which counts visual rows, so a wrapped line scrolls by segment).
     pub fn viewport_lines(&mut self, rows: usize) -> Vec<String> {
         self.last_rows = rows.max(1);
+        self.clamp_cursor();
         self.keep_cursor_visible(rows);
         let visual = self.visual_rows();
         visual
@@ -854,7 +973,8 @@ impl Notepad {
         let Some((row, start, end)) = visual.get(index).copied() else {
             return;
         };
-        let segment = &self.line(row)[start..end];
+        let line = self.line(row);
+        let segment = &line[start..end];
         let byte_col = segment
             .char_indices()
             .map(|(index, _)| start + index)
@@ -896,8 +1016,11 @@ impl Notepad {
     pub fn io_done(&mut self, effect: &NotepadEffect, result: Result<Option<String>, String>) {
         match (effect, result) {
             (NotepadEffect::Save { path, .. }, Ok(_)) => {
-                self.path = Some(path.clone());
-                self.dirty = false;
+                {
+                    let mut doc = self.doc_mut();
+                    doc.path = Some(path.clone());
+                    doc.dirty = false;
+                }
                 self.close_armed = false;
                 self.status = if self.status == "Restoring..." {
                     alloc::format!(
@@ -939,12 +1062,11 @@ impl Notepad {
         if self.prompt.is_some() {
             return self.handle_prompt_byte(byte);
         }
+        self.clamp_cursor();
         if byte == CTRL_Y {
-            return match &self.path {
-                Some(path) => NotepadEffect::Version {
-                    path: path.clone(),
-                    index: 0,
-                },
+            let path = self.doc().path.clone();
+            return match path {
+                Some(path) => NotepadEffect::Version { path, index: 0 },
                 None => {
                     self.status = "Save first: history is kept per name".to_string();
                     NotepadEffect::Redraw
@@ -967,7 +1089,7 @@ impl Notepad {
                         self.move_vertical(1);
                     }
                     KEY_SHIFT_HOME => self.cursor.col = 0,
-                    _ => self.cursor.col = self.buffer.line_length(self.cursor.row),
+                    _ => self.cursor.col = self.line_length(self.cursor.row),
                 }
                 return NotepadEffect::Redraw;
             }
@@ -975,7 +1097,7 @@ impl Notepad {
                 // A page is what the card shows; the caret moves with the
                 // view and the view follows it.
                 self.anchor = None;
-                let last = self.buffer.line_count().saturating_sub(1) as isize;
+                let last = self.line_count().saturating_sub(1) as isize;
                 let page = self.last_rows as isize;
                 let delta = if byte == KEY_PAGE_UP { -page } else { page };
                 let target = (self.cursor.row as isize + delta).clamp(0, last);
@@ -989,13 +1111,13 @@ impl Notepad {
             }
             KEY_END => {
                 self.anchor = None;
-                self.cursor.col = self.buffer.line_length(self.cursor.row);
+                self.cursor.col = self.line_length(self.cursor.row);
                 return NotepadEffect::Redraw;
             }
             CTRL_A => {
-                let last = self.buffer.line_count().saturating_sub(1);
+                let last = self.line_count().saturating_sub(1);
                 self.anchor = Some(Position::new(0, 0));
-                self.cursor = Position::new(last, self.buffer.line_length(last));
+                self.cursor = Position::new(last, self.line_length(last));
                 return NotepadEffect::Redraw;
             }
             CTRL_C => {
@@ -1049,9 +1171,10 @@ impl Notepad {
         }
         match byte {
             CTRL_S => {
-                if let Some(path) = &self.path {
+                let path = self.doc().path.clone();
+                if let Some(path) = path {
                     NotepadEffect::Save {
-                        path: path.clone(),
+                        path,
                         content: self.content(),
                     }
                 } else {
@@ -1068,7 +1191,9 @@ impl Notepad {
                 NotepadEffect::ListFiles
             }
             CTRL_N => {
-                if self.dirty && !self.close_armed {
+                // Another card on the document keeps it, so nothing is
+                // discarded and there is nothing to ask (GFX-074).
+                if self.is_dirty() && !self.shared() && !self.close_armed {
                     self.close_armed = true;
                     self.status = "Unsaved changes: Ctrl+N again to discard".to_string();
                     return NotepadEffect::Redraw;
@@ -1077,7 +1202,7 @@ impl Notepad {
                 NotepadEffect::Redraw
             }
             CTRL_W => {
-                if self.dirty && !self.close_armed {
+                if self.is_dirty() && !self.shared() && !self.close_armed {
                     self.close_armed = true;
                     self.status = "Unsaved changes: Ctrl+W again to close".to_string();
                     return NotepadEffect::Redraw;
@@ -1085,11 +1210,15 @@ impl Notepad {
                 NotepadEffect::Close
             }
             CTRL_Z => {
-                if let Some((buffer, cursor)) = self.undo.pop() {
-                    self.buffer = buffer;
+                let undone = self.doc_mut().undo.pop();
+                if let Some((buffer, cursor)) = undone {
+                    {
+                        let mut doc = self.doc_mut();
+                        doc.buffer = buffer;
+                        doc.dirty = true;
+                    }
                     self.cursor = cursor;
                     self.anchor = None;
-                    self.dirty = true;
                     NotepadEffect::Redraw
                 } else {
                     self.status = "Nothing to undo".to_string();
@@ -1108,7 +1237,8 @@ impl Notepad {
             }
             BACKSPACE => {
                 let before = self.snapshot();
-                match self.buffer.backspace(self.cursor) {
+                let moved = self.doc_mut().buffer.backspace(self.cursor);
+                match moved {
                     Some(pos) => {
                         self.push_undo(before);
                         self.cursor = pos;
@@ -1119,7 +1249,8 @@ impl Notepad {
             }
             KEY_DELETE => {
                 let before = self.snapshot();
-                if self.buffer.delete_char(self.cursor) {
+                let removed = self.doc_mut().buffer.delete_char(self.cursor);
+                if removed {
                     self.push_undo(before);
                     NotepadEffect::Redraw
                 } else {
@@ -1128,7 +1259,8 @@ impl Notepad {
             }
             b'\n' | b'\r' => {
                 let before = self.snapshot();
-                if self.buffer.insert_newline(self.cursor) {
+                let broke = self.doc_mut().buffer.insert_newline(self.cursor);
+                if broke {
                     self.push_undo(before);
                     self.cursor.row += 1;
                     self.cursor.col = 0;
@@ -1148,7 +1280,8 @@ impl Notepad {
                 let before = self.snapshot();
                 let mut inserted = 0;
                 for _ in 0..4 {
-                    if self.buffer.insert_char(self.cursor, ' ') {
+                    let put = self.doc_mut().buffer.insert_char(self.cursor, ' ');
+                    if put {
                         self.cursor.col += 1;
                         inserted += 1;
                     }
@@ -1162,7 +1295,8 @@ impl Notepad {
             }
             0x20..=0x7E => {
                 let before = self.snapshot();
-                if self.buffer.insert_char(self.cursor, byte as char) {
+                let put = self.doc_mut().buffer.insert_char(self.cursor, byte as char);
+                if put {
                     self.push_undo(before);
                     self.cursor.col += 1;
                     NotepadEffect::Redraw
@@ -1207,12 +1341,12 @@ impl Notepad {
                             self.cursor.col -= 1;
                         } else if self.cursor.row > 0 {
                             self.cursor.row -= 1;
-                            self.cursor.col = self.buffer.line_length(self.cursor.row);
+                            self.cursor.col = self.line_length(self.cursor.row);
                         } else {
                             // Line 0, column 0: the search starts after the
                             // caret, so step to the very end and wrap.
-                            let last = self.buffer.line_count() - 1;
-                            self.cursor = Position::new(last, self.buffer.line_length(last));
+                            let last = self.line_count() - 1;
+                            self.cursor = Position::new(last, self.line_length(last));
                         }
                     }
                     if !self.find_next(&query) {
@@ -1283,32 +1417,32 @@ impl Notepad {
 
     fn move_vertical(&mut self, delta: isize) -> NotepadEffect {
         let target = self.cursor.row as isize + delta;
-        if target < 0 || target as usize >= self.buffer.line_count() {
+        if target < 0 || target as usize >= self.line_count() {
             return NotepadEffect::None;
         }
         self.cursor.row = target as usize;
-        let len = self.buffer.line_length(self.cursor.row);
-        self.cursor.col = floor_boundary(self.line(self.cursor.row), self.cursor.col.min(len));
+        let len = self.line_length(self.cursor.row);
+        self.cursor.col = floor_boundary(&self.line(self.cursor.row), self.cursor.col.min(len));
         NotepadEffect::Redraw
     }
 
-    fn line(&self, row: usize) -> &str {
-        self.buffer.line(row).unwrap_or("")
-    }
-
     fn snapshot(&self) -> (TextBuffer, Position) {
-        (self.buffer.clone(), self.cursor)
+        (self.doc().buffer.clone(), self.cursor)
     }
 
-    /// Push only after an edit landed -- E7's lesson.
+    /// Push only after an edit landed -- E7's lesson. The undo history is
+    /// the document's: whichever card undoes, the last edit goes, and the
+    /// caret lands where that edit was made.
     fn push_undo(&mut self, before: (TextBuffer, Position)) {
-        self.undo.push(before);
-        if self.undo.len() > MAX_UNDO {
-            self.undo.remove(0);
+        let mut doc = self.doc_mut();
+        doc.undo.push(before);
+        if doc.undo.len() > MAX_UNDO {
+            doc.undo.remove(0);
         }
-        self.dirty = true;
+        doc.dirty = true;
+        doc.edited = true;
+        drop(doc);
         self.close_armed = false;
-        self.edited = true;
     }
 }
 
@@ -1370,7 +1504,7 @@ mod tests {
         );
         pad.io_done(&effect, Ok(None));
         assert!(!pad.is_dirty());
-        assert_eq!(pad.path(), Some("a.txt"));
+        assert_eq!(pad.path().as_deref(), Some("a.txt"));
 
         type_str(&mut pad, "!");
         assert!(
@@ -1857,6 +1991,86 @@ mod tests {
         assert_eq!(pad.viewport_selection(10), alloc::vec![(1, 0, 1)]);
         pad.handle_byte(ESC);
         assert!(pad.viewport_selection(10).is_empty());
+    }
+
+    /// Two cards, one document (GFX-074): an edit in either shows in both,
+    /// each caret is its own, the undo history is shared, and browsing
+    /// history in one leaves the other on the document.
+    #[test]
+    fn a_shared_document_is_one_text_with_two_carets() {
+        let mut a = Notepad::new();
+        a.load(Some("memo".to_string()), "one\ntwo");
+        let mut b = a.share();
+        assert!(a.shares_with(&b) && a.shared() && b.shared());
+        assert_eq!(b.content(), "one\ntwo");
+        assert_eq!(b.path().as_deref(), Some("memo"));
+
+        // b types at the end; a sees it, a's caret stays at the top.
+        b.handle_byte(KEY_DOWN);
+        b.handle_byte(KEY_END);
+        type_str(&mut b, "!");
+        assert_eq!(a.content(), "one\ntwo!");
+        assert_eq!(a.cursor(), Position::new(0, 0));
+        assert!(a.is_dirty() && b.is_dirty());
+        assert!(a.footer().contains("in 2 cards"), "{}", a.footer());
+
+        // a undoes b's edit; the caret lands where b made it.
+        a.handle_byte(CTRL_Z);
+        assert_eq!(b.content(), "one\ntwo");
+        assert_eq!(a.cursor(), Position::new(1, 3));
+
+        // b's caret is past text a removes: it is brought back in range.
+        b.handle_byte(CTRL_A);
+        b.handle_byte(KEY_DELETE);
+        assert_eq!(a.content(), "");
+        a.handle_byte(b'x');
+        assert_eq!(a.content(), "x");
+        b.handle_byte(KEY_RIGHT);
+        assert_eq!(b.cursor(), Position::new(0, 1));
+
+        // Saving through either clears the mark for both.
+        let effect = a.handle_byte(CTRL_S);
+        a.io_done(&effect, Ok(None));
+        assert!(!b.is_dirty());
+
+        // Browsing history is this card's own: b keeps showing the text.
+        assert!(matches!(
+            a.handle_byte(CTRL_Y),
+            NotepadEffect::Version { .. }
+        ));
+        a.show_version(0, 1, Some("older"), 0);
+        assert_eq!(a.content(), "older");
+        assert_eq!(b.content(), "x");
+        assert!(!b.browsing_history());
+        // Enter restores into the document, so b sees it.
+        a.handle_byte(b'\n');
+        assert_eq!(b.content(), "older");
+        assert!(b.is_dirty());
+
+        // Closing a shared card asks nothing: the other keeps the text.
+        assert_eq!(b.handle_byte(CTRL_W), NotepadEffect::Close);
+        drop(b);
+        assert!(!a.shared());
+        // Opening another file in a card leaves the others alone.
+        let mut c = a.share();
+        c.load(Some("other".to_string()), "else");
+        assert!(!a.shares_with(&c));
+        assert_eq!(a.content(), "older");
+        assert_eq!(c.content(), "else");
+    }
+
+    /// One document in two cards autosaves once (GFX-074).
+    #[test]
+    fn a_shared_document_autosaves_once() {
+        let mut a = Notepad::new();
+        a.load(Some("memo".to_string()), "");
+        let mut b = a.share();
+        type_str(&mut a, "hi");
+        assert!(a.autosave_due(1).is_none() && b.autosave_due(1).is_none());
+        let at = 1 + AUTOSAVE_IDLE_TICKS;
+        let saves = [a.autosave_due(at), b.autosave_due(at)];
+        assert_eq!(saves.iter().filter(|s| s.is_some()).count(), 1, "{saves:?}");
+        assert!(a.autosave_due(at + 1).is_none() && b.autosave_due(at + 1).is_none());
     }
 
     #[test]

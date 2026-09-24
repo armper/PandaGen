@@ -396,6 +396,7 @@ impl DeskWindow {
                 ("Open".to_string(), crate::notepad::CTRL_O),
                 ("Find".to_string(), crate::notepad::CTRL_F),
                 ("History".to_string(), crate::notepad::CTRL_Y),
+                ("Split".to_string(), crate::notepad::CTRL_D),
             ],
             AppState::Files(files) => files.actions(),
             AppState::Terminal => Vec::new(),
@@ -972,6 +973,8 @@ pub enum PaletteAction {
     Find,
     ToggleTheme,
     History,
+    /// This document in a second card, side by side (GFX-074).
+    Split,
     /// Go to space 1..4 (GFX-067).
     Space(usize),
     /// Move the focused card to space 1..4.
@@ -987,7 +990,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 32] = [
+    pub const ALL: [PaletteAction; 33] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1008,6 +1011,7 @@ impl PaletteAction {
         PaletteAction::Find,
         PaletteAction::ToggleTheme,
         PaletteAction::History,
+        PaletteAction::Split,
         PaletteAction::Space(0),
         PaletteAction::Space(1),
         PaletteAction::Space(2),
@@ -1044,6 +1048,7 @@ impl PaletteAction {
             PaletteAction::Find => "Find...",
             PaletteAction::ToggleTheme => "Look: themes and accents",
             PaletteAction::History => "Earlier versions of this document",
+            PaletteAction::Split => "Split: this document in a second card",
             PaletteAction::Space(0) => "Go to space 1",
             PaletteAction::Space(1) => "Go to space 2",
             PaletteAction::Space(2) => "Go to space 3",
@@ -1081,6 +1086,7 @@ impl PaletteAction {
             PaletteAction::Find => "Ctrl+F",
             PaletteAction::ToggleTheme => "",
             PaletteAction::History => "Ctrl+Y",
+            PaletteAction::Split => "Ctrl+D",
             PaletteAction::Space(0) => "Ctrl+1",
             PaletteAction::Space(1) => "Ctrl+2",
             PaletteAction::Space(2) => "Ctrl+3",
@@ -1109,6 +1115,7 @@ impl PaletteAction {
                 | PaletteAction::Paste
                 | PaletteAction::Find
                 | PaletteAction::History
+                | PaletteAction::Split
         )
     }
 
@@ -2094,6 +2101,25 @@ impl Desk {
         }
     }
 
+    /// The document in card `id` in a second card as well (GFX-074): the
+    /// new card is another view of the same text -- its own caret, the
+    /// same document -- and the two are snapped side by side, the original
+    /// left, the new one right and focused. Returns whether it happened.
+    fn split(&mut self, id: ViewId) -> bool {
+        let Some(view) = self.window(id).and_then(|w| w.notepad()).map(|n| n.share()) else {
+            return false;
+        };
+        let twin = self.launch(DeskApp::Notepad);
+        if let Some(window) = self.window_mut(twin) {
+            window.state = AppState::Notepad(view);
+        }
+        self.focus = Some(id);
+        self.snap_focused(PaletteAction::SnapLeft);
+        self.focus = Some(twin);
+        self.snap_focused(PaletteAction::SnapRight);
+        true
+    }
+
     /// Run a palette action. Returns what the kernel must do, if anything.
     fn run_action(&mut self, action: PaletteAction) -> Option<DeskRequest> {
         match action {
@@ -2118,6 +2144,12 @@ impl Desk {
             PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
             PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
             PaletteAction::History => self.forward_to_notepad(crate::notepad::CTRL_Y),
+            PaletteAction::Split => {
+                if let Some(id) = self.focus {
+                    self.split(id);
+                }
+                None
+            }
             PaletteAction::Space(index) => {
                 self.go_to_space(index);
                 None
@@ -2875,6 +2907,10 @@ impl Desk {
             .clone()
             .unwrap_or_else(|| self.look.clone());
         let kept_row = LookView::row_of(&self.look);
+        // Split is the desk's, not the Notepad's: it makes a card.
+        if byte == crate::notepad::CTRL_D && self.window(id).and_then(|w| w.notepad()).is_some() {
+            return (None, self.split(id));
+        }
         let Some(window) = self.window_mut(id) else {
             return (None, false);
         };
@@ -5368,7 +5404,7 @@ mod tests {
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(
             card.actions,
-            alloc::vec!["Save", "Save as", "Open", "Find", "History"]
+            alloc::vec!["Save", "Save as", "Open", "Find", "History", "Split"]
         );
         let save = card.action_rects()[0].expect("the Save chip is placed");
         let compositor = Compositor::new();
@@ -5403,6 +5439,60 @@ mod tests {
             .find(|w| w.frame.view_id == terminal)
             .unwrap();
         assert!(card.actions.is_empty());
+    }
+
+    /// Split (GFX-074): the chip, Ctrl+D or the palette row puts the
+    /// focused Notepad's document in a second card, snapped beside the
+    /// first; typing in either shows in both; closing one asks nothing.
+    #[test]
+    fn split_puts_one_document_in_two_cards_side_by_side() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        desk.handle_key(b'h');
+        let chips = desk.window(id).unwrap().actions();
+        assert!(chips
+            .iter()
+            .any(|(label, key)| label == "Split" && *key == crate::notepad::CTRL_D));
+        assert_eq!(desk.handle_key(crate::notepad::CTRL_D), (None, true));
+        let pads: Vec<ViewId> = desk
+            .windows
+            .iter()
+            .filter(|w| w.app == DeskApp::Notepad)
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(pads.len(), 2);
+        let twin = pads.into_iter().find(|p| *p != id).unwrap();
+        assert_eq!(desk.focus(), Some(twin));
+        let area = desk.work_area();
+        let left = desk.window(id).unwrap().bounds;
+        let right = desk.window(twin).unwrap().bounds;
+        assert_eq!((left.x, left.width), (area.x, area.width / 2));
+        assert_eq!(right.x, area.x + area.width / 2);
+        assert!(desk
+            .window(id)
+            .unwrap()
+            .notepad()
+            .unwrap()
+            .shares_with(desk.window(twin).unwrap().notepad().unwrap()));
+        // Typed in the new card, shown in both.
+        desk.handle_key(b'i');
+        assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "hi");
+        assert_eq!(
+            desk.window(twin).unwrap().notepad().unwrap().content(),
+            "hi"
+        );
+        // Unsaved, but shared: Ctrl+W closes at once and the text stays.
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(twin).is_none());
+        let kept = desk.window(id).unwrap().notepad().unwrap();
+        assert_eq!(kept.content(), "hi");
+        assert!(!kept.shared());
+        // Ctrl+D on a Terminal is the Terminal's.
+        desk.launch(DeskApp::Terminal);
+        assert!(matches!(
+            desk.handle_key(crate::notepad::CTRL_D),
+            (Some(DeskRequest::Terminal(0x04)), true)
+        ));
     }
 
     #[test]
