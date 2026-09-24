@@ -3387,6 +3387,7 @@ impl Desk {
             let focused = focus == Some(window.id);
             let mut highlight = None;
             let mut selection = Vec::new();
+            let mut styles = Vec::new();
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
                     // Long lines wrap to the card (GFX-064); the width is
@@ -3400,6 +3401,7 @@ impl Desk {
                     let lines = notepad.viewport_lines(rows);
                     let cursor = notepad.viewport_cursor();
                     selection = notepad.viewport_selection(rows);
+                    styles = notepad.viewport_styles(rows);
                     (lines, notepad.title(), notepad.footer(), cursor)
                 }
                 AppState::Files(files) => {
@@ -3546,6 +3548,7 @@ impl Desk {
                 .with_footer(Some(footer))
                 .with_highlight(highlight)
                 .with_selection(selection)
+                .with_line_styles(styles)
                 .with_actions(
                     window
                         .actions()

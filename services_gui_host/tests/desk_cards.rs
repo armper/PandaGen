@@ -3,7 +3,7 @@
 
 use graphics_rasterizer::{RasterRect, RgbaBuffer, RgbaColor};
 use services_gui_host::{
-    Compositor, DesktopTab, DesktopWindow, HitRegion, Theme, Wallpaper, WindowStyle,
+    Compositor, DesktopTab, DesktopWindow, HitRegion, LineStyle, Theme, Wallpaper, WindowStyle,
     CARD_HEADER_HEIGHT, CARD_LINE_HEIGHT, CARD_PADDING, CARD_RADIUS, DOCK_TILE,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
@@ -162,6 +162,61 @@ fn the_caret_and_a_footer_are_drawn_where_the_geometry_says() {
         card.content_rows(),
         (240 - CARD_HEADER_HEIGHT - CARD_PADDING * 2 - 20) / CARD_LINE_HEIGHT
     );
+}
+
+/// A styled line takes its tone's colour, a bold one strikes twice, an
+/// underlined one has a rule under it; the grid does not move (GFX-073).
+#[test]
+fn line_styles_change_tone_weight_and_rule_but_not_the_grid() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let card = DesktopWindow::card(frame("Notepad", &["# Title", "plain", "> aside"]), bounds)
+        .focused()
+        .with_line_styles(vec![(0, LineStyle::HEADING), (2, LineStyle::QUIET)]);
+    let (ox, oy, pitch) = card.card_text_origin();
+    let target = render(vec![card]);
+    let glyph_h = 16;
+    let text_y = oy + (pitch - glyph_h) / 2;
+    // Somewhere in "# Title" there is an accent pixel and no plain-text pixel.
+    let row0: Vec<RgbaColor> = (ox..ox + 7 * 8)
+        .map(|x| px(&target, x, text_y + 8))
+        .collect();
+    assert!(
+        row0.contains(&theme.accent),
+        "heading is not accent-coloured"
+    );
+    assert!(!row0.contains(&theme.text), "heading has plain-text pixels");
+    // The rule: an accent line right under the glyphs, across the text.
+    assert_eq!(
+        px(&target, ox + 3, text_y + glyph_h + 1),
+        theme.accent,
+        "no underline"
+    );
+    assert_eq!(
+        px(&target, ox + 7 * 8 + 4, text_y + glyph_h + 1),
+        theme.surface,
+        "underline too long"
+    );
+    // Bold: the glyph column one pixel right of a stem is also lit. 'l' in
+    // "Title" (index 3) has a vertical stem; find a lit pixel and check
+    // its right neighbour.
+    let stem_x = (ox + 3 * 8..ox + 4 * 8)
+        .find(|x| px(&target, *x, text_y + 8) == theme.accent)
+        .expect("a lit pixel in 'l'");
+    assert_eq!(
+        px(&target, stem_x + 1, text_y + 8),
+        theme.accent,
+        "not bold"
+    );
+    // Line 1 is plain text on the grid's next row; line 2 is muted.
+    let row1: Vec<RgbaColor> = (ox..ox + 5 * 8)
+        .map(|x| px(&target, x, text_y + pitch + 8))
+        .collect();
+    assert!(row1.contains(&theme.text));
+    let row2: Vec<RgbaColor> = (ox..ox + 7 * 8)
+        .map(|x| px(&target, x, text_y + 2 * pitch + 8))
+        .collect();
+    assert!(row2.contains(&theme.text_muted) && !row2.contains(&theme.text));
 }
 
 /// A wallpaper is sampled to the surface, behind the cards, and a damage

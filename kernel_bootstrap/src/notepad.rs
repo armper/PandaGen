@@ -31,6 +31,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use editor_core::{Position, TextBuffer};
+use services_gui_host::LineStyle;
 
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
@@ -488,6 +489,43 @@ impl Notepad {
             }
         }
         spans
+    }
+
+    /// How a document line is drawn (GFX-073), from how it starts: `# ` is
+    /// a heading, `## ` a subheading, `### ` strong, `> ` an aside. The
+    /// marks stay in the text -- the file is plain text and says so -- but
+    /// the line reads as what it is.
+    pub fn line_style(line: &str) -> Option<LineStyle> {
+        if line.starts_with("# ") {
+            Some(LineStyle::HEADING)
+        } else if line.starts_with("## ") {
+            Some(LineStyle::SUBHEADING)
+        } else if line.starts_with("### ") {
+            Some(LineStyle::STRONG)
+        } else if line.starts_with("> ") {
+            Some(LineStyle::QUIET)
+        } else {
+            None
+        }
+    }
+
+    /// The styles of the visual rows in view, for the card (GFX-073). A
+    /// wrapped heading is a heading on every row it takes; its rule is on
+    /// the last.
+    pub fn viewport_styles(&self, rows: usize) -> Vec<(usize, LineStyle)> {
+        let visual = self.visual_rows();
+        visual
+            .iter()
+            .enumerate()
+            .skip(self.scroll)
+            .take(rows)
+            .filter_map(|(i, (row, _, _))| {
+                let mut style = Self::line_style(self.line(*row))?;
+                let last_segment = visual.get(i + 1).map(|r| r.0 != *row).unwrap_or(true);
+                style.underline = style.underline && last_segment;
+                Some((i - self.scroll, style))
+            })
+            .collect()
     }
 
     /// The pointer moved with the button down: the selection runs from
@@ -1819,6 +1857,40 @@ mod tests {
         assert_eq!(pad.viewport_selection(10), alloc::vec![(1, 0, 1)]);
         pad.handle_byte(ESC);
         assert!(pad.viewport_selection(10).is_empty());
+    }
+
+    #[test]
+    fn headings_and_asides_are_styled_by_how_the_line_starts() {
+        let mut pad = Notepad::new();
+        pad.load(
+            None,
+            "# Title\nbody\n## Part\n> aside\n#nospace\n### strong",
+        );
+        let styles = pad.viewport_styles(10);
+        assert_eq!(
+            styles,
+            alloc::vec![
+                (0, LineStyle::HEADING),
+                (2, LineStyle::SUBHEADING),
+                (3, LineStyle::QUIET),
+                (5, LineStyle::STRONG),
+            ]
+        );
+        // A wrapped heading: styled on both rows, ruled on the last.
+        pad.load(None, "# a long heading here");
+        pad.set_wrap(10);
+        let styles = pad.viewport_styles(10);
+        assert_eq!(styles.len(), 3);
+        assert!(!styles[0].1.underline && styles[2].1.underline);
+        assert!(styles.iter().all(|(_, s)| s.bold));
+        // Scrolling keeps the view-relative rows.
+        pad.load(None, "x\n# Title");
+        pad.set_wrap(0);
+        pad.scroll_by(1);
+        assert_eq!(
+            pad.viewport_styles(10),
+            alloc::vec![(0, LineStyle::HEADING)]
+        );
     }
 
     #[test]

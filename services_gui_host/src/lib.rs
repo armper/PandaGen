@@ -222,6 +222,11 @@ pub struct DesktopWindow {
     /// line break.
     #[serde(default)]
     pub selection_spans: Vec<(usize, usize, usize)>,
+    /// How particular content lines are drawn (GFX-073): weight, tone,
+    /// underline. One font, so weight is a one-pixel double strike and
+    /// size stays the grid's; hierarchy comes from tone and rule.
+    #[serde(default)]
+    pub line_styles: Vec<(usize, LineStyle)>,
     /// How the window is painted and hit-tested (GFX-050).
     #[serde(default)]
     pub style: WindowStyle,
@@ -252,6 +257,48 @@ pub const CARD_CHIP_HEIGHT: usize = 16;
 pub const CARD_CHIP_PAD: usize = 6;
 /// Gap between chips.
 pub const CARD_CHIP_GAP: usize = 6;
+
+/// Which of the theme's text colours a styled line takes (GFX-073).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum LineTone {
+    #[default]
+    Text,
+    Accent,
+    Muted,
+}
+
+/// How one content line is drawn (GFX-073). Bold is a second strike one
+/// pixel right, the only weight one 8x16 font has; the line keeps the
+/// grid's height so nothing below it moves.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LineStyle {
+    pub bold: bool,
+    pub tone: LineTone,
+    pub underline: bool,
+}
+
+impl LineStyle {
+    pub const HEADING: LineStyle = LineStyle {
+        bold: true,
+        tone: LineTone::Accent,
+        underline: true,
+    };
+    pub const SUBHEADING: LineStyle = LineStyle {
+        bold: true,
+        tone: LineTone::Accent,
+        underline: false,
+    };
+    pub const STRONG: LineStyle = LineStyle {
+        bold: true,
+        tone: LineTone::Text,
+        underline: false,
+    };
+    pub const QUIET: LineStyle = LineStyle {
+        bold: false,
+        tone: LineTone::Muted,
+        underline: false,
+    };
+}
 
 /// How a window is painted (GFX-050).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -305,6 +352,7 @@ impl DesktopWindow {
             chrome: true,
             highlight_line: None,
             selection_spans: Vec::new(),
+            line_styles: Vec::new(),
             style: WindowStyle::Classic,
             pixel_rect: None,
             closable: false,
@@ -479,6 +527,12 @@ impl DesktopWindow {
     /// fill.
     pub fn with_selection(mut self, spans: Vec<(usize, usize, usize)>) -> Self {
         self.selection_spans = spans;
+        self
+    }
+
+    /// Style particular content lines (GFX-073).
+    pub fn with_line_styles(mut self, styles: Vec<(usize, LineStyle)>) -> Self {
+        self.line_styles = styles;
         self
     }
 
@@ -1833,13 +1887,39 @@ fn raster_card(
                 .take(rows)
                 .enumerate()
             {
-                content_painter.draw_text_with_font(
-                    origin_x,
-                    origin_y + line_index * pitch + text_y_offset,
-                    &line,
-                    &DESKTOP_FONT,
-                    theme.text,
-                );
+                let style = window
+                    .line_styles
+                    .iter()
+                    .find(|(l, _)| *l == line_index)
+                    .map(|(_, s)| *s)
+                    .unwrap_or_default();
+                let color = match style.tone {
+                    LineTone::Text => theme.text,
+                    LineTone::Accent => theme.accent,
+                    LineTone::Muted => theme.text_muted,
+                };
+                let y = origin_y + line_index * pitch + text_y_offset;
+                content_painter.draw_text_with_font(origin_x, y, &line, &DESKTOP_FONT, color);
+                if style.bold {
+                    // A second strike one pixel right: the weight one font
+                    // can give (GFX-073).
+                    content_painter.draw_text_with_font(
+                        origin_x + 1,
+                        y,
+                        &line,
+                        &DESKTOP_FONT,
+                        color,
+                    );
+                }
+                if style.underline {
+                    let width = line.chars().count() * RASTER_CELL_WIDTH + 1;
+                    content_painter.draw_hline(
+                        origin_x,
+                        y + DESKTOP_FONT.glyph_height() + 1,
+                        width,
+                        color,
+                    );
+                }
             }
             if let Some(cursor) = window.frame.cursor {
                 content_painter.fill_rect(
