@@ -61,6 +61,72 @@ pub const NOTEPAD_SIZE: (usize, usize) = (720, 480);
 pub const TERMINAL_SIZE: (usize, usize) = (800, 520);
 /// Successive windows open offset by this much.
 pub const CASCADE_STEP: usize = 32;
+/// How long a card takes to arrive, in ticks at 100 Hz (GFX-085).
+pub const MOTION_TICKS: u64 = 18;
+
+/// Ease out: fast at first, settling. `p` and the result are in 0..=1000.
+fn ease_out(p: u32) -> u32 {
+    let r = 1000u64.saturating_sub(p as u64);
+    (1000 - (r * r * r) / 1_000_000) as u32
+}
+
+/// Where `p` thousandths of the way from `from` to `to` is.
+fn lerp_rect(from: RasterRect, to: RasterRect, p: u32) -> RasterRect {
+    let lerp = |a: usize, b: usize| -> usize {
+        (a as i64 + (b as i64 - a as i64) * p as i64 / 1000).max(0) as usize
+    };
+    RasterRect::new(
+        lerp(from.x, to.x),
+        lerp(from.y, to.y),
+        lerp(from.width, to.width),
+        lerp(from.height, to.height),
+    )
+}
+
+/// How far a motion that began at `start` has got by `now`, in
+/// thousandths, eased.
+fn motion_progress(start: u64, now: u64) -> u32 {
+    let elapsed = now.saturating_sub(start).min(MOTION_TICKS);
+    ease_out((elapsed * 1000 / MOTION_TICKS) as u32)
+}
+
+/// The rectangle a new card rises from: a little smaller, a little lower.
+fn rise_from(target: RasterRect) -> RasterRect {
+    let dx = target.width / 12;
+    let dy = target.height / 12;
+    RasterRect::new(
+        target.x + dx,
+        target.y + dy + 24,
+        target.width.saturating_sub(dx * 2),
+        target.height.saturating_sub(dy * 2),
+    )
+}
+
+/// A card on its way (GFX-085): drawn between `from` and its bounds
+/// until the motion has run.
+#[derive(Debug, Clone, Copy)]
+struct Motion {
+    id: ViewId,
+    from: RasterRect,
+    start: u64,
+}
+
+/// A closed card shrinking away (GFX-085): the chrome alone, no content.
+#[derive(Debug, Clone)]
+struct Ghost {
+    title: String,
+    z: usize,
+    from: RasterRect,
+    start: u64,
+}
+
+/// Where `id` is drawn this frame: partway, if it is on its way.
+fn motion_bounds(motions: &[Motion], clock: u64, id: ViewId, target: RasterRect) -> RasterRect {
+    match motions.iter().find(|m| m.id == id) {
+        Some(m) => lerp_rect(m.from, target, motion_progress(m.start, clock)),
+        None => target,
+    }
+}
 /// The smallest a card can be resized to.
 pub const MIN_CARD_SIZE: (usize, usize) = (240, 140);
 /// How close to an edge a drag must end to snap there.
@@ -1706,6 +1772,15 @@ pub struct Desk {
     notes_stale: bool,
     /// The tick a running timer was last drawn at (GFX-077).
     timer_drawn: u64,
+    /// Cards on their way and cards shrinking away (GFX-085), and the
+    /// clock they run on: the last `tick`. Before the first tick there is
+    /// no clock, so nothing moves -- a desk built and read in one breath,
+    /// as the host tests do, is where it will be.
+    motions: Vec<Motion>,
+    ghosts: Vec<Ghost>,
+    motion_clock: u64,
+    /// When the overview opened, for its cards to fly to their slots.
+    overview_since: Option<u64>,
 }
 
 impl Desk {
@@ -1750,6 +1825,10 @@ impl Desk {
             today: None,
             notes_stale: false,
             timer_drawn: 0,
+            motions: Vec::new(),
+            ghosts: Vec::new(),
+            motion_clock: 0,
+            overview_since: None,
         }
     }
 
@@ -2047,6 +2126,17 @@ impl Desk {
     /// from the preview they hold (GFX-071).
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        // Motion (GFX-085): the clock, what has arrived, and a repaint
+        // every tick while anything moves.
+        self.motion_clock = now.max(1);
+        let clock = self.motion_clock;
+        self.motions
+            .retain(|m| clock.saturating_sub(m.start) < MOTION_TICKS);
+        self.ghosts
+            .retain(|g| clock.saturating_sub(g.start) < MOTION_TICKS);
+        if self.in_motion() {
+            requests.push(DeskRequest::Repaint);
+        }
         // Timers run on the desk's ticks; a countdown that is up is said
         // through a notice, so it is heard from any space (GFX-077).
         let mut done = Vec::new();
@@ -2065,7 +2155,10 @@ impl Desk {
             .windows
             .iter()
             .any(|w| matches!(&w.state, AppState::Timer(t) if t.running()));
-        if running && now.saturating_sub(self.timer_drawn) >= crate::timer::HZ / 10 {
+        if running
+            && now.saturating_sub(self.timer_drawn) >= crate::timer::HZ / 10
+            && !requests.contains(&DeskRequest::Repaint)
+        {
             self.timer_drawn = now;
             requests.push(DeskRequest::Repaint);
         }
@@ -2255,6 +2348,8 @@ impl Desk {
             },
         });
         self.focus = Some(id);
+        // A new card rises into place (GFX-085).
+        self.animate_to(id, rise_from(RasterRect::new(x, y, w, h)));
         id
     }
 
@@ -2400,6 +2495,65 @@ impl Desk {
         cards.iter().map(|w| w.id).collect()
     }
 
+    /// Start card `id` moving from `from` to wherever its bounds are
+    /// (GFX-085). A card already on its way continues from where it is
+    /// drawn, so a second snap does not jump.
+    fn animate_to(&mut self, id: ViewId, from: RasterRect) {
+        if self.motion_clock == 0 {
+            return;
+        }
+        let Some(target) = self.window(id).map(|w| w.bounds) else {
+            return;
+        };
+        let from = match self.motions.iter().position(|m| m.id == id) {
+            Some(at) => {
+                let current = motion_bounds(&self.motions, self.motion_clock, id, target);
+                self.motions.remove(at);
+                if current == target {
+                    from
+                } else {
+                    current
+                }
+            }
+            None => from,
+        };
+        if from == target {
+            return;
+        }
+        self.motions.push(Motion {
+            id,
+            from,
+            start: self.motion_clock,
+        });
+    }
+
+    /// Whether anything is moving: motions, ghosts, the overview's cards.
+    fn in_motion(&self) -> bool {
+        let clock = self.motion_clock;
+        !self.motions.is_empty()
+            || !self.ghosts.is_empty()
+            || self
+                .overview_since
+                .is_some_and(|since| clock.saturating_sub(since) < MOTION_TICKS)
+    }
+
+    /// The overview's slot for the card at `index` of `count` (GFX-068).
+    fn overview_slot(&self, index: usize, count: usize) -> RasterRect {
+        let area = self.work_area();
+        let (w, h) = OVERVIEW_CARD;
+        let step_x = w + OVERVIEW_GAP;
+        let step_y = h + OVERVIEW_GAP + 10;
+        let total_w = OVERVIEW_COLUMNS.min(count.max(1)) * step_x - OVERVIEW_GAP;
+        let x0 = area.x + area.width.saturating_sub(total_w) / 2;
+        let y0 = area.y + 40;
+        RasterRect::new(
+            x0 + (index % OVERVIEW_COLUMNS) * step_x,
+            y0 + (index / OVERVIEW_COLUMNS) * step_y,
+            w,
+            h,
+        )
+    }
+
     /// Open the overview on the next card (GFX-068). Nothing to show with
     /// no cards.
     pub fn open_overview(&mut self) -> bool {
@@ -2409,6 +2563,7 @@ impl Desk {
         }
         self.palette = None;
         self.overview = Some(if count > 1 { 1 } else { 0 });
+        self.overview_since = (self.motion_clock > 0).then_some(self.motion_clock);
         true
     }
 
@@ -2426,9 +2581,14 @@ impl Desk {
         let Some(index) = self.overview.take() else {
             return false;
         };
-        match self.overview_order().get(index).copied() {
+        self.overview_since = None;
+        let order = self.overview_order();
+        match order.get(index).copied() {
             Some(id) => {
+                // The picked card flies from its slot to its place.
+                let slot = self.overview_slot(index, order.len());
                 self.raise(id);
+                self.animate_to(id, slot);
                 true
             }
             None => true,
@@ -2600,21 +2760,37 @@ impl Desk {
             window.tucked = false;
         }
         self.raise(id);
+        // Back from the dock: it grows up from the dock's edge (GFX-085).
+        let area = self.work_area();
+        if let Some(bounds) = self.window(id).map(|w| w.bounds) {
+            let from = RasterRect::new(
+                bounds.x + bounds.width / 2 - 20,
+                area.bottom().saturating_sub(8),
+                40,
+                8,
+            );
+            self.animate_to(id, from);
+        }
     }
 
     /// Back to the size a window had before it was snapped, if it was.
     fn unsnap(&mut self, id: ViewId) -> bool {
         let area = self.work_area();
+        let mut from = None;
         if let Some(window) = self.window_mut(id) {
             if let Some(restore) = window.restore.take() {
+                from = Some(window.bounds);
                 window.bounds = RasterRect::new(
                     restore.x.min(area.right().saturating_sub(restore.width)),
                     restore.y.max(area.y),
                     restore.width.min(area.width),
                     restore.height.min(area.height),
                 );
-                return true;
             }
+        }
+        if let Some(from) = from {
+            self.animate_to(id, from);
+            return true;
         }
         false
     }
@@ -2635,11 +2811,16 @@ impl Desk {
             ),
             _ => area,
         };
+        let mut from = None;
         if let Some(window) = self.window_mut(id) {
             if window.restore.is_none() {
                 window.restore = Some(window.bounds);
             }
+            from = Some(window.bounds);
             window.bounds = target;
+        }
+        if let Some(from) = from {
+            self.animate_to(id, from);
         }
     }
 
@@ -2917,6 +3098,19 @@ impl Desk {
         if self.window(id).map(|w| w.app) == Some(DeskApp::Welcome) {
             self.welcome_dismissed = true;
         }
+        // The card's chrome shrinks away (GFX-085).
+        if self.motion_clock > 0 {
+            if let Some(window) = self.window(id) {
+                let from = motion_bounds(&self.motions, self.motion_clock, id, window.bounds);
+                self.ghosts.push(Ghost {
+                    title: window.app.name().to_string(),
+                    z: window.z,
+                    from,
+                    start: self.motion_clock,
+                });
+            }
+        }
+        self.motions.retain(|m| m.id != id);
         self.windows.retain(|w| w.id != id);
         if self.drag.map(|d| d.id) == Some(id) {
             self.drag = None;
@@ -4114,30 +4308,46 @@ impl Desk {
         let now_lines = self.now_lines(clock);
         let space = self.space;
         let overview_open = self.overview.is_some();
+        let motion_now = self.motion_clock;
         if let Some(highlight) = self.overview {
             // The overview (GFX-068): every card as a small card, in a
             // grid, the highlighted one ringed. Real cards stay hidden.
+            // They fly from where they were to their slots (GFX-085).
             let order = self.overview_order();
-            let area = self.work_area();
-            let (w, h) = OVERVIEW_CARD;
-            let step_x = w + OVERVIEW_GAP;
-            let step_y = h + OVERVIEW_GAP + 10;
-            let total_w = OVERVIEW_COLUMNS.min(order.len().max(1)) * step_x - OVERVIEW_GAP;
-            let x0 = area.x + area.width.saturating_sub(total_w) / 2;
-            let y0 = area.y + 40;
             for (index, id) in order.iter().enumerate() {
                 let Some(window) = self.windows.iter().find(|w| w.id == *id) else {
                     continue;
                 };
-                let bounds = RasterRect::new(
-                    x0 + (index % OVERVIEW_COLUMNS) * step_x,
-                    y0 + (index / OVERVIEW_COLUMNS) * step_y,
-                    w,
-                    h,
-                );
+                let slot = self.overview_slot(index, order.len());
+                let bounds = match self.overview_since {
+                    Some(since) => {
+                        lerp_rect(window.bounds, slot, motion_progress(since, motion_now))
+                    }
+                    None => slot,
+                };
                 out.push(self.overview_card(window, bounds, index == highlight));
             }
         }
+        // Closed cards shrinking away (GFX-085): chrome only.
+        for ghost in &self.ghosts {
+            let to = RasterRect::new(
+                ghost.from.x + ghost.from.width / 2 - 20,
+                ghost.from.y + ghost.from.height / 2 - 12,
+                40,
+                24,
+            );
+            let bounds = lerp_rect(ghost.from, to, motion_progress(ghost.start, motion_now));
+            let mut frame = ViewFrame::new(
+                ViewId::new(),
+                ViewKind::TextBuffer,
+                0,
+                ViewContent::text_buffer(Vec::new()),
+                0,
+            );
+            frame.title = Some(ghost.title.clone());
+            out.push(DesktopWindow::card(frame, bounds).with_z_index(ghost.z));
+        }
+        let motions = self.motions.clone();
         let pointer = self.pointer;
         let palette = crate::widgets::Palette::from_theme(&self.theme());
         for window in &mut self.windows {
@@ -4354,7 +4564,9 @@ impl Desk {
                     frame.cursor = Some(CursorPosition::new(line, column));
                 }
             }
-            let mut card = DesktopWindow::card(frame, window.bounds)
+            // Partway, if the card is on its way (GFX-085).
+            let drawn = motion_bounds(&motions, motion_now, window.id, window.bounds);
+            let mut card = DesktopWindow::card(frame, drawn)
                 .with_z_index(window.z)
                 .with_footer(Some(footer))
                 .with_highlight(highlight)
@@ -6668,6 +6880,71 @@ mod tests {
             .unwrap();
         assert!(dock.tabs.iter().all(|t| t.icon.is_some()));
         assert_eq!(dock.tabs[0].icon, DeskApp::Notepad.icon());
+    }
+
+    /// Motion (GFX-085): once the desk has a clock, a new card rises into
+    /// place over `MOTION_TICKS` and the desk asks for a repaint every
+    /// tick meanwhile; a snap slides; a closed card leaves a shrinking
+    /// ghost; without a clock nothing moves.
+    #[test]
+    fn cards_rise_slide_and_shrink_away_on_the_desks_clock() {
+        let drawn = |desk: &mut Desk, id: ViewId| {
+            desk.windows("", true, None)
+                .iter()
+                .find(|w| w.frame.view_id == id)
+                .map(|w| w.bounds())
+                .unwrap()
+        };
+        // No clock yet: a card is where it will be.
+        let mut still = Desk::new(1280, 800);
+        let id = still.launch(DeskApp::Notepad);
+        assert_eq!(drawn(&mut still, id), still.window(id).unwrap().bounds);
+        assert!(still.tick(0).is_empty());
+
+        let mut desk = Desk::new(1280, 800);
+        desk.tick(100);
+        let id = desk.launch(DeskApp::Notepad);
+        let target = desk.window(id).unwrap().bounds;
+        let first = drawn(&mut desk, id);
+        assert!(
+            first.width < target.width && first.y > target.y,
+            "{first:?} vs {target:?}"
+        );
+        assert_eq!(desk.tick(101), alloc::vec![DeskRequest::Repaint]);
+        let mid = drawn(&mut desk, id);
+        assert!(mid.width > first.width && mid.width < target.width);
+        assert!(desk.tick(100 + MOTION_TICKS).is_empty());
+        assert_eq!(drawn(&mut desk, id), target);
+        // A snap slides from the old place.
+        desk.handle_key(crate::notepad::KEY_CTRL_LEFT);
+        let snapped = desk.window(id).unwrap().bounds;
+        assert_eq!(drawn(&mut desk, id), target, "not yet moved");
+        desk.tick(100 + MOTION_TICKS + 9);
+        let half = drawn(&mut desk, id);
+        assert!(half.x < target.x && half.x > snapped.x);
+        desk.tick(100 + MOTION_TICKS * 2);
+        assert_eq!(drawn(&mut desk, id), snapped);
+        // Closing leaves a ghost with the card's name, then nothing.
+        let before = desk.windows("", true, None).len();
+        desk.handle_key(crate::notepad::CTRL_W);
+        let after = desk.windows("", true, None);
+        assert_eq!(after.len(), before, "a ghost stands in");
+        assert!(after
+            .iter()
+            .any(|w| w.frame.title.as_deref() == Some("Notepad")));
+        assert_eq!(
+            desk.tick(100 + MOTION_TICKS * 2 + 1),
+            alloc::vec![DeskRequest::Repaint]
+        );
+        assert!(desk.tick(100 + MOTION_TICKS * 3).is_empty());
+        assert_eq!(desk.windows("", true, None).len(), before - 1);
+        // Helpers.
+        assert_eq!(ease_out(0), 0);
+        assert_eq!(ease_out(1000), 1000);
+        assert!(ease_out(500) > 500);
+        let a = RasterRect::new(0, 0, 100, 100);
+        let b = RasterRect::new(100, 200, 300, 400);
+        assert_eq!(lerp_rect(a, b, 500), RasterRect::new(50, 100, 200, 250));
     }
 
     #[test]
