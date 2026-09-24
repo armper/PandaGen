@@ -182,6 +182,10 @@ pub struct DesktopTab {
     /// is drawn as a ring, so the tile says "something is here, waiting".
     #[serde(default)]
     pub tucked: bool,
+    /// A 16x16 one-bit icon (GFX-084), drawn two pixels a bit in place of
+    /// the monogram when present. Row 0 is the top; bit 15 is the left.
+    #[serde(default)]
+    pub icon: Option<[u16; 16]>,
 }
 
 impl DesktopTab {
@@ -191,9 +195,18 @@ impl DesktopTab {
             active,
             hovered: false,
             tucked: false,
+            icon: None,
         }
     }
+
+    pub fn with_icon(mut self, icon: Option<[u16; 16]>) -> Self {
+        self.icon = icon;
+        self
+    }
 }
+
+/// The side of a dock icon as drawn: sixteen bits, two pixels each.
+pub const DOCK_ICON: usize = 32;
 
 /// Window descriptor for desktop composition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2010,15 +2023,31 @@ fn raster_dock(
             theme.tab_inactive
         };
         painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, fill);
-        let monogram: String = tab.label.chars().take(2).collect();
-        let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
-        painter.draw_text_with_font(
-            tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
-            tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
-            &monogram,
-            &DESKTOP_FONT,
-            theme.text,
-        );
+        if let Some(icon) = tab.icon {
+            // The icon, two pixels a bit, centred (GFX-084).
+            let ox = tile.x + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
+            let oy = tile.y + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
+            for (row, bits) in icon.iter().enumerate() {
+                for col in 0..16 {
+                    if bits & (1 << (15 - col)) != 0 {
+                        painter.fill_rect(
+                            RasterRect::new(ox + col * 2, oy + row * 2, 2, 2),
+                            theme.text,
+                        );
+                    }
+                }
+            }
+        } else {
+            let monogram: String = tab.label.chars().take(2).collect();
+            let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
+            painter.draw_text_with_font(
+                tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
+                tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
+                &monogram,
+                &DESKTOP_FONT,
+                theme.text,
+            );
+        }
         if tab.active {
             let dot = RasterRect::new(tile.x + DOCK_TILE / 2 - 3, tile.bottom() + 2, 6, 6);
             if tab.tucked {

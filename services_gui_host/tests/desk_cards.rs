@@ -219,6 +219,54 @@ fn line_styles_change_tone_weight_and_rule_but_not_the_grid() {
     assert!(row2.contains(&theme.text_muted) && !row2.contains(&theme.text));
 }
 
+/// A dock tile with an icon draws it, two pixels a bit, in place of the
+/// monogram (GFX-084); a tile without one still shows its letters.
+#[test]
+fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(200, 340, 240, 56);
+    // A frame: the top row and the left column lit, nothing else.
+    let mut icon = [0u16; 16];
+    icon[0] = 0xFFFF;
+    for row in icon.iter_mut().skip(1) {
+        *row = 0x8000;
+    }
+    let dock = DesktopWindow::new(
+        frame("", &[]),
+        services_gui_host::SurfaceRect::new(0, 0, 0, 0),
+    )
+    .with_style(WindowStyle::Dock)
+    .with_pixel_rect(bounds)
+    .with_tabs(vec![
+        DesktopTab::new("Np", false).with_icon(Some(icon)),
+        DesktopTab::new("Fi", false),
+    ]);
+    let target = render(vec![dock]);
+    // Two tiles: row 88 wide, starts at 200 + (240-88)/2 = 276; tiles are
+    // centred vertically in the 56px pill, at y=348.
+    let (tx, ty) = (276, 348);
+    let (ox, oy) = (tx + (DOCK_TILE - 32) / 2, ty + (DOCK_TILE - 32) / 2);
+    assert_eq!(px(&target, ox, oy), theme.text, "top-left bit");
+    assert_eq!(
+        px(&target, ox + 31, oy + 1),
+        theme.text,
+        "top row, two pixels tall"
+    );
+    assert_eq!(px(&target, ox + 1, oy + 31), theme.text, "left column");
+    assert_eq!(
+        px(&target, ox + 16, oy + 16),
+        theme.tab_inactive,
+        "inside is the tile"
+    );
+    // The second tile has no icon: its monogram puts text pixels in the
+    // middle of the tile.
+    let middle: Vec<RgbaColor> = (tx + 48 + 12..tx + 48 + 28)
+        .flat_map(|x| (ty + 12..ty + 28).map(move |y| (x, y)))
+        .map(|(x, y)| px(&target, x, y))
+        .collect();
+    assert!(middle.contains(&theme.text));
+}
+
 /// A wallpaper is sampled to the surface, behind the cards, and a damage
 /// repaint reads the same pixels (GFX-066).
 #[test]
