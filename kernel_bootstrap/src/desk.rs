@@ -49,6 +49,7 @@ use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::notepad::{Notepad, NotepadEffect};
+use crate::timer::{TimerEffect, TimerView};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
 pub const DOCK_HEIGHT: usize = 56;
@@ -105,16 +106,20 @@ pub enum DeskApp {
     /// A month at a glance; a day's note is a document named by the day
     /// (GFX-076).
     Calendar,
+    /// A stopwatch with laps and a countdown that says when it is up
+    /// (GFX-077).
+    Timer,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 6] = [
+    pub const ALL: [DeskApp; 7] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
         DeskApp::Look,
         DeskApp::Calculator,
         DeskApp::Calendar,
+        DeskApp::Timer,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -129,6 +134,7 @@ impl DeskApp {
             DeskApp::Shortcuts => "Shortcuts",
             DeskApp::Calculator => "Calculator",
             DeskApp::Calendar => "Calendar",
+            DeskApp::Timer => "Timer",
         }
     }
 
@@ -145,6 +151,7 @@ impl DeskApp {
             DeskApp::Shortcuts => "Ky",
             DeskApp::Calculator => "Ca",
             DeskApp::Calendar => "Cl",
+            DeskApp::Timer => "Ti",
         }
     }
 
@@ -160,9 +167,13 @@ impl DeskApp {
             DeskApp::Shortcuts => SHORTCUTS_SIZE,
             DeskApp::Calculator => CALCULATOR_SIZE,
             DeskApp::Calendar => CALENDAR_SIZE,
+            DeskApp::Timer => TIMER_SIZE,
         }
     }
 }
+
+/// The Timer card (GFX-077): the controls, the presets, six laps.
+pub const TIMER_SIZE: (usize, usize) = (400, 420);
 
 /// The Calendar card (GFX-076): six week rows, today, the selected day.
 pub const CALENDAR_SIZE: (usize, usize) = (420, 400);
@@ -446,6 +457,14 @@ impl DeskWindow {
                 ("Earlier".to_string(), crate::notepad::KEY_PAGE_UP),
                 ("Later".to_string(), crate::notepad::KEY_PAGE_DOWN),
                 ("Note".to_string(), b'\n'),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Timer(timer) => alloc::vec![
+                (
+                    if timer.running() { "Pause" } else { "Start" }.to_string(),
+                    b' ',
+                ),
+                ("Reset".to_string(), b'r'),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
         }
@@ -847,6 +866,7 @@ pub enum AppState {
     Shortcuts(usize),
     Calculator(Calculator),
     Calendar(CalendarView),
+    Timer(TimerView),
 }
 
 /// One open window.
@@ -929,6 +949,9 @@ pub enum DeskRequest {
     Io { id: ViewId, effect: NotepadEffect },
     /// A key for the console, which the workspace owns.
     Terminal(u8),
+    /// Draw the desk again: something on it moved on its own -- a running
+    /// timer (GFX-077).
+    Repaint,
     /// List the filesystem, then call [`Desk::files_listed`] for `id`.
     ListFiles { id: ViewId },
     /// Leave the desk for the text console.
@@ -1025,10 +1048,12 @@ pub enum PaletteAction {
     Calculator,
     /// The Calendar card (GFX-076).
     Calendar,
+    /// The Timer card (GFX-077).
+    Timer,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 35] = [
+    pub const ALL: [PaletteAction; 36] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1064,6 +1089,7 @@ impl PaletteAction {
         PaletteAction::Shortcuts,
         PaletteAction::Calculator,
         PaletteAction::Calendar,
+        PaletteAction::Timer,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1103,6 +1129,7 @@ impl PaletteAction {
             PaletteAction::Shortcuts => "Shortcuts: every key the desk answers",
             PaletteAction::Calculator => "Calculator",
             PaletteAction::Calendar => "Calendar",
+            PaletteAction::Timer => "Timer: stopwatch and countdown",
         }
     }
 
@@ -1143,6 +1170,7 @@ impl PaletteAction {
             PaletteAction::Shortcuts => "",
             PaletteAction::Calculator => "",
             PaletteAction::Calendar => "",
+            PaletteAction::Timer => "",
         }
     }
 
@@ -1380,6 +1408,8 @@ pub struct Desk {
     /// A document was saved since the Calendars last listed: their dots
     /// may be stale.
     notes_stale: bool,
+    /// The tick a running timer was last drawn at (GFX-077).
+    timer_drawn: u64,
 }
 
 impl Desk {
@@ -1422,6 +1452,7 @@ impl Desk {
             file_names_cache: Vec::new(),
             today: None,
             notes_stale: false,
+            timer_drawn: 0,
         }
     }
 
@@ -1686,6 +1717,28 @@ impl Desk {
     /// from the preview they hold (GFX-071).
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        // Timers run on the desk's ticks; a countdown that is up is said
+        // through a notice, so it is heard from any space (GFX-077).
+        let mut done = Vec::new();
+        for window in &mut self.windows {
+            if let AppState::Timer(timer) = &mut window.state {
+                if let Some(message) = timer.poll(now) {
+                    done.push(message);
+                }
+            }
+        }
+        for message in done {
+            self.notify(NoticeLevel::Info, message, now);
+        }
+        // A running timer is drawn ten times a second.
+        let running = self
+            .windows
+            .iter()
+            .any(|w| matches!(&w.state, AppState::Timer(t) if t.running()));
+        if running && now.saturating_sub(self.timer_drawn) >= crate::timer::HZ / 10 {
+            self.timer_drawn = now;
+            requests.push(DeskRequest::Repaint);
+        }
         // A save may have made a day's note: the Calendars list again.
         if self.notes_stale {
             self.notes_stale = false;
@@ -1831,6 +1884,7 @@ impl Desk {
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
                 DeskApp::Calculator => AppState::Calculator(Calculator::new()),
                 DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
+                DeskApp::Timer => AppState::Timer(TimerView::new()),
             },
         });
         self.focus = Some(id);
@@ -2059,6 +2113,10 @@ impl Desk {
                 "Calendar".to_string(),
                 alloc::vec![calendar.selected.short()],
             ),
+            AppState::Timer(timer) => (
+                "Timer".to_string(),
+                alloc::vec![crate::timer::format_ticks(timer.shown_ticks())],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2266,6 +2324,10 @@ impl Desk {
             }
             PaletteAction::Calculator => {
                 self.open_or_raise(DeskApp::Calculator);
+                None
+            }
+            PaletteAction::Timer => {
+                self.open_or_raise(DeskApp::Timer);
                 None
             }
             PaletteAction::Calendar => {
@@ -2767,6 +2829,12 @@ impl Desk {
                             if let CalendarEffect::OpenNote { name, exists } = effect {
                                 requests.extend(self.open_note(name, exists));
                             }
+                            // Timer: its buttons are in the text (GFX-077).
+                            if let Some(AppState::Timer(timer)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                timer.click(line, column);
+                            }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
                             let look_row = self
@@ -3228,6 +3296,14 @@ impl Desk {
                 }
                 CalendarEffect::OpenNote { name, exists } => (self.open_note(name, exists), true),
             },
+            AppState::Timer(timer) => match timer.handle_byte(byte) {
+                TimerEffect::None => (None, false),
+                TimerEffect::Redraw => (None, true),
+                TimerEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3666,6 +3742,17 @@ impl Desk {
                         calendar.footer(),
                         None,
                     )
+                }
+                AppState::Timer(timer) => {
+                    let title = if timer.running() {
+                        alloc::format!(
+                            "Timer - {}",
+                            crate::timer::format_ticks(timer.shown_ticks())
+                        )
+                    } else {
+                        "Timer".to_string()
+                    };
+                    (timer.lines(), title, timer.footer(), None)
                 }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
@@ -5779,6 +5866,38 @@ mod tests {
                 }
             })
         );
+    }
+
+    /// The Timer (GFX-077): it runs on `tick`, its title shows the time
+    /// while running, and a countdown that is up becomes a notice in the
+    /// log -- once -- whether or not the card is on this space.
+    #[test]
+    fn a_countdown_that_is_up_becomes_a_notice_from_any_space() {
+        let mut desk = Desk::new(1280, 800);
+        assert!(DeskApp::ALL.contains(&DeskApp::Timer));
+        let id = desk.launch(DeskApp::Timer);
+        desk.tick(1_000);
+        // Preset 1: one minute, running at once; the chip says Pause.
+        assert!(desk.handle_key(b'1').1);
+        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Pause");
+        assert_eq!(desk.tick(1_100), alloc::vec![DeskRequest::Repaint]);
+        assert!(desk.tick(1_105).is_empty(), "ten a second, not a hundred");
+        let windows = desk.windows_at("", true, None, 1_100, &[]);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.frame.title.as_deref(), Some("Timer - 00:58.9"));
+        // Move to another space; the countdown still runs and is heard.
+        desk.go_to_space(2);
+        let before = desk.notice_log.len();
+        desk.tick(1_000 + 60 * crate::timer::HZ + 5);
+        assert_eq!(desk.notice_log.len(), before + 1);
+        assert_eq!(desk.notice_log[0].1.text, "Timer: 1 minute up");
+        desk.tick(1_000 + 60 * crate::timer::HZ + 500);
+        assert_eq!(desk.notice_log.len(), before + 1, "said once");
+        // Back on space 1, the card says Done and Start would run it again.
+        desk.go_to_space(0);
+        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Start");
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
     }
 
     #[test]

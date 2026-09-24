@@ -36,6 +36,7 @@ mod palette_overlay;
 mod present_policy;
 mod render_stats;
 mod rtc;
+mod timer;
 mod vga;
 mod workspace;
 
@@ -1996,6 +1997,7 @@ fn workspace_loop(
                 };
                 match request {
                     desk::DeskRequest::Terminal(_) => {}
+                    desk::DeskRequest::Repaint => output_dirty = true,
                     desk::DeskRequest::ReadVersion { id, name, index } => {
                         let Some(fs) = workspace.take_filesystem() else {
                             continue;
