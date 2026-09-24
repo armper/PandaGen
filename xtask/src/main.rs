@@ -538,6 +538,29 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: the Calendar from the palette, a month on screen");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Open the Calendar through the palette; PageDown turns the month.
+        "sleep:6,ctrl-spc,sleep:1,c,a,l,e,n,ret,sleep:2,pgdn,sleep:2,shot:calendar".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_calendar".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The card: 420 wide, centred (x=430), first cascade step at y=44,
+        // focused, so its top edge is the accent ring...
+        "--expect-pixel".to_string(),
+        "640,44,52,211,153".to_string(),
+        // ...and its body, right of the grid, the plain surface.
+        "--expect-pixel".to_string(),
+        "800,200,28,34,48".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: a save, Files from the palette, a file opened from it");
     let args = [
         "--port-base".to_string(),
@@ -566,12 +589,12 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // the bare gradient would otherwise be.
         "--expect-pixel".to_string(),
         "1200,81,28,34,48".to_string(),
-        // Two dock tiles lit: Notepad and Files. Five tiles (GFX-075) are
-        // 232px wide centred on 640, so the first centre is at 544.
+        // Two dock tiles lit: Notepad and Files. Six tiles (GFX-076) are
+        // 280px wide centred on 640, so the first centre is at 520.
         "--expect-pixel".to_string(),
-        "544,785,52,211,153".to_string(),
+        "520,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "592,785,52,211,153".to_string(),
+        "568,785,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

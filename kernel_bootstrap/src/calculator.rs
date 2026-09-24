@@ -178,13 +178,11 @@ impl Calculator {
     }
 
     pub fn footer(&self) -> String {
+        // The card is 280px: 32 characters of footer.
         if self.tape.is_empty() {
-            "Type or click the keys   Enter works it out   Esc clears".to_string()
+            "Enter works it out   Esc clears".to_string()
         } else {
-            alloc::format!(
-                "{} on the tape   Enter works it out   Esc clears",
-                self.tape.len()
-            )
+            alloc::format!("{} on the tape   Esc clears", self.tape.len())
         }
     }
 }
@@ -383,10 +381,7 @@ mod tests {
         calc.handle_byte(b'2');
         calc.handle_byte(b'\n');
         assert_eq!(calc.shown(), "30");
-        assert_eq!(
-            calc.footer(),
-            "2 on the tape   Enter works it out   Esc clears"
-        );
+        assert_eq!(calc.footer(), "2 on the tape   Esc clears");
         // A digit after a result starts over; Backspace edits; Esc clears.
         calc.handle_byte(b'4');
         calc.handle_byte(b'2');

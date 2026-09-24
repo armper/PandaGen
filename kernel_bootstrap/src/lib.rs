@@ -12,6 +12,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod calculator;
+pub mod calendar;
 pub mod desk;
 pub mod desktop_frame;
 pub mod display_mode;

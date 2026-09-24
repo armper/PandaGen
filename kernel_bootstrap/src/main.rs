@@ -21,6 +21,7 @@ mod bare_metal_editor_io;
 mod bare_metal_net;
 mod bare_metal_storage;
 mod calculator;
+mod calendar;
 mod desk;
 mod desktop_frame;
 mod display_mode;
@@ -2494,10 +2495,13 @@ fn workspace_loop(
                     let _ = input_router.set_keyboard_focus(desk.focus());
                     // A clock that is one: the CMOS RTC, with uptime as the
                     // fallback if it never settles.
-                    let clock = match rtc::read_time(&mut rtc_port) {
-                        Some(t) => alloc::format!("{:02}:{:02}", t.hour, t.minute),
+                    let today = rtc::read_clock(&mut rtc_port);
+                    let clock = match today {
+                        Some(d) => alloc::format!("{:02}:{:02}", d.time.hour, d.time.minute),
                         None => alloc::format!("up {}:{:02}", now / 6000, (now / 100) % 60),
                     };
+                    // The Calendar marks today (GFX-076).
+                    desk.set_today(today.map(|d| calendar::Date::new(d.year, d.month, d.day)));
                     let terminal = desk
                         .terminal_rows()
                         .map(|rows| terminal_view(&workspace, rows));

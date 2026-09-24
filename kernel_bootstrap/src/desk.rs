@@ -47,6 +47,7 @@ pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::calculator::Calculator;
+use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::notepad::{Notepad, NotepadEffect};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
@@ -101,15 +102,19 @@ pub enum DeskApp {
     Shortcuts,
     /// Exact decimal arithmetic with keys to click and a tape (GFX-075).
     Calculator,
+    /// A month at a glance; a day's note is a document named by the day
+    /// (GFX-076).
+    Calendar,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 5] = [
+    pub const ALL: [DeskApp; 6] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
         DeskApp::Look,
         DeskApp::Calculator,
+        DeskApp::Calendar,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -123,6 +128,7 @@ impl DeskApp {
             DeskApp::Now => "Now",
             DeskApp::Shortcuts => "Shortcuts",
             DeskApp::Calculator => "Calculator",
+            DeskApp::Calendar => "Calendar",
         }
     }
 
@@ -138,6 +144,7 @@ impl DeskApp {
             DeskApp::Now => "Nw",
             DeskApp::Shortcuts => "Ky",
             DeskApp::Calculator => "Ca",
+            DeskApp::Calendar => "Cl",
         }
     }
 
@@ -152,9 +159,13 @@ impl DeskApp {
             DeskApp::Now => NOW_SIZE,
             DeskApp::Shortcuts => SHORTCUTS_SIZE,
             DeskApp::Calculator => CALCULATOR_SIZE,
+            DeskApp::Calendar => CALENDAR_SIZE,
         }
     }
 }
+
+/// The Calendar card (GFX-076): six week rows, today, the selected day.
+pub const CALENDAR_SIZE: (usize, usize) = (420, 400);
 
 /// The Calculator card (GFX-075): the key grid and six lines of tape.
 pub const CALCULATOR_SIZE: (usize, usize) = (280, 440);
@@ -428,6 +439,13 @@ impl DeskWindow {
             AppState::Shortcuts(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
             AppState::Calculator(_) => alloc::vec![
                 ("Clear".to_string(), crate::notepad::ESC),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Calendar(_) => alloc::vec![
+                ("Today".to_string(), b't'),
+                ("Earlier".to_string(), crate::notepad::KEY_PAGE_UP),
+                ("Later".to_string(), crate::notepad::KEY_PAGE_DOWN),
+                ("Note".to_string(), b'\n'),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
         }
@@ -828,6 +846,7 @@ pub enum AppState {
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
     Calculator(Calculator),
+    Calendar(CalendarView),
 }
 
 /// One open window.
@@ -1004,10 +1023,12 @@ pub enum PaletteAction {
     Shortcuts,
     /// The Calculator card (GFX-075).
     Calculator,
+    /// The Calendar card (GFX-076).
+    Calendar,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 34] = [
+    pub const ALL: [PaletteAction; 35] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1042,6 +1063,7 @@ impl PaletteAction {
         PaletteAction::Now,
         PaletteAction::Shortcuts,
         PaletteAction::Calculator,
+        PaletteAction::Calendar,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1080,6 +1102,7 @@ impl PaletteAction {
             PaletteAction::Now => "Now: the machine, this second",
             PaletteAction::Shortcuts => "Shortcuts: every key the desk answers",
             PaletteAction::Calculator => "Calculator",
+            PaletteAction::Calendar => "Calendar",
         }
     }
 
@@ -1119,6 +1142,7 @@ impl PaletteAction {
             PaletteAction::Now => "click the clock",
             PaletteAction::Shortcuts => "",
             PaletteAction::Calculator => "",
+            PaletteAction::Calendar => "",
         }
     }
 
@@ -1351,6 +1375,11 @@ pub struct Desk {
     vitals_pending: bool,
     /// The last file listing, for save-as and open autocomplete.
     file_names_cache: Vec<String>,
+    /// The RTC's date, for the Calendar (GFX-076); `None` until it is read.
+    today: Option<Date>,
+    /// A document was saved since the Calendars last listed: their dots
+    /// may be stale.
+    notes_stale: bool,
 }
 
 impl Desk {
@@ -1391,7 +1420,41 @@ impl Desk {
             vitals_asked_at: None,
             vitals_pending: false,
             file_names_cache: Vec::new(),
+            today: None,
+            notes_stale: false,
         }
+    }
+
+    /// The kernel read the clock: today's date, or `None` when it is not
+    /// set. Every Calendar card marks it (GFX-076).
+    pub fn set_today(&mut self, today: Option<Date>) {
+        if self.today == today {
+            return;
+        }
+        self.today = today;
+        for window in &mut self.windows {
+            if let AppState::Calendar(calendar) = &mut window.state {
+                calendar.set_today(today);
+            }
+        }
+    }
+
+    /// Open a day's note (GFX-076): a Notepad on the document named by
+    /// the day, read from disk when it exists, otherwise new with that
+    /// name so it saves itself once something is typed.
+    fn open_note(&mut self, name: String, exists: bool) -> Option<DeskRequest> {
+        let id = self.launch(DeskApp::Notepad);
+        if exists {
+            return Some(DeskRequest::Io {
+                id,
+                effect: NotepadEffect::Open { path: name },
+            });
+        }
+        if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
+            notepad.load(Some(name), "");
+            notepad.set_status("A new note for the day: it saves itself as you type");
+        }
+        None
     }
 
     pub fn palette_open(&self) -> bool {
@@ -1429,7 +1492,10 @@ impl Desk {
             files.select(0);
         }
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
-            notepad.set_file_names(names);
+            notepad.set_file_names(names.clone());
+        }
+        if let Some(AppState::Calendar(calendar)) = self.window_mut(id).map(|w| &mut w.state) {
+            calendar.set_file_names(&names);
         }
     }
 
@@ -1620,6 +1686,15 @@ impl Desk {
     /// from the preview they hold (GFX-071).
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        // A save may have made a day's note: the Calendars list again.
+        if self.notes_stale {
+            self.notes_stale = false;
+            for window in &self.windows {
+                if matches!(window.state, AppState::Calendar(_)) {
+                    requests.push(DeskRequest::ListFiles { id: window.id });
+                }
+            }
+        }
         // A Now card asks once a second (GFX-072), and never twice at once.
         if self.windows.iter().any(|w| w.app == DeskApp::Now) {
             let due = !self.vitals_pending
@@ -1755,6 +1830,7 @@ impl Desk {
                 DeskApp::Now => AppState::Now,
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
                 DeskApp::Calculator => AppState::Calculator(Calculator::new()),
+                DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
             },
         });
         self.focus = Some(id);
@@ -1979,6 +2055,10 @@ impl Desk {
                 alloc::vec!["every key".to_string()],
             ),
             AppState::Calculator(calc) => ("Calculator".to_string(), alloc::vec![calc.shown()]),
+            AppState::Calendar(calendar) => (
+                "Calendar".to_string(),
+                alloc::vec![calendar.selected.short()],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2187,6 +2267,11 @@ impl Desk {
             PaletteAction::Calculator => {
                 self.open_or_raise(DeskApp::Calculator);
                 None
+            }
+            PaletteAction::Calendar => {
+                let had = self.windows.iter().any(|w| w.app == DeskApp::Calendar);
+                let id = self.open_or_raise(DeskApp::Calendar);
+                (!had).then_some(DeskRequest::ListFiles { id })
             }
             PaletteAction::Notices => {
                 self.open_or_raise(DeskApp::Notices);
@@ -2444,7 +2529,8 @@ impl Desk {
             }
             None => {
                 let id = self.launch(app);
-                (app == DeskApp::Files).then_some(DeskRequest::ListFiles { id })
+                matches!(app, DeskApp::Files | DeskApp::Calendar)
+                    .then_some(DeskRequest::ListFiles { id })
             }
         }
     }
@@ -2672,6 +2758,14 @@ impl Desk {
                                 self.window_mut(*target).map(|w| &mut w.state)
                             {
                                 calc.click(line, column);
+                            }
+                            // Calendar: a day, or the month's ends (GFX-076).
+                            let effect = match self.window_mut(*target).map(|w| &mut w.state) {
+                                Some(AppState::Calendar(calendar)) => calendar.click(line, column),
+                                _ => CalendarEffect::None,
+                            };
+                            if let CalendarEffect::OpenNote { name, exists } = effect {
+                                requests.extend(self.open_note(name, exists));
                             }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
@@ -3125,6 +3219,15 @@ impl Desk {
                 }
                 (None, calc.handle_byte(byte))
             }
+            AppState::Calendar(calendar) => match calendar.handle_byte(byte) {
+                CalendarEffect::None => (None, false),
+                CalendarEffect::Redraw => (None, true),
+                CalendarEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+                CalendarEffect::OpenNote { name, exists } => (self.open_note(name, exists), true),
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3344,6 +3447,7 @@ impl Desk {
         };
         let (level, text) = match (effect, &result) {
             (NotepadEffect::Save { path, .. }, Ok(_)) => {
+                self.notes_stale = true;
                 (NoticeLevel::Info, alloc::format!("Saved {path}"))
             }
             (NotepadEffect::Open { path }, Ok(Some(_))) => {
@@ -3553,6 +3657,15 @@ impl Desk {
                 ),
                 AppState::Calculator(calc) => {
                     (calc.lines(), "Calculator".to_string(), calc.footer(), None)
+                }
+                AppState::Calendar(calendar) => {
+                    selection = calendar.selection();
+                    (
+                        calendar.lines(),
+                        "Calendar".to_string(),
+                        calendar.footer(),
+                        None,
+                    )
                 }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
@@ -5601,6 +5714,71 @@ mod tests {
         assert!(desk.window(id).is_some());
         desk.handle_key(crate::notepad::CTRL_W);
         assert!(desk.window(id).is_none());
+    }
+
+    /// The Calendar (GFX-076): opened from the palette it asks for the
+    /// listing, marks the days that have a note, opens a day's note in a
+    /// Notepad named by the day, and lists again after a save.
+    #[test]
+    fn the_calendar_marks_noted_days_and_opens_a_day_as_a_document() {
+        let mut desk = Desk::new(1280, 800);
+        desk.set_today(Some(Date::new(2026, 9, 24)));
+        assert!(DeskApp::ALL.contains(&DeskApp::Calendar));
+        desk.handle_key(KEY_CTRL_SPACE);
+        for byte in b"calen" {
+            desk.handle_key(*byte);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        let id = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Calendar);
+        assert_eq!(request, Some(DeskRequest::ListFiles { id }));
+        desk.files_listed(
+            id,
+            alloc::vec![FileEntry::named("2026-09-03"), FileEntry::named("memo")],
+        );
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let lines = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(lines[0], "<      September 2026      >");
+        assert!(lines[2].contains(" 3."), "{:?}", lines[2]);
+        assert!(lines[5].contains("*24"), "{:?}", lines[5]);
+        assert_eq!(card.selection_spans, alloc::vec![(5, 12, 15)]);
+        assert_eq!(card.actions[0], "Today");
+        // Enter on today: a new Notepad named by the day, nothing to read.
+        let (request, changed) = desk.handle_key(b'\n');
+        assert!(changed && request.is_none());
+        let pad_id = desk.focused_window().map(|w| w.id).unwrap();
+        let pad = desk.window(pad_id).unwrap().notepad().unwrap();
+        assert_eq!(pad.path().as_deref(), Some("2026-09-24"));
+        assert!(!pad.is_dirty());
+        // Its save makes the Calendar list again, once.
+        let effect = NotepadEffect::Save {
+            path: "2026-09-24".to_string(),
+            content: "x".to_string(),
+        };
+        desk.io_done(pad_id, &effect, Ok(None), 10);
+        assert_eq!(desk.tick(11), alloc::vec![DeskRequest::ListFiles { id }]);
+        assert!(desk.tick(12).is_empty());
+        // A day with a note opens by reading it.
+        desk.raise(id);
+        desk.focus = Some(id);
+        for _ in 0..3 {
+            assert!(desk.handle_key(crate::notepad::KEY_UP).1);
+        }
+        let (request, _) = desk.handle_key(b'\n');
+        let opened = desk.focused_window().map(|w| w.id).unwrap();
+        assert_eq!(
+            request,
+            Some(DeskRequest::Io {
+                id: opened,
+                effect: NotepadEffect::Open {
+                    path: "2026-09-03".to_string()
+                }
+            })
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl DateTime {
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -93,7 +93,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -104,6 +104,29 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// The day of the week, Monday 0 to Sunday 6 (GFX-076). 1970-01-01 was
+/// a Thursday.
+pub fn weekday(year: u16, month: u8, day: u8) -> usize {
+    (days_from_civil(year as i64, month as i64, day as i64) + 3).rem_euclid(7) as usize
+}
+
+/// How many days `month` of `year` has.
+pub fn days_in_month(year: u16, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
 }
 
 /// `2026-09-20 23:17` for a listing; "-" when the time was never set.
