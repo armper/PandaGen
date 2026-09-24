@@ -2061,6 +2061,16 @@ fn workspace_loop(
                             output_dirty = true;
                         }
                     }
+                    desk::DeskRequest::PreviewFile { id, name } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let text = io.open(&name).map(|(t, _)| t).unwrap_or_default();
+                            workspace.set_filesystem(io.into_filesystem());
+                            desk.preview_loaded(id, &name, &text);
+                            output_dirty = true;
+                        }
+                    }
                     desk::DeskRequest::Welcomed => {
                         if let Some(fs) = workspace.take_filesystem() {
                             let mut io =

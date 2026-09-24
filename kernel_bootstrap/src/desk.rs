@@ -440,6 +440,14 @@ pub enum FilesPrompt {
 pub const CTRL_E: u8 = 0x05;
 pub const CTRL_K: u8 = 0x0B;
 pub const CTRL_B: u8 = 0x02;
+/// Ctrl+U: the preview beside the list, on or off (GFX-071).
+pub const CTRL_U: u8 = 0x15;
+/// Ctrl+G: gather by the next tag (GFX-071).
+pub const CTRL_G: u8 = 0x07;
+/// How many lines a preview reads, and how wide it may be.
+pub const PREVIEW_LINES: usize = 40;
+/// A card narrower than this many cells shows the list alone.
+pub const PREVIEW_MIN_COLUMNS: usize = 60;
 
 /// The Files app's state (GFX-057): what the kernel listed, a filter typed
 /// straight into the card, a sort, whether the bin is showing, the
@@ -459,6 +467,15 @@ pub struct FilesView {
     pub by_name: bool,
     /// Showing the bin instead of the files.
     pub bin: bool,
+    /// The list alone; the default is the list with a preview (GFX-071).
+    pub list_only: bool,
+    /// The selected file's first lines, as the kernel read them: `(name,
+    /// lines)`. Shown beside the list.
+    pub preview: Option<(String, Vec<String>)>,
+    /// The name a preview was asked for and has not arrived.
+    pub preview_pending: Option<String>,
+    /// Only files carrying this tag (GFX-071); a collection, not a folder.
+    pub tag_filter: Option<String>,
 }
 
 impl FilesView {
@@ -473,6 +490,10 @@ impl FilesView {
             // Names starting with '.' are the system's (the desk's look);
             // Files is for the person's files.
             .filter(|(_, e)| !e.name.starts_with('.'))
+            .filter(|(_, e)| match &self.tag_filter {
+                Some(tag) => e.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)),
+                None => true,
+            })
             .filter(|(_, e)| {
                 filter.is_empty()
                     || e.name.to_ascii_lowercase().contains(&filter)
@@ -537,6 +558,9 @@ impl FilesView {
             return "Reading the filesystem...".to_string();
         }
         let mut text = String::new();
+        if let Some(tag) = &self.tag_filter {
+            text.push_str(&alloc::format!("#{tag} only   "));
+        }
         if !self.filter.is_empty() {
             text.push_str(&alloc::format!(
                 "Filter: {}_   {} of {}   ",
@@ -611,9 +635,42 @@ impl FilesView {
         }
     }
 
+    /// Every tag on the files (not the bin), sorted, once each.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut tags: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| !e.trashed && !e.name.starts_with('.'))
+            .flat_map(|e| e.tags.iter().cloned())
+            .collect();
+        tags.sort();
+        tags.dedup();
+        tags
+    }
+
+    /// Gather by the next tag: all -> first tag -> ... -> all (GFX-071).
+    fn cycle_tag(&mut self) {
+        let tags = self.all_tags();
+        self.tag_filter = match &self.tag_filter {
+            None => tags.first().cloned(),
+            Some(current) => tags
+                .iter()
+                .position(|t| t == current)
+                .and_then(|i| tags.get(i + 1))
+                .cloned(),
+        };
+        self.selection = 0;
+        self.scroll = 0;
+    }
+
     /// The header chips for this state (GFX-057): the bin has its own.
     fn actions(&self) -> Vec<(String, u8)> {
         let sort = if self.by_name { "A-Z" } else { "Recent" };
+        let gather = match &self.tag_filter {
+            Some(tag) => alloc::format!("#{tag}"),
+            None => "All".to_string(),
+        };
+        let preview = if self.list_only { "Preview" } else { "List" };
         if self.bin {
             alloc::vec![
                 ("Restore".to_string(), b'\n'),
@@ -627,7 +684,9 @@ impl FilesView {
                 ("Rename".to_string(), CTRL_E),
                 ("Tag".to_string(), CTRL_K),
                 ("Bin it".to_string(), crate::notepad::KEY_DELETE),
+                (gather, CTRL_G),
                 (sort.to_string(), crate::notepad::CTRL_S),
+                (preview.to_string(), CTRL_U),
                 ("Bin".to_string(), CTRL_B),
             ]
         }
@@ -829,6 +888,9 @@ pub enum DeskRequest {
     SearchFiles { query: String },
     /// The Welcome card was closed: remember that on disk (GFX-065).
     Welcomed,
+    /// Read the first lines of `name` for the Files card `id`, then call
+    /// [`Desk::preview_loaded`] (GFX-071).
+    PreviewFile { id: ViewId, name: String },
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
 }
@@ -1357,11 +1419,46 @@ impl Desk {
         Some(DeskRequest::SaveRecent { text })
     }
 
+    /// The kernel read `name` for the Files card `id` (GFX-071).
+    pub fn preview_loaded(&mut self, id: ViewId, name: &str, text: &str) {
+        if let Some(files) = self.window_mut(id).and_then(|w| w.files_mut()) {
+            let lines: Vec<String> = text
+                .lines()
+                .take(PREVIEW_LINES)
+                .map(|l| l.chars().take(120).collect())
+                .collect();
+            files.preview = Some((name.to_string(), lines));
+            if files.preview_pending.as_deref() == Some(name) {
+                files.preview_pending = None;
+            }
+        }
+    }
+
     /// Every tick (GFX-060): documents that have sat still save
     /// themselves. The saves are quiet -- no notice card -- because a card
-    /// for something the person did not ask for is noise.
+    /// for something the person did not ask for is noise. Files cards ask
+    /// for the selected file's first lines when the selection has moved on
+    /// from the preview they hold (GFX-071).
     pub fn tick(&mut self, now: u64) -> Vec<DeskRequest> {
         let mut requests = Vec::new();
+        for window in &mut self.windows {
+            if let AppState::Files(files) = &mut window.state {
+                if files.list_only || files.bin {
+                    continue;
+                }
+                let Some(want) = files.selected().map(|e| e.name.clone()) else {
+                    continue;
+                };
+                let have = files.preview.as_ref().map(|(n, _)| n.as_str());
+                if have != Some(want.as_str()) && files.preview_pending.as_deref() != Some(&want) {
+                    files.preview_pending = Some(want.clone());
+                    requests.push(DeskRequest::PreviewFile {
+                        id: window.id,
+                        name: want,
+                    });
+                }
+            }
+        }
         if self.welcome_dismissed {
             self.welcome_dismissed = false;
             requests.push(DeskRequest::Welcomed);
@@ -2628,6 +2725,14 @@ impl Desk {
                         (None, true)
                     }
                     CTRL_R => (Some(DeskRequest::ListFiles { id }), true),
+                    CTRL_U => {
+                        files.list_only = !files.list_only;
+                        (None, true)
+                    }
+                    CTRL_G => {
+                        files.cycle_tag();
+                        (None, true)
+                    }
                     crate::notepad::CTRL_S => {
                         files.by_name = !files.by_name;
                         files.selection = 0;
@@ -3064,11 +3169,42 @@ impl Desk {
                         .width
                         .saturating_sub(services_gui_host::CARD_PADDING * 2)
                         / GLYPH_WIDTH;
-                    let lines: Vec<String> = visible
-                        .iter()
-                        .skip(files.scroll)
-                        .take(rows)
-                        .map(|index| FilesView::line(&files.entries[*index], columns))
+                    // The preview (GFX-071) takes the right two fifths when
+                    // the card is wide enough and the list is not asked for
+                    // alone; the list keeps the left.
+                    let selected_name = files.selected().map(|e| e.name.clone());
+                    let with_preview =
+                        !files.list_only && !files.bin && columns >= PREVIEW_MIN_COLUMNS;
+                    let list_w = if with_preview {
+                        columns * 11 / 20
+                    } else {
+                        columns
+                    };
+                    let preview_w = columns.saturating_sub(list_w + 3);
+                    let preview_lines: Vec<String> = match (&files.preview, &selected_name) {
+                        (Some((name, lines)), Some(selected)) if name == selected => lines.clone(),
+                        (_, Some(_)) => alloc::vec!["...".to_string()],
+                        (_, None) => Vec::new(),
+                    };
+                    let lines: Vec<String> = (0..rows)
+                        .filter(|i| {
+                            files.scroll + i < visible.len()
+                                || (with_preview && *i < preview_lines.len())
+                        })
+                        .map(|i| {
+                            let left = visible
+                                .get(files.scroll + i)
+                                .map(|index| FilesView::line(&files.entries[*index], list_w))
+                                .unwrap_or_default();
+                            if !with_preview {
+                                return left;
+                            }
+                            let right: String = preview_lines
+                                .get(i)
+                                .map(|l| l.chars().take(preview_w).collect())
+                                .unwrap_or_default();
+                            alloc::format!("{:<list_w$} | {}", left, right)
+                        })
                         .collect();
                     if !visible.is_empty() {
                         highlight = Some(files.selection - files.scroll);
@@ -4527,6 +4663,104 @@ mod tests {
     }
 
     #[test]
+    fn files_previews_the_selected_file_beside_the_list_and_gathers_by_tag() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Files);
+        let mut a = FileEntry::named("alpha");
+        a.tags = alloc::vec!["work".to_string()];
+        let mut b = FileEntry::named("beta");
+        b.tags = alloc::vec!["home".to_string(), "work".to_string()];
+        let c = FileEntry::named("gamma");
+        desk.files_listed(id, alloc::vec![a, b, c]);
+        // The tick asks for the selected file once, not every tick.
+        let requests = desk.tick(0);
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::PreviewFile {
+                id,
+                name: "alpha".to_string()
+            }]
+        );
+        assert!(desk.tick(1).is_empty(), "already asked");
+        desk.preview_loaded(id, "alpha", "first line\nsecond line\n");
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(
+            rows[0].starts_with("alpha") && rows[0].contains("| first line"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("beta") && rows[1].contains("| second line"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2].starts_with("gamma") && rows[2].trim_end().ends_with('|'),
+            "{rows:?}"
+        );
+        // Moving the selection asks for the next file; until it arrives
+        // the preview says so.
+        desk.handle_key(crate::notepad::KEY_DOWN);
+        assert_eq!(
+            desk.tick(2),
+            alloc::vec![DeskRequest::PreviewFile {
+                id,
+                name: "beta".to_string()
+            }]
+        );
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(rows[0].contains("| ..."), "{rows:?}");
+        // The list alone, on request.
+        desk.handle_key(CTRL_U);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let rows = match &card.frame.content {
+            ViewContent::TextBuffer { lines } => lines.clone(),
+            _ => panic!(),
+        };
+        assert!(!rows[0].contains('|'), "{rows:?}");
+        assert!(
+            desk.tick(3).is_empty(),
+            "no preview asked for while the list is alone"
+        );
+        assert!(card.actions.iter().any(|a| a == "Preview"));
+        desk.handle_key(CTRL_U);
+        // Gather by tag: All -> #home -> #work -> All.
+        let files = desk.window(id).unwrap().files().unwrap();
+        assert_eq!(
+            files.all_tags(),
+            alloc::vec!["home".to_string(), "work".to_string()]
+        );
+        desk.handle_key(CTRL_G);
+        let files = desk.window(id).unwrap().files().unwrap();
+        assert_eq!(files.tag_filter.as_deref(), Some("home"));
+        assert_eq!(files.visible().len(), 1);
+        assert!(files.footer().starts_with("#home only"));
+        desk.handle_key(CTRL_G);
+        let files = desk.window(id).unwrap().files().unwrap();
+        assert_eq!(files.visible().len(), 2);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert!(
+            card.actions.iter().any(|a| a == "#work"),
+            "{:?}",
+            card.actions
+        );
+        desk.handle_key(CTRL_G);
+        let files = desk.window(id).unwrap().files().unwrap();
+        assert_eq!(files.tag_filter, None);
+        assert_eq!(files.visible().len(), 3);
+    }
+
+    #[test]
     fn files_hides_the_systems_dot_names() {
         let mut desk = Desk::new(1280, 800);
         let id = desk.launch(DeskApp::Files);
@@ -4793,7 +5027,7 @@ mod tests {
         let card = windows.iter().find(|w| w.frame.view_id == files).unwrap();
         assert_eq!(
             card.actions,
-            alloc::vec!["New", "Rename", "Tag", "Bin it", "Recent", "Bin"]
+            alloc::vec!["New", "Rename", "Tag", "Bin it", "All", "Recent", "List", "Bin"]
         );
         let terminal = desk.launch(DeskApp::Terminal);
         let windows = desk.windows("", true, None);
