@@ -526,13 +526,17 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "dist/qemu_desk_calc".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
-        // The card: 280 wide, centred (x=500), first cascade step at y=44,
+        // The card: 300 wide, centred (x=490), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
         "640,44,52,211,153".to_string(),
-        // ...and its body, right of the key grid, the plain surface.
+        // ...the "=" key (row 4, column 3 of the grid at canvas 498,76) is
+        // an accent fill, checked away from its glyph...
         "--expect-pixel".to_string(),
-        "760,300,28,34,48".to_string(),
+        "725,370,52,211,153".to_string(),
+        // ...and the "5" key is the raised surface (GFX-081).
+        "--expect-pixel".to_string(),
+        "583,270,22,28,40".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

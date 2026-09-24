@@ -661,6 +661,41 @@ pub trait RenderTarget {
             }
         }
     }
+
+    /// `text` at `scale` times the font's size (GFX-081): each glyph pixel
+    /// becomes a `scale` x `scale` block, so one bitmap font gives a
+    /// display or a heading without a second font in the binary.
+    fn draw_text_scaled(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        font: &BitmapFont,
+        scale: usize,
+        color: RgbaColor,
+    ) {
+        let scale = scale.max(1);
+        let mut cursor_x = x;
+        for ch in text.chars() {
+            let glyph = rasterize_glyph(font, ch);
+            for (row, pattern) in glyph.iter().take(font.glyph_height()).enumerate() {
+                for column in 0..font.glyph_width() {
+                    let mask = 1 << (font.glyph_width() - 1 - column);
+                    if pattern & mask == 0 {
+                        continue;
+                    }
+                    self.fill_rect(
+                        RasterRect::new(cursor_x + column * scale, y + row * scale, scale, scale),
+                        color,
+                    );
+                }
+            }
+            cursor_x = cursor_x.saturating_add(font.advance_x() * scale);
+            if cursor_x >= self.width() {
+                break;
+            }
+        }
+    }
 }
 
 /// Largest radius that still leaves the rectangle well-formed.
@@ -1467,6 +1502,38 @@ fn compact_glyph_for(ch: char) -> [u8; SOURCE_GLYPH_HEIGHT] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scaled text is the same glyph with every pixel a `scale` block
+    /// (GFX-081): four times the lit pixels at twice the size, and the
+    /// advance doubles too.
+    #[test]
+    fn scaled_text_is_the_glyph_enlarged() {
+        let ink = RgbaColor::new(255, 255, 255, 255);
+        let lit = |buffer: &RgbaBuffer| {
+            let mut n = 0;
+            for y in 0..buffer.height() {
+                for x in 0..buffer.width() {
+                    if buffer.pixel(x, y) == Some(ink) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let mut small = RgbaBuffer::new(64, 64, RgbaColor::new(0, 0, 0, 255));
+        small.draw_text_with_font(0, 0, "A", &DESKTOP_FONT, ink);
+        let mut big = RgbaBuffer::new(64, 64, RgbaColor::new(0, 0, 0, 255));
+        big.draw_text_scaled(0, 0, "A", &DESKTOP_FONT, 2, ink);
+        let one = lit(&small);
+        assert!(one > 0);
+        assert_eq!(lit(&big), one * 4);
+        // The second glyph starts one scaled advance along.
+        let mut two = RgbaBuffer::new(64, 64, RgbaColor::new(0, 0, 0, 255));
+        two.draw_text_scaled(0, 0, "AA", &DESKTOP_FONT, 2, ink);
+        assert_eq!(lit(&two), one * 8);
+        assert!((16..32).any(|x| (0..32).any(|y| two.pixel(x, y) == Some(ink))));
+        assert!(!(16..32).any(|x| (0..32).any(|y| big.pixel(x, y) == Some(ink))));
+    }
 
     const CLEAR: RgbaColor = RgbaColor::new(5, 10, 15, 255);
     const ACCENT: RgbaColor = RgbaColor::new(200, 100, 50, 255);

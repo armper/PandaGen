@@ -269,6 +269,10 @@ pub struct TextStyle {
     /// De-emphasised (host maps to its muted text colour when `color` is None).
     #[serde(default)]
     pub muted: bool,
+    /// Draw the glyphs this many times their size (GFX-081); 0 and 1 are
+    /// native. One font, made bigger for a display or a heading.
+    #[serde(default)]
+    pub scale: u8,
 }
 
 /// One immediate draw operation.
@@ -634,6 +638,7 @@ mod tests {
                 style: TextStyle {
                     compact: true,
                     muted: true,
+                    scale: 0,
                 },
             },
         ];

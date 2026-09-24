@@ -1376,7 +1376,18 @@ fn raster_graphics(
                 } else {
                     &DESKTOP_FONT
                 };
-                canvas.draw_text_with_font(*x as usize, *y as usize, text, font, color);
+                if style.scale > 1 {
+                    canvas.draw_text_scaled(
+                        *x as usize,
+                        *y as usize,
+                        text,
+                        font,
+                        style.scale as usize,
+                        color,
+                    );
+                } else {
+                    canvas.draw_text_with_font(*x as usize, *y as usize, text, font, color);
+                }
             }
         }
     }

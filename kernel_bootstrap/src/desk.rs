@@ -225,8 +225,8 @@ pub const TIMER_SIZE: (usize, usize) = (400, 420);
 /// The Calendar card (GFX-076): six week rows, today, the selected day.
 pub const CALENDAR_SIZE: (usize, usize) = (420, 400);
 
-/// The Calculator card (GFX-075): the key grid and six lines of tape.
-pub const CALCULATOR_SIZE: (usize, usize) = (280, 440);
+/// The Calculator card (GFX-075, GFX-081): a display, real keys, a tape.
+pub const CALCULATOR_SIZE: (usize, usize) = (300, 460);
 
 /// The Now card (GFX-072).
 pub const NOW_SIZE: (usize, usize) = (440, 260);
@@ -939,6 +939,25 @@ pub enum AppState {
     Sketch(SketchView),
 }
 
+/// Where screen pixel `(px, py)` falls in the canvas of a card with
+/// `bounds`: the content area's own pixel space, the one the compositor
+/// draws graphics in (GFX-080). `None` outside it.
+fn canvas_point_in(bounds: RasterRect, px: usize, py: usize) -> Option<(i32, i32)> {
+    let origin_x = bounds.x + services_gui_host::CARD_PADDING;
+    let origin_y =
+        bounds.y + services_gui_host::CARD_HEADER_HEIGHT + services_gui_host::CARD_PADDING;
+    let right = bounds
+        .right()
+        .saturating_sub(services_gui_host::CARD_PADDING);
+    let bottom = bounds
+        .bottom()
+        .saturating_sub(services_gui_host::CARD_PADDING + services_gui_host::CARD_FOOTER_HEIGHT);
+    if px < origin_x || py < origin_y || px >= right || py >= bottom {
+        return None;
+    }
+    Some(((px - origin_x) as i32, (py - origin_y) as i32))
+}
+
 /// One open window.
 #[derive(Debug, Clone)]
 pub struct DeskWindow {
@@ -1562,22 +1581,21 @@ impl Desk {
     /// content area's own pixel space, the one the compositor draws
     /// graphics in (GFX-080). `None` outside it.
     fn canvas_point(&self, id: ViewId, px: usize, py: usize) -> Option<(i32, i32)> {
-        let window = self.window(id)?;
-        let origin_x = window.bounds.x + services_gui_host::CARD_PADDING;
-        let origin_y = window.bounds.y
-            + services_gui_host::CARD_HEADER_HEIGHT
-            + services_gui_host::CARD_PADDING;
-        let right = window
-            .bounds
-            .right()
-            .saturating_sub(services_gui_host::CARD_PADDING);
-        let bottom = window.bounds.bottom().saturating_sub(
-            services_gui_host::CARD_PADDING + services_gui_host::CARD_FOOTER_HEIGHT,
+        canvas_point_in(self.window(id)?.bounds, px, py)
+    }
+
+    /// The canvas's size for a card with `bounds`: the content area
+    /// between the header, the padding and the footer (GFX-081).
+    fn canvas_size(bounds: RasterRect) -> (u32, u32) {
+        let width = bounds
+            .width
+            .saturating_sub(services_gui_host::CARD_PADDING * 2);
+        let height = bounds.height.saturating_sub(
+            services_gui_host::CARD_HEADER_HEIGHT
+                + services_gui_host::CARD_PADDING * 2
+                + services_gui_host::CARD_FOOTER_HEIGHT,
         );
-        if px < origin_x || py < origin_y || px >= right || py >= bottom {
-            return None;
-        }
-        Some(((px - origin_x) as i32, (py - origin_y) as i32))
+        (width as u32, height as u32)
     }
 
     /// Open a day's note (GFX-076): a Notepad on the document named by
@@ -3011,10 +3029,18 @@ impl Desk {
                                 requests.extend(self.open_files_selection(*target));
                             }
                             // Calculator: the keys are in the content (GFX-075).
-                            if let Some(AppState::Calculator(calc)) =
-                                self.window_mut(*target).map(|w| &mut w.state)
-                            {
-                                calc.click(line, column);
+                            // Calculator: real keys, hit by pixel (GFX-081).
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                let bounds = self.window(*target).map(|w| w.bounds);
+                                let palette = crate::widgets::Palette::from_theme(&self.theme());
+                                if let (Some(bounds), Some(AppState::Calculator(calc))) =
+                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
+                                {
+                                    let (w, h) = Self::canvas_size(bounds);
+                                    if let Some(key) = calc.ui(w, h, palette, None).hit(x, y) {
+                                        calc.press(key as char);
+                                    }
+                                }
                             }
                             // Calendar: a day, or the month's ends (GFX-076).
                             let effect = match self.window_mut(*target).map(|w| &mut w.state) {
@@ -3891,10 +3917,14 @@ impl Desk {
                 out.push(self.overview_card(window, bounds, index == highlight));
             }
         }
+        let pointer = self.pointer;
+        let palette = crate::widgets::Palette::from_theme(&self.theme());
         for window in &mut self.windows {
             if window.tucked || window.space != space || overview_open {
                 continue;
             }
+            // The pointer in this card's canvas, for hover (GFX-081).
+            let hover = pointer.and_then(|(px, py)| canvas_point_in(window.bounds, px, py));
             let rows = Self::card_rows(window.bounds);
             let focused = focus == Some(window.id);
             let mut highlight = None;
@@ -3990,7 +4020,9 @@ impl Desk {
                     None,
                 ),
                 AppState::Calculator(calc) => {
-                    (calc.lines(), "Calculator".to_string(), calc.footer(), None)
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(calc.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Calculator".to_string(), calc.footer(), None)
                 }
                 AppState::Calendar(calendar) => {
                     selection = calendar.selection();
@@ -6035,36 +6067,55 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.actions, alloc::vec!["Clear", "Close"]);
-        let (ox, oy, pitch) = card.card_text_origin();
-        // Click "7" (row 1 of the grid, first key), "+" (row 3, last), "8",
-        // then "=".
-        let click = |desk: &mut Desk, router: &mut DesktopInputRouter, line: usize, col: usize| {
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
+        let (ox, oy, _) = card.card_text_origin();
+        let bounds = desk.window(id).unwrap().bounds;
+        let (w, h) = Desk::canvas_size(bounds);
+        let layout = crate::calculator::Layout::new(w, h);
+        // Click the centres of "7", "+", "8", "=" as the layout places them.
+        let click = |desk: &mut Desk, router: &mut DesktopInputRouter, key: char| {
             let windows = desk.windows("", true, None);
-            let x = (ox + col * 8 + 4) as i32;
-            let y = (oy + line * pitch + 4) as i32;
+            let cell = layout.key_rect(key).expect("a key on the grid");
+            let x = (ox as u32 + cell.x + cell.width / 2) as i32;
+            let y = (oy as u32 + cell.y + cell.height / 2) as i32;
             let deliveries = router.route(&compositor, &windows, press(x, y));
             desk.handle_deliveries_with_requests(&deliveries);
             let deliveries = router.route(&compositor, &windows, release(x, y));
             desk.handle_deliveries_with_requests(&deliveries);
         };
-        let first = crate::calculator::FIRST_KEY_LINE;
-        click(&mut desk, &mut router, first + 1, 2);
-        click(&mut desk, &mut router, first + 3, 20);
-        click(&mut desk, &mut router, first + 1, 8);
-        click(&mut desk, &mut router, first + 4, 20);
-        let lines = match &desk
-            .windows("", true, None)
-            .iter()
-            .find(|w| w.frame.view_id == id)
-            .unwrap()
-            .frame
-            .content
-        {
-            ViewContent::TextBuffer { lines } => lines.clone(),
+        for key in ['7', '+', '8', '='] {
+            click(&mut desk, &mut router, key);
+        }
+        let calc = match &desk.window(id).unwrap().state {
+            AppState::Calculator(calc) => calc.clone(),
             _ => panic!(),
         };
-        assert!(lines[1].ends_with("15"), "{lines:?}");
-        assert!(lines.last().unwrap().ends_with("7+8 = 15"), "{lines:?}");
+        assert_eq!(calc.shown(), "15");
+        assert_eq!(
+            calc.tape().first().map(|(e, r)| (e.as_str(), r.as_str())),
+            Some(("7+8", "15"))
+        );
+        // The pointer over "=" outlines it: one more op than at rest.
+        let cell = layout.key_rect('=').unwrap();
+        let at_rest = calc
+            .ui(
+                w,
+                h,
+                crate::widgets::Palette::from_theme(&Theme::DEFAULT),
+                None,
+            )
+            .into_ops()
+            .len();
+        let hovered = calc
+            .ui(
+                w,
+                h,
+                crate::widgets::Palette::from_theme(&Theme::DEFAULT),
+                Some((cell.x as i32 + 2, cell.y as i32 + 2)),
+            )
+            .into_ops()
+            .len();
+        assert_eq!(hovered, at_rest + 1);
         // Typed: the result carries on. Esc clears rather than closing.
         desk.handle_key(b'*');
         desk.handle_key(b'2');

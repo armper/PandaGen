@@ -1,31 +1,33 @@
-//! Calculator (GFX-075): a card with keys you can click and a tape.
+//! Calculator (GFX-075, GFX-081): real keys, a display, a tape.
 //!
 //! The arithmetic is exact decimal, not floating point: values are `i128`
 //! scaled by [`SCALE`] (twelve decimal places), so `0.1 + 0.2` is `0.3`
 //! and a kernel without a floating-point unit never needs one. Anything
 //! that would not fit says "Too big" rather than wrapping.
 //!
-//! The card is text, like every card: the expression and its result on
-//! the first two lines, then the key grid, then the tape of what was
-//! worked out before. A click on a key is mapped back from the grid's
-//! line and column, so the pointer and the keyboard reach the same
-//! [`Calculator::press`].
+//! The card is drawn with the widget layer: the expression small and the
+//! result twice the font's size, right-aligned; a grid of rounded keys;
+//! the tape in the muted tone below. A click lands on a key through the
+//! [`Ui`]'s hit rectangles and arrives here as the same character the
+//! keyboard would send, so both reach [`Calculator::press`].
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use view_types::PixelRect;
+
+use crate::widgets::{grid, rect, ButtonKind, Palette, Ui, GLYPH_H};
 
 /// Fixed-point scale: twelve decimal places.
 pub const SCALE: i128 = 1_000_000_000_000;
 /// How many results the tape keeps.
 pub const TAPE: usize = 6;
-/// The display's width in characters; expression and result are
-/// right-aligned to it, and the key grid sits under it.
-pub const WIDTH: usize = 23;
+/// Longest expression.
+pub const WIDTH: usize = 24;
 
-/// The key grid, as drawn: five rows of four. `C` clears, `<` deletes
-/// the last character, `=` works the expression out.
+/// The key grid: five rows of four. `C` clears, `<` deletes the last
+/// character, `=` works the expression out.
 pub const KEYS: [[char; 4]; 5] = [
     ['C', '(', ')', '/'],
     ['7', '8', '9', '*'],
@@ -33,10 +35,47 @@ pub const KEYS: [[char; 4]; 5] = [
     ['1', '2', '3', '+'],
     ['0', '.', '<', '='],
 ];
-/// The content line the first key row is on: expression, result, a gap.
-pub const FIRST_KEY_LINE: usize = 3;
-/// Each key is `[ x ]` and a space: six columns.
-const KEY_WIDTH: usize = 6;
+/// The display's height in canvas pixels.
+pub const DISPLAY_H: u32 = 64;
+const GAP: u32 = 6;
+const KEY_ROWS_H: u32 = 244;
+const TAPE_PITCH: u32 = GLYPH_H + 2;
+
+/// Where things go on a canvas of a given size (GFX-081): the display,
+/// the twenty keys, the tape. Pure geometry, so a test and the desk agree
+/// on where a key is.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub width: u32,
+    pub display: PixelRect,
+    pub keys: Vec<PixelRect>,
+    pub tape_top: u32,
+    pub tape_rows: u32,
+}
+
+impl Layout {
+    pub fn new(width: u32, height: u32) -> Self {
+        let keys_top = DISPLAY_H + 8;
+        let keys = grid(rect(0, keys_top as i32, width, KEY_ROWS_H), 4, 5, GAP);
+        let tape_top = keys_top + KEY_ROWS_H + 12;
+        let tape_rows = height.saturating_sub(tape_top) / TAPE_PITCH;
+        Self {
+            width,
+            display: rect(0, 0, width, DISPLAY_H),
+            keys,
+            tape_top,
+            tape_rows,
+        }
+    }
+
+    /// The rectangle of key `ch`.
+    pub fn key_rect(&self, ch: char) -> Option<PixelRect> {
+        KEYS.iter()
+            .flatten()
+            .position(|k| *k == ch)
+            .and_then(|i| self.keys.get(i).copied())
+    }
+}
 
 /// The calculator's whole state.
 #[derive(Debug, Clone, Default)]
@@ -54,6 +93,10 @@ pub struct Calculator {
 impl Calculator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn tape(&self) -> &[(String, String)] {
+        &self.tape
     }
 
     /// One key: a digit, an operator, `(`, `)`, `.`, `C`, `<` or `=`.
@@ -130,23 +173,6 @@ impl Calculator {
         }
     }
 
-    /// The key under content `line`, `column`, if that is a key.
-    pub fn key_at(line: usize, column: usize) -> Option<char> {
-        let row = line.checked_sub(FIRST_KEY_LINE)?;
-        if column % KEY_WIDTH >= KEY_WIDTH - 1 {
-            return None; // the space between keys
-        }
-        KEYS.get(row)?.get(column / KEY_WIDTH).copied()
-    }
-
-    /// A click on the card's content.
-    pub fn click(&mut self, line: usize, column: usize) -> bool {
-        match Self::key_at(line, column) {
-            Some(key) => self.press(key),
-            None => false,
-        }
-    }
-
     /// What the result line says: the value, the error, or nothing.
     pub fn shown(&self) -> String {
         match &self.result {
@@ -156,29 +182,45 @@ impl Calculator {
         }
     }
 
-    /// The card's lines: the display, the keys, the tape.
-    pub fn lines(&self) -> Vec<String> {
-        let mut lines = alloc::vec![
-            alloc::format!("{:>WIDTH$}", self.expr),
-            alloc::format!("{:>WIDTH$}", self.shown()),
-            String::new(),
-        ];
-        for row in KEYS.iter() {
-            let cells: Vec<String> = row.iter().map(|k| alloc::format!("[ {k} ]")).collect();
-            lines.push(cells.join(" "));
+    /// The card, drawn (GFX-081): the display, the keys, the tape.
+    /// `hover` is the pointer in canvas pixels, if it is over the card.
+    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+        let layout = Layout::new(width, height);
+        let mut ui = Ui::new(palette, hover);
+        let p = *ui.palette();
+        // The display: a raised well, the expression small above the
+        // result large, both right-aligned; an error reads in the accent.
+        ui.fill(layout.display, p.raised, 8);
+        let right = width as i32 - 10;
+        let expr_ink = if self.fresh { p.muted } else { p.text };
+        ui.text_right(right, 8, &self.expr, expr_ink, 1);
+        let (shown, ink) = match &self.result {
+            Some(Ok(value)) => (value.clone(), p.text),
+            Some(Err(why)) => (why.clone(), p.accent),
+            None => (String::new(), p.text),
+        };
+        let scale = if shown.len() > 16 { 1 } else { 2 };
+        ui.text_right(right, 28, &shown, ink, scale);
+        // The keys.
+        for (cell, key) in layout.keys.iter().zip(KEYS.iter().flatten()) {
+            let kind = match key {
+                '=' => ButtonKind::Primary,
+                '/' | '*' | '-' | '+' => ButtonKind::Accent,
+                'C' | '<' | '(' | ')' => ButtonKind::Quiet,
+                _ => ButtonKind::Plain,
+            };
+            let label = key.to_string();
+            ui.button(*cell, &label, *key as u8, kind);
         }
-        if !self.tape.is_empty() {
-            lines.push(String::new());
-            for (expr, value) in &self.tape {
-                let entry = alloc::format!("{expr} = {value}");
-                lines.push(alloc::format!("{entry:>WIDTH$}"));
-            }
+        // The tape, newest first, in the muted tone.
+        for (i, (expr, value)) in self.tape.iter().take(layout.tape_rows as usize).enumerate() {
+            let y = (layout.tape_top + i as u32 * TAPE_PITCH) as i32;
+            ui.text_right(right, y, &alloc::format!("{expr} = {value}"), p.muted, 1);
         }
-        lines
+        ui
     }
 
     pub fn footer(&self) -> String {
-        // The card is 280px: 32 characters of footer.
         if self.tape.is_empty() {
             "Enter works it out   Esc clears".to_string()
         } else {
@@ -331,6 +373,8 @@ pub fn format_fixed(value: i128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use services_gui_host::Theme;
+    use view_types::DrawOp;
 
     fn value(text: &str) -> String {
         format_fixed(evaluate(text).unwrap())
@@ -359,23 +403,37 @@ mod tests {
     }
 
     #[test]
-    fn keys_clicked_and_typed_reach_the_same_expression_and_the_tape() {
+    fn keys_are_real_buttons_hit_by_pixel_and_typed_keys_reach_the_same_code() {
+        let palette = Palette::from_theme(&Theme::DEFAULT);
+        let layout = Layout::new(284, 400);
+        assert_eq!(layout.keys.len(), 20);
+        assert_eq!(layout.key_rect('7'), Some(rect(0, 122, 66, 44)));
+        assert_eq!(layout.key_rect('='), Some(rect(216, 272, 66, 44)));
+        assert_eq!(layout.tape_rows, 4);
         let mut calc = Calculator::new();
-        // Click 7, +, 8, = on the grid.
-        assert_eq!(Calculator::key_at(FIRST_KEY_LINE + 1, 0), Some('7'));
-        assert_eq!(Calculator::key_at(FIRST_KEY_LINE + 1, 4), Some('7'));
-        assert_eq!(Calculator::key_at(FIRST_KEY_LINE + 1, 5), None, "the gap");
-        assert_eq!(Calculator::key_at(FIRST_KEY_LINE + 3, 18), Some('+'));
-        assert_eq!(Calculator::key_at(0, 0), None);
-        assert!(calc.click(FIRST_KEY_LINE + 1, 2));
-        assert!(calc.click(FIRST_KEY_LINE + 3, 20));
-        assert!(calc.click(FIRST_KEY_LINE + 1, 8));
-        assert!(calc.click(FIRST_KEY_LINE + 4, 20));
+        // Click 7, +, 8, = through the drawn keys.
+        for key in ['7', '+', '8', '='] {
+            let cell = layout.key_rect(key).unwrap();
+            let hit = calc
+                .ui(284, 400, palette, None)
+                .hit(cell.x as i32 + 5, cell.y as i32 + 5)
+                .expect("a key there");
+            assert_eq!(hit as char, key);
+            calc.press(hit as char);
+        }
         assert_eq!(calc.shown(), "15");
-        let lines = calc.lines();
-        assert!(lines[0].ends_with("15"));
-        assert_eq!(lines[FIRST_KEY_LINE], "[ C ] [ ( ] [ ) ] [ / ]");
-        assert!(lines.last().unwrap().ends_with("7+8 = 15"));
+        assert_eq!(calc.tape()[0], ("7+8".to_string(), "15".to_string()));
+        // The display shows the result at twice the size; the tape once.
+        let ops = calc.ui(284, 400, palette, None).into_ops();
+        assert!(ops.iter().any(
+            |op| matches!(op, DrawOp::Text { text, style, .. } if text == "15" && style.scale == 2)
+        ));
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            DrawOp::Text { text, style, .. } if text == "7+8 = 15" && style.scale == 1
+        )));
+        // Between the keys there is nothing to hit.
+        assert_eq!(calc.ui(284, 400, palette, None).hit(68, 130), None);
         // An operator carries the result on; Enter is =; x is *.
         calc.handle_byte(b'x');
         calc.handle_byte(b'2');
@@ -386,13 +444,12 @@ mod tests {
         calc.handle_byte(b'4');
         calc.handle_byte(b'2');
         calc.handle_byte(0x08);
-        assert!(calc.lines()[0].ends_with(" 4"));
         calc.handle_byte(b'/');
         calc.handle_byte(b'0');
         calc.handle_byte(b'\n');
         assert_eq!(calc.shown(), "Divide by zero");
         assert!(calc.handle_byte(0x1B));
-        assert_eq!(calc.lines()[0].trim(), "");
+        assert_eq!(calc.shown(), "");
         assert!(!calc.handle_byte(b'\n'), "nothing to work out");
     }
 }

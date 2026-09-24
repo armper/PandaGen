@@ -41,6 +41,7 @@ mod sketch;
 mod tasks;
 mod timer;
 mod vga;
+mod widgets;
 mod workspace;
 
 #[cfg(not(test))]
