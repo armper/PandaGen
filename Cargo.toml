@@ -81,6 +81,12 @@ panic = "abort"
 inherits = "release"
 opt-level = 2
 debug = "line-tables-only"
+# The bootloader reads the whole kernel file into memory before it maps
+# the segments, so the file's size is the boot's footprint: with the line
+# tables in it the kernel was 9.9 MB and a 16 MiB machine had no room left
+# for a 2 MiB heap (H3). Strip them from the binary; the build keeps them
+# for the toolchain.
+strip = "debuginfo"
 
 [workspace.dependencies]
 # Core crates

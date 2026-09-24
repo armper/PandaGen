@@ -50,6 +50,7 @@ use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::game::{Game, GameEffect};
 use crate::notepad::{Notepad, NotepadEffect};
+use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
 use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
 use crate::timer::{TimerEffect, TimerView};
 
@@ -115,10 +116,12 @@ pub enum DeskApp {
     Tiles,
     /// The to-do list, kept as the document `tasks` (GFX-079).
     Tasks,
+    /// Draw with the pointer; kept as the document `sketch` (GFX-080).
+    Sketch,
 }
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 9] = [
+    pub const ALL: [DeskApp; 10] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
@@ -128,6 +131,7 @@ impl DeskApp {
         DeskApp::Timer,
         DeskApp::Tiles,
         DeskApp::Tasks,
+        DeskApp::Sketch,
     ];
 
     /// What the desk must ask the kernel for right after `app` opens in
@@ -138,6 +142,10 @@ impl DeskApp {
             DeskApp::Tasks => Some(DeskRequest::PreviewFile {
                 id,
                 name: TASKS_FILE.to_string(),
+            }),
+            DeskApp::Sketch => Some(DeskRequest::PreviewFile {
+                id,
+                name: SKETCH_FILE.to_string(),
             }),
             _ => None,
         }
@@ -158,6 +166,7 @@ impl DeskApp {
             DeskApp::Timer => "Timer",
             DeskApp::Tiles => "Tiles",
             DeskApp::Tasks => "Tasks",
+            DeskApp::Sketch => "Sketch",
         }
     }
 
@@ -177,6 +186,7 @@ impl DeskApp {
             DeskApp::Timer => "Ti",
             DeskApp::Tiles => "2k",
             DeskApp::Tasks => "Td",
+            DeskApp::Sketch => "Sk",
         }
     }
 
@@ -195,9 +205,13 @@ impl DeskApp {
             DeskApp::Timer => TIMER_SIZE,
             DeskApp::Tiles => TILES_SIZE,
             DeskApp::Tasks => TASKS_SIZE,
+            DeskApp::Sketch => SKETCH_SIZE,
         }
     }
 }
+
+/// The Sketch card (GFX-080): a canvas.
+pub const SKETCH_SIZE: (usize, usize) = (520, 420);
 
 /// The Tasks card (GFX-079).
 pub const TASKS_SIZE: (usize, usize) = (460, 400);
@@ -512,6 +526,12 @@ impl DeskWindow {
                 ("Add".to_string(), b'a'),
                 ("Done".to_string(), b'\n'),
                 ("Remove".to_string(), crate::notepad::KEY_DELETE),
+                ("Close".to_string(), crate::notepad::CTRL_W),
+            ],
+            AppState::Sketch(_) => alloc::vec![
+                ("Colour".to_string(), b'c'),
+                ("Undo".to_string(), b'z'),
+                ("Clear".to_string(), b'x'),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
         }
@@ -916,6 +936,7 @@ pub enum AppState {
     Timer(TimerView),
     Tiles(Game),
     Tasks(TasksView),
+    Sketch(SketchView),
 }
 
 /// One open window.
@@ -1103,10 +1124,12 @@ pub enum PaletteAction {
     Tiles,
     /// The Tasks card (GFX-079).
     Tasks,
+    /// The Sketch card (GFX-080).
+    Sketch,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 38] = [
+    pub const ALL: [PaletteAction; 39] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1145,6 +1168,7 @@ impl PaletteAction {
         PaletteAction::Timer,
         PaletteAction::Tiles,
         PaletteAction::Tasks,
+        PaletteAction::Sketch,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1187,6 +1211,7 @@ impl PaletteAction {
             PaletteAction::Timer => "Timer: stopwatch and countdown",
             PaletteAction::Tiles => "Tiles: the 2048 game",
             PaletteAction::Tasks => "Tasks: the to-do list",
+            PaletteAction::Sketch => "Sketch: draw with the pointer",
         }
     }
 
@@ -1230,6 +1255,7 @@ impl PaletteAction {
             PaletteAction::Timer => "",
             PaletteAction::Tiles => "",
             PaletteAction::Tasks => "",
+            PaletteAction::Sketch => "",
         }
     }
 
@@ -1438,6 +1464,8 @@ pub struct Desk {
     overview: Option<usize>,
     /// A pointer drag selecting text in this card.
     text_select: Option<ViewId>,
+    /// A stroke is being drawn in this Sketch card (GFX-080).
+    sketching: Option<ViewId>,
     notices: Vec<DeskNotice>,
     notice_ids: Vec<ViewId>,
     /// Shell notices the person clicked away (GFX-063): hidden until the
@@ -1498,6 +1526,7 @@ impl Desk {
             space: 0,
             overview: None,
             text_select: None,
+            sketching: None,
             notices: Vec::new(),
             notice_ids: (0..4).map(|_| ViewId::new()).collect(),
             dismissed_shell: Vec::new(),
@@ -1527,6 +1556,28 @@ impl Desk {
                 calendar.set_today(today);
             }
         }
+    }
+
+    /// Where screen pixel `(px, py)` falls in card `id`'s canvas -- the
+    /// content area's own pixel space, the one the compositor draws
+    /// graphics in (GFX-080). `None` outside it.
+    fn canvas_point(&self, id: ViewId, px: usize, py: usize) -> Option<(i32, i32)> {
+        let window = self.window(id)?;
+        let origin_x = window.bounds.x + services_gui_host::CARD_PADDING;
+        let origin_y = window.bounds.y
+            + services_gui_host::CARD_HEADER_HEIGHT
+            + services_gui_host::CARD_PADDING;
+        let right = window
+            .bounds
+            .right()
+            .saturating_sub(services_gui_host::CARD_PADDING);
+        let bottom = window.bounds.bottom().saturating_sub(
+            services_gui_host::CARD_PADDING + services_gui_host::CARD_FOOTER_HEIGHT,
+        );
+        if px < origin_x || py < origin_y || px >= right || py >= bottom {
+            return None;
+        }
+        Some(((px - origin_x) as i32, (py - origin_y) as i32))
     }
 
     /// Open a day's note (GFX-076): a Notepad on the document named by
@@ -1773,6 +1824,12 @@ impl Desk {
                 tasks.load(text);
             }
         }
+        // And the Sketch its strokes (GFX-080).
+        if let Some(AppState::Sketch(sketch)) = self.window_mut(id).map(|w| &mut w.state) {
+            if name == SKETCH_FILE {
+                sketch.load(text);
+            }
+        }
     }
 
     /// Every tick (GFX-060): documents that have sat still save
@@ -1867,6 +1924,21 @@ impl Desk {
                         id: window.id,
                         effect: NotepadEffect::Save {
                             path: TASKS_FILE.to_string(),
+                            content,
+                        },
+                    });
+                    if !self.quiet_saves.contains(&window.id) {
+                        self.quiet_saves.push(window.id);
+                    }
+                }
+            }
+            // And the drawing (GFX-080).
+            if let AppState::Sketch(sketch) = &mut window.state {
+                if let Some(content) = sketch.save_due(now) {
+                    requests.push(DeskRequest::Io {
+                        id: window.id,
+                        effect: NotepadEffect::Save {
+                            path: SKETCH_FILE.to_string(),
                             content,
                         },
                     });
@@ -1971,6 +2043,7 @@ impl Desk {
                     self.last_tick.wrapping_mul(6_364_136_223_846_793_005) ^ self.opened as u64,
                 )),
                 DeskApp::Tasks => AppState::Tasks(TasksView::new()),
+                DeskApp::Sketch => AppState::Sketch(SketchView::new()),
             },
         });
         self.focus = Some(id);
@@ -2214,6 +2287,10 @@ impl Desk {
                     tasks.tasks().iter().filter(|t| !t.done).count()
                 )],
             ),
+            AppState::Sketch(sketch) => (
+                "Sketch".to_string(),
+                alloc::vec![alloc::format!("{} strokes", sketch.strokes().len())],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -2438,6 +2515,15 @@ impl Desk {
                     None
                 } else {
                     DeskApp::Tasks.launch_request(id)
+                }
+            }
+            PaletteAction::Sketch => {
+                let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
+                let id = self.open_or_raise(DeskApp::Sketch);
+                if had {
+                    None
+                } else {
+                    DeskApp::Sketch.launch_request(id)
                 }
             }
             PaletteAction::Calendar => {
@@ -2956,6 +3042,16 @@ impl Desk {
                             {
                                 tasks.click(line, column);
                             }
+                            // Sketch: a stroke begins where the pointer
+                            // pressed, in the canvas's own pixels (GFX-080).
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                if let Some(AppState::Sketch(sketch)) =
+                                    self.window_mut(*target).map(|w| &mut w.state)
+                                {
+                                    sketch.begin(x, y);
+                                    self.sketching = Some(*target);
+                                }
+                            }
                             // Look: a click on a row previews it; a click on
                             // the row already under the highlight keeps it.
                             let look_row = self
@@ -3010,7 +3106,15 @@ impl Desk {
                             }
                         }
                         (_, _, _, PointerEventKind::Move { .. }) => {
-                            if self.text_select == Some(*target) {
+                            if self.sketching == Some(*target) {
+                                if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                    if let Some(AppState::Sketch(sketch)) =
+                                        self.window_mut(*target).map(|w| &mut w.state)
+                                    {
+                                        changed |= sketch.extend(x, y);
+                                    }
+                                }
+                            } else if self.text_select == Some(*target) {
                                 if let Some(HitRegion::Content { line, column }) = region {
                                     if let Some(notepad) =
                                         self.window_mut(*target).and_then(|w| w.notepad_mut())
@@ -3066,6 +3170,14 @@ impl Desk {
                             }
                             if self.text_select == Some(*target) {
                                 self.text_select = None;
+                            }
+                            if self.sketching == Some(*target) {
+                                self.sketching = None;
+                                if let Some(AppState::Sketch(sketch)) =
+                                    self.window_mut(*target).map(|w| &mut w.state)
+                                {
+                                    sketch.end();
+                                }
                             }
                         }
                         _ => {}
@@ -3441,6 +3553,14 @@ impl Desk {
                     (None, true)
                 }
             },
+            AppState::Sketch(sketch) => match sketch.handle_byte(byte) {
+                SketchEffect::None => (None, false),
+                SketchEffect::Redraw => (None, true),
+                SketchEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -3780,6 +3900,7 @@ impl Desk {
             let mut highlight = None;
             let mut selection = Vec::new();
             let mut styles = Vec::new();
+            let mut graphics: Option<Vec<view_types::DrawOp>> = None;
             let (lines, title, footer, cursor) = match &mut window.state {
                 AppState::Notepad(notepad) => {
                     // Long lines wrap to the card (GFX-064); the width is
@@ -3896,6 +4017,15 @@ impl Desk {
                     highlight = tasks.highlight();
                     (tasks.lines(), "Tasks".to_string(), tasks.footer(), None)
                 }
+                AppState::Sketch(sketch) => {
+                    let canvas_width = window
+                        .bounds
+                        .width
+                        .saturating_sub(services_gui_host::CARD_PADDING * 2)
+                        as u32;
+                    graphics = Some(sketch.ops(canvas_width));
+                    (Vec::new(), "Sketch".to_string(), sketch.footer(), None)
+                }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
                     let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
@@ -3958,6 +4088,11 @@ impl Desk {
                 0,
             );
             frame.title = Some(title);
+            if let Some(ops) = graphics.take() {
+                // A canvas, not text: the card draws these in its content
+                // area's own pixel space (GFX-080).
+                frame.content = ViewContent::graphics(ops);
+            }
             if caret_visible && focused {
                 if let Some((line, column)) = cursor {
                     frame.cursor = Some(CursorPosition::new(line, column));
@@ -6157,6 +6292,81 @@ mod tests {
             DeskApp::Tasks.launch_request(fresh),
             Some(DeskRequest::PreviewFile { .. })
         ));
+    }
+
+    /// Sketch (GFX-080): press, move, release draws a stroke in the
+    /// canvas's own pixels; the card's content is graphics; the drawing
+    /// saves itself as a document a second later.
+    #[test]
+    fn sketch_draws_a_stroke_with_the_pointer_and_keeps_it_as_a_document() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        assert!(DeskApp::ALL.contains(&DeskApp::Sketch));
+        let id = desk.launch(DeskApp::Sketch);
+        assert!(matches!(
+            DeskApp::Sketch.launch_request(id),
+            Some(DeskRequest::PreviewFile { name, .. }) if name == "sketch"
+        ));
+        desk.preview_loaded(id, "sketch", "2: 1,1 2,2\n");
+        desk.tick(10);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
+        assert_eq!(
+            card.actions,
+            alloc::vec!["Colour", "Undo", "Clear", "Close"]
+        );
+        let (ox, oy, _) = card.card_text_origin();
+        let (x0, y0) = ((ox + 20) as i32, (oy + 30) as i32);
+        route(&mut desk, &mut router, press(x0, y0));
+        route(
+            &mut desk,
+            &mut router,
+            moved(x0 + 40, y0 + 10, PointerButtons::PRIMARY),
+        );
+        route(
+            &mut desk,
+            &mut router,
+            moved(x0 + 80, y0 + 10, PointerButtons::PRIMARY),
+        );
+        route(&mut desk, &mut router, release(x0 + 80, y0 + 10));
+        let strokes = match &desk.window(id).unwrap().state {
+            AppState::Sketch(sketch) => sketch.strokes().to_vec(),
+            _ => panic!(),
+        };
+        assert_eq!(strokes.len(), 2, "the loaded one and the drawn one");
+        assert_eq!(
+            strokes[1].points,
+            alloc::vec![(20, 30), (60, 40), (100, 40)]
+        );
+        // Moving with the button up draws nothing more.
+        route(
+            &mut desk,
+            &mut router,
+            moved(x0 + 90, y0 + 50, PointerButtons::none()),
+        );
+        let strokes = match &desk.window(id).unwrap().state {
+            AppState::Sketch(sketch) => sketch.strokes().to_vec(),
+            _ => panic!(),
+        };
+        assert_eq!(strokes[1].points.len(), 3);
+        // The drawing saves itself, quietly, as the `sketch` document.
+        let requests = desk.tick(10 + crate::sketch::SAVE_AFTER_TICKS + 1);
+        assert!(matches!(
+            requests.as_slice(),
+            [DeskRequest::Io { effect: NotepadEffect::Save { path, content }, .. }]
+                if path == "sketch" && content.starts_with("2: 1,1 2,2\n0: 20,30 60,40 100,40\n")
+        ));
+        // Colour, undo, and the chips.
+        desk.handle_key(b'c');
+        desk.handle_key(b'z');
+        let strokes = match &desk.window(id).unwrap().state {
+            AppState::Sketch(sketch) => sketch.strokes().to_vec(),
+            _ => panic!(),
+        };
+        assert_eq!(strokes.len(), 1);
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
     }
 
     #[test]

@@ -631,6 +631,34 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: Sketch from the palette, the colour swatch");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // Open Sketch, press C once: the swatch in the canvas's top-right
+        // corner turns red.
+        "sleep:6,ctrl-spc,sleep:1,s,k,e,t,c,h,ret,sleep:2,c,sleep:1,shot:sketch".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_sketch".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The card: 520 wide, centred (x=380), first cascade step at y=44,
+        // focused: the accent ring on its top edge...
+        "--expect-pixel".to_string(),
+        "640,44,52,211,153".to_string(),
+        // ...the swatch, 12px at the canvas's top-right (canvas x=388,
+        // width 504; y=76), red after one C...
+        "--expect-pixel".to_string(),
+        "884,84,239,83,80".to_string(),
+        // ...and an empty canvas is the card's surface.
+        "--expect-pixel".to_string(),
+        "640,250,28,34,48".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: a save, Files from the palette, a file opened from it");
     let args = [
         "--port-base".to_string(),
@@ -659,12 +687,12 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // the bare gradient would otherwise be.
         "--expect-pixel".to_string(),
         "1200,81,28,34,48".to_string(),
-        // Two dock tiles lit: Notepad and Files. Nine tiles (GFX-079) are
-        // 424px wide centred on 640, so the first centre is at 448.
+        // Two dock tiles lit: Notepad and Files. Ten tiles (GFX-080) are
+        // 472px wide centred on 640, so the first centre is at 424.
         "--expect-pixel".to_string(),
-        "448,785,52,211,153".to_string(),
+        "424,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "496,785,52,211,153".to_string(),
+        "472,785,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

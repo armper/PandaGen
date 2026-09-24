@@ -26,6 +26,7 @@ pub mod palette_overlay;
 pub mod present_policy;
 pub mod render_stats;
 pub mod rtc;
+pub mod sketch;
 pub mod tasks;
 pub mod timer;
 
