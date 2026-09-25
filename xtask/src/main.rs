@@ -645,8 +645,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
-        // Open Sketch, press C once: the swatch in the canvas's top-right
-        // corner turns red.
+        // Open Sketch, press C once: the toolbar's ring moves to the red
+        // swatch (GFX-106).
         "sleep:6,ctrl-spc,sleep:1,s,k,e,t,c,h,ret,sleep:2,c,sleep:1,shot:sketch".to_string(),
         "--out".to_string(),
         "dist/qemu_desk_sketch".to_string(),
@@ -656,10 +656,13 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // focused: the accent ring on its top edge...
         "--expect-pixel".to_string(),
         "640,44,52,211,153".to_string(),
-        // ...the swatch, 12px at the canvas's top-right (canvas x=388,
-        // width 504; y=76), red after one C...
+        // ...the red swatch, second on the toolbar (canvas x=388, y=76;
+        // swatch at canvas 42,9, 22px), and the ring around it after one
+        // C, its left edge at canvas x=38...
         "--expect-pixel".to_string(),
-        "884,84,239,83,80".to_string(),
+        "441,96,239,83,80".to_string(),
+        "--expect-pixel".to_string(),
+        "426,96,226,232,240".to_string(),
         // ...and an empty canvas is the card's surface.
         "--expect-pixel".to_string(),
         "640,250,28,34,48".to_string(),

@@ -1115,11 +1115,7 @@ impl DeskWindow {
                 ("Cancel".to_string(), crate::notepad::ESC),
             ],
             AppState::Tasks(_) => Vec::new(),
-            AppState::Sketch(_) => alloc::vec![
-                ("Colour".to_string(), b'c'),
-                ("Undo".to_string(), b'z'),
-                ("Clear".to_string(), b'x'),
-            ],
+            AppState::Sketch(_) => Vec::new(),
             AppState::Launcher(_) => Vec::new(),
         }
     }
@@ -4231,14 +4227,38 @@ impl Desk {
                                 changed = true;
                                 continue;
                             }
-                            // Sketch: a stroke begins where the pointer
-                            // pressed, in the canvas's own pixels (GFX-080).
+                            // Sketch: its toolbar's controls answer their
+                            // keys (GFX-106); below it a stroke begins
+                            // where the pointer pressed, in the canvas's own
+                            // pixels (GFX-080).
+                            let sketch_key =
+                                match (self.canvas_point(*target, px, py), self.window(*target)) {
+                                    (Some((x, y)), Some(w)) => match &w.state {
+                                        AppState::Sketch(sketch) => {
+                                            let (cw, _) = Self::canvas_size(w.bounds);
+                                            let palette =
+                                                crate::widgets::Palette::from_theme(&self.theme());
+                                            sketch.ui(cw, palette, None).hit(x, y)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                            if let Some(key) = sketch_key {
+                                let (request, _) = self.handle_app_key(*target, key);
+                                requests.extend(request);
+                                self.say(Sound::Click);
+                                changed = true;
+                                continue;
+                            }
                             if let Some((x, y)) = self.canvas_point(*target, px, py) {
                                 if let Some(AppState::Sketch(sketch)) =
                                     self.window_mut(*target).map(|w| &mut w.state)
                                 {
-                                    sketch.begin(x, y);
-                                    self.sketching = Some(*target);
+                                    if y >= crate::sketch::TOOLBAR_H as i32 {
+                                        sketch.begin(x, y);
+                                        self.sketching = Some(*target);
+                                    }
                                 }
                             }
                             if clicked {
@@ -5404,12 +5424,8 @@ impl Desk {
                     (Vec::new(), "Tasks".to_string(), tasks.footer(), None)
                 }
                 AppState::Sketch(sketch) => {
-                    let canvas_width = window
-                        .bounds
-                        .width
-                        .saturating_sub(services_gui_host::CARD_PADDING * 2)
-                        as u32;
-                    graphics = Some(sketch.ops(canvas_width));
+                    let (w, _) = Self::canvas_size(window.bounds);
+                    graphics = Some(sketch.ui(w, palette, hover).into_ops());
                     (Vec::new(), "Sketch".to_string(), sketch.footer(), None)
                 }
                 AppState::Launcher(launcher) => {
@@ -7826,9 +7842,9 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
-        assert_eq!(card.actions, alloc::vec!["Colour", "Undo", "Clear"]);
+        assert!(card.actions.is_empty(), "its toolbar is drawn");
         let (ox, oy, _) = card.card_text_origin();
-        let (x0, y0) = ((ox + 20) as i32, (oy + 30) as i32);
+        let (x0, y0) = ((ox + 20) as i32, (oy + 60) as i32);
         route(&mut desk, &mut router, press(x0, y0));
         route(
             &mut desk,
@@ -7848,7 +7864,7 @@ mod tests {
         assert_eq!(strokes.len(), 2, "the loaded one and the drawn one");
         assert_eq!(
             strokes[1].points,
-            alloc::vec![(20, 30), (60, 40), (100, 40)]
+            alloc::vec![(20, 60), (60, 70), (100, 70)]
         );
         // Moving with the button up draws nothing more.
         route(
@@ -7866,16 +7882,37 @@ mod tests {
         assert!(matches!(
             requests.as_slice(),
             [DeskRequest::Io { effect: NotepadEffect::Save { path, content }, .. }]
-                if path == "sketch" && content.starts_with("2: 1,1 2,2\n0: 20,30 60,40 100,40\n")
+                if path == "sketch" && content.starts_with("2: 1,1 2,2\n0: 20,60 60,70 100,70\n")
         ));
-        // Colour, undo, and the chips.
+        // The toolbar (GFX-106): a click on the third swatch picks yellow
+        // and draws nothing; a click on Undo takes the stroke back.
+        let swatch_x =
+            (ox as u32 + 10 + 2 * (crate::sketch::SWATCH + crate::sketch::SWATCH_GAP) + 11) as i32;
+        route(&mut desk, &mut router, press(swatch_x, (oy + 20) as i32));
+        route(&mut desk, &mut router, release(swatch_x, (oy + 20) as i32));
+        match &desk.window(id).unwrap().state {
+            AppState::Sketch(sketch) => {
+                assert_eq!(sketch.color, 2);
+                assert_eq!(sketch.strokes().len(), 2);
+            }
+            _ => panic!(),
+        }
+        let (cw, _) = Desk::canvas_size(desk.window(id).unwrap().bounds);
+        let undo_x = (ox as u32 + cw as u32 - 16 - 64 - 32) as i32;
+        route(&mut desk, &mut router, press(undo_x, (oy + 20) as i32));
+        route(&mut desk, &mut router, release(undo_x, (oy + 20) as i32));
+        match &desk.window(id).unwrap().state {
+            AppState::Sketch(sketch) => assert_eq!(sketch.strokes().len(), 1),
+            _ => panic!(),
+        }
+        // Colour and undo by key.
         desk.handle_key(b'c');
         desk.handle_key(b'z');
         let strokes = match &desk.window(id).unwrap().state {
             AppState::Sketch(sketch) => sketch.strokes().to_vec(),
             _ => panic!(),
         };
-        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes.len(), 0);
         desk.handle_key(crate::notepad::CTRL_W);
         assert!(desk.window(id).is_none());
     }
