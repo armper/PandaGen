@@ -5314,7 +5314,9 @@ impl Desk {
                                 .get(i)
                                 .map(|l| l.chars().take(preview_w).collect())
                                 .unwrap_or_default();
-                            alloc::format!("{:<list_w$} | {}", left, right)
+                            // Three cells between list and preview, where
+                            // the divider is drawn (GFX-105).
+                            alloc::format!("{:<list_w$}   {}", left, right)
                         })
                         .collect();
                     if !visible.is_empty() {
@@ -5331,6 +5333,19 @@ impl Desk {
                                 None => icon_op(2, y, 1, entry.icon()),
                             });
                         }
+                    }
+                    // The divider between list and preview (GFX-105): a
+                    // hairline down the middle of the gap, the card's height.
+                    if with_preview {
+                        let pitch = services_gui_host::CARD_LINE_HEIGHT as i32;
+                        let x = (list_w * GLYPH_WIDTH + GLYPH_WIDTH + GLYPH_WIDTH / 2) as i32;
+                        overlay.push(view_types::DrawOp::Line {
+                            x0: x,
+                            y0: 2,
+                            x1: x,
+                            y1: rows as i32 * pitch - 2,
+                            color: palette.hairline,
+                        });
                     }
                     let title = if files.bin { "Files - Bin" } else { "Files" };
                     (lines, title.to_string(), files.footer(), None)
@@ -6986,17 +7001,24 @@ mod tests {
             _ => panic!(),
         };
         assert!(
-            rows[0].trim_start().starts_with("alpha") && rows[0].contains("| first line"),
+            rows[0].trim_start().starts_with("alpha") && rows[0].contains("   first line"),
             "{rows:?}"
         );
         assert!(
-            rows[1].trim_start().starts_with("beta") && rows[1].contains("| second line"),
+            rows[1].trim_start().starts_with("beta") && rows[1].contains("   second line"),
             "{rows:?}"
         );
         assert!(
-            rows[2].trim_start().starts_with("gamma") && rows[2].trim_end().ends_with('|'),
+            rows[2].trim_start().starts_with("gamma") && !rows[2].contains('|'),
             "{rows:?}"
         );
+        // The divider is drawn, not typed (GFX-105).
+        let divider = |card: &DesktopWindow| {
+            card.overlay
+                .iter()
+                .any(|op| matches!(op, view_types::DrawOp::Line { x0, x1, .. } if x0 == x1))
+        };
+        assert!(divider(card));
         // Moving the selection asks for the next file; until it arrives
         // the preview says so.
         desk.handle_key(crate::notepad::KEY_DOWN);
@@ -7013,7 +7035,7 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(rows[0].contains("| ..."), "{rows:?}");
+        assert!(rows[0].contains("   ..."), "{rows:?}");
         // The list alone, on request.
         desk.handle_key(CTRL_U);
         let windows = desk.windows("", true, None);
@@ -7022,7 +7044,8 @@ mod tests {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
         };
-        assert!(!rows[0].contains('|'), "{rows:?}");
+        assert!(!rows[0].contains("..."), "{rows:?}");
+        assert!(!divider(card));
         assert!(
             desk.tick(3).is_empty(),
             "no preview asked for while the list is alone"
@@ -7969,7 +7992,12 @@ mod tests {
         assert_eq!(document_app("2026-09-25"), DeskApp::Calendar);
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.overlay.len(), 3, "an icon a row");
+        let icons = card
+            .overlay
+            .iter()
+            .filter(|op| !matches!(op, view_types::DrawOp::Line { .. }))
+            .count();
+        assert_eq!(icons, 3, "an icon a row");
         let lines = match &card.frame.content {
             ViewContent::TextBuffer { lines } => lines.clone(),
             _ => panic!(),
