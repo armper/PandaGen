@@ -505,6 +505,10 @@ pub const NOW_SIZE: (usize, usize) = (440, 260);
 pub const SHORTCUTS_SIZE: (usize, usize) = (560, 520);
 /// How often the Now card asks the kernel for fresh vitals, in ticks.
 pub const VITALS_EVERY: u64 = 100;
+/// How many cells the top bar keeps for its memory meter (GFX-088).
+pub const METER_CELLS: usize = 6;
+/// How often the kernel refreshes the tray's numbers, in ticks.
+pub const TRAY_EVERY: u64 = 500;
 
 /// What the kernel knows about the machine right now (GFX-072).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2510,13 +2514,90 @@ impl Desk {
         }
     }
 
-    /// The bar's right-hand text: "3 new   12:34", or just the clock.
-    fn bar_right(&self, clock: &str) -> String {
+    /// The tray's parts, left to right (GFX-088): the unseen notices,
+    /// the date, room for the memory meter, the clock. Only what is known
+    /// is shown: no date before the clock is read, no meter before the
+    /// kernel has said how much memory there is.
+    fn bar_parts(&self, clock: &str) -> Vec<String> {
+        let mut parts = Vec::new();
         if self.unseen_notices > 0 {
-            alloc::format!("{} new   {clock}", self.unseen_notices)
-        } else {
-            clock.to_string()
+            parts.push(alloc::format!("{} new", self.unseen_notices));
         }
+        if let Some(today) = self.today {
+            parts.push(today.short());
+        }
+        if self.vitals.heap_total_kib > 0 {
+            parts.push(" ".repeat(METER_CELLS));
+        }
+        parts.push(clock.to_string());
+        parts
+    }
+
+    /// The bar's right-hand text: "3 new   Thu 24 Sep   ......   12:34",
+    /// or just the clock.
+    fn bar_right(&self, clock: &str) -> String {
+        self.bar_parts(clock).join("   ")
+    }
+
+    /// The tray's pictures (GFX-088), in the bar's pixels: the notice
+    /// count as an accent badge over its text, and the memory meter in
+    /// the cells kept for it. Laid out by the same right-alignment the
+    /// compositor paints the text with.
+    fn tray_overlay(&self, clock: &str) -> Vec<view_types::DrawOp> {
+        use view_types::{Color, DrawOp, PixelRect, TextStyle};
+        let theme = self.theme();
+        let rgb = |c: graphics_rasterizer::RgbaColor| Color::rgba(c.r, c.g, c.b, c.a);
+        let total = self.bar_right(clock).chars().count();
+        let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH);
+        let text_y = ((TOP_BAR_HEIGHT - 16) / 2) as u32;
+        let mut ops = Vec::new();
+        let mut x = start;
+        for part in self.bar_parts(clock) {
+            let w = part.chars().count() * GLYPH_WIDTH;
+            if self.unseen_notices > 0 && part.ends_with(" new") && x == start {
+                ops.push(DrawOp::RoundedFill {
+                    rect: PixelRect {
+                        x: x.saturating_sub(6) as u32,
+                        y: 4,
+                        width: (w + 12) as u32,
+                        height: (TOP_BAR_HEIGHT - 8) as u32,
+                    },
+                    radius: 10,
+                    color: rgb(theme.accent),
+                });
+                ops.push(DrawOp::Text {
+                    x: x as u32,
+                    y: text_y,
+                    text: part.clone(),
+                    color: Some(rgb(theme.background)),
+                    style: TextStyle::default(),
+                });
+            } else if part.trim().is_empty() && part.len() == METER_CELLS {
+                let track = PixelRect {
+                    x: x as u32,
+                    y: (TOP_BAR_HEIGHT / 2 - 4) as u32,
+                    width: w as u32,
+                    height: 8,
+                };
+                ops.push(DrawOp::RoundedFill {
+                    rect: track,
+                    radius: 4,
+                    color: rgb(theme.hairline),
+                });
+                let used = self.vitals.heap_used_kib.min(self.vitals.heap_total_kib);
+                let fill = (w * used / self.vitals.heap_total_kib.max(1)).max(4);
+                ops.push(DrawOp::RoundedFill {
+                    rect: PixelRect {
+                        width: fill as u32,
+                        ..track
+                    },
+                    radius: 4,
+                    color: rgb(theme.accent),
+                });
+            }
+            x += w + 3 * GLYPH_WIDTH;
+        }
+        ops
     }
 
     /// Whether top-bar text cell `column` is on the "N new" indicator.
@@ -4872,7 +4953,8 @@ impl Desk {
                 .with_role(DesktopWindowRole::Status)
                 .with_layer(DesktopWindowLayer::System)
                 .with_style(WindowStyle::TopBar)
-                .with_pixel_rect(RasterRect::new(0, 0, self.width, TOP_BAR_HEIGHT)),
+                .with_pixel_rect(RasterRect::new(0, 0, self.width, TOP_BAR_HEIGHT))
+                .with_overlay(self.tray_overlay(clock)),
         );
 
         // Dock: one tile per app, the running ones marked, the hovered one lit.
@@ -7200,6 +7282,57 @@ mod tests {
             .collect();
         assert_eq!(sounds, alloc::vec![&DeskRequest::Sound(Sound::Chime)]);
         assert_eq!(Sound::Chime.notes().len(), 5);
+    }
+
+    /// The tray (GFX-088): the date once the clock is known, a meter once
+    /// the memory is, the notice count as a badge; the clock and the
+    /// badge are still the click targets they were.
+    #[test]
+    fn the_tray_shows_the_date_a_memory_meter_and_a_badge() {
+        let mut desk = Desk::new(1280, 800);
+        let bar = |desk: &mut Desk| {
+            desk.windows("12:34", true, None)
+                .into_iter()
+                .find(|w| w.style == WindowStyle::TopBar)
+                .unwrap()
+        };
+        let line = |w: &DesktopWindow| match &w.frame.content {
+            ViewContent::TextBuffer { lines } => lines[0].clone(),
+            _ => panic!(),
+        };
+        assert_eq!(line(&bar(&mut desk)), "12:34");
+        assert!(bar(&mut desk).overlay.is_empty());
+        desk.set_today(Some(Date::new(2026, 9, 24)));
+        desk.vitals_loaded(Vitals {
+            heap_used_kib: 8 * 1024,
+            heap_total_kib: 32 * 1024,
+            ..Vitals::default()
+        });
+        desk.notify(NoticeLevel::Info, "Saved memo", 0);
+        let top = bar(&mut desk);
+        assert_eq!(line(&top), "1 new   Thu 24 Sep            12:34");
+        // A badge (fill and its text) and a meter (track and fill).
+        assert_eq!(top.overlay.len(), 4);
+        let widths: Vec<u32> = top
+            .overlay
+            .iter()
+            .filter_map(|op| match op {
+                view_types::DrawOp::RoundedFill {
+                    rect, radius: 4, ..
+                } => Some(rect.width),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(widths, alloc::vec![48, 12], "a quarter of the heap in use");
+        // Clicks: the clock opens Now, the badge Notices.
+        let total = line(&top).chars().count();
+        let start = (1280 - 12 - total * 8) / 8;
+        assert!(desk.notices_at_column(start, 5));
+        assert!(desk.clock_at_column(start + total - 1, 5));
+        assert!(
+            !desk.clock_at_column(start + 9, 5),
+            "the date is not the clock"
+        );
     }
 
     #[test]

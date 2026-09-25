@@ -1471,6 +1471,10 @@ fn cmd_qemu() -> Result<(), Box<dyn std::error::Error>> {
     command.current_dir(&root);
     if let Some(backend) = &audio {
         command.arg("-audiodev").arg(format!("{backend},id=snd0"));
+        // The line printed above is the machine without sound; say what
+        // was added, so the printed command is the one that runs.
+        println!("  with sound: -audiodev {backend},id=snd0 -machine {machine}");
+        println!();
     }
     run(command
         .arg("-machine")

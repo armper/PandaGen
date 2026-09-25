@@ -2137,6 +2137,11 @@ fn raster_top_bar(
             theme.text,
         );
     }
+    // The tray's pictures (GFX-088): a badge, a meter, over the text,
+    // in the bar's own pixels.
+    if !window.overlay.is_empty() {
+        raster_graphics(&mut painter, rect, &window.overlay, theme);
+    }
     true
 }
 

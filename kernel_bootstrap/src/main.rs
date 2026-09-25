@@ -1518,6 +1518,8 @@ fn workspace_loop(
     // windows keep their places across mode switches.
     let mut desk: Option<desk::Desk> = None;
     let mut rtc_port = hal_x86_64::RealPortIo::new();
+    // When the tray's numbers were last asked for (GFX-088).
+    let mut tray_refreshed_at: u64 = 0;
     // The speaker (GFX-087): what the desk says out loud, polled by tick.
     let mut speaker = speaker::Speaker::new(hal_x86_64::RealPortIo::new());
     // What the desk asked the kernel for this iteration: file operations,
@@ -1987,6 +1989,14 @@ fn workspace_loop(
         if display_mode.is_desk() {
             if let Some(desk) = desk.as_mut() {
                 desk_requests.extend(desk.tick(get_tick_count()));
+                // The tray's numbers, every few seconds (GFX-088).
+                let now = get_tick_count();
+                if now.saturating_sub(tray_refreshed_at) >= desk::TRAY_EVERY {
+                    tray_refreshed_at = now;
+                    if !desk_requests.contains(&desk::DeskRequest::Vitals) {
+                        desk_requests.push(desk::DeskRequest::Vitals);
+                    }
+                }
             }
         }
         // The speaker plays what was queued, note by note (GFX-087).
