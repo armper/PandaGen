@@ -58,60 +58,71 @@ pub const PICTURE_NAMES: [&str; 11] = [
     "sketch",
     "panda",
 ];
-pub const PICTURE_SIZES: [u32; 5] = [64, 40, 32, 20, 16];
+pub const PICTURE_SIZES: [u32; 6] = [64, 48, 40, 32, 20, 16];
 
-pub static PICTURES: [services_gui_host::Picture; 55] = [
+pub static PICTURES: [services_gui_host::Picture; 66] = [
     picture!("notepad", 64),
+    picture!("notepad", 48),
     picture!("notepad", 40),
     picture!("notepad", 32),
     picture!("notepad", 20),
     picture!("notepad", 16),
     picture!("files", 64),
+    picture!("files", 48),
     picture!("files", 40),
     picture!("files", 32),
     picture!("files", 20),
     picture!("files", 16),
     picture!("terminal", 64),
+    picture!("terminal", 48),
     picture!("terminal", 40),
     picture!("terminal", 32),
     picture!("terminal", 20),
     picture!("terminal", 16),
     picture!("look", 64),
+    picture!("look", 48),
     picture!("look", 40),
     picture!("look", 32),
     picture!("look", 20),
     picture!("look", 16),
     picture!("calculator", 64),
+    picture!("calculator", 48),
     picture!("calculator", 40),
     picture!("calculator", 32),
     picture!("calculator", 20),
     picture!("calculator", 16),
     picture!("calendar", 64),
+    picture!("calendar", 48),
     picture!("calendar", 40),
     picture!("calendar", 32),
     picture!("calendar", 20),
     picture!("calendar", 16),
     picture!("timer", 64),
+    picture!("timer", 48),
     picture!("timer", 40),
     picture!("timer", 32),
     picture!("timer", 20),
     picture!("timer", 16),
     picture!("tiles", 64),
+    picture!("tiles", 48),
     picture!("tiles", 40),
     picture!("tiles", 32),
     picture!("tiles", 20),
     picture!("tiles", 16),
     picture!("tasks", 64),
+    picture!("tasks", 48),
     picture!("tasks", 40),
     picture!("tasks", 32),
     picture!("tasks", 20),
     picture!("tasks", 16),
     picture!("sketch", 64),
+    picture!("sketch", 48),
     picture!("sketch", 40),
     picture!("sketch", 32),
     picture!("sketch", 20),
     picture!("sketch", 16),
     picture!("panda", 64),
+    picture!("panda", 48),
     picture!("panda", 40),
     picture!("panda", 32),
     picture!("panda", 20),
@@ -169,7 +180,7 @@ use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
 use crate::timer::{TimerEffect, TimerView};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
-pub const DOCK_HEIGHT: usize = 56;
+pub const DOCK_HEIGHT: usize = 64;
 pub const DOCK_MARGIN: usize = 12;
 pub const NOTEPAD_SIZE: (usize, usize) = (720, 480);
 pub const TERMINAL_SIZE: (usize, usize) = (800, 520);
@@ -8121,10 +8132,10 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs[0].picture, DeskApp::Notepad.picture(40));
+        assert_eq!(dock.tabs[0].picture, DeskApp::Notepad.picture(48));
         assert_eq!(
-            PICTURES[DeskApp::Notepad.picture(40).unwrap() as usize].width,
-            40
+            PICTURES[DeskApp::Notepad.picture(48).unwrap() as usize].width,
+            48
         );
     }
 

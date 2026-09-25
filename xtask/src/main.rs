@@ -481,15 +481,16 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // The machine boots into the desk; the boot log says so, by label.
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
-        // Top bar: the raised surface, four pixels down, mid-screen.
+        // Top bar: the raised surface as glass over the wallpaper (GFX-098),
+        // four pixels down, mid-screen.
         "--expect-pixel".to_string(),
-        "640,4,22,28,40".to_string(),
+        "640,4,23,33,49".to_string(),
         // Dock pill: raised surface. Tiles are 40px tall centred in the
         // 56px pill (740..780), so three pixels under the pill's top edge at
         // its centre is pill whatever the number of tiles -- the first
         // version of this pinned an x that a second tile then covered.
         "--expect-pixel".to_string(),
-        "640,735,22,28,40".to_string(),
+        "640,735,24,29,39".to_string(),
         // The Notepad card: 720 wide, centred, first cascade step, at y=44.
         // It has lost focus to the Terminal, so its ring is the hairline...
         "--expect-pixel".to_string(),
@@ -717,9 +718,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // Two dock tiles lit: Notepad and Files. Ten tiles (GFX-080) are
         // 472px wide centred on 640, so the first centre is at 424.
         "--expect-pixel".to_string(),
-        "424,785,52,211,153".to_string(),
+        "379,785,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "472,785,52,211,153".to_string(),
+        "437,785,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -774,7 +775,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // (100,400) is the wallpaper now, whatever the theme (GFX-066).
         "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
-        "640,4,32,22,24".to_string(),
+        "640,4,31,28,35".to_string(),
         "--expect-pixel".to_string(),
         "600,200,40,28,30".to_string(),
         "--expect-pixel".to_string(),
@@ -830,7 +831,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-pixel".to_string(),
         "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
-        "640,4,238,241,246".to_string(),
+        "640,4,204,212,222".to_string(),
         "--expect-pixel".to_string(),
         "640,300,250,250,252".to_string(),
         "--forbid-serial".to_string(),

@@ -668,6 +668,24 @@ pub trait RenderTarget {
         }
     }
 
+    /// A rounded rectangle laid over what is there by `color`'s alpha
+    /// (GFX-098): glass, where `fill_rounded_rect` is paint.
+    fn blend_rounded_rect(&mut self, rect: RasterRect, radius: usize, color: RgbaColor) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let radius = clamp_radius(rect, radius);
+        for row in 0..visible_rows(rect, self.height()) {
+            if let Some((start, end)) = rounded_row_span(rect, radius, row) {
+                let y = rect.y + row;
+                for x in start..end.min(self.width()) {
+                    let under = self.pixel(x, y).unwrap_or(RgbaColor::new(0, 0, 0, 255));
+                    self.write_pixel(x, y, blend_over(under, color));
+                }
+            }
+        }
+    }
+
     /// Rounded outline of `thickness` pixels; the interior is left untouched.
     fn draw_rounded_border(
         &mut self,

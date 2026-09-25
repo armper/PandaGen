@@ -366,10 +366,13 @@ pub const CARD_CLOSE_SIZE: usize = 16;
 /// moved card must grow by this much or it leaves a trail.
 pub const CARD_LIFT: usize = 2;
 /// Dock tiles.
-pub const DOCK_TILE: usize = 40;
-pub const DOCK_TILE_GAP: usize = 8;
-pub const DOCK_RADIUS: usize = 12;
-pub const DOCK_TILE_RADIUS: usize = 8;
+pub const DOCK_TILE: usize = 48;
+pub const DOCK_TILE_GAP: usize = 10;
+pub const DOCK_RADIUS: usize = 18;
+pub const DOCK_TILE_RADIUS: usize = 10;
+/// How much of the top bar and the dock is their own colour, out of 255
+/// (GFX-098); the rest is the wallpaper through them.
+pub const GLASS_ALPHA: u8 = 214;
 
 impl DesktopWindow {
     pub fn new(frame: ViewFrame, rect: SurfaceRect) -> Self {
@@ -2105,7 +2108,13 @@ fn raster_dock(
     theme: &Theme,
 ) -> bool {
     let mut painter = ScissorTarget::new(target, clipped_rect);
-    painter.fill_rounded_rect(rect, DOCK_RADIUS, theme.surface_raised);
+    let glass = RgbaColor::new(
+        theme.surface_raised.r,
+        theme.surface_raised.g,
+        theme.surface_raised.b,
+        GLASS_ALPHA,
+    );
+    painter.blend_rounded_rect(rect, DOCK_RADIUS, glass);
     painter.draw_rounded_border(rect, DOCK_RADIUS, 1, theme.hairline);
     for (index, tab) in window.tabs.iter().enumerate() {
         let Some(tile) = dock_tile_rect(window, index) else {
@@ -2184,7 +2193,13 @@ fn raster_top_bar(
     theme: &Theme,
 ) -> bool {
     let mut painter = ScissorTarget::new(target, clipped_rect);
-    painter.fill_rect(rect, theme.surface_raised);
+    let glass = RgbaColor::new(
+        theme.surface_raised.r,
+        theme.surface_raised.g,
+        theme.surface_raised.b,
+        GLASS_ALPHA,
+    );
+    painter.blend_rounded_rect(rect, 0, glass);
     if rect.height > 0 {
         painter.draw_hline(rect.x, rect.bottom() - 1, rect.width, theme.hairline);
     }

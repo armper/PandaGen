@@ -30,6 +30,14 @@ fn render(windows: Vec<DesktopWindow>) -> RgbaBuffer {
     target
 }
 
+/// Within `slack` of `want` in every channel: glass (GFX-098) is its own
+/// colour laid over what is under it, so it is near, not equal.
+fn near(got: RgbaColor, want: RgbaColor, slack: u8) -> bool {
+    got.r.abs_diff(want.r) <= slack
+        && got.g.abs_diff(want.g) <= slack
+        && got.b.abs_diff(want.b) <= slack
+}
+
 fn px(target: &RgbaBuffer, x: usize, y: usize) -> RgbaColor {
     target.pixel(x, y).expect("inside the surface")
 }
@@ -242,9 +250,9 @@ fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
         DesktopTab::new("Fi", false),
     ]);
     let target = render(vec![dock]);
-    // Two tiles: row 88 wide, starts at 200 + (240-88)/2 = 276; tiles are
-    // centred vertically in the 56px pill, at y=348.
-    let (tx, ty) = (276, 348);
+    // Two tiles: row 106 wide, starts at 200 + (240-106)/2 = 267; tiles are
+    // centred vertically in the 56px pill, at y=344.
+    let (tx, ty) = (267, 344);
     let (ox, oy) = (tx + (DOCK_TILE - 32) / 2, ty + (DOCK_TILE - 32) / 2);
     assert_eq!(px(&target, ox, oy), theme.text, "top-left bit");
     assert_eq!(
@@ -260,7 +268,7 @@ fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
     );
     // The second tile has no icon: its monogram puts text pixels in the
     // middle of the tile.
-    let middle: Vec<RgbaColor> = (tx + 48 + 12..tx + 48 + 28)
+    let middle: Vec<RgbaColor> = (tx + 58 + 12..tx + 58 + 28)
         .flat_map(|x| (ty + 12..ty + 28).map(move |y| (x, y)))
         .map(|(x, y)| px(&target, x, y))
         .collect();
@@ -565,21 +573,21 @@ fn the_dock_paints_a_tile_per_app_and_names_the_tile_that_was_hit() {
     ]);
     let target = render(vec![dock.clone()]);
 
-    // The pill is the raised surface.
-    assert_eq!(px(&target, 204, 368), theme.surface_raised);
+    // The pill is the raised surface, as glass over what is under it.
+    assert!(near(px(&target, 204, 368), theme.surface_raised, 4));
 
     let compositor = Compositor::new();
     let windows = vec![dock];
-    // Three tiles, centred: total row = 3*40 + 2*8 = 136; starts at 200 + (240-136)/2 = 252.
-    let first_x = 252 + DOCK_TILE / 2;
+    // Three tiles, centred: total row = 3*48 + 2*10 = 164; starts at 200 + (240-164)/2 = 238.
+    let first_x = 238 + DOCK_TILE / 2;
     let y = 340 + 56 / 2;
     let hit = compositor.hit_test(&windows, first_x, y).unwrap();
     assert_eq!(hit.region, HitRegion::DockTile { index: 0 });
-    let hit = compositor.hit_test(&windows, first_x + 48 * 2, y).unwrap();
+    let hit = compositor.hit_test(&windows, first_x + 58 * 2, y).unwrap();
     assert_eq!(hit.region, HitRegion::DockTile { index: 2 });
     // Between tiles is the pill, not a tile.
     let hit = compositor
-        .hit_test(&windows, 252 + DOCK_TILE + 4, y)
+        .hit_test(&windows, 238 + DOCK_TILE + 4, y)
         .unwrap();
     assert_eq!(hit.region, HitRegion::Border);
     // A tile is drawn as the inactive tab colour, and the running dot under
@@ -602,7 +610,7 @@ fn the_top_bar_is_a_raised_strip_with_a_hairline() {
     .with_style(WindowStyle::TopBar)
     .with_pixel_rect(bounds);
     let target = render(vec![bar]);
-    assert_eq!(px(&target, 320, 4), theme.surface_raised);
+    assert!(near(px(&target, 320, 4), theme.surface_raised, 4));
     assert_eq!(px(&target, 320, 27), theme.hairline);
 }
 

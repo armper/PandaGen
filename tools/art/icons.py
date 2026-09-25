@@ -19,7 +19,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 ICONS = os.path.join(ROOT, "kernel_bootstrap", "assets", "icons")
 NAMES = ["notepad", "files", "terminal", "look", "calculator", "calendar",
          "timer", "tiles", "tasks", "sketch", "panda"]
-SIZES = [64, 40, 32, 20, 16]
+SIZES = [64, 48, 40, 32, 20, 16]
 
 
 def squircle_mask(size, n=5.0, ss=8):
