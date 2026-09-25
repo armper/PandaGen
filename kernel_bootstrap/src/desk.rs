@@ -1649,6 +1649,9 @@ pub struct Palette {
     pub hits: Vec<(String, String)>,
     /// The query the hits were found for; stale hits are not shown.
     pub hits_for: String,
+    /// The focused document's headings (GFX-091): `(row, text, level)`,
+    /// refreshed by the desk whenever the palette is drawn or keyed.
+    pub headings: Vec<(usize, String, usize)>,
 }
 
 /// Content search starts at this many characters, so one letter does not
@@ -1670,6 +1673,12 @@ pub enum PaletteRow {
     },
     /// Something copied lately: paste it into the focused Notepad (GFX-070).
     Paste(String),
+    /// A heading in the focused Notepad: go there (GFX-091).
+    Heading {
+        row: usize,
+        text: String,
+        level: usize,
+    },
 }
 
 /// How many copied texts the palette remembers.
@@ -1683,6 +1692,9 @@ impl PaletteRow {
             PaletteRow::Hit { file, line } => {
                 let line: String = line.trim().chars().take(40).collect();
                 alloc::format!("{file}: {line}")
+            }
+            PaletteRow::Heading { text, level, .. } => {
+                alloc::format!("{}{text}", "  ".repeat(level.saturating_sub(1)))
             }
             PaletteRow::Paste(text) => {
                 let flat: String = text
@@ -1701,6 +1713,7 @@ impl PaletteRow {
             PaletteRow::Recent(_) => "recent",
             PaletteRow::Hit { .. } => "in file",
             PaletteRow::Paste(_) => "clipboard",
+            PaletteRow::Heading { .. } => "heading",
         }
     }
 
@@ -1722,6 +1735,7 @@ impl PaletteRow {
                 _ => None,
             },
             PaletteRow::Recent(_) | PaletteRow::Hit { .. } => DeskApp::Files.icon(),
+            PaletteRow::Heading { .. } => DeskApp::Notepad.icon(),
             PaletteRow::Paste(_) => None,
         }
     }
@@ -1749,6 +1763,19 @@ impl Palette {
             .filter(|name| fits(&alloc::format!("Open {name}")))
             .map(|name| PaletteRow::Recent(name.clone()))
             .collect();
+        // The focused document's headings, to go to (GFX-091).
+        if has_notepad {
+            rows.extend(
+                self.headings
+                    .iter()
+                    .map(|(row, text, level)| PaletteRow::Heading {
+                        row: *row,
+                        text: text.clone(),
+                        level: *level,
+                    })
+                    .filter(|row| fits(&row.label())),
+            );
+        }
         if self.hits_for == self.query {
             rows.extend(self.hits.iter().map(|(file, line)| PaletteRow::Hit {
                 file: file.clone(),
@@ -3201,7 +3228,19 @@ impl Desk {
     }
 
     /// A key while the palette is open.
+    /// The focused Notepad's headings, for the palette (GFX-091).
+    fn focused_headings(&self) -> Vec<(usize, String, usize)> {
+        self.focused_window()
+            .and_then(|w| w.notepad())
+            .map(|n| n.headings())
+            .unwrap_or_default()
+    }
+
     fn handle_palette_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
+        let headings = self.focused_headings();
+        if let Some(palette) = self.palette.as_mut() {
+            palette.headings = headings;
+        }
         let has_window = self.focused_window().is_some();
         let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
         let recent = self.recent.clone();
@@ -3257,6 +3296,16 @@ impl Desk {
                             }),
                             true,
                         )
+                    }
+                    Some(PaletteRow::Heading { row, .. }) => {
+                        if let Some(notepad) = self
+                            .focus
+                            .and_then(|id| self.window_mut(id))
+                            .and_then(|w| w.notepad_mut())
+                        {
+                            notepad.go_to_line(row);
+                        }
+                        (None, true)
                     }
                     Some(PaletteRow::Paste(text)) => {
                         // Paste it: it becomes the clipboard, then Ctrl+V.
@@ -4890,6 +4939,10 @@ impl Desk {
 
         // The palette: a card near the top, above everything, without a
         // close glyph -- Esc or a click elsewhere closes it.
+        let headings = self.focused_headings();
+        if let Some(palette) = self.palette.as_mut() {
+            palette.headings = headings;
+        }
         if let Some(palette) = &self.palette {
             let has_window = focus.is_some();
             let has_notepad = self
@@ -7485,6 +7538,49 @@ mod tests {
             !DeskApp::ALL.contains(&DeskApp::Launcher),
             "not a dock tile"
         );
+    }
+
+    /// Headings in the palette (GFX-091): with a Notepad focused, the
+    /// palette lists its headings first, filters them by what is typed,
+    /// and Enter goes there.
+    #[test]
+    fn the_palette_goes_to_a_heading_in_the_focused_document() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        let body: String = (0..30).map(|i| alloc::format!("line {i}\n")).collect();
+        desk.window_mut(id)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(None, &alloc::format!("# Intro\n{body}## Details\n"));
+        desk.handle_key(KEY_CTRL_SPACE);
+        let listed = |desk: &mut Desk| {
+            let windows = desk.windows("", true, None);
+            let palette = windows
+                .iter()
+                .find(|w| w.role == DesktopWindowRole::Palette)
+                .unwrap();
+            match &palette.frame.content {
+                ViewContent::TextBuffer { lines } => lines.clone(),
+                _ => panic!(),
+            }
+        };
+        let rows = listed(&mut desk);
+        assert!(rows[0].trim_start().starts_with("Intro"), "{rows:?}");
+        assert!(rows[0].trim_end().ends_with("heading"), "{rows:?}");
+        assert!(rows[1].trim_start().starts_with("Details"), "{rows:?}");
+        for b in b"deta" {
+            desk.handle_key(*b);
+        }
+        assert!(listed(&mut desk)[0].trim_start().starts_with("Details"));
+        desk.handle_key(b'\n');
+        assert!(!desk.palette_open());
+        let pad = desk.window(id).unwrap().notepad().unwrap();
+        assert_eq!(pad.cursor().row, 31);
+        // Without a Notepad there are no headings.
+        desk.launch(DeskApp::Calculator);
+        desk.handle_key(KEY_CTRL_SPACE);
+        assert!(!listed(&mut desk).iter().any(|r| r.contains("heading")));
     }
 
     #[test]

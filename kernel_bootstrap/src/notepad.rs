@@ -630,6 +630,38 @@ impl Notepad {
         }
     }
 
+    /// The document's headings (GFX-091): `(row, text, level)` for every
+    /// line that starts `# `, `## ` or `### `, the marks taken off.
+    pub fn headings(&self) -> Vec<(usize, String, usize)> {
+        self.with_text(|text| {
+            text.lines()
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with('#') && Self::line_style(line).is_some())
+                .map(|(row, line)| {
+                    let level = line.chars().take_while(|c| *c == '#').count();
+                    (row, line[level..].trim().to_string(), level)
+                })
+                .collect()
+        })
+    }
+
+    /// Put the caret at the start of `row` and that row at the top of the
+    /// view (GFX-091): going to a heading shows what is under it.
+    pub fn go_to_line(&mut self, row: usize) {
+        if self.history.is_some() {
+            return;
+        }
+        let row = row.min(self.line_count().saturating_sub(1));
+        self.cursor = Position::new(row, 0);
+        self.anchor = None;
+        self.prompt = None;
+        self.scrolled_away = false;
+        if let Some(index) = self.visual_rows().iter().position(|(r, _, _)| *r == row) {
+            self.scroll = index;
+        }
+    }
+
     /// The styles of the visual rows in view, for the card (GFX-073). A
     /// wrapped heading is a heading on every row it takes; its rule is on
     /// the last.
@@ -2286,6 +2318,27 @@ mod tests {
         );
         pad.handle_byte(ESC);
         assert_eq!(pad.prompt_open(), None);
+    }
+
+    #[test]
+    fn headings_are_listed_by_level_and_going_to_one_puts_it_at_the_top() {
+        let mut pad = Notepad::new();
+        let body: String = (0..40).map(|i| alloc::format!("line {i}\n")).collect();
+        pad.load(
+            None,
+            &alloc::format!("# Intro\n{body}## Details\n#nope\n### Deep\n"),
+        );
+        assert_eq!(
+            pad.headings(),
+            alloc::vec![
+                (0, "Intro".to_string(), 1),
+                (41, "Details".to_string(), 2),
+                (43, "Deep".to_string(), 3),
+            ]
+        );
+        pad.go_to_line(41);
+        assert_eq!(pad.cursor(), Position::new(41, 0));
+        assert_eq!(pad.viewport_lines(10)[0], "## Details");
     }
 
     #[test]
