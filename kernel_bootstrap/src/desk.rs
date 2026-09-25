@@ -1101,30 +1101,20 @@ impl DeskWindow {
                 ("Shortcuts".to_string(), b'k'),
             ],
             AppState::Shortcuts(_) => Vec::new(),
-            AppState::Calculator(_) => alloc::vec![("Clear".to_string(), crate::notepad::ESC),],
-            AppState::Calendar(_) => alloc::vec![
-                ("Today".to_string(), b't'),
-                ("Earlier".to_string(), crate::notepad::KEY_PAGE_UP),
-                ("Later".to_string(), crate::notepad::KEY_PAGE_DOWN),
-                ("Note".to_string(), b'\n'),
-            ],
-            AppState::Timer(timer) => alloc::vec![
-                (
-                    if timer.running() { "Pause" } else { "Start" }.to_string(),
-                    b' ',
-                ),
-                ("Reset".to_string(), b'r'),
-            ],
+            // A drawn card's own buttons are its controls (GFX-103): a chip
+            // is only for what the card does not draw -- the Calculator's
+            // C, the Timer's Start and Reset, the Calendar's arrows.
+            AppState::Calculator(_) => Vec::new(),
+            AppState::Calendar(_) => {
+                alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
+            }
+            AppState::Timer(_) => Vec::new(),
             AppState::Tiles(_) => alloc::vec![("New".to_string(), b'n'),],
             AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
                 ("Add".to_string(), b'\n'),
                 ("Cancel".to_string(), crate::notepad::ESC),
             ],
-            AppState::Tasks(_) => alloc::vec![
-                ("Add".to_string(), b'a'),
-                ("Done".to_string(), b'\n'),
-                ("Remove".to_string(), crate::notepad::KEY_DELETE),
-            ],
+            AppState::Tasks(_) => Vec::new(),
             AppState::Sketch(_) => alloc::vec![
                 ("Colour".to_string(), b'c'),
                 ("Undo".to_string(), b'z'),
@@ -1183,19 +1173,30 @@ impl FileEntry {
         self.app().icon().unwrap_or([0; 16])
     }
 
-    /// The app that made the document (GFX-094), whose icon it wears.
+    /// The app that made the document (GFX-094), whose icon it wears: a
+    /// folder is the Files card's, anything else `document_app`'s.
     pub fn app(&self) -> DeskApp {
-        if crate::calendar::Date::parse(&self.name).is_some() {
-            DeskApp::Calendar
-        } else if self.name == crate::tasks::TASKS_FILE {
-            DeskApp::Tasks
-        } else if self.name == crate::sketch::SKETCH_FILE {
-            DeskApp::Sketch
-        } else if self.schema.as_deref() == Some("text/plain") {
-            DeskApp::Notepad
-        } else {
+        if self.kind == "folder" {
             DeskApp::Files
+        } else {
+            document_app(&self.name)
         }
+    }
+}
+
+/// The app a document opens in, and so the icon it wears (GFX-103): a
+/// day's note is the Calendar's, the task list the Tasks card's, a drawing
+/// the Sketch's, and anything else a page of the Notepad's -- which is
+/// where Enter on it opens it.
+pub fn document_app(name: &str) -> DeskApp {
+    if crate::calendar::Date::parse(name).is_some() {
+        DeskApp::Calendar
+    } else if name == crate::tasks::TASKS_FILE {
+        DeskApp::Tasks
+    } else if name == crate::sketch::SKETCH_FILE {
+        DeskApp::Sketch
+    } else {
+        DeskApp::Notepad
     }
 }
 
@@ -2059,7 +2060,7 @@ impl PaletteRow {
                 PaletteAction::Sketch => Some(DeskApp::Sketch),
                 _ => None,
             },
-            PaletteRow::Recent(_) | PaletteRow::Hit { .. } => Some(DeskApp::Files),
+            PaletteRow::Recent(file) | PaletteRow::Hit { file, .. } => Some(document_app(file)),
             PaletteRow::Heading { .. } => Some(DeskApp::Notepad),
             PaletteRow::Paste(_) => None,
         }
@@ -7493,7 +7494,7 @@ mod tests {
         let id = desk.launch(DeskApp::Calculator);
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.actions, alloc::vec!["Clear"]);
+        assert!(card.actions.is_empty(), "its keys are drawn");
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
         let bounds = desk.window(id).unwrap().bounds;
@@ -7641,9 +7642,9 @@ mod tests {
         assert!(DeskApp::ALL.contains(&DeskApp::Timer));
         let id = desk.launch(DeskApp::Timer);
         desk.tick(1_000);
-        // Preset 1: one minute, running at once; the chip says Pause.
+        // Preset 1: one minute, running at once.
         assert!(desk.handle_key(b'1').1);
-        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Pause");
+        assert!(matches!(&desk.window(id).unwrap().state, AppState::Timer(t) if t.running()));
         assert_eq!(desk.tick(1_100), alloc::vec![DeskRequest::Repaint]);
         assert!(desk.tick(1_105).is_empty(), "ten a second, not a hundred");
         let windows = desk.windows_at("", true, None, 1_100, &[]);
@@ -7657,9 +7658,9 @@ mod tests {
         assert_eq!(desk.notice_log[0].1.text, "Timer: 1 minute up");
         desk.tick(1_000 + 60 * crate::timer::HZ + 500);
         assert_eq!(desk.notice_log.len(), before + 1, "said once");
-        // Back on space 1, the card says Done and Start would run it again.
+        // Back on space 1, the timer has stopped.
         desk.go_to_space(0);
-        assert_eq!(desk.window(id).unwrap().actions()[0].0, "Start");
+        assert!(matches!(&desk.window(id).unwrap().state, AppState::Timer(t) if !t.running()));
         desk.handle_key(crate::notepad::CTRL_W);
         assert!(desk.window(id).is_none());
     }
@@ -7742,7 +7743,7 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
-        assert_eq!(card.actions, alloc::vec!["Add", "Done", "Remove"]);
+        assert!(card.actions.is_empty(), "its buttons are drawn");
         // Add through the footer: the chips become Add / Cancel.
         desk.tick(10);
         desk.handle_key(b'a');
@@ -7960,10 +7961,12 @@ mod tests {
             FileEntry::named("tasks").icon(),
             DeskApp::Tasks.icon().unwrap()
         );
+        // Anything else is a page, which Enter opens in a Notepad (GFX-103).
         assert_eq!(
             FileEntry::named("blob").icon(),
-            DeskApp::Files.icon().unwrap()
+            DeskApp::Notepad.icon().unwrap()
         );
+        assert_eq!(document_app("2026-09-25"), DeskApp::Calendar);
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.overlay.len(), 3, "an icon a row");
@@ -8004,10 +8007,11 @@ mod tests {
     #[test]
     fn the_desk_asks_the_kernel_to_click_blip_and_chime() {
         let mut desk = Desk::new(1280, 800);
+        let tiles = desk.launch(DeskApp::Tiles);
         let id = desk.launch(DeskApp::Timer);
         desk.tick(1_000);
-        // A chip.
-        let (_, _) = desk.card_action(id, 1);
+        // A chip: the Tiles card's New.
+        let (_, _) = desk.card_action(tiles, 0);
         let requests = desk.tick(1_001);
         assert!(
             requests.contains(&DeskRequest::Sound(Sound::Click)),
@@ -8021,6 +8025,7 @@ mod tests {
         desk.notify(NoticeLevel::Info, "Saved memo", 1_003);
         assert!(desk.tick(1_003).contains(&DeskRequest::Sound(Sound::Blip)));
         // A countdown that is up: one chime, no blip.
+        desk.raise(id);
         desk.handle_key(b'1');
         let requests = desk.tick(1_003 + 60 * crate::timer::HZ + 1);
         let sounds: Vec<&DeskRequest> = requests
