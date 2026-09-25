@@ -66,8 +66,9 @@ pub fn thumbnail_id(name: &str) -> Option<u32> {
     Some((PICTURE_NAMES.len() * PICTURE_SIZES.len() + n) as u32)
 }
 
-/// The order of `PICTURES`: a name, then its sizes.
-pub const PICTURE_NAMES: [&str; 11] = [
+/// The order of `PICTURES`: a name, then its sizes. After the apps and
+/// the panda, the desk's own (GFX-107): notices, now, shortcuts, bin.
+pub const PICTURE_NAMES: [&str; 15] = [
     "notepad",
     "files",
     "terminal",
@@ -79,10 +80,14 @@ pub const PICTURE_NAMES: [&str; 11] = [
     "tasks",
     "sketch",
     "panda",
+    "notices",
+    "now",
+    "shortcuts",
+    "bin",
 ];
 pub const PICTURE_SIZES: [u32; 6] = [64, 48, 40, 32, 20, 16];
 
-pub static PICTURES: [services_gui_host::Picture; 70] = [
+pub static PICTURES: [services_gui_host::Picture; 94] = [
     picture!("notepad", 64),
     picture!("notepad", 48),
     picture!("notepad", 40),
@@ -149,6 +154,31 @@ pub static PICTURES: [services_gui_host::Picture; 70] = [
     picture!("panda", 32),
     picture!("panda", 20),
     picture!("panda", 16),
+    // The desk's own (GFX-107).
+    picture!("notices", 64),
+    picture!("notices", 48),
+    picture!("notices", 40),
+    picture!("notices", 32),
+    picture!("notices", 20),
+    picture!("notices", 16),
+    picture!("now", 64),
+    picture!("now", 48),
+    picture!("now", 40),
+    picture!("now", 32),
+    picture!("now", 20),
+    picture!("now", 16),
+    picture!("shortcuts", 64),
+    picture!("shortcuts", 48),
+    picture!("shortcuts", 40),
+    picture!("shortcuts", 32),
+    picture!("shortcuts", 20),
+    picture!("shortcuts", 16),
+    picture!("bin", 64),
+    picture!("bin", 48),
+    picture!("bin", 40),
+    picture!("bin", 32),
+    picture!("bin", 20),
+    picture!("bin", 16),
     // Look's wallpaper thumbnails (GFX-100), after the icons.
     thumbnail!("picture"),
     thumbnail!("aurora"),
@@ -2041,6 +2071,17 @@ impl PaletteRow {
 
     /// The app a row stands for (GFX-094): the one a launch row opens,
     /// the Notepad a heading is in, Files for a document.
+    /// The picture a row wears at `size` (GFX-107): its app's, or for the
+    /// desk's own cards -- Notices, Now, Shortcuts -- their own icon.
+    pub fn picture(&self, size: u32) -> Option<u32> {
+        match self {
+            PaletteRow::Action(PaletteAction::Notices) => picture_id("notices", size),
+            PaletteRow::Action(PaletteAction::Now) => picture_id("now", size),
+            PaletteRow::Action(PaletteAction::Shortcuts) => picture_id("shortcuts", size),
+            _ => self.app().and_then(|app| app.picture(size)),
+        }
+    }
+
     pub fn app(&self) -> Option<DeskApp> {
         match self {
             PaletteRow::Action(action) => match action {
@@ -5348,7 +5389,13 @@ impl Desk {
                             let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
                             let entry = &files.entries[*index];
                             let y = i as u32 * pitch + ROW_ICON_Y;
-                            overlay.push(match entry.app().picture(16) {
+                            // In the Bin, every row wears the bin (GFX-107).
+                            let picture = if files.bin {
+                                picture_id("bin", 16)
+                            } else {
+                                entry.app().picture(16)
+                            };
+                            overlay.push(match picture {
                                 Some(id) => view_types::DrawOp::Picture { x: 2, y, id },
                                 None => icon_op(2, y, 1, entry.icon()),
                             });
@@ -5601,7 +5648,7 @@ impl Desk {
                     .enumerate()
                     .filter_map(|(i, row)| {
                         let y = i as u32 * services_gui_host::CARD_LINE_HEIGHT as u32 + ROW_ICON_Y;
-                        match row.app().and_then(|app| app.picture(16)) {
+                        match row.picture(16) {
                             Some(id) => Some(view_types::DrawOp::Picture { x: 2, y, id }),
                             None => row.icon().map(|bits| icon_op(2, y, 1, bits)),
                         }
@@ -5632,7 +5679,10 @@ impl Desk {
         for (index, notice) in all.iter().rev().take(self.notice_ids.len()).enumerate() {
             // The icon of what the notice is about (GFX-101), left of its
             // text, which moves over three cells for it.
-            let icon = notice_app(&notice.text).and_then(|app| app.picture(20));
+            // A notice about no app in particular wears the bell (GFX-107).
+            let icon = notice_app(&notice.text)
+                .and_then(|app| app.picture(20))
+                .or_else(|| picture_id("notices", 20));
             let lines = match icon {
                 Some(_) => wrap_words(&notice.text, columns.saturating_sub(3))
                     .into_iter()
@@ -8439,7 +8489,7 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(thumbnail_id("Aurora"), Some(67));
+        assert_eq!(thumbnail_id("Aurora"), Some(91));
         assert_eq!(thumbnail_id("Gradient"), None);
         let t = &PICTURES[thumbnail_id("Nebula").unwrap() as usize];
         assert_eq!((t.width as u32, t.height as u32), (THUMB_W, THUMB_H));
@@ -8496,11 +8546,25 @@ mod tests {
             saved.overlay.as_slice(),
             [view_types::DrawOp::Picture { .. }]
         ));
+        // Any other wears the bell (GFX-107).
         let other = toasts
             .iter()
             .find(|w| w.frame.view_id != saved.frame.view_id)
             .unwrap();
-        assert!(other.overlay.is_empty());
+        assert!(matches!(
+            other.overlay.as_slice(),
+            [view_types::DrawOp::Picture { id, .. }] if Some(*id) == picture_id("notices", 20)
+        ));
+        // The palette's rows for the desk's own cards wear theirs.
+        assert_eq!(
+            PaletteRow::Action(PaletteAction::Now).picture(16),
+            picture_id("now", 16)
+        );
+        assert_eq!(
+            PaletteRow::Action(PaletteAction::Calculator).picture(16),
+            DeskApp::Calculator.picture(16)
+        );
+        assert_eq!(PICTURES[picture_id("bin", 64).unwrap() as usize].width, 64);
         assert_eq!(notice_app("Timer: 1 minute up"), Some(DeskApp::Timer));
     }
 

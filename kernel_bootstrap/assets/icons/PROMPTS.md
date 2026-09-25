@@ -32,3 +32,7 @@ Subjects:
 | tasks | a checklist of three lines with white tick marks and a round green check badge, on a green gradient |
 | sketch | a white pencil drawn diagonally with a pink eraser, on a coral-to-red gradient |
 | panda | the friendly face of a cute panda, front view, on a deep midnight-navy gradient |
+
+The desk's own icons -- notices (a bell), now (a gauge), shortcuts (a
+keyboard) and bin -- are not generated: `tools/art/drawn_icons.py` draws
+them in the same style (GFX-107).

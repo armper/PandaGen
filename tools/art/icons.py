@@ -18,7 +18,9 @@ from PIL import Image
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 ICONS = os.path.join(ROOT, "kernel_bootstrap", "assets", "icons")
 NAMES = ["notepad", "files", "terminal", "look", "calculator", "calendar",
-         "timer", "tiles", "tasks", "sketch", "panda"]
+         "timer", "tiles", "tasks", "sketch", "panda",
+         # Drawn by tools/art/drawn_icons.py (GFX-107).
+         "notices", "now", "shortcuts", "bin"]
 SIZES = [64, 48, 40, 32, 20, 16]
 
 
