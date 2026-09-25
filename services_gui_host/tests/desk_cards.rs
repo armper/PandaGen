@@ -141,6 +141,30 @@ fn card_hit_regions_name_the_header_the_close_glyph_and_the_line() {
     assert!(compositor.hit_test(&windows, 10, 10).is_none());
 }
 
+/// The close cross is drawn (GFX-104): solid on its diagonals, soft beside
+/// them, and nothing between its arms or past their ends.
+#[test]
+fn the_close_cross_is_two_smooth_diagonals() {
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let card = DesktopWindow::card(frame("Notepad", &["one"]), bounds);
+    let close = card.close_rect().unwrap();
+    let target = render(vec![card]);
+    let at = |dx: usize, dy: usize| px(&target, close.x + dx, close.y + dy);
+    let header = at(1, 1);
+    assert_ne!(header, theme.text_muted);
+    // The centre and an arm's end are solid.
+    assert_eq!(at(8, 8), theme.text_muted);
+    assert_eq!(at(3, 3), theme.text_muted);
+    assert_eq!(at(12, 3), theme.text_muted);
+    // Beside a diagonal: partly inked.
+    let soft = at(5, 4);
+    assert!(soft != theme.text_muted && soft != header, "{soft:?}");
+    // Between the arms and past their ends: the header.
+    assert_eq!(at(8, 3), header);
+    assert_eq!(at(2, 2), header);
+}
+
 #[test]
 fn pixel_bounds_win_over_the_cell_rect() {
     let bounds = RasterRect::new(123, 77, 210, 150);

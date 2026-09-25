@@ -362,6 +362,40 @@ pub const CARD_RADIUS: usize = 10;
 pub const CARD_FOOTER_HEIGHT: usize = 20;
 /// The close glyph's hit box, inset from the header's right edge.
 pub const CARD_CLOSE_SIZE: usize = 16;
+/// Half the close cross's arms, in pixels (GFX-104): a 9px cross in the
+/// 16px hit box.
+pub const CARD_CLOSE_ARM: i32 = 4;
+
+/// The close cross (GFX-104): two diagonals about 1.6px thick, each pixel
+/// inked by how much of it the stroke covers, so the cross is smooth
+/// where a font's 'x' was a letter. Integer arithmetic: coordinates are
+/// in half pixels, and a pixel's distance from a diagonal is
+/// `|a - b| / (2 * sqrt 2)` of them.
+fn close_cross<T: RenderTarget + ?Sized>(target: &mut T, hit: RasterRect, color: RgbaColor) {
+    let cx = (hit.x * 2 + hit.width) as i32;
+    let cy = (hit.y * 2 + hit.height) as i32;
+    let reach = CARD_CLOSE_ARM * 2 + 1;
+    for y in hit.y..hit.bottom().min(target.height()) {
+        for x in hit.x..hit.right().min(target.width()) {
+            let a = x as i32 * 2 + 1 - cx;
+            let b = y as i32 * 2 + 1 - cy;
+            if a.abs() > reach || b.abs() > reach {
+                continue;
+            }
+            // 1/256ths: 0.8px of half-stroke plus half a pixel of filter,
+            // less the distance to the nearer diagonal.
+            let d = (a - b).abs().min((a + b).abs()) * 91;
+            let cover = (333 - d).clamp(0, 256) as u32;
+            if cover == 0 {
+                continue;
+            }
+            let alpha = (color.a as u32 * cover / 256) as u8;
+            let under = target.pixel(x, y).unwrap_or(color);
+            let ink = RgbaColor::new(color.r, color.g, color.b, alpha);
+            target.write_pixel(x, y, graphics_rasterizer::blend_over(under, ink));
+        }
+    }
+}
 /// How far the shadow extends past a card, right and down. Damage for a
 /// moved card must grow by this much or it leaves a trail.
 pub const CARD_LIFT: usize = 2;
@@ -2018,10 +2052,8 @@ fn raster_card(
         );
     }
     if let Some(close) = close {
-        // An 'x' in the one font there is, centred in its hit box.
-        let gx = close.x + (CARD_CLOSE_SIZE.saturating_sub(RASTER_CELL_WIDTH)) / 2;
-        let gy = close.y + (CARD_CLOSE_SIZE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
-        painter.draw_text_with_font(gx, gy, "x", &SMOOTH_FONT, theme.text_muted);
+        // A drawn cross (GFX-104), centred in its hit box.
+        close_cross(&mut painter, close, theme.text_muted);
     }
 
     // Content.
