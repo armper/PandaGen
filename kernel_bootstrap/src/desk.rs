@@ -488,6 +488,30 @@ impl DeskApp {
     }
 }
 
+/// How a chip's key is written when Ctrl is held (GFX-093): `^S` for a
+/// control key, the name of a named key, the letter of a plain one.
+pub fn key_name(key: u8) -> Option<String> {
+    use crate::notepad as k;
+    let name = match key {
+        b'\n' | b'\r' => "Enter".to_string(),
+        k::ESC => "Esc".to_string(),
+        b' ' => "Space".to_string(),
+        b'\t' => "Tab".to_string(),
+        k::KEY_DELETE => "Del".to_string(),
+        k::KEY_LEFT => "Left".to_string(),
+        k::KEY_RIGHT => "Right".to_string(),
+        k::KEY_UP => "Up".to_string(),
+        k::KEY_DOWN => "Down".to_string(),
+        k::KEY_PAGE_UP => "PgUp".to_string(),
+        k::KEY_PAGE_DOWN => "PgDn".to_string(),
+        k::CTRL_SHIFT_S => "^+S".to_string(),
+        0x01..=0x1A => alloc::format!("^{}", (b'A' + key - 1) as char),
+        0x21..=0x7E => alloc::format!("{}", (key as char).to_ascii_uppercase()),
+        _ => return None,
+    };
+    Some(name)
+}
+
 /// Ctrl+L: rest (GFX-092).
 pub const KEY_CTRL_L: u8 = 0x0C;
 /// Five minutes without a key or the pointer, in ticks: the desk rests.
@@ -1914,6 +1938,8 @@ pub struct Desk {
     overview_since: Option<u64>,
     /// Sounds to play, handed to the kernel on the next tick (GFX-087).
     pending_sounds: Vec<Sound>,
+    /// Ctrl is held (GFX-093): the chips say their keys.
+    ctrl_held: bool,
     /// Resting (GFX-092): the desk shows only the time until a key or
     /// the pointer wakes it. `last_input` is the tick of the last one.
     resting: bool,
@@ -1969,6 +1995,7 @@ impl Desk {
             pending_sounds: Vec::new(),
             resting: false,
             last_input: 0,
+            ctrl_held: false,
         }
     }
 
@@ -4046,6 +4073,22 @@ impl Desk {
     }
 
     pub fn handle_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
+        // Ctrl down and up (GFX-093): the chips say their keys while it
+        // is held. Down repeats while held; only the first changes things.
+        if byte == crate::notepad::KEY_CTRL_PRESSED {
+            let was = self.ctrl_held;
+            self.ctrl_held = true;
+            self.last_input = self.motion_clock;
+            if self.resting {
+                self.resting = false;
+                return (None, true);
+            }
+            return (None, !was);
+        }
+        let hints_off = byte == crate::notepad::KEY_CTRL_RELEASED && self.ctrl_held;
+        if hints_off {
+            self.ctrl_held = false;
+        }
         // Any key is input; while resting it only wakes (GFX-092), so a
         // key pressed to wake is not typed into a card.
         self.last_input = self.motion_clock;
@@ -4099,7 +4142,7 @@ impl Desk {
             };
         }
         if byte == crate::notepad::KEY_CTRL_RELEASED {
-            return (None, false);
+            return (None, hints_off);
         }
         if byte == KEY_CTRL_TAB {
             return (None, self.open_overview());
@@ -4787,6 +4830,7 @@ impl Desk {
         }
         let motions = self.motions.clone();
         let pointer = self.pointer;
+        let ctrl_held = self.ctrl_held;
         let palette = crate::widgets::Palette::from_theme(&self.theme());
         for window in &mut self.windows {
             if window.tucked || window.space != space || overview_open {
@@ -5042,7 +5086,11 @@ impl Desk {
                     window
                         .actions()
                         .into_iter()
-                        .map(|(label, _)| label)
+                        .map(|(label, key)| match (ctrl_held, key_name(key)) {
+                            // Ctrl held: the key beside the name (GFX-093).
+                            (true, Some(name)) => alloc::format!("{label} {name}"),
+                            _ => label,
+                        })
                         .collect(),
                 );
             if focused {
@@ -7742,6 +7790,51 @@ mod tests {
         assert!(route(&mut desk, &mut router, press(640, 400)));
         assert!(!desk.resting());
         assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "ac");
+    }
+
+    /// Hold Ctrl (GFX-093): every chip says its key beside its name;
+    /// letting go puts the names back; Ctrl+Tab and the overview still
+    /// work as they did.
+    #[test]
+    fn holding_ctrl_shows_every_chips_key() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Notepad);
+        let chips = |desk: &mut Desk| {
+            desk.windows("", true, None)
+                .into_iter()
+                .find(|w| w.frame.view_id == id)
+                .unwrap()
+                .actions
+        };
+        assert_eq!(chips(&mut desk)[0], "Save");
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_CTRL_PRESSED),
+            (None, true)
+        );
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_CTRL_PRESSED),
+            (None, false),
+            "the repeat changes nothing"
+        );
+        let held = chips(&mut desk);
+        assert_eq!(held[0], "Save ^S");
+        assert_eq!(held[3], "Find ^F");
+        assert_eq!(
+            desk.handle_key(crate::notepad::KEY_CTRL_RELEASED),
+            (None, true)
+        );
+        assert_eq!(chips(&mut desk)[0], "Save");
+        assert_eq!(key_name(crate::notepad::ESC).as_deref(), Some("Esc"));
+        assert_eq!(key_name(b'c').as_deref(), Some("C"));
+        assert_eq!(key_name(crate::notepad::REPLACE_ALL), None);
+        // Ctrl+Tab still opens the overview and the release picks.
+        desk.launch(DeskApp::Calculator);
+        desk.handle_key(crate::notepad::KEY_CTRL_PRESSED);
+        desk.handle_key(KEY_CTRL_TAB);
+        assert!(desk.overview_open());
+        desk.handle_key(crate::notepad::KEY_CTRL_RELEASED);
+        assert!(!desk.overview_open());
+        assert_eq!(desk.focus(), Some(id));
     }
 
     #[test]

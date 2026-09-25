@@ -63,6 +63,8 @@ pub const KEY_CTRL_1: u8 = 0x96;
 pub const KEY_CTRL_SHIFT_1: u8 = 0x9A;
 /// Ctrl was released (GFX-068): the overview picks what is highlighted.
 pub const KEY_CTRL_RELEASED: u8 = 0x9F;
+/// Ctrl went down (GFX-093): the chips say their keys while it is held.
+pub const KEY_CTRL_PRESSED: u8 = 0x9E;
 pub const CTRL_A: u8 = 0x01;
 pub const CTRL_C: u8 = 0x03;
 /// Ctrl+D: this document in a second card (GFX-074). The desk answers it;
