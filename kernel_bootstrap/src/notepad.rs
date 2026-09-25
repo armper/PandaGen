@@ -76,6 +76,10 @@ pub const CTRL_Y: u8 = 0x19;
 pub const CTRL_N: u8 = 0x0E;
 pub const CTRL_O: u8 = 0x0F;
 pub const CTRL_S: u8 = 0x13;
+/// Ctrl+R: find and replace (GFX-090).
+pub const CTRL_R: u8 = 0x12;
+/// Not a key the parser produces: the replace prompt's "All" chip.
+pub const REPLACE_ALL: u8 = 0xB0;
 /// Not a key the parser can produce -- the palette's "Save as..." row uses
 /// it to ask for the prompt even when a name is already known.
 pub const CTRL_SHIFT_S: u8 = 0x87;
@@ -138,6 +142,13 @@ enum Prompt {
     Open(String),
     /// Find: the query, and how many places match it.
     Find(String),
+    /// Find and replace (GFX-090): what to find, what to put there, and
+    /// which of the two is being typed.
+    Replace {
+        find: String,
+        with: String,
+        on_with: bool,
+    },
 }
 
 /// The text itself and what belongs to it rather than to any one card
@@ -389,6 +400,7 @@ impl Notepad {
     pub fn prompt_open(&self) -> Option<&'static str> {
         match self.prompt {
             Some(Prompt::Find(_)) => Some("find"),
+            Some(Prompt::Replace { .. }) => Some("replace"),
             Some(Prompt::SaveAs(_)) | Some(Prompt::Open(_)) => Some("name"),
             None => None,
         }
@@ -773,6 +785,59 @@ impl Notepad {
         false
     }
 
+    /// Find `query` at the caret or after it, wrapping; select it.
+    fn find_from_here(&mut self, query: &str) -> bool {
+        // `find_next` starts one past the caret: step back one first so a
+        // match right here is found.
+        if self.cursor.col > 0 {
+            self.cursor.col -= 1;
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+            self.cursor.col = self.line_length(self.cursor.row);
+        } else {
+            let last = self.line_count().saturating_sub(1);
+            self.cursor = Position::new(last, self.line_length(last));
+        }
+        self.find_next(query)
+    }
+
+    /// Replace the selected match of `find` with `with` (one undo step)
+    /// and select the next; with no match selected, select the next.
+    fn replace_next(&mut self, find: &str, with: &str) {
+        if find.is_empty() || self.history.is_some() {
+            return;
+        }
+        if self.selected_text().as_deref() == Some(find) {
+            let before = self.snapshot();
+            self.delete_selection();
+            self.insert_text(with);
+            self.push_undo(before);
+            if !self.find_next(find) {
+                self.status = "Replaced the last one".to_string();
+            }
+        } else if !self.find_next(find) {
+            self.status = "No matches".to_string();
+        }
+    }
+
+    /// Replace every `find` with `with`, one undo step. Returns how many.
+    fn replace_all(&mut self, find: &str, with: &str) -> usize {
+        if find.is_empty() || self.history.is_some() {
+            return 0;
+        }
+        let content = self.content();
+        let count = content.matches(find).count();
+        if count == 0 {
+            return 0;
+        }
+        let before = self.snapshot();
+        self.doc_mut().buffer = TextBuffer::from_string(content.replace(find, with));
+        self.anchor = None;
+        self.clamp_cursor();
+        self.push_undo(before);
+        count
+    }
+
     fn match_count(&self, query: &str) -> usize {
         if query.is_empty() {
             return 0;
@@ -875,6 +940,27 @@ impl Notepad {
             );
         }
         match &self.prompt {
+            Some(Prompt::Replace {
+                find,
+                with,
+                on_with,
+            }) => {
+                let (a, b) = if *on_with { ("", "_") } else { ("_", "") };
+                let count = self.match_count(find);
+                let found = match (find.is_empty(), count) {
+                    (true, _) => String::new(),
+                    (false, 0) => "   no matches".to_string(),
+                    (false, n) => alloc::format!("   {n} found"),
+                };
+                let said = if self.status.is_empty() {
+                    String::new()
+                } else {
+                    alloc::format!("   {}", self.status)
+                };
+                return alloc::format!(
+                    "Replace: {find}{a}   with: {with}{b}{found}{said}   (Tab switches, Enter replaces)"
+                );
+            }
             Some(Prompt::Find(query)) => {
                 let count = self.match_count(query);
                 let found = match (query.is_empty(), count) {
@@ -1148,6 +1234,20 @@ impl Notepad {
                 self.prompt = Some(Prompt::Find(seed));
                 return NotepadEffect::Redraw;
             }
+            CTRL_R => {
+                // Find and replace (GFX-090), seeded like Find.
+                let find = self
+                    .selected_text()
+                    .filter(|t| !t.contains('\n'))
+                    .unwrap_or_default();
+                let on_with = !find.is_empty();
+                self.prompt = Some(Prompt::Replace {
+                    find,
+                    with: String::new(),
+                    on_with,
+                });
+                return NotepadEffect::Redraw;
+            }
             KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT => self.anchor = None,
             BACKSPACE | KEY_DELETE if self.selection().is_some() => {
                 let before = self.snapshot();
@@ -1309,6 +1409,72 @@ impl Notepad {
     }
 
     fn handle_prompt_byte(&mut self, byte: u8) -> NotepadEffect {
+        if let Some(Prompt::Replace {
+            find,
+            with,
+            on_with,
+        }) = &self.prompt
+        {
+            let (mut find, mut with, mut on_with) = (find.clone(), with.clone(), *on_with);
+            let effect = match byte {
+                ESC => {
+                    self.prompt = None;
+                    return NotepadEffect::Redraw;
+                }
+                b'\t' => {
+                    on_with = !on_with;
+                    NotepadEffect::Redraw
+                }
+                BACKSPACE => {
+                    if on_with {
+                        with.pop();
+                    } else {
+                        find.pop();
+                    }
+                    NotepadEffect::Redraw
+                }
+                b'\n' | b'\r' => {
+                    self.replace_next(&find, &with);
+                    NotepadEffect::Redraw
+                }
+                REPLACE_ALL => {
+                    let n = self.replace_all(&find, &with);
+                    self.status = match n {
+                        0 => "No matches".to_string(),
+                        1 => "Replaced 1".to_string(),
+                        n => alloc::format!("Replaced {n}"),
+                    };
+                    NotepadEffect::Redraw
+                }
+                0x20..=0x7E => {
+                    let field = if on_with { &mut with } else { &mut find };
+                    if field.len() < 64 {
+                        field.push(byte as char);
+                    }
+                    if !on_with {
+                        // Like Find: the first match as it is typed.
+                        let saved = (self.cursor, self.anchor);
+                        if let Some((start, _)) = self.selection() {
+                            self.cursor = start;
+                            self.anchor = None;
+                        }
+                        if !self.find_from_here(&find) {
+                            (self.cursor, self.anchor) = saved;
+                        }
+                    }
+                    NotepadEffect::Redraw
+                }
+                _ => NotepadEffect::None,
+            };
+            if self.prompt.is_some() {
+                self.prompt = Some(Prompt::Replace {
+                    find,
+                    with,
+                    on_with,
+                });
+            }
+            return effect;
+        }
         if let Some(Prompt::Find(query)) = &self.prompt {
             let mut query = query.clone();
             let effect = match byte {
@@ -1364,7 +1530,7 @@ impl Notepad {
         };
         let name = match prompt {
             Prompt::SaveAs(name) | Prompt::Open(name) => name,
-            Prompt::Find(_) => return NotepadEffect::None,
+            Prompt::Find(_) | Prompt::Replace { .. } => return NotepadEffect::None,
         };
         match byte {
             ESC => {
@@ -1386,7 +1552,7 @@ impl Notepad {
                 if let (Some(first), Some(prompt)) = (first, self.prompt.as_mut()) {
                     match prompt {
                         Prompt::SaveAs(n) | Prompt::Open(n) => *n = first,
-                        Prompt::Find(_) => {}
+                        Prompt::Find(_) | Prompt::Replace { .. } => {}
                     }
                 }
                 NotepadEffect::Redraw
@@ -1404,7 +1570,9 @@ impl Notepad {
                         content: self.content(),
                     },
                     Some(Prompt::Open(_)) => NotepadEffect::Open { path: name },
-                    Some(Prompt::Find(_)) | None => NotepadEffect::None,
+                    Some(Prompt::Find(_)) | Some(Prompt::Replace { .. }) | None => {
+                        NotepadEffect::None
+                    }
                 }
             }
             0x20..=0x7E if name.len() < 64 => {
@@ -2071,6 +2239,53 @@ mod tests {
         let saves = [a.autosave_due(at), b.autosave_due(at)];
         assert_eq!(saves.iter().filter(|s| s.is_some()).count(), 1, "{saves:?}");
         assert!(a.autosave_due(at + 1).is_none() && b.autosave_due(at + 1).is_none());
+    }
+
+    /// Find and replace (GFX-090): Ctrl+R, type what to find, Tab, type
+    /// what to put there; Enter replaces the selected match and moves to
+    /// the next; All replaces the rest; each is one undo step.
+    #[test]
+    fn find_and_replace_one_at_a_time_or_all_at_once() {
+        let mut pad = Notepad::new();
+        pad.load(None, "cat and cat\nthe cat sat");
+        pad.handle_byte(CTRL_R);
+        assert_eq!(pad.prompt_open(), Some("replace"));
+        type_str(&mut pad, "cat");
+        assert_eq!(pad.selected_text().as_deref(), Some("cat"));
+        assert_eq!(pad.cursor(), Position::new(0, 3), "the first one");
+        assert!(pad.footer().contains("3 found"), "{}", pad.footer());
+        pad.handle_byte(b'\t');
+        type_str(&mut pad, "dog");
+        assert!(
+            pad.footer().starts_with("Replace: cat   with: dog_"),
+            "{}",
+            pad.footer()
+        );
+        pad.handle_byte(b'\n');
+        assert_eq!(pad.content(), "dog and cat\nthe cat sat");
+        assert_eq!(pad.selected_text().as_deref(), Some("cat"), "the next one");
+        pad.handle_byte(REPLACE_ALL);
+        assert_eq!(pad.content(), "dog and dog\nthe dog sat");
+        assert!(pad.footer().contains("Replaced 2"), "{}", pad.footer());
+        // Undo takes back All in one step, then the single one.
+        pad.handle_byte(ESC);
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "dog and cat\nthe cat sat");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "cat and cat\nthe cat sat");
+        // A selection seeds the find and the caret starts on "with".
+        pad.handle_byte(CTRL_A);
+        pad.handle_byte(KEY_RIGHT);
+        pad.load(None, "one");
+        pad.handle_byte(CTRL_A);
+        pad.handle_byte(CTRL_R);
+        assert!(
+            pad.footer().starts_with("Replace: one   with: _"),
+            "{}",
+            pad.footer()
+        );
+        pad.handle_byte(ESC);
+        assert_eq!(pad.prompt_open(), None);
     }
 
     #[test]

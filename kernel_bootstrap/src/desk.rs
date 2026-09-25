@@ -754,6 +754,11 @@ impl DeskWindow {
                 ("Next".to_string(), b'\n'),
                 ("Close".to_string(), crate::notepad::ESC),
             ],
+            AppState::Notepad(notepad) if notepad.prompt_open() == Some("replace") => alloc::vec![
+                ("Replace".to_string(), b'\n'),
+                ("All".to_string(), crate::notepad::REPLACE_ALL),
+                ("Close".to_string(), crate::notepad::ESC),
+            ],
             AppState::Notepad(notepad) if notepad.prompt_open().is_some() => {
                 alloc::vec![("Cancel".to_string(), crate::notepad::ESC)]
             }
@@ -763,6 +768,7 @@ impl DeskWindow {
                 ("Open".to_string(), crate::notepad::CTRL_O),
                 ("Find".to_string(), crate::notepad::CTRL_F),
                 ("History".to_string(), crate::notepad::CTRL_Y),
+                ("Replace".to_string(), crate::notepad::CTRL_R),
                 ("Split".to_string(), crate::notepad::CTRL_D),
             ],
             AppState::Files(files) => files.actions(),
@@ -1428,6 +1434,8 @@ pub enum PaletteAction {
     Cut,
     Paste,
     Find,
+    /// Find and replace in the focused Notepad (GFX-090).
+    Replace,
     ToggleTheme,
     History,
     /// This document in a second card, side by side (GFX-074).
@@ -1461,7 +1469,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 40] = [
+    pub const ALL: [PaletteAction; 41] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1480,6 +1488,7 @@ impl PaletteAction {
         PaletteAction::Cut,
         PaletteAction::Paste,
         PaletteAction::Find,
+        PaletteAction::Replace,
         PaletteAction::ToggleTheme,
         PaletteAction::History,
         PaletteAction::Split,
@@ -1524,6 +1533,7 @@ impl PaletteAction {
             PaletteAction::Cut => "Cut",
             PaletteAction::Paste => "Paste",
             PaletteAction::Find => "Find...",
+            PaletteAction::Replace => "Find and replace...",
             PaletteAction::ToggleTheme => "Look: themes and accents",
             PaletteAction::History => "Earlier versions of this document",
             PaletteAction::Split => "Split: this document in a second card",
@@ -1569,6 +1579,7 @@ impl PaletteAction {
             PaletteAction::Cut => "Ctrl+X",
             PaletteAction::Paste => "Ctrl+V",
             PaletteAction::Find => "Ctrl+F",
+            PaletteAction::Replace => "Ctrl+R",
             PaletteAction::ToggleTheme => "",
             PaletteAction::History => "Ctrl+Y",
             PaletteAction::Split => "Ctrl+D",
@@ -1606,6 +1617,7 @@ impl PaletteAction {
                 | PaletteAction::Cut
                 | PaletteAction::Paste
                 | PaletteAction::Find
+                | PaletteAction::Replace
                 | PaletteAction::History
                 | PaletteAction::Split
         )
@@ -3067,6 +3079,7 @@ impl Desk {
             PaletteAction::Cut => self.forward_to_notepad(crate::notepad::CTRL_X),
             PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
             PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
+            PaletteAction::Replace => self.forward_to_notepad(crate::notepad::CTRL_R),
             PaletteAction::History => self.forward_to_notepad(crate::notepad::CTRL_Y),
             PaletteAction::Split => {
                 if let Some(id) = self.focus {
@@ -6721,7 +6734,7 @@ mod tests {
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(
             card.actions,
-            alloc::vec!["Save", "Save as", "Open", "Find", "History", "Split"]
+            alloc::vec!["Save", "Save as", "Open", "Find", "History", "Replace", "Split"]
         );
         let save = card.action_rects()[0].expect("the Save chip is placed");
         let compositor = Compositor::new();

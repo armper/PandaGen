@@ -496,9 +496,10 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "300,44,48,56,72".to_string(),
         // ...and its header, between the title and the action chips, is
         // the plain surface. (This sat at x=880 until the chips arrived
-        // there.)
+        // there, and at x=600 until the Replace chip, GFX-090, pushed them
+        // further left.)
         "--expect-pixel".to_string(),
-        "600,56,28,34,48".to_string(),
+        "500,56,28,34,48".to_string(),
         // The Terminal card: 800 wide, second cascade step (x=272, y=76),
         // focused, so its top edge is the accent ring.
         "--expect-pixel".to_string(),
