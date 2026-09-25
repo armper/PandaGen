@@ -19,6 +19,7 @@ pub mod display_mode;
 pub mod display_sink;
 pub mod free_list_heap;
 pub mod game;
+pub mod launcher;
 pub mod minimal_editor;
 pub mod notepad;
 pub mod optimized_render;

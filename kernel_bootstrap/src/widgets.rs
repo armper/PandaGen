@@ -220,6 +220,11 @@ impl Ui {
         self.hits.push((area, key));
     }
 
+    /// Any draw operation, as it is (GFX-089): an icon, a line.
+    pub fn push(&mut self, op: DrawOp) {
+        self.ops.push(op);
+    }
+
     /// Make `area` answer `key` to a click without drawing anything: for
     /// controls the app draws itself, such as a day or a row (GFX-083).
     pub fn hit_area(&mut self, area: PixelRect, key: u8) {

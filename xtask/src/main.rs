@@ -666,6 +666,25 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     ];
     cmd_qemu_script(args.into_iter())?;
 
+    println!("== the desk: Apps from Ctrl+Space twice, Timer by name");
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,ctrl-spc,sleep:2,shot:apps,t,i,m,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_apps".to_string(),
+        "--expect-serial".to_string(),
+        "display_mode=Some(\"desk\")".to_string(),
+        // The Timer opened from the grid: 400 wide, centred, first cascade
+        // step, focused -- the accent ring on its top edge (GFX-089).
+        "--expect-pixel".to_string(),
+        "640,44,52,211,153".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    cmd_qemu_script(args.into_iter())?;
+
     println!("== the desk: a save, Files from the palette, a file opened from it");
     let args = [
         "--port-base".to_string(),

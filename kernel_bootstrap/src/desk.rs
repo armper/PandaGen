@@ -49,6 +49,7 @@ use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::game::{Game, GameEffect};
+use crate::launcher::{LauncherEffect, LauncherView};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
 pub use crate::speaker::Sound;
@@ -199,6 +200,9 @@ pub enum DeskApp {
     Tasks,
     /// Draw with the pointer; kept as the document `sketch` (GFX-080).
     Sketch,
+    /// Every app as a grid of icons (GFX-089). Not on the dock: it is the
+    /// way to the dock's apps by name.
+    Launcher,
 }
 
 impl DeskApp {
@@ -248,6 +252,7 @@ impl DeskApp {
             DeskApp::Tiles => "Tiles",
             DeskApp::Tasks => "Tasks",
             DeskApp::Sketch => "Sketch",
+            DeskApp::Launcher => "Apps",
         }
     }
 
@@ -458,6 +463,7 @@ impl DeskApp {
             DeskApp::Tiles => "2k",
             DeskApp::Tasks => "Td",
             DeskApp::Sketch => "Sk",
+            DeskApp::Launcher => "Ap",
         }
     }
 
@@ -477,9 +483,16 @@ impl DeskApp {
             DeskApp::Tiles => TILES_SIZE,
             DeskApp::Tasks => TASKS_SIZE,
             DeskApp::Sketch => SKETCH_SIZE,
+            DeskApp::Launcher => LAUNCHER_SIZE,
         }
     }
 }
+
+/// The top bar's left cells that open Apps (GFX-089).
+pub const BAR_APPS_COLUMNS: usize = 12;
+
+/// The Apps card (GFX-089): two rows of five.
+pub const LAUNCHER_SIZE: (usize, usize) = (560, 324);
 
 /// The Sketch card (GFX-080): a canvas.
 pub const SKETCH_SIZE: (usize, usize) = (520, 420);
@@ -809,6 +822,7 @@ impl DeskWindow {
                 ("Clear".to_string(), b'x'),
                 ("Close".to_string(), crate::notepad::CTRL_W),
             ],
+            AppState::Launcher(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
         }
     }
 }
@@ -1231,6 +1245,7 @@ pub enum AppState {
     Tiles(Game),
     Tasks(TasksView),
     Sketch(SketchView),
+    Launcher(LauncherView),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -1441,10 +1456,12 @@ pub enum PaletteAction {
     Tasks,
     /// The Sketch card (GFX-080).
     Sketch,
+    /// Every app as a grid (GFX-089).
+    Apps,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 39] = [
+    pub const ALL: [PaletteAction; 40] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1484,6 +1501,7 @@ impl PaletteAction {
         PaletteAction::Tiles,
         PaletteAction::Tasks,
         PaletteAction::Sketch,
+        PaletteAction::Apps,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1527,6 +1545,7 @@ impl PaletteAction {
             PaletteAction::Tiles => "Tiles: the 2048 game",
             PaletteAction::Tasks => "Tasks: the to-do list",
             PaletteAction::Sketch => "Sketch: draw with the pointer",
+            PaletteAction::Apps => "Apps: every app on the desk",
         }
     }
 
@@ -1571,6 +1590,7 @@ impl PaletteAction {
             PaletteAction::Tiles => "",
             PaletteAction::Tasks => "",
             PaletteAction::Sketch => "",
+            PaletteAction::Apps => "Ctrl+Space twice",
         }
     }
 
@@ -2392,7 +2412,11 @@ impl Desk {
         let id = ViewId::new();
         let z = self.next_z;
         self.next_z += 1;
-        self.opened += 1;
+        // A passing grid does not use up a cascade slot (GFX-089): the
+        // app opened from it lands where it would from the dock.
+        if app != DeskApp::Launcher {
+            self.opened += 1;
+        }
         self.windows.push(DeskWindow {
             id,
             app,
@@ -2422,6 +2446,7 @@ impl Desk {
                 )),
                 DeskApp::Tasks => AppState::Tasks(TasksView::new()),
                 DeskApp::Sketch => AppState::Sketch(SketchView::new()),
+                DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
             },
         });
         self.focus = Some(id);
@@ -2821,6 +2846,7 @@ impl Desk {
                 "Sketch".to_string(),
                 alloc::vec![alloc::format!("{} strokes", sketch.strokes().len())],
             ),
+            AppState::Launcher(_) => ("Apps".to_string(), alloc::vec!["every app".to_string()]),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -3081,6 +3107,10 @@ impl Desk {
                     DeskApp::Tasks.launch_request(id)
                 }
             }
+            PaletteAction::Apps => {
+                self.open_or_raise(DeskApp::Launcher);
+                None
+            }
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
                 let id = self.open_or_raise(DeskApp::Sketch);
@@ -3172,6 +3202,13 @@ impl Desk {
             return (None, false);
         };
         match byte {
+            // Ctrl+Space again with nothing typed: every app, as a grid
+            // (GFX-089).
+            KEY_CTRL_SPACE if palette.query.is_empty() => {
+                self.palette = None;
+                self.open_or_raise(DeskApp::Launcher);
+                (None, true)
+            }
             crate::notepad::ESC | KEY_CTRL_SPACE | 0x10 => {
                 self.palette = None;
                 (None, true)
@@ -3499,6 +3536,10 @@ impl Desk {
                         } else if column.map(|c| self.clock_at_column(c, 5)).unwrap_or(false) {
                             // The clock is the way into Now (GFX-072).
                             self.open_or_raise(DeskApp::Now);
+                        } else if column.is_some_and(|c| c < BAR_APPS_COLUMNS) {
+                            // The bar's left end is the way to every app
+                            // (GFX-089), the corner an eye looks to first.
+                            self.open_or_raise(DeskApp::Launcher);
                         } else {
                             match column.and_then(|c| self.space_at_column(c)) {
                                 Some(space) => {
@@ -3664,6 +3705,28 @@ impl Desk {
                                         clicked = true;
                                     }
                                 }
+                            }
+                            // Apps: a cell, by pixel (GFX-089); the key it
+                            // answers opens the app and closes the card.
+                            let launcher_key =
+                                match (self.canvas_point(*target, px, py), self.window(*target)) {
+                                    (Some((x, y)), Some(w)) => match &w.state {
+                                        AppState::Launcher(launcher) => {
+                                            let (cw, ch) = Self::canvas_size(w.bounds);
+                                            let palette =
+                                                crate::widgets::Palette::from_theme(&self.theme());
+                                            launcher.ui(cw, ch, palette, None).hit(x, y)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                            if let Some(key) = launcher_key {
+                                let (request, _) = self.handle_app_key(*target, key);
+                                requests.extend(request);
+                                self.say(Sound::Click);
+                                changed = true;
+                                continue;
                             }
                             // Sketch: a stroke begins where the pointer
                             // pressed, in the canvas's own pixels (GFX-080).
@@ -4187,6 +4250,20 @@ impl Desk {
                     (None, true)
                 }
             },
+            AppState::Launcher(launcher) => match launcher.handle_byte(byte) {
+                LauncherEffect::None => (None, false),
+                LauncherEffect::Redraw => (None, true),
+                LauncherEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+                LauncherEffect::Launch(index) => {
+                    // The card has done its work; the app opens as its
+                    // dock tile would open it.
+                    self.close(id);
+                    (self.activate_dock_tile(index), true)
+                }
+            },
             AppState::Shortcuts(scroll) => match byte {
                 crate::notepad::CTRL_W | crate::notepad::ESC => {
                     self.close(id);
@@ -4698,6 +4775,11 @@ impl Desk {
                         as u32;
                     graphics = Some(sketch.ops(canvas_width));
                     (Vec::new(), "Sketch".to_string(), sketch.footer(), None)
+                }
+                AppState::Launcher(launcher) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(launcher.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Apps".to_string(), launcher.footer(), None)
                 }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
@@ -7332,6 +7414,63 @@ mod tests {
         assert!(
             !desk.clock_at_column(start + 9, 5),
             "the date is not the clock"
+        );
+    }
+
+    /// Apps (GFX-089): Ctrl+Space twice, or the bar's left end, opens the
+    /// grid; typing filters; Enter opens the app as its dock tile would
+    /// and the grid goes; a click on a cell does the same.
+    #[test]
+    fn apps_opens_from_the_palette_or_the_bar_and_launches_by_name_or_click() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        let compositor = Compositor::new();
+        desk.handle_key(KEY_CTRL_SPACE);
+        desk.handle_key(KEY_CTRL_SPACE);
+        assert!(!desk.palette_open());
+        let grid = desk.focused_window().map(|w| (w.id, w.app)).unwrap();
+        assert_eq!(grid.1, DeskApp::Launcher);
+        for b in b"tim" {
+            desk.handle_key(*b);
+        }
+        desk.handle_key(b'\n');
+        assert!(desk.window(grid.0).is_none(), "the grid went");
+        assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Timer));
+        // The grid took no cascade slot: the Timer is where a first card goes.
+        let mut fresh = Desk::new(1280, 800);
+        let first = fresh.launch(DeskApp::Timer);
+        assert_eq!(
+            desk.focused_window().map(|w| w.bounds),
+            fresh.window(first).map(|w| w.bounds)
+        );
+        // From the bar's left end.
+        route(&mut desk, &mut router, press(20, 14));
+        route(&mut desk, &mut router, release(20, 14));
+        let grid = desk.focused_window().map(|w| (w.id, w.app)).unwrap();
+        assert_eq!(grid.1, DeskApp::Launcher);
+        // A click on the second cell: Files, which asks for its listing.
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == grid.0).unwrap();
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
+        let (ox, oy, _) = card.card_text_origin();
+        let (w, _) = Desk::canvas_size(desk.window(grid.0).unwrap().bounds);
+        let cell = crate::launcher::LauncherView::cells(w)[1];
+        let (x, y) = (
+            (ox as u32 + cell.x + 20) as i32,
+            (oy as u32 + cell.y + 20) as i32,
+        );
+        let deliveries = router.route(&compositor, &windows, press(x, y));
+        let (requests, _) = desk.handle_deliveries_with_requests(&deliveries);
+        let files = desk.focused_window().map(|w| (w.id, w.app)).unwrap();
+        assert_eq!(files.1, DeskApp::Files);
+        assert_eq!(
+            requests,
+            alloc::vec![DeskRequest::ListFiles { id: files.0 }]
+        );
+        assert!(desk.window(grid.0).is_none());
+        assert!(
+            !DeskApp::ALL.contains(&DeskApp::Launcher),
+            "not a dock tile"
         );
     }
 
