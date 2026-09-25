@@ -751,9 +751,45 @@ pub const NOTICE_LOG: usize = 50;
 
 /// The Welcome card (GFX-065): wide enough for its lines, low enough to
 /// sit above the dock without covering the middle of the desk.
-pub const WELCOME_SIZE: (usize, usize) = (440, 200);
+pub const WELCOME_SIZE: (usize, usize) = (480, 250);
 
 /// What the Welcome card says. Short, and every line is a thing to try.
+/// Welcome's tips, drawn (GFX-101): each with the icon of what it is
+/// about. `WELCOME_LINES` stays the plain text of them.
+pub const WELCOME_TIPS: [(&str, &str); 4] = [
+    ("files", "Type anywhere to search files and actions."),
+    ("panda", "Ctrl+Space twice, or the panda: every app."),
+    ("notepad", "Documents save themselves and keep versions."),
+    ("look", "Look, on the dock, changes the theme."),
+];
+
+/// The Welcome card, drawn (GFX-101): the desk's mark, a large title, and
+/// the tips with their icons. `width` is the canvas's.
+pub fn welcome_ui(width: u32, palette: crate::widgets::Palette) -> crate::widgets::Ui {
+    use crate::widgets::Ui;
+    use view_types::DrawOp;
+    let mut ui = Ui::new(palette, None);
+    let p = palette;
+    if let Some(id) = picture_id("panda", 48) {
+        ui.push(DrawOp::Picture { x: 0, y: 0, id });
+    }
+    ui.text(62, 2, "Welcome to PandaGen", p.text, 2);
+    ui.text(62, 34, "A desk that keeps what you make.", p.muted, 1);
+    for (n, (icon, tip)) in WELCOME_TIPS.iter().enumerate() {
+        let y = 64 + 28 * n as i32;
+        if let Some(id) = picture_id(icon, 20) {
+            ui.push(DrawOp::Picture {
+                x: 2,
+                y: y as u32,
+                id,
+            });
+        }
+        ui.text(32, y + 2, tip, p.text, 1);
+    }
+    let _ = width;
+    ui
+}
+
 pub const WELCOME_LINES: [&str; 5] = [
     "Just start typing to search files and actions.",
     "Ctrl+Space or a click on the bar: the palette.",
@@ -1466,6 +1502,20 @@ pub fn parse_tag_edit(text: &str) -> (Vec<String>, Vec<String>) {
 /// word longer than a line is cut. A notice card is 340px wide and the
 /// workspace's messages are longer than that -- the first build showed
 /// "Unknown command: files. Type 'help' for h" and stopped.
+/// The app a notice is about, by what it says (GFX-101): a save or an
+/// open is a document's, a timer's is the Timer's. Others have no icon.
+pub fn notice_app(text: &str) -> Option<DeskApp> {
+    if text.starts_with("Saved ") || text.starts_with("Opened ") || text.starts_with("Restored") {
+        Some(DeskApp::Notepad)
+    } else if text.starts_with("Timer") {
+        Some(DeskApp::Timer)
+    } else if text.starts_with("Not found") {
+        Some(DeskApp::Files)
+    } else {
+        None
+    }
+}
+
 pub fn wrap_words(text: &str, columns: usize) -> Vec<String> {
     let columns = columns.max(1);
     let mut lines = Vec::new();
@@ -5288,12 +5338,16 @@ impl Desk {
                     let view = terminal.cloned().unwrap_or_default();
                     (view.lines, "Terminal".to_string(), view.status, view.cursor)
                 }
-                AppState::Welcome => (
-                    WELCOME_LINES.iter().map(|l| l.to_string()).collect(),
-                    "Welcome to PandaGen".to_string(),
-                    "Close this card and it stays closed".to_string(),
-                    None,
-                ),
+                AppState::Welcome => {
+                    let (w, _) = Self::canvas_size(window.bounds);
+                    graphics = Some(welcome_ui(w, palette).into_ops());
+                    (
+                        Vec::new(),
+                        "Welcome".to_string(),
+                        "Close this card and it stays closed".to_string(),
+                        None,
+                    )
+                }
                 AppState::Now => (
                     now_lines.clone(),
                     "Now".to_string(),
@@ -5544,7 +5598,16 @@ impl Desk {
         let mut y = TOP_BAR_HEIGHT + NOTICE_MARGIN;
         let columns = (NOTICE_WIDTH - services_gui_host::CARD_PADDING * 2) / GLYPH_WIDTH;
         for (index, notice) in all.iter().rev().take(self.notice_ids.len()).enumerate() {
-            let lines = wrap_words(&notice.text, columns);
+            // The icon of what the notice is about (GFX-101), left of its
+            // text, which moves over three cells for it.
+            let icon = notice_app(&notice.text).and_then(|app| app.picture(20));
+            let lines = match icon {
+                Some(_) => wrap_words(&notice.text, columns.saturating_sub(3))
+                    .into_iter()
+                    .map(|l| alloc::format!("   {l}"))
+                    .collect(),
+                None => wrap_words(&notice.text, columns),
+            };
             let height = services_gui_host::CARD_HEADER_HEIGHT
                 + services_gui_host::CARD_PADDING * 2
                 + services_gui_host::CARD_LINE_HEIGHT * lines.len().max(1);
@@ -5566,7 +5629,11 @@ impl Desk {
                 ),
             )
             .with_role(DesktopWindowRole::Notification)
-            .with_z_index(usize::MAX / 2 - 1);
+            .with_z_index(usize::MAX / 2 - 1)
+            .with_overlay(
+                icon.map(|id| alloc::vec![view_types::DrawOp::Picture { x: 0, y: 0, id }])
+                    .unwrap_or_default(),
+            );
             card.closable = false;
             out.push(card);
             y += height + NOTICE_MARGIN;
@@ -6664,7 +6731,7 @@ mod tests {
         );
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.actions, alloc::vec!["Got it"]);
-        assert_eq!(card.frame.title.as_deref(), Some("Welcome to PandaGen"));
+        assert_eq!(card.frame.title.as_deref(), Some("Welcome"));
         // The chip closes it and the kernel is told once.
         desk.raise(id);
         let (_, byte) = desk.window(id).unwrap().actions()[0].clone();
@@ -8318,6 +8385,55 @@ mod tests {
         assert_eq!(desk.look().wallpaper, "Aurora");
     }
 
+    /// Welcome, drawn, and notices with icons (GFX-101).
+    #[test]
+    fn welcome_is_drawn_and_a_notice_wears_its_apps_icon() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.show_welcome();
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let ops = match &card.frame.content {
+            ViewContent::Graphics { ops } => ops.clone(),
+            _ => panic!("Welcome is drawn"),
+        };
+        let pictures = ops
+            .iter()
+            .filter(|op| matches!(op, view_types::DrawOp::Picture { .. }))
+            .count();
+        assert_eq!(pictures, 1 + WELCOME_TIPS.len(), "the mark and a tip each");
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            view_types::DrawOp::Text { text, style, .. } if text == "Welcome to PandaGen" && style.scale == 2
+        )));
+        assert_eq!(card.actions, alloc::vec!["Got it"]);
+        // A save's notice wears the Notepad's icon; a plain one none.
+        desk.notify(NoticeLevel::Info, "Saved memo", 0);
+        desk.notify(NoticeLevel::Warning, "Something else", 0);
+        let windows = desk.windows_at("", true, None, 1, &[]);
+        let toasts: Vec<&DesktopWindow> = windows
+            .iter()
+            .filter(|w| w.role == DesktopWindowRole::Notification)
+            .collect();
+        assert_eq!(toasts.len(), 2);
+        let saved = toasts
+            .iter()
+            .find(|w| match &w.frame.content {
+                ViewContent::TextBuffer { lines } => lines[0].contains("Saved memo"),
+                _ => false,
+            })
+            .unwrap();
+        assert!(matches!(
+            saved.overlay.as_slice(),
+            [view_types::DrawOp::Picture { .. }]
+        ));
+        let other = toasts
+            .iter()
+            .find(|w| w.frame.view_id != saved.frame.view_id)
+            .unwrap();
+        assert!(other.overlay.is_empty());
+        assert_eq!(notice_app("Timer: 1 minute up"), Some(DeskApp::Timer));
+    }
+
     #[test]
     fn the_history_chip_asks_the_kernel_and_the_answer_reaches_the_notepad() {
         let mut desk = Desk::new(1280, 800);
@@ -8369,7 +8485,7 @@ mod tests {
             .find(|w| w.role == DesktopWindowRole::Notification)
             .expect("a notice card");
         assert!(
-            matches!(&notice.frame.content, ViewContent::TextBuffer { lines } if lines[0] == "Saved n.txt")
+            matches!(&notice.frame.content, ViewContent::TextBuffer { lines } if lines[0] == "   Saved n.txt")
         );
         assert!(!notice.closable);
 
