@@ -296,20 +296,25 @@ pub enum GlyphSource {
     /// Full printable-ASCII 8x16 set (`FONT_8X16`), shared with the kernel
     /// text console. Distinct lowercase and all punctuation.
     Ascii8x16,
+    /// The same set drawn smoothly (GFX-095): alpha from a Scale2x
+    /// enlargement of each glyph, so straight stems stay crisp and steps
+    /// and curves get soft edges. The desk's painters use it; the text
+    /// console and the classic compositor keep the plain bitmap.
+    Ascii8x16Smooth,
 }
 
 impl GlyphSource {
     const fn width(self) -> usize {
         match self {
             GlyphSource::Compact5x7 => 5,
-            GlyphSource::Ascii8x16 => 8,
+            GlyphSource::Ascii8x16 | GlyphSource::Ascii8x16Smooth => 8,
         }
     }
 
     const fn height(self) -> usize {
         match self {
             GlyphSource::Compact5x7 => 7,
-            GlyphSource::Ascii8x16 => 16,
+            GlyphSource::Ascii8x16 | GlyphSource::Ascii8x16Smooth => 16,
         }
     }
 }
@@ -373,6 +378,123 @@ impl BitmapFont {
 pub const COMPACT_FONT: BitmapFont = BitmapFont::new(5, 7, 6);
 /// Desktop text font: full printable ASCII, 8x16 pixels, tiled at 8 px advance.
 pub const DESKTOP_FONT: BitmapFont = BitmapFont::ascii_8x16(8);
+/// The desktop font drawn smoothly (GFX-095).
+pub const SMOOTH_FONT: BitmapFont = DESKTOP_FONT.with_source(GlyphSource::Ascii8x16Smooth);
+
+/// Alpha for each smooth glyph at 1x: 128 glyphs of 8x16 bytes, from
+/// `tools/art/font_smooth.py`.
+static FONT_AA_8X16: &[u8; 128 * 128] = include_bytes!("font_aa_8x16.bin");
+/// Each glyph enlarged 8x by Scale2x: 128 glyphs of 64x128 bits, eight
+/// bytes a row, most significant bit leftmost. Scaled text samples it.
+static FONT_HI8_8X16: &[u8; 128 * 1024] = include_bytes!("font_hi8_8x16.bin");
+
+/// The table index of `ch`: printable ASCII as itself, a space as a
+/// space, anything else as `?` -- the same as `ascii_8x16_glyph`.
+fn ascii_index(ch: char) -> usize {
+    let index = ch as usize;
+    if ch.is_ascii() && !ch.is_ascii_control() && index < 128 {
+        index
+    } else if ch == ' ' {
+        b' ' as usize
+    } else {
+        b'?' as usize
+    }
+}
+
+/// `color` at `alpha` (0..=255) over what `target` has at `(x, y)`.
+fn blend_at(
+    target: &mut (impl RenderTarget + ?Sized),
+    x: usize,
+    y: usize,
+    color: RgbaColor,
+    alpha: u32,
+) {
+    let a = alpha * color.a as u32 / 255;
+    if a == 0 {
+        return;
+    }
+    let src = RgbaColor::new(color.r, color.g, color.b, a as u8);
+    let out = if a >= 255 {
+        RgbaColor::new(color.r, color.g, color.b, 255)
+    } else {
+        blend_over(
+            target.pixel(x, y).unwrap_or(RgbaColor::new(0, 0, 0, 255)),
+            src,
+        )
+    };
+    target.write_pixel(x, y, out);
+}
+
+/// One smooth glyph at 1x (GFX-095).
+fn draw_smooth_glyph(
+    target: &mut (impl RenderTarget + ?Sized),
+    x: usize,
+    y: usize,
+    ch: char,
+    color: RgbaColor,
+) {
+    let base = ascii_index(ch) * 128;
+    for row in 0..16 {
+        let ty = y + row;
+        if ty >= target.height() {
+            break;
+        }
+        for col in 0..8 {
+            let tx = x + col;
+            if tx >= target.width() {
+                break;
+            }
+            let alpha = FONT_AA_8X16[base + row * 8 + col];
+            if alpha != 0 {
+                blend_at(target, tx, ty, color, alpha as u32);
+            }
+        }
+    }
+}
+
+/// One smooth glyph at `scale` (GFX-095): each target pixel's coverage is
+/// sixteen samples of the 8x enlargement.
+fn draw_smooth_glyph_scaled(
+    target: &mut (impl RenderTarget + ?Sized),
+    x: usize,
+    y: usize,
+    ch: char,
+    scale: usize,
+    color: RgbaColor,
+) {
+    let base = ascii_index(ch) * 1024;
+    let lit = |hx: usize, hy: usize| -> bool {
+        let byte = FONT_HI8_8X16[base + hy.min(127) * 8 + hx.min(63) / 8];
+        byte & (0x80 >> (hx.min(63) % 8)) != 0
+    };
+    for row in 0..16 * scale {
+        let ty = y + row;
+        if ty >= target.height() {
+            break;
+        }
+        for col in 0..8 * scale {
+            let tx = x + col;
+            if tx >= target.width() {
+                break;
+            }
+            // Sample points at quarter steps inside the target pixel,
+            // mapped into the 8x grid: (p + (2k+1)/8) * 8 / scale.
+            let mut n = 0u32;
+            for sy in 0..4 {
+                let hy = (row * 8 + 2 * sy + 1) / scale;
+                for sx in 0..4 {
+                    let hx = (col * 8 + 2 * sx + 1) / scale;
+                    if lit(hx, hy) {
+                        n += 1;
+                    }
+                }
+            }
+            if n != 0 {
+                blend_at(target, tx, ty, color, n * 255 / 16);
+            }
+        }
+    }
+}
 
 /// Complete 8x16 bitmap font for ASCII 0x00..0x7F (one byte per row, MSB is
 /// the leftmost pixel). Also used by the kernel framebuffer text console so
@@ -653,8 +775,13 @@ pub trait RenderTarget {
         color: RgbaColor,
     ) {
         let mut cursor_x = x;
+        let smooth = font.source() == GlyphSource::Ascii8x16Smooth;
         for ch in text.chars() {
-            draw_glyph(self, cursor_x, y, font, ch, color);
+            if smooth {
+                draw_smooth_glyph(self, cursor_x, y, ch, color);
+            } else {
+                draw_glyph(self, cursor_x, y, font, ch, color);
+            }
             cursor_x = cursor_x.saturating_add(font.advance_x());
             if cursor_x >= self.width() {
                 break;
@@ -676,6 +803,16 @@ pub trait RenderTarget {
     ) {
         let scale = scale.max(1);
         let mut cursor_x = x;
+        if font.source() == GlyphSource::Ascii8x16Smooth {
+            for ch in text.chars() {
+                draw_smooth_glyph_scaled(self, cursor_x, y, ch, scale, color);
+                cursor_x = cursor_x.saturating_add(font.advance_x() * scale);
+                if cursor_x >= self.width() {
+                    break;
+                }
+            }
+            return;
+        }
         for ch in text.chars() {
             let glyph = rasterize_glyph(font, ch);
             for (row, pattern) in glyph.iter().take(font.glyph_height()).enumerate() {
@@ -1309,7 +1446,7 @@ fn rasterize_glyph(font: &BitmapFont, ch: char) -> [u16; MAX_GLYPH_HEIGHT] {
             let source = compact_glyph_for(ch);
             scale_glyph(font, &source, GlyphSource::Compact5x7)
         }
-        GlyphSource::Ascii8x16 => {
+        GlyphSource::Ascii8x16 | GlyphSource::Ascii8x16Smooth => {
             let source = ascii_8x16_glyph(ch);
             scale_glyph(font, source, GlyphSource::Ascii8x16)
         }
@@ -1502,6 +1639,70 @@ fn compact_glyph_for(ch: char) -> [u8; SOURCE_GLYPH_HEIGHT] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Smooth text (GFX-095): a straight stem is as opaque as the plain
+    /// font's, a diagonal gains partial pixels, and scaled smooth text
+    /// covers about what the plain enlargement does, with soft edges.
+    #[test]
+    fn smooth_text_keeps_stems_and_softens_steps() {
+        let ink = RgbaColor::new(255, 255, 255, 255);
+        let black = RgbaColor::new(0, 0, 0, 255);
+        let count = |b: &RgbaBuffer, pred: &dyn Fn(RgbaColor) -> bool| {
+            let mut n = 0;
+            for y in 0..b.height() {
+                for x in 0..b.width() {
+                    if pred(b.pixel(x, y).unwrap()) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let partial = |c: RgbaColor| c.r > 0 && c.r < 255;
+        // 'l' is stems: the smooth one has the plain one's full pixels.
+        let mut plain = RgbaBuffer::new(16, 16, black);
+        plain.draw_text_with_font(0, 0, "l", &DESKTOP_FONT, ink);
+        let mut smooth = RgbaBuffer::new(16, 16, black);
+        smooth.draw_text_with_font(0, 0, "l", &SMOOTH_FONT, ink);
+        for y in 0..16 {
+            for x in 0..8 {
+                if plain.pixel(x, y) == Some(ink) {
+                    assert!(smooth.pixel(x, y).unwrap().r >= 128, "stem at {x},{y}");
+                }
+            }
+        }
+        // 'A' has diagonals: the smooth one has soft pixels, the plain none.
+        let mut plain = RgbaBuffer::new(8, 16, black);
+        plain.draw_text_with_font(0, 0, "A", &DESKTOP_FONT, ink);
+        let mut smooth = RgbaBuffer::new(8, 16, black);
+        smooth.draw_text_with_font(0, 0, "A", &SMOOTH_FONT, ink);
+        assert_eq!(count(&plain, &partial), 0);
+        assert!(count(&smooth, &partial) > 0);
+        // Scaled: coverage within a fifth of the plain enlargement's.
+        let mut plain = RgbaBuffer::new(64, 128, black);
+        plain.draw_text_scaled(0, 0, "8", &DESKTOP_FONT, 8, ink);
+        let mut smooth = RgbaBuffer::new(64, 128, black);
+        smooth.draw_text_scaled(0, 0, "8", &SMOOTH_FONT, 8, ink);
+        let sum = |b: &RgbaBuffer| {
+            let mut n = 0u32;
+            for y in 0..b.height() {
+                for x in 0..b.width() {
+                    n += b.pixel(x, y).unwrap().r as u32;
+                }
+            }
+            n
+        };
+        let (p, q) = (sum(&plain), sum(&smooth));
+        assert!(q > p * 4 / 5 && q < p * 6 / 5, "{p} vs {q}");
+        let mut two = RgbaBuffer::new(16, 32, black);
+        two.draw_text_scaled(0, 0, "S", &SMOOTH_FONT, 2, ink);
+        assert!(count(&two, &partial) > 0, "soft edges at 2x");
+        // Translucent ink blends; nothing outside the glyph is touched.
+        let mut faint = RgbaBuffer::new(8, 16, black);
+        faint.draw_text_with_font(0, 0, "l", &SMOOTH_FONT, RgbaColor::new(255, 255, 255, 128));
+        assert!(count(&faint, &|c: RgbaColor| c.r == 255) == 0);
+        assert_eq!(ascii_index('\u{e9}'), b'?' as usize);
+    }
 
     /// Scaled text is the same glyph with every pixel a `scale` block
     /// (GFX-081): four times the lit pixels at twice the size, and the

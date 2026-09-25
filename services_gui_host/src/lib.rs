@@ -13,7 +13,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use graphics_rasterizer::{
-    RasterRect, RenderTarget, RgbaBuffer, RgbaColor, ScissorTarget, DESKTOP_FONT,
+    RasterRect, RenderTarget, RgbaBuffer, RgbaColor, ScissorTarget, DESKTOP_FONT, SMOOTH_FONT,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "workspace")]
@@ -1440,7 +1440,7 @@ fn raster_graphics(
                 let font = if style.compact {
                     &COMPACT_FONT
                 } else {
-                    &DESKTOP_FONT
+                    &SMOOTH_FONT
                 };
                 if style.scale > 1 {
                     canvas.draw_text_scaled(
@@ -1887,7 +1887,7 @@ fn raster_card(
         rect.x + CARD_PADDING + 4,
         title_y,
         &title,
-        &DESKTOP_FONT,
+        &SMOOTH_FONT,
         title_color,
     );
     let header_bottom = rect.y + CARD_HEADER_HEIGHT;
@@ -1909,7 +1909,7 @@ fn raster_card(
             chip.x + CARD_CHIP_PAD,
             ty,
             label,
-            &DESKTOP_FONT,
+            &SMOOTH_FONT,
             if window.focused {
                 theme.text
             } else {
@@ -1921,7 +1921,7 @@ fn raster_card(
         // An 'x' in the one font there is, centred in its hit box.
         let gx = close.x + (CARD_CLOSE_SIZE.saturating_sub(RASTER_CELL_WIDTH)) / 2;
         let gy = close.y + (CARD_CLOSE_SIZE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
-        painter.draw_text_with_font(gx, gy, "x", &DESKTOP_FONT, theme.text_muted);
+        painter.draw_text_with_font(gx, gy, "x", &SMOOTH_FONT, theme.text_muted);
     }
 
     // Content.
@@ -1976,7 +1976,7 @@ fn raster_card(
                     LineTone::Muted => theme.text_muted,
                 };
                 let y = origin_y + line_index * pitch + text_y_offset;
-                content_painter.draw_text_with_font(origin_x, y, &line, &DESKTOP_FONT, color);
+                content_painter.draw_text_with_font(origin_x, y, &line, &SMOOTH_FONT, color);
                 if style.bold {
                     // A second strike one pixel right: the weight one font
                     // can give (GFX-073).
@@ -1984,7 +1984,7 @@ fn raster_card(
                         origin_x + 1,
                         y,
                         &line,
-                        &DESKTOP_FONT,
+                        &SMOOTH_FONT,
                         color,
                     );
                 }
@@ -2049,7 +2049,7 @@ fn raster_card(
                 rect.x + CARD_PADDING,
                 text_y,
                 &fit_text(footer, room),
-                &DESKTOP_FONT,
+                &SMOOTH_FONT,
                 theme.text_muted,
             );
         }
@@ -2119,7 +2119,7 @@ fn raster_dock(
                     tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
                     tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
                     &monogram,
-                    &DESKTOP_FONT,
+                    &SMOOTH_FONT,
                     theme.text,
                 );
             }
@@ -2158,14 +2158,14 @@ fn raster_top_bar(
         rect.x + TOP_BAR_TITLE_X,
         text_y,
         &left,
-        &DESKTOP_FONT,
+        &SMOOTH_FONT,
         theme.text,
     );
     let lines = render_content_lines(&window.frame.content);
     if let Some(right) = lines.first() {
         let width = right.chars().count() * RASTER_CELL_WIDTH;
         let x = rect.right().saturating_sub(width + 12);
-        painter.draw_text_with_font(x, text_y, right, &DESKTOP_FONT, theme.text_muted);
+        painter.draw_text_with_font(x, text_y, right, &SMOOTH_FONT, theme.text_muted);
     }
     // A second content line is centred (GFX-067): the space strip. Its
     // cells are what `top_bar_centre_column` reports, so a click lands on
@@ -2176,7 +2176,7 @@ fn raster_top_bar(
             rect.x + column * RASTER_CELL_WIDTH,
             text_y,
             centre,
-            &DESKTOP_FONT,
+            &SMOOTH_FONT,
             theme.text,
         );
     }
@@ -3675,10 +3675,16 @@ mod tests {
                 assert_ne!(surface.pixel(x, y), Some(RgbaColor::new(0, 200, 0, 255)));
             }
         }
+        // Text is drawn smoothly (GFX-095): a corner may be soft, but
+        // the stem of the 'I' is in the full text colour.
         let glyph = graphics_rasterizer::ascii_8x16_glyph('I');
-        let (dy, row) = glyph.iter().enumerate().find(|(_, r)| **r != 0).unwrap();
-        let dx = (0..8).find(|dx| (row >> (7 - dx)) & 1 == 1).unwrap();
-        assert_eq!(surface.pixel(ox + dx, oy + 40 + dy), Some(TEXT_COLOR));
+        let inked = glyph.iter().enumerate().any(|(dy, row)| {
+            (0..8).any(|dx| {
+                (row >> (7 - dx)) & 1 == 1
+                    && surface.pixel(ox + dx, oy + 40 + dy) == Some(TEXT_COLOR)
+            })
+        });
+        assert!(inked, "no fully inked pixel in the 'I'");
         // Hit testing still reports content cells for graphics windows.
         let hit = compositor
             .hit_test(
