@@ -384,6 +384,30 @@ fn a_veil_darkens_what_is_under_it() {
     assert_eq!(px(&veiled, 11, 11), RgbaColor::new(255, 255, 255, 255));
 }
 
+/// A wallpaper smaller than the surface is enlarged smoothly (GFX-097):
+/// between a black and a white source pixel there is grey, not a step.
+#[test]
+fn a_small_wallpaper_is_enlarged_smoothly() {
+    static PALETTE: [u8; 6] = [0, 0, 0, 255, 255, 255];
+    static INDICES: [u8; 2] = [0, 1];
+    let wall = services_gui_host::Wallpaper {
+        width: 2,
+        height: 1,
+        palette: &PALETTE,
+        indices: &INDICES,
+    };
+    let row: Vec<u8> = (0..8).map(|x| wall.sample(x, 0, 8, 4).r).collect();
+    assert_eq!(row[0], 0, "{row:?}");
+    assert_eq!(row[7], 255, "{row:?}");
+    assert!(row[3] > 40 && row[3] < 215, "a middle grey: {row:?}");
+    assert!(
+        row.windows(2).all(|w| w[0] <= w[1]),
+        "no steps back: {row:?}"
+    );
+    // At its own size a wallpaper is drawn as it is.
+    assert_eq!(wall.sample(1, 0, 2, 1).r, 255);
+}
+
 /// A wallpaper is sampled to the surface, behind the cards, and a damage
 /// repaint reads the same pixels (GFX-066).
 #[test]
@@ -423,8 +447,10 @@ fn a_wallpaper_is_sampled_to_the_surface_behind_the_cards() {
         px(&target, W - 1, H - 1),
         RgbaColor::new(255, 255, 255, 255)
     );
+    // (Well inside the white quadrant: a 2x2 picture enlarged is blended
+    // across its middle, GFX-097.)
     assert_eq!(
-        px(&target, W / 2 + 1, H / 2 + 1),
+        px(&target, W * 3 / 4 + 1, H * 3 / 4 + 1),
         RgbaColor::new(255, 255, 255, 255)
     );
     // The scene carries it too.

@@ -125,8 +125,26 @@ pub fn picture_id(name: &str, size: u32) -> Option<u32> {
     Some((n * PICTURE_SIZES.len() + s) as u32)
 }
 
-/// What Look calls the two backgrounds.
-pub const WALLPAPERS: [&str; 2] = ["Picture", "Gradient"];
+/// Look's other wallpapers (GFX-097): generated with OpenAI `gpt-image-2`,
+/// kept at 640x400 in 256 colours (a quarter megabyte each) and enlarged
+/// smoothly by the compositor. `cargo xtask wallpaper <ppm> --name <n>`.
+macro_rules! half_wallpaper {
+    ($name:literal) => {
+        Wallpaper {
+            width: 640,
+            height: 400,
+            palette: include_bytes!(concat!("../assets/wallpaper_", $name, ".pal")),
+            indices: include_bytes!(concat!("../assets/wallpaper_", $name, ".idx")),
+        }
+    };
+}
+pub const WALLPAPER_AURORA: Wallpaper = half_wallpaper!("aurora");
+pub const WALLPAPER_BAMBOO: Wallpaper = half_wallpaper!("bamboo");
+pub const WALLPAPER_NEBULA: Wallpaper = half_wallpaper!("nebula");
+
+/// What Look calls the backgrounds. Gradient, the one without a picture,
+/// stays last.
+pub const WALLPAPERS: [&str; 5] = ["Picture", "Aurora", "Bamboo", "Nebula", "Gradient"];
 
 /// How many spaces the desk has (GFX-067): four desks on one screen, each
 /// with its own cards. Ctrl+1..4 switches, Ctrl+Shift+1..4 moves the
@@ -707,7 +725,7 @@ pub const WELCOME_LINES: [&str; 5] = [
 ];
 
 /// The Look card (GFX-059).
-pub const LOOK_SIZE: (usize, usize) = (420, 420);
+pub const LOOK_SIZE: (usize, usize) = (420, 480);
 
 /// What the desk looks like: a preset and an accent, by name (GFX-059).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,9 +767,13 @@ impl LookChoice {
 
     /// The picture, when the choice is the picture.
     pub fn wallpaper(&self) -> Option<Wallpaper> {
-        self.wallpaper
-            .eq_ignore_ascii_case("Picture")
-            .then_some(WALLPAPER)
+        match self.wallpaper.to_ascii_lowercase().as_str() {
+            "picture" => Some(WALLPAPER),
+            "aurora" => Some(WALLPAPER_AURORA),
+            "bamboo" => Some(WALLPAPER_BAMBOO),
+            "nebula" => Some(WALLPAPER_NEBULA),
+            _ => None,
+        }
     }
 
     /// Parse the on-disk form; unknown names fall back to the defaults, so
@@ -8104,6 +8126,28 @@ mod tests {
             PICTURES[DeskApp::Notepad.picture(40).unwrap() as usize].width,
             40
         );
+    }
+
+    /// The wallpapers (GFX-097): every name Look offers but Gradient is a
+    /// picture, the new ones at half size, and the choice survives the
+    /// look file.
+    #[test]
+    fn every_wallpaper_but_gradient_is_a_picture() {
+        for name in WALLPAPERS {
+            let choice = LookChoice {
+                wallpaper: name.to_string(),
+                ..LookChoice::default()
+            };
+            let wall = choice.wallpaper();
+            assert_eq!(wall.is_none(), name == "Gradient", "{name}");
+            if let Some(wall) = wall {
+                assert_eq!(wall.indices.len(), wall.width * wall.height, "{name}");
+                assert_eq!(wall.palette.len(), 768, "{name}");
+            }
+            let back = LookChoice::from_text(&choice.to_text());
+            assert_eq!(back.wallpaper, name);
+        }
+        assert_eq!(WALLPAPER_AURORA.width, 640);
     }
 
     #[test]

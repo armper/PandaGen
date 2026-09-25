@@ -708,13 +708,47 @@ impl Wallpaper {
         if self.width == 0 || self.height == 0 || surface_w == 0 || surface_h == 0 {
             return RgbaColor::new(0, 0, 0, 255);
         }
+        if self.width < surface_w || self.height < surface_h {
+            return self.sample_smooth(x, y, surface_w, surface_h);
+        }
         let sx = (x * self.width / surface_w).min(self.width - 1);
         let sy = (y * self.height / surface_h).min(self.height - 1);
+        self.colour_at(sx, sy)
+    }
+
+    fn colour_at(&self, sx: usize, sy: usize) -> RgbaColor {
         let index = self.indices.get(sy * self.width + sx).copied().unwrap_or(0) as usize;
         match self.palette.get(index * 3..index * 3 + 3) {
             Some(px) => RgbaColor::new(px[0], px[1], px[2], 255),
             None => RgbaColor::new(0, 0, 0, 255),
         }
+    }
+
+    /// Enlarging (GFX-097): blend the four source pixels around the
+    /// surface pixel's centre by distance, so a half-size wallpaper is
+    /// soft rather than blocky. Fixed point, 1/256 of a source pixel.
+    fn sample_smooth(&self, x: usize, y: usize, surface_w: usize, surface_h: usize) -> RgbaColor {
+        let fx = ((2 * x + 1) * self.width * 128 / surface_w).saturating_sub(128);
+        let fy = ((2 * y + 1) * self.height * 128 / surface_h).saturating_sub(128);
+        let (x0, y0) = (
+            (fx >> 8).min(self.width - 1),
+            (fy >> 8).min(self.height - 1),
+        );
+        let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
+        let (ax, ay) = ((fx & 255) as u32, (fy & 255) as u32);
+        let (a, b) = (self.colour_at(x0, y0), self.colour_at(x1, y0));
+        let (c, d) = (self.colour_at(x0, y1), self.colour_at(x1, y1));
+        let mix = |p: u8, q: u8, r: u8, s: u8| -> u8 {
+            let top = p as u32 * (256 - ax) + q as u32 * ax;
+            let bottom = r as u32 * (256 - ax) + s as u32 * ax;
+            ((top * (256 - ay) + bottom * ay) >> 16) as u8
+        };
+        RgbaColor::new(
+            mix(a.r, b.r, c.r, d.r),
+            mix(a.g, b.g, c.g, d.g),
+            mix(a.b, b.b, c.b, d.b),
+            255,
+        )
     }
 }
 

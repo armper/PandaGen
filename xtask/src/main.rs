@@ -938,10 +938,20 @@ fn cmd_wallpaper(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn s
     let Some(path) = args.next() else {
         return Err(io::Error::other("wallpaper: a P6 ppm path is needed").into());
     };
+    // `--name <name>` writes wallpaper_<name>.{pal,idx}, one of Look's
+    // choices (GFX-097); without it, the default picture.
+    let mut name: Option<String> = None;
+    while let Some(arg) = args.next() {
+        if arg == "--name" {
+            name = args.next();
+        }
+    }
     let picture = read_ppm(&path)?;
-    if (picture.width, picture.height) != (1280, 800) {
+    // Full size, or half: a half-size wallpaper is a quarter of the bytes
+    // and the compositor smooths it when it enlarges it.
+    if !matches!((picture.width, picture.height), (1280, 800) | (640, 400)) {
         return Err(format!(
-            "{path}: {}x{}, and the wallpaper is 1280x800",
+            "{path}: {}x{}, and a wallpaper is 1280x800 or 640x400",
             picture.width, picture.height
         )
         .into());
@@ -958,8 +968,18 @@ fn cmd_wallpaper(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn s
     for entry in &palette {
         pal.extend_from_slice(entry);
     }
-    fs::write(root.join("kernel_bootstrap/assets/wallpaper.pal"), &pal)?;
-    fs::write(root.join("kernel_bootstrap/assets/wallpaper.idx"), &indices)?;
+    let stem = match &name {
+        Some(name) => format!("wallpaper_{name}"),
+        None => "wallpaper".to_string(),
+    };
+    fs::write(
+        root.join(format!("kernel_bootstrap/assets/{stem}.pal")),
+        &pal,
+    )?;
+    fs::write(
+        root.join(format!("kernel_bootstrap/assets/{stem}.idx")),
+        &indices,
+    )?;
     println!(
         "wallpaper: {} colours, {} bytes; rebuild with `cargo xtask iso`",
         palette.len(),
