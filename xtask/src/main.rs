@@ -859,7 +859,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-pixel".to_string(),
         "340,80,44,82,96".to_string(),
         "--expect-pixel".to_string(),
-        "360,80,28,34,48".to_string(),
+        // Mid-cell, above the x-height: Fira's 'l' next door inks the
+        // cell edge at 360 (GFX-102).
+        "356,80,28,34,48".to_string(),
         "--expect-pixel".to_string(),
         "300,80,28,34,48".to_string(),
         "--forbid-serial".to_string(),

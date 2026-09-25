@@ -296,9 +296,9 @@ pub enum GlyphSource {
     /// Full printable-ASCII 8x16 set (`FONT_8X16`), shared with the kernel
     /// text console. Distinct lowercase and all punctuation.
     Ascii8x16,
-    /// The same set drawn smoothly (GFX-095): alpha from a Scale2x
-    /// enlargement of each glyph, so straight stems stay crisp and steps
-    /// and curves get soft edges. The desk's painters use it; the text
+    /// The same set drawn smoothly (GFX-095): real type (GFX-102) --
+    /// printable ASCII is Fira Mono's coverage in the same 8x16 cell, the
+    /// rest the bitmap smoothed by Scale2x. The desk's painters use it; the text
     /// console and the classic compositor keep the plain bitmap.
     Ascii8x16Smooth,
 }
@@ -378,14 +378,15 @@ impl BitmapFont {
 pub const COMPACT_FONT: BitmapFont = BitmapFont::new(5, 7, 6);
 /// Desktop text font: full printable ASCII, 8x16 pixels, tiled at 8 px advance.
 pub const DESKTOP_FONT: BitmapFont = BitmapFont::ascii_8x16(8);
-/// The desktop font drawn smoothly (GFX-095).
+/// The desktop font drawn smoothly (GFX-095), from Fira Mono (GFX-102): the
+/// same cells, so anything laid out in the desktop font lays out the same.
 pub const SMOOTH_FONT: BitmapFont = DESKTOP_FONT.with_source(GlyphSource::Ascii8x16Smooth);
 
 /// Alpha for each smooth glyph at 1x: 128 glyphs of 8x16 bytes, from
 /// `tools/art/font_smooth.py`.
 static FONT_AA_8X16: &[u8; 128 * 128] = include_bytes!("font_aa_8x16.bin");
-/// Each glyph enlarged 8x by Scale2x: 128 glyphs of 64x128 bits, eight
-/// bytes a row, most significant bit leftmost. Scaled text samples it.
+/// Each glyph eight times the size: 128 glyphs of 64x128 bits, eight bytes
+/// a row, most significant bit leftmost. Scaled text samples it.
 static FONT_HI8_8X16: &[u8; 128 * 1024] = include_bytes!("font_hi8_8x16.bin");
 
 /// The table index of `ch`: printable ASCII as itself, a space as a
@@ -1658,9 +1659,9 @@ fn compact_glyph_for(ch: char) -> [u8; SOURCE_GLYPH_HEIGHT] {
 mod tests {
     use super::*;
 
-    /// Smooth text (GFX-095): a straight stem is as opaque as the plain
-    /// font's, a diagonal gains partial pixels, and scaled smooth text
-    /// covers about what the plain enlargement does, with soft edges.
+    /// Smooth text (GFX-095, GFX-102): a stem has fully inked pixels, a
+    /// diagonal has partial ones, and scaled text covers what the 1x glyph
+    /// does times the scale squared, with soft edges.
     #[test]
     fn smooth_text_keeps_stems_and_softens_steps() {
         let ink = RgbaColor::new(255, 255, 255, 255);
@@ -1676,31 +1677,6 @@ mod tests {
             }
             n
         };
-        let partial = |c: RgbaColor| c.r > 0 && c.r < 255;
-        // 'l' is stems: the smooth one has the plain one's full pixels.
-        let mut plain = RgbaBuffer::new(16, 16, black);
-        plain.draw_text_with_font(0, 0, "l", &DESKTOP_FONT, ink);
-        let mut smooth = RgbaBuffer::new(16, 16, black);
-        smooth.draw_text_with_font(0, 0, "l", &SMOOTH_FONT, ink);
-        for y in 0..16 {
-            for x in 0..8 {
-                if plain.pixel(x, y) == Some(ink) {
-                    assert!(smooth.pixel(x, y).unwrap().r >= 128, "stem at {x},{y}");
-                }
-            }
-        }
-        // 'A' has diagonals: the smooth one has soft pixels, the plain none.
-        let mut plain = RgbaBuffer::new(8, 16, black);
-        plain.draw_text_with_font(0, 0, "A", &DESKTOP_FONT, ink);
-        let mut smooth = RgbaBuffer::new(8, 16, black);
-        smooth.draw_text_with_font(0, 0, "A", &SMOOTH_FONT, ink);
-        assert_eq!(count(&plain, &partial), 0);
-        assert!(count(&smooth, &partial) > 0);
-        // Scaled: coverage within a fifth of the plain enlargement's.
-        let mut plain = RgbaBuffer::new(64, 128, black);
-        plain.draw_text_scaled(0, 0, "8", &DESKTOP_FONT, 8, ink);
-        let mut smooth = RgbaBuffer::new(64, 128, black);
-        smooth.draw_text_scaled(0, 0, "8", &SMOOTH_FONT, 8, ink);
         let sum = |b: &RgbaBuffer| {
             let mut n = 0u32;
             for y in 0..b.height() {
@@ -1710,7 +1686,22 @@ mod tests {
             }
             n
         };
-        let (p, q) = (sum(&plain), sum(&smooth));
+        let partial = |c: RgbaColor| c.r > 0 && c.r < 255;
+        let full = |c: RgbaColor| c.r >= 250;
+        // 'I' is a stem and two bars: solid pixels, not a smear.
+        let mut stem = RgbaBuffer::new(8, 16, black);
+        stem.draw_text_with_font(0, 0, "I", &SMOOTH_FONT, ink);
+        assert!(count(&stem, &full) >= 8, "the stem is solid");
+        // 'A' has diagonals: soft pixels.
+        let mut diagonal = RgbaBuffer::new(8, 16, black);
+        diagonal.draw_text_with_font(0, 0, "A", &SMOOTH_FONT, ink);
+        assert!(count(&diagonal, &partial) > 0);
+        // Scaled: coverage within a fifth of the 1x glyph's times 64.
+        let mut one = RgbaBuffer::new(8, 16, black);
+        one.draw_text_with_font(0, 0, "8", &SMOOTH_FONT, ink);
+        let mut eight = RgbaBuffer::new(64, 128, black);
+        eight.draw_text_scaled(0, 0, "8", &SMOOTH_FONT, 8, ink);
+        let (p, q) = (sum(&one) * 64, sum(&eight));
         assert!(q > p * 4 / 5 && q < p * 6 / 5, "{p} vs {q}");
         let mut two = RgbaBuffer::new(16, 32, black);
         two.draw_text_scaled(0, 0, "S", &SMOOTH_FONT, 2, ink);
