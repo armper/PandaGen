@@ -5613,18 +5613,53 @@ impl Desk {
                     (shown, "Shortcuts".to_string(), footer, None)
                 }
                 AppState::Notices => {
+                    // Three cells for each notice's icon (GFX-110): its
+                    // app's, or the bell.
                     let lines: Vec<String> = notice_log
                         .iter()
                         .take(rows)
                         .map(|(then, notice)| {
                             alloc::format!(
-                                "{:>8}   {:<5}  {}",
+                                "   {:>8}   {:<5}  {}",
                                 Desk::ago(now_tick, *then),
                                 notice.card_title(),
                                 notice.text
                             )
                         })
                         .collect();
+                    let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
+                    for (i, (_, notice)) in notice_log.iter().take(rows).enumerate() {
+                        let id = notice_app(&notice.text)
+                            .and_then(|app| app.picture(16))
+                            .or_else(|| picture_id("notices", 16));
+                        if let Some(id) = id {
+                            overlay.push(view_types::DrawOp::Picture {
+                                x: 2,
+                                y: i as u32 * pitch + ROW_ICON_Y,
+                                id,
+                            });
+                        }
+                    }
+                    // Nothing kept: the bell, large, and a word under it.
+                    if notice_log.is_empty() {
+                        let (w, h) = Self::canvas_size(window.bounds);
+                        if let Some(id) = picture_id("notices", 64) {
+                            let y = h.saturating_sub(64 + 28) / 2;
+                            overlay.push(view_types::DrawOp::Picture {
+                                x: w.saturating_sub(64) / 2,
+                                y,
+                                id,
+                            });
+                            let quiet = "All quiet";
+                            overlay.push(view_types::DrawOp::Text {
+                                x: w.saturating_sub(crate::widgets::text_width(quiet, 1)) / 2,
+                                y: y + 64 + 12,
+                                text: quiet.to_string(),
+                                color: Some(palette.muted),
+                                style: view_types::TextStyle::default(),
+                            });
+                        }
+                    }
                     let footer = if notice_log.is_empty() {
                         "Nothing yet: saves, opens and the console's warnings land here".to_string()
                     } else {
@@ -7063,10 +7098,27 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows[1].starts_with("  1m ago") && rows[1].contains("Saved memo"),
+            rows[1].starts_with("     1m ago") && rows[1].contains("Saved memo"),
             "{rows:?}"
         );
         assert_eq!(card.actions, alloc::vec!["Clear"]);
+        // Each row wears an icon (GFX-110): the save its Notepad's, the
+        // console's warning the bell.
+        let ids: Vec<u32> = card
+            .overlay
+            .iter()
+            .filter_map(|op| match op {
+                view_types::DrawOp::Picture { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            alloc::vec![
+                picture_id("notices", 16).unwrap(),
+                DeskApp::Notepad.picture(16).unwrap()
+            ]
+        );
         // Delete clears; Esc closes; the bar is just the clock again.
         desk.handle_key(crate::notepad::KEY_DELETE);
         assert!(desk.notice_log().is_empty());
