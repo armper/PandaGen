@@ -316,6 +316,14 @@ pub enum DrawOp {
         #[serde(default)]
         style: TextStyle,
     },
+    /// Picture `id` from the host's table (GFX-094), its top-left at
+    /// `(x, y)`, blended by its own alpha. A host without the picture
+    /// draws nothing.
+    Picture {
+        x: u32,
+        y: u32,
+        id: u32,
+    },
     /// A 16x16 one-bit icon (GFX-086), `scale` pixels a bit, in `color`
     /// or the host's text colour. Row 0 is the top; bit 15 is the left.
     Icon {

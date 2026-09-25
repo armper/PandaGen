@@ -48,7 +48,7 @@ pub use shell::{
     ShellViewIds,
 };
 pub use telemetry::{GfxSnapshot, GfxTelemetry};
-pub use theme::Theme;
+pub use theme::{Picture, Theme};
 pub use transport::{
     apply_delta, diff_scenes, DecodeError, SceneDecoder, SceneDelta, SceneEncoder, SceneReplay,
     SceneUpdate,
@@ -186,6 +186,10 @@ pub struct DesktopTab {
     /// the monogram when present. Row 0 is the top; bit 15 is the left.
     #[serde(default)]
     pub icon: Option<[u16; 16]>,
+    /// A picture from the theme's table (GFX-094), drawn in place of the
+    /// tile, the icon and the monogram when the theme has it.
+    #[serde(default)]
+    pub picture: Option<u32>,
 }
 
 impl DesktopTab {
@@ -196,7 +200,13 @@ impl DesktopTab {
             hovered: false,
             tucked: false,
             icon: None,
+            picture: None,
         }
+    }
+
+    pub fn with_picture(mut self, picture: Option<u32>) -> Self {
+        self.picture = picture;
+        self
     }
 
     pub fn with_icon(mut self, icon: Option<[u16; 16]>) -> Self {
@@ -1385,6 +1395,11 @@ fn raster_graphics(
                 *y1 as i64,
                 to_color(*color),
             ),
+            DrawOp::Picture { x, y, id } => {
+                if let Some(picture) = theme.pictures.get(*id as usize) {
+                    draw_picture(&mut canvas, *x as usize, *y as usize, picture);
+                }
+            }
             DrawOp::Icon {
                 x,
                 y,
@@ -2063,31 +2078,51 @@ fn raster_dock(
         } else {
             theme.tab_inactive
         };
-        painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, fill);
-        if let Some(icon) = tab.icon {
-            // The icon, two pixels a bit, centred (GFX-084).
-            let ox = tile.x + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
-            let oy = tile.y + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
-            for (row, bits) in icon.iter().enumerate() {
-                for col in 0..16 {
-                    if bits & (1 << (15 - col)) != 0 {
-                        painter.fill_rect(
-                            RasterRect::new(ox + col * 2, oy + row * 2, 2, 2),
-                            theme.text,
-                        );
+        // A picture is the tile (GFX-094): drawn alone, with a halo
+        // behind it under the pointer.
+        let picture = tab
+            .picture
+            .and_then(|id| theme.pictures.get(id as usize).copied());
+        if let Some(picture) = picture {
+            if tab.hovered {
+                let halo = RasterRect::new(
+                    tile.x.saturating_sub(3),
+                    tile.y.saturating_sub(3),
+                    tile.width + 6,
+                    tile.height + 6,
+                );
+                painter.fill_rounded_rect(halo, DOCK_TILE_RADIUS + 3, theme.selection);
+            }
+            let px = tile.x + DOCK_TILE.saturating_sub(picture.width as usize) / 2;
+            let py = tile.y + DOCK_TILE.saturating_sub(picture.height as usize) / 2;
+            draw_picture(&mut painter, px, py, &picture);
+        } else {
+            painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, fill);
+            if let Some(icon) = tab.icon {
+                // The icon, two pixels a bit, centred (GFX-084).
+                let ox = tile.x + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
+                let oy = tile.y + (DOCK_TILE.saturating_sub(DOCK_ICON)) / 2;
+                for (row, bits) in icon.iter().enumerate() {
+                    for col in 0..16 {
+                        if bits & (1 << (15 - col)) != 0 {
+                            painter.fill_rect(
+                                RasterRect::new(ox + col * 2, oy + row * 2, 2, 2),
+                                theme.text,
+                            );
+                        }
                     }
                 }
+            } else {
+                let monogram: String = tab.label.chars().take(2).collect();
+                let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
+                painter.draw_text_with_font(
+                    tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
+                    tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
+                    &monogram,
+                    &DESKTOP_FONT,
+                    theme.text,
+                );
             }
-        } else {
-            let monogram: String = tab.label.chars().take(2).collect();
-            let text_w = monogram.chars().count() * RASTER_CELL_WIDTH;
-            painter.draw_text_with_font(
-                tile.x + (DOCK_TILE.saturating_sub(text_w)) / 2,
-                tile.y + (DOCK_TILE.saturating_sub(DESKTOP_FONT.glyph_height())) / 2,
-                &monogram,
-                &DESKTOP_FONT,
-                theme.text,
-            );
         }
         if tab.active {
             let dot = RasterRect::new(tile.x + DOCK_TILE / 2 - 3, tile.bottom() + 2, 6, 6);
@@ -2117,7 +2152,15 @@ fn raster_top_bar(
     }
     let text_y = rect.y + (rect.height.saturating_sub(DESKTOP_FONT.glyph_height())) / 2;
     let left = window.frame.title.clone().unwrap_or_default();
-    painter.draw_text_with_font(rect.x + 12, text_y, &left, &DESKTOP_FONT, theme.text);
+    // The title sits right of the desk's mark (GFX-094), which the desk
+    // draws in the bar's overlay.
+    painter.draw_text_with_font(
+        rect.x + TOP_BAR_TITLE_X,
+        text_y,
+        &left,
+        &DESKTOP_FONT,
+        theme.text,
+    );
     let lines = render_content_lines(&window.frame.content);
     if let Some(right) = lines.first() {
         let width = right.chars().count() * RASTER_CELL_WIDTH;
@@ -2143,6 +2186,53 @@ fn raster_top_bar(
         raster_graphics(&mut painter, rect, &window.overlay, theme);
     }
     true
+}
+
+/// Where the top bar's title starts (GFX-094): after a 20px mark at x=12.
+pub const TOP_BAR_TITLE_X: usize = 40;
+
+/// Draw `picture` with its top-left at `(x, y)`, each pixel blended over
+/// what is there by its alpha (GFX-094).
+pub fn draw_picture(
+    target: &mut (impl RenderTarget + ?Sized),
+    x: usize,
+    y: usize,
+    picture: &Picture,
+) {
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    if picture.rgba.len() < w * h * 4 {
+        return;
+    }
+    for row in 0..h {
+        let ty = y + row;
+        if ty >= target.height() {
+            break;
+        }
+        for col in 0..w {
+            let tx = x + col;
+            if tx >= target.width() {
+                break;
+            }
+            let at = (row * w + col) * 4;
+            let a = picture.rgba[at + 3];
+            if a == 0 {
+                continue;
+            }
+            let src = RgbaColor::new(
+                picture.rgba[at],
+                picture.rgba[at + 1],
+                picture.rgba[at + 2],
+                a,
+            );
+            let color = if a == 255 {
+                src
+            } else {
+                let under = target.pixel(tx, ty).unwrap_or(RgbaColor::new(0, 0, 0, 255));
+                graphics_rasterizer::blend_over(under, src)
+            };
+            target.write_pixel(tx, ty, color);
+        }
+    }
 }
 
 /// The first cell of a centred top-bar text `chars` wide on a bar

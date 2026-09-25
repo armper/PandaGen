@@ -11,6 +11,16 @@
 use graphics_rasterizer::RgbaColor;
 use serde::{Deserialize, Serialize};
 
+/// A picture the compositor draws by number (GFX-094): straight-alpha
+/// RGBA, `width * height * 4` bytes, row-major. Built into the kernel, so
+/// the table is `'static` and travels with the theme at no cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picture {
+    pub width: u16,
+    pub height: u16,
+    pub rgba: &'static [u8],
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Theme {
     /// Desktop behind all windows.
@@ -62,6 +72,11 @@ pub struct Theme {
     /// rasterizer, so the gradient is painted a row at a time.
     #[serde(default = "Theme::default_background_bottom")]
     pub background_bottom: RgbaColor,
+    /// The pictures `DrawOp::Picture` and a dock tile's picture name by
+    /// index (GFX-094). Empty unless the host has pictures to give: then
+    /// nothing that asks for one draws, and everything else is as it was.
+    #[serde(skip)]
+    pub pictures: &'static [Picture],
 }
 
 impl Theme {
@@ -108,6 +123,7 @@ impl Theme {
         // Flat by default: the classic graphics mode, the remote viewer's
         // golden fixtures and every existing pixel test expect one colour.
         background_bottom: RgbaColor::new(12, 18, 28, 255),
+        pictures: &[],
     };
 
     /// The desk's theme (GFX-052): the default palette with a soft vertical
@@ -154,6 +170,12 @@ impl Theme {
 
     /// This theme with another accent: the ring, the caret's colour is
     /// left alone (it is orange on purpose, to be found).
+    /// This theme with a table of pictures to draw by number (GFX-094).
+    pub const fn with_pictures(mut self, pictures: &'static [Picture]) -> Theme {
+        self.pictures = pictures;
+        self
+    }
+
     pub const fn with_accent(mut self, accent: RgbaColor) -> Theme {
         self.accent = accent;
         self.border_focused = accent;
@@ -246,6 +268,7 @@ impl Theme {
         hairline: RgbaColor::new(200, 206, 216, 255),
         shadow: RgbaColor::new(196, 202, 212, 255),
         background_bottom: RgbaColor::new(226, 230, 236, 255),
+        pictures: &[],
     };
 }
 

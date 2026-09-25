@@ -298,6 +298,60 @@ fn a_text_card_draws_its_overlay_over_the_lines() {
     assert!(row.contains(&theme.text));
 }
 
+/// Pictures (GFX-094): a dock tile with a picture is drawn as the picture,
+/// blended by its alpha, and a card's overlay can draw one by number; a
+/// theme without pictures draws nothing for either.
+#[test]
+fn pictures_are_blended_by_their_alpha_in_the_dock_and_on_cards() {
+    // A 40x40 picture: opaque red, but its first column is half-clear.
+    static RGBA: [u8; 40 * 40 * 4] = {
+        let mut px = [0u8; 40 * 40 * 4];
+        let mut i = 0;
+        while i < 40 * 40 {
+            px[i * 4] = 200;
+            px[i * 4 + 3] = if i % 40 == 0 { 128 } else { 255 };
+            i += 1;
+        }
+        px
+    };
+    static PICTURES: [services_gui_host::Picture; 1] = [services_gui_host::Picture {
+        width: 40,
+        height: 40,
+        rgba: &RGBA,
+    }];
+    let theme = Theme::DEFAULT.with_pictures(&PICTURES);
+    let bounds = RasterRect::new(200, 340, 240, 56);
+    let dock = DesktopWindow::new(
+        frame("", &[]),
+        services_gui_host::SurfaceRect::new(0, 0, 0, 0),
+    )
+    .with_style(WindowStyle::Dock)
+    .with_pixel_rect(bounds)
+    .with_tabs(vec![DesktopTab::new("Np", false).with_picture(Some(0))]);
+    let card = DesktopWindow::card(frame("Card", &[]), RasterRect::new(300, 60, 300, 200))
+        .with_overlay(vec![view_types::DrawOp::Picture {
+            x: 10,
+            y: 10,
+            id: 0,
+        }]);
+    let (ox, oy, _) = card.card_text_origin();
+    let compositor = Compositor::with_theme(theme);
+    let mut target = RgbaBuffer::new(W, H, RgbaColor::new(0, 0, 0, 255));
+    compositor.render_desktop_to_target(&mut target, vec![dock.clone(), card.clone()]);
+    // One tile, centred: starts at 200 + (240-40)/2 = 300, y = 348.
+    assert_eq!(px(&target, 320, 368), RgbaColor::new(200, 0, 0, 255));
+    let edge = px(&target, 300, 368);
+    assert!(edge.r > 90 && edge.r < 130, "half blended: {edge:?}");
+    assert_eq!(
+        px(&target, ox + 30, oy + 30),
+        RgbaColor::new(200, 0, 0, 255)
+    );
+    // Without the table, neither draws: the tile is gone too, so the
+    // pill shows through where the picture would be.
+    let plain = render(vec![dock, card]);
+    assert_ne!(px(&plain, 320, 368), RgbaColor::new(200, 0, 0, 255));
+}
+
 /// A wallpaper is sampled to the surface, behind the cards, and a damage
 /// repaint reads the same pixels (GFX-066).
 #[test]

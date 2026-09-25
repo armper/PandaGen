@@ -31,6 +31,100 @@ pub const WALLPAPER: Wallpaper = Wallpaper {
     indices: include_bytes!("../assets/wallpaper.idx"),
 };
 
+/// The desk's pictures (GFX-094): every app's icon, and the panda mark,
+/// each at the sizes the desk draws. Made by `tools/art/icons.py` from
+/// the sources beside them; straight-alpha RGBA.
+macro_rules! picture {
+    ($name:literal, $size:literal) => {
+        services_gui_host::Picture {
+            width: $size,
+            height: $size,
+            rgba: include_bytes!(concat!("../assets/icons/", $name, "_", $size, ".rgba")),
+        }
+    };
+}
+
+/// The order of `PICTURES`: a name, then its sizes.
+pub const PICTURE_NAMES: [&str; 11] = [
+    "notepad",
+    "files",
+    "terminal",
+    "look",
+    "calculator",
+    "calendar",
+    "timer",
+    "tiles",
+    "tasks",
+    "sketch",
+    "panda",
+];
+pub const PICTURE_SIZES: [u32; 5] = [64, 40, 32, 20, 16];
+
+pub static PICTURES: [services_gui_host::Picture; 55] = [
+    picture!("notepad", 64),
+    picture!("notepad", 40),
+    picture!("notepad", 32),
+    picture!("notepad", 20),
+    picture!("notepad", 16),
+    picture!("files", 64),
+    picture!("files", 40),
+    picture!("files", 32),
+    picture!("files", 20),
+    picture!("files", 16),
+    picture!("terminal", 64),
+    picture!("terminal", 40),
+    picture!("terminal", 32),
+    picture!("terminal", 20),
+    picture!("terminal", 16),
+    picture!("look", 64),
+    picture!("look", 40),
+    picture!("look", 32),
+    picture!("look", 20),
+    picture!("look", 16),
+    picture!("calculator", 64),
+    picture!("calculator", 40),
+    picture!("calculator", 32),
+    picture!("calculator", 20),
+    picture!("calculator", 16),
+    picture!("calendar", 64),
+    picture!("calendar", 40),
+    picture!("calendar", 32),
+    picture!("calendar", 20),
+    picture!("calendar", 16),
+    picture!("timer", 64),
+    picture!("timer", 40),
+    picture!("timer", 32),
+    picture!("timer", 20),
+    picture!("timer", 16),
+    picture!("tiles", 64),
+    picture!("tiles", 40),
+    picture!("tiles", 32),
+    picture!("tiles", 20),
+    picture!("tiles", 16),
+    picture!("tasks", 64),
+    picture!("tasks", 40),
+    picture!("tasks", 32),
+    picture!("tasks", 20),
+    picture!("tasks", 16),
+    picture!("sketch", 64),
+    picture!("sketch", 40),
+    picture!("sketch", 32),
+    picture!("sketch", 20),
+    picture!("sketch", 16),
+    picture!("panda", 64),
+    picture!("panda", 40),
+    picture!("panda", 32),
+    picture!("panda", 20),
+    picture!("panda", 16),
+];
+
+/// The picture of `name` at `size`, as its number in `PICTURES`.
+pub fn picture_id(name: &str, size: u32) -> Option<u32> {
+    let n = PICTURE_NAMES.iter().position(|p| *p == name)?;
+    let s = PICTURE_SIZES.iter().position(|p| *p == size)?;
+    Some((n * PICTURE_SIZES.len() + s) as u32)
+}
+
 /// What Look calls the two backgrounds.
 pub const WALLPAPERS: [&str; 2] = ["Picture", "Gradient"];
 
@@ -443,6 +537,24 @@ impl DeskApp {
             ]),
             _ => None,
         }
+    }
+
+    /// The app's colour icon at `size` (GFX-094), as a picture number.
+    pub fn picture(self, size: u32) -> Option<u32> {
+        let name = match self {
+            DeskApp::Notepad => "notepad",
+            DeskApp::Files => "files",
+            DeskApp::Terminal => "terminal",
+            DeskApp::Look => "look",
+            DeskApp::Calculator => "calculator",
+            DeskApp::Calendar => "calendar",
+            DeskApp::Timer => "timer",
+            DeskApp::Tiles => "tiles",
+            DeskApp::Tasks => "tasks",
+            DeskApp::Sketch => "sketch",
+            _ => return None,
+        };
+        picture_id(name, size)
     }
 
     /// Two letters for the dock tile: what a tile shows when it has no
@@ -907,7 +1019,12 @@ impl FileEntry {
     /// list the Tasks card's, a drawing the Sketch's, text the Notepad's,
     /// anything else a plain document.
     pub fn icon(&self) -> [u16; 16] {
-        let app = if crate::calendar::Date::parse(&self.name).is_some() {
+        self.app().icon().unwrap_or([0; 16])
+    }
+
+    /// The app that made the document (GFX-094), whose icon it wears.
+    pub fn app(&self) -> DeskApp {
+        if crate::calendar::Date::parse(&self.name).is_some() {
             DeskApp::Calendar
         } else if self.name == crate::tasks::TASKS_FILE {
             DeskApp::Tasks
@@ -917,8 +1034,7 @@ impl FileEntry {
             DeskApp::Notepad
         } else {
             DeskApp::Files
-        };
-        app.icon().unwrap_or([0; 16])
+        }
     }
 }
 
@@ -1751,6 +1867,29 @@ impl PaletteRow {
         }
     }
 
+    /// The app a row stands for (GFX-094): the one a launch row opens,
+    /// the Notepad a heading is in, Files for a document.
+    pub fn app(&self) -> Option<DeskApp> {
+        match self {
+            PaletteRow::Action(action) => match action {
+                PaletteAction::NewNotepad => Some(DeskApp::Notepad),
+                PaletteAction::NewTerminal => Some(DeskApp::Terminal),
+                PaletteAction::OpenFiles => Some(DeskApp::Files),
+                PaletteAction::ToggleTheme => Some(DeskApp::Look),
+                PaletteAction::Calculator => Some(DeskApp::Calculator),
+                PaletteAction::Calendar => Some(DeskApp::Calendar),
+                PaletteAction::Timer => Some(DeskApp::Timer),
+                PaletteAction::Tiles => Some(DeskApp::Tiles),
+                PaletteAction::Tasks => Some(DeskApp::Tasks),
+                PaletteAction::Sketch => Some(DeskApp::Sketch),
+                _ => None,
+            },
+            PaletteRow::Recent(_) | PaletteRow::Hit { .. } => Some(DeskApp::Files),
+            PaletteRow::Heading { .. } => Some(DeskApp::Notepad),
+            PaletteRow::Paste(_) => None,
+        }
+    }
+
     /// The icon beside the row (GFX-086): the app a launch row opens, a
     /// document for a recent or a search hit, nothing for the rest.
     pub fn icon(&self) -> Option<[u16; 16]> {
@@ -2119,7 +2258,12 @@ impl Desk {
     /// The theme the desk is drawn with: the preview while one is open,
     /// otherwise what is kept.
     pub fn theme(&self) -> Theme {
-        self.look_preview.as_ref().unwrap_or(&self.look).theme()
+        // With the desk's pictures (GFX-094).
+        self.look_preview
+            .as_ref()
+            .unwrap_or(&self.look)
+            .theme()
+            .with_pictures(&PICTURES)
     }
 
     /// A text was copied: to the front of the history, once, bounded.
@@ -2663,6 +2807,10 @@ impl Desk {
         let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH);
         let text_y = ((TOP_BAR_HEIGHT - 16) / 2) as u32;
         let mut ops = Vec::new();
+        // The desk's mark at the bar's left end (GFX-094).
+        if let Some(id) = picture_id("panda", 20) {
+            ops.push(DrawOp::Picture { x: 12, y: 4, id });
+        }
         let mut x = start;
         for part in self.bar_parts(clock) {
             let w = part.chars().count() * GLYPH_WIDTH;
@@ -2957,7 +3105,11 @@ impl Desk {
                     .width
                     .saturating_sub(services_gui_host::CARD_PADDING * 2)
                     as u32;
-                alloc::vec![icon_op(content_w.saturating_sub(34), 0, 2, bits)]
+                let x = content_w.saturating_sub(34);
+                match window.app.picture(32) {
+                    Some(id) => alloc::vec![view_types::DrawOp::Picture { x, y: 0, id }],
+                    None => alloc::vec![icon_op(x, 0, 2, bits)],
+                }
             })
             .unwrap_or_default();
         let mut card = DesktopWindow::card(frame, bounds)
@@ -4927,12 +5079,12 @@ impl Desk {
                     for i in 0..rows {
                         if let Some(index) = visible.get(files.scroll + i) {
                             let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
-                            overlay.push(icon_op(
-                                2,
-                                i as u32 * pitch + ROW_ICON_Y,
-                                1,
-                                files.entries[*index].icon(),
-                            ));
+                            let entry = &files.entries[*index];
+                            let y = i as u32 * pitch + ROW_ICON_Y;
+                            overlay.push(match entry.app().picture(16) {
+                                Some(id) => view_types::DrawOp::Picture { x: 2, y, id },
+                                None => icon_op(2, y, 1, entry.icon()),
+                            });
                         }
                     }
                     let title = if files.bin { "Files - Bin" } else { "Files" };
@@ -5167,10 +5319,11 @@ impl Desk {
                     .take(rows)
                     .enumerate()
                     .filter_map(|(i, row)| {
-                        row.icon().map(|bits| {
-                            let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
-                            icon_op(2, i as u32 * pitch + ROW_ICON_Y, 1, bits)
-                        })
+                        let y = i as u32 * services_gui_host::CARD_LINE_HEIGHT as u32 + ROW_ICON_Y;
+                        match row.app().and_then(|app| app.picture(16)) {
+                            Some(id) => Some(view_types::DrawOp::Picture { x: 2, y, id }),
+                            None => row.icon().map(|bits| icon_op(2, y, 1, bits)),
+                        }
                     })
                     .collect(),
             )
@@ -5280,7 +5433,8 @@ impl Desk {
             .map(|(index, app)| {
                 let mut tab =
                     DesktopTab::new(app.monogram(), self.windows.iter().any(|w| w.app == *app))
-                        .with_icon(app.icon());
+                        .with_icon(app.icon())
+                        .with_picture(app.picture(services_gui_host::DOCK_TILE as u32));
                 tab.hovered = self.hovered_tile == Some(index);
                 tab.tucked = self.windows.iter().any(|w| w.app == *app && w.tucked);
                 tab
@@ -5811,7 +5965,7 @@ mod tests {
     #[test]
     fn the_look_card_previews_as_you_move_keeps_on_enter_and_reverts_on_esc() {
         let mut desk = Desk::new(1280, 800);
-        assert_eq!(desk.theme(), Theme::DESK);
+        assert_eq!(desk.theme().with_pictures(&[]), Theme::DESK);
         let windows = desk.windows("", true, None);
         let bar = windows
             .iter()
@@ -5839,7 +5993,10 @@ mod tests {
         // Down twice: Ember, previewed at once, not kept.
         desk.handle_key(crate::notepad::KEY_DOWN);
         desk.handle_key(crate::notepad::KEY_DOWN);
-        assert_eq!(desk.theme(), Theme::EMBER.with_accent(Theme::ACCENTS[0].1));
+        assert_eq!(
+            desk.theme().with_pictures(&[]),
+            Theme::EMBER.with_accent(Theme::ACCENTS[0].1)
+        );
         assert_eq!(desk.look().theme, "Dusk");
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
@@ -5850,7 +6007,7 @@ mod tests {
             .starts_with("Previewing Ember + Mint"));
         // Esc reverts.
         desk.handle_key(crate::notepad::ESC);
-        assert_eq!(desk.theme(), Theme::DESK);
+        assert_eq!(desk.theme().with_pictures(&[]), Theme::DESK);
 
         // Down to Ember again, then on to the accents: Sky. Enter keeps and
         // asks the kernel to write it.
@@ -5880,7 +6037,10 @@ mod tests {
         assert_eq!(WALLPAPER.indices.len(), WALLPAPER.width * WALLPAPER.height);
         assert_eq!(WALLPAPER.palette.len(), 256 * 3);
         assert_eq!(desk.look().theme, "Mono");
-        assert_eq!(desk.theme(), Theme::MONO.with_accent(Theme::ACCENTS[1].1));
+        assert_eq!(
+            desk.theme().with_pictures(&[]),
+            Theme::MONO.with_accent(Theme::ACCENTS[1].1)
+        );
 
         // What was written reads back; nonsense reads as the defaults.
         let mut fresh = Desk::new(1280, 800);
@@ -5893,9 +6053,9 @@ mod tests {
 
         // Closing the card drops any preview.
         desk.handle_key(crate::notepad::KEY_UP);
-        assert_ne!(desk.theme(), desk.look().theme());
+        assert_ne!(desk.theme().with_pictures(&[]), desk.look().theme());
         desk.close(id);
-        assert_eq!(desk.theme(), desk.look().theme());
+        assert_eq!(desk.theme().with_pictures(&[]), desk.look().theme());
 
         // A card with focus names itself in the bar.
         desk.launch(DeskApp::Notepad);
@@ -6212,7 +6372,10 @@ mod tests {
         let deliveries = router.route(&compositor, &windows, click);
         desk.handle_deliveries_with_requests(&deliveries);
         route(&mut desk, &mut router, release(cx, cy));
-        assert_eq!(desk.theme(), Theme::EMBER.with_accent(Theme::ACCENTS[0].1));
+        assert_eq!(
+            desk.theme().with_pictures(&[]),
+            Theme::EMBER.with_accent(Theme::ACCENTS[0].1)
+        );
         assert_eq!(desk.look().theme, "Dusk");
         let windows = desk.windows("", true, None);
         let deliveries = router.route(&compositor, &windows, click);
@@ -7557,7 +7720,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             mini.overlay.as_slice(),
-            [view_types::DrawOp::Icon { scale: 2, .. }]
+            [view_types::DrawOp::Picture { .. }]
         ));
     }
 
@@ -7611,7 +7774,7 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(line(&bar(&mut desk)), "12:34");
-        assert!(bar(&mut desk).overlay.is_empty());
+        assert_eq!(bar(&mut desk).overlay.len(), 1, "just the mark");
         desk.set_today(Some(Date::new(2026, 9, 24)));
         desk.vitals_loaded(Vitals {
             heap_used_kib: 8 * 1024,
@@ -7621,8 +7784,8 @@ mod tests {
         desk.notify(NoticeLevel::Info, "Saved memo", 0);
         let top = bar(&mut desk);
         assert_eq!(line(&top), "1 new   Thu 24 Sep            12:34");
-        // A badge (fill and its text) and a meter (track and fill).
-        assert_eq!(top.overlay.len(), 4);
+        // The mark, a badge (fill and its text) and a meter (track and fill).
+        assert_eq!(top.overlay.len(), 5);
         let widths: Vec<u32> = top
             .overlay
             .iter()
@@ -7835,6 +7998,43 @@ mod tests {
         desk.handle_key(crate::notepad::KEY_CTRL_RELEASED);
         assert!(!desk.overview_open());
         assert_eq!(desk.focus(), Some(id));
+    }
+
+    /// Pictures (GFX-094): every dock app has its icon at every size the
+    /// desk draws, the table's sizes are right, the theme carries it, and
+    /// the dock's tiles name their pictures.
+    #[test]
+    fn every_app_has_its_picture_at_every_size_and_the_dock_uses_them() {
+        for (n, picture) in PICTURES.iter().enumerate() {
+            let size = PICTURE_SIZES[n % PICTURE_SIZES.len()] as usize;
+            assert_eq!(
+                (picture.width as usize, picture.height as usize),
+                (size, size)
+            );
+            assert_eq!(picture.rgba.len(), size * size * 4);
+            // Squircle corners are clear; the middle is opaque.
+            assert_eq!(picture.rgba[3], 0, "{n}: corner");
+            let mid = ((size / 2) * size + size / 2) * 4 + 3;
+            assert_eq!(picture.rgba[mid], 255, "{n}: middle");
+        }
+        for app in DeskApp::ALL {
+            for size in PICTURE_SIZES {
+                assert!(app.picture(size).is_some(), "{app:?} at {size}");
+            }
+        }
+        assert_eq!(DeskApp::Welcome.picture(40), None);
+        let mut desk = Desk::new(1280, 800);
+        assert_eq!(desk.theme().pictures.len(), PICTURES.len());
+        let windows = desk.windows("", true, None);
+        let dock = windows
+            .iter()
+            .find(|w| w.style == WindowStyle::Dock)
+            .unwrap();
+        assert_eq!(dock.tabs[0].picture, DeskApp::Notepad.picture(40));
+        assert_eq!(
+            PICTURES[DeskApp::Notepad.picture(40).unwrap() as usize].width,
+            40
+        );
     }
 
     #[test]

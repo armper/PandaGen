@@ -125,7 +125,14 @@ impl LauncherView {
             } else if ui.hovered(cell) {
                 ui.outline(*cell, p.text, 10, 1);
             }
-            if let Some(bits) = app.icon() {
+            if let Some(id) = app.picture(64) {
+                // The colour icon (GFX-094).
+                ui.push(DrawOp::Picture {
+                    x: cell.x + cell.width.saturating_sub(64) / 2,
+                    y: cell.y + 8,
+                    id,
+                });
+            } else if let Some(bits) = app.icon() {
                 // Twice the dock's: sixteen bits, four pixels each.
                 let x = cell.x + cell.width.saturating_sub(64) / 2;
                 ui.push(DrawOp::Icon {
@@ -201,7 +208,7 @@ mod tests {
         let ops = view.ui(504, 260, palette, None).into_ops();
         let icons = ops
             .iter()
-            .filter(|op| matches!(op, DrawOp::Icon { scale: 4, .. }))
+            .filter(|op| matches!(op, DrawOp::Picture { .. }))
             .count();
         assert_eq!(icons, DeskApp::ALL.len());
         assert!(ops
