@@ -740,7 +740,7 @@ pub const CALENDAR_SIZE: (usize, usize) = (420, 400);
 pub const CALCULATOR_SIZE: (usize, usize) = (300, 460);
 
 /// The Now card (GFX-072).
-pub const NOW_SIZE: (usize, usize) = (440, 260);
+pub const NOW_SIZE: (usize, usize) = (440, 300);
 /// The shortcut sheet (GFX-072).
 pub const SHORTCUTS_SIZE: (usize, usize) = (560, 520);
 /// How often the Now card asks the kernel for fresh vitals, in ticks.
@@ -759,6 +759,125 @@ pub struct Vitals {
     pub cpus_online: usize,
     pub cpus_total: usize,
     pub files: usize,
+}
+
+/// What the Now card shows (GFX-108), gathered before the cards are drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowFacts {
+    pub clock: String,
+    pub up: String,
+    /// Used and total, in MiB, once the kernel has said.
+    pub memory: Option<(usize, usize)>,
+    pub cpus_online: usize,
+    pub cpus_total: usize,
+    pub files: usize,
+    pub cards: usize,
+    pub spaces: usize,
+    pub look: String,
+    pub notices: usize,
+}
+
+/// The most CPUs Now draws a dot for; past it, the count says the rest.
+pub const NOW_CPU_DOTS: usize = 16;
+
+/// The Now card, drawn (GFX-108): the clock large with the uptime and the
+/// look beside it, memory as a bar, each CPU a dot lit when it is online,
+/// and three tiles -- files, cards, notices -- each a large number over
+/// its name.
+pub fn now_ui(
+    facts: &NowFacts,
+    width: u32,
+    palette: crate::widgets::Palette,
+) -> crate::widgets::Ui {
+    use crate::widgets::{grid, Ui};
+    use view_types::PixelRect;
+    let p = palette;
+    let mut ui = Ui::new(palette, None);
+    let w = width as i32;
+    ui.text(0, 0, &facts.clock, p.text, 3);
+    ui.text_right(w, 6, &alloc::format!("up {}", facts.up), p.muted, 1);
+    ui.text_right(w, 26, &facts.look, p.muted, 1);
+
+    let bar = |ui: &mut Ui, y: u32, used: usize, total: usize| {
+        let track = PixelRect {
+            x: 0,
+            y,
+            width,
+            height: 10,
+        };
+        ui.fill(track, p.raised, 5);
+        if total > 0 && used > 0 {
+            let fill = ((width as usize * used.min(total)) / total).max(10) as u32;
+            ui.fill(
+                PixelRect {
+                    width: fill,
+                    ..track
+                },
+                p.accent,
+                5,
+            );
+        }
+    };
+    ui.text(0, 62, "Memory", p.muted, 1);
+    match facts.memory {
+        Some((used, total)) => {
+            ui.text_right(w, 62, &alloc::format!("{used} of {total} MiB"), p.text, 1);
+            bar(&mut ui, 84, used, total);
+        }
+        None => {
+            ui.text_right(w, 62, "asking...", p.muted, 1);
+            bar(&mut ui, 84, 0, 0);
+        }
+    }
+
+    let total = facts.cpus_total.max(facts.cpus_online);
+    ui.text(0, 108, "CPUs", p.muted, 1);
+    ui.text_right(
+        w,
+        108,
+        &alloc::format!("{} of {} online", facts.cpus_online, total),
+        p.text,
+        1,
+    );
+    for i in 0..total.min(NOW_CPU_DOTS) {
+        let dot = PixelRect {
+            x: i as u32 * 22,
+            y: 130,
+            width: 14,
+            height: 14,
+        };
+        let color = if i < facts.cpus_online {
+            p.accent
+        } else {
+            p.raised
+        };
+        ui.fill(dot, color, 7);
+    }
+
+    let area = PixelRect {
+        x: 0,
+        y: 160,
+        width,
+        height: 54,
+    };
+    let tiles = [
+        (alloc::format!("{}", facts.files), "files"),
+        (
+            alloc::format!("{}", facts.cards),
+            if facts.spaces == 1 {
+                "cards, 1 space"
+            } else {
+                "cards"
+            },
+        ),
+        (alloc::format!("{}", facts.notices), "notices kept"),
+    ];
+    for (cell, (number, label)) in grid(area, 3, 1, 10).into_iter().zip(tiles.iter()) {
+        ui.fill(cell, p.raised, 10);
+        ui.text(cell.x as i32 + 12, cell.y as i32 + 4, number, p.text, 2);
+        ui.text(cell.x as i32 + 12, cell.y as i32 + 36, label, p.muted, 1);
+    }
+    ui
 }
 
 /// The desk's own keys, for the sheet: the ones no palette row carries.
@@ -1139,7 +1258,7 @@ impl DeskWindow {
                 alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
             }
             AppState::Timer(_) => Vec::new(),
-            AppState::Tiles(_) => alloc::vec![("New".to_string(), b'n'),],
+            AppState::Tiles(_) => Vec::new(),
             AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
                 ("Add".to_string(), b'\n'),
                 ("Cancel".to_string(), crate::notepad::ESC),
@@ -2561,46 +2680,27 @@ impl Desk {
         }
     }
 
-    /// The Now card's lines (GFX-072).
-    fn now_lines(&self, clock: &str) -> Vec<String> {
+    /// What the Now card shows (GFX-072, drawn since GFX-108).
+    fn now_facts(&self, clock: &str) -> NowFacts {
         let v = &self.vitals;
         let cards = self
             .windows
             .iter()
             .filter(|w| w.app != DeskApp::Welcome)
             .count();
-        let spaces_used = self.space_counts().iter().filter(|c| **c > 0).count();
-        let mut lines = alloc::vec![
-            alloc::format!("Clock        {clock}"),
-            alloc::format!("Up           {}", Self::uptime(v.uptime_ticks)),
-        ];
-        if v.heap_total_kib > 0 {
-            lines.push(alloc::format!(
-                "Memory       {} MiB of {} MiB in use",
-                v.heap_used_kib / 1024,
-                v.heap_total_kib / 1024
-            ));
+        NowFacts {
+            clock: clock.to_string(),
+            up: Self::uptime(v.uptime_ticks),
+            memory: (v.heap_total_kib > 0)
+                .then(|| (v.heap_used_kib / 1024, v.heap_total_kib / 1024)),
+            cpus_online: v.cpus_online,
+            cpus_total: v.cpus_total,
+            files: v.files,
+            cards,
+            spaces: self.space_counts().iter().filter(|c| **c > 0).count(),
+            look: alloc::format!("{} + {}", self.look.theme, self.look.accent),
+            notices: self.notice_log.len(),
         }
-        lines.push(alloc::format!(
-            "CPUs         {} online of {}",
-            v.cpus_online,
-            v.cpus_total.max(v.cpus_online)
-        ));
-        lines.push(alloc::format!("Files        {}", v.files));
-        lines.push(alloc::format!(
-            "Cards        {cards} open on {spaces_used} space{}",
-            if spaces_used == 1 { "" } else { "s" }
-        ));
-        lines.push(alloc::format!(
-            "Look         {} + {}",
-            self.look.theme,
-            self.look.accent
-        ));
-        lines.push(alloc::format!(
-            "Notices      {} kept",
-            self.notice_log.len()
-        ));
-        lines
     }
 
     /// The shortcut sheet's lines (GFX-072): the desk's keys, then every
@@ -5244,7 +5344,7 @@ impl Desk {
         let look_preview = self.look_preview.clone();
         let notice_log = self.notice_log.clone();
         let now_tick = self.last_tick;
-        let now_lines = self.now_lines(clock);
+        let now_facts = self.now_facts(clock);
         let space = self.space;
         let overview_open = self.overview.is_some();
         let motion_now = self.motion_clock;
@@ -5431,12 +5531,16 @@ impl Desk {
                         None,
                     )
                 }
-                AppState::Now => (
-                    now_lines.clone(),
-                    "Now".to_string(),
-                    "The machine, this second; refreshed every second".to_string(),
-                    None,
-                ),
+                AppState::Now => {
+                    let (w, _) = Self::canvas_size(window.bounds);
+                    graphics = Some(now_ui(&now_facts, w, palette).into_ops());
+                    (
+                        Vec::new(),
+                        "Now".to_string(),
+                        "The machine, this second; refreshed every second".to_string(),
+                        None,
+                    )
+                }
                 AppState::Calculator(calc) => {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(calc.ui(w, h, palette, hover).into_ops());
@@ -7172,16 +7276,44 @@ mod tests {
         assert_eq!(desk.tick(600), alloc::vec![DeskRequest::Vitals]);
         let windows = desk.windows_at("12:34", true, None, 600, &[]);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        let rows = match &card.frame.content {
-            ViewContent::TextBuffer { lines } => lines.clone(),
-            _ => panic!(),
+        // Drawn (GFX-108): the clock large, the rest as text, a bar and
+        // dots.
+        let ops = match &card.frame.content {
+            ViewContent::Graphics { ops } => ops.clone(),
+            _ => panic!("Now is drawn"),
         };
-        assert!(rows[0].ends_with("12:34"), "{rows:?}");
-        assert!(rows[1].ends_with("1h 02m"), "{rows:?}");
-        assert!(rows[2].contains("12 MiB of 32 MiB"), "{rows:?}");
-        assert!(rows[3].contains("4 online of 4"), "{rows:?}");
-        assert!(rows[4].ends_with("6"), "{rows:?}");
-        assert!(rows[5].contains("1 open on 1 space"), "{rows:?}");
+        let texts: Vec<(String, u8)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                view_types::DrawOp::Text { text, style, .. } => Some((text.clone(), style.scale)),
+                _ => None,
+            })
+            .collect();
+        let has = |t: &str| texts.iter().any(|(s, _)| s == t);
+        assert!(texts.contains(&("12:34".to_string(), 3)), "{texts:?}");
+        assert!(has("up 1h 02m"), "{texts:?}");
+        assert!(has("12 of 32 MiB"), "{texts:?}");
+        assert!(has("4 of 4 online"), "{texts:?}");
+        assert!(has("6") && has("files"), "{texts:?}");
+        assert!(has("1") && has("cards, 1 space"), "{texts:?}");
+        let facts = desk.now_facts("12:34");
+        assert_eq!(facts.memory, Some((12, 32)));
+        // The memory bar's fill is the used share of the track.
+        let palette = crate::widgets::Palette::from_theme(&desk.theme());
+        let (w, _) = Desk::canvas_size(desk.window(id).unwrap().bounds);
+        let fills: Vec<u32> = now_ui(&facts, w, palette)
+            .into_ops()
+            .iter()
+            .filter_map(|op| match op {
+                view_types::DrawOp::RoundedFill { rect, color, .. }
+                    if rect.y == 84 && *color == palette.accent =>
+                {
+                    Some(rect.width)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, alloc::vec![w * 12 / 32]);
         assert_eq!(Desk::uptime(6_100), "1m 01s");
         // Its chips open the other system cards.
         assert_eq!(card.actions[2], "Shortcuts");
@@ -7792,7 +7924,7 @@ mod tests {
         // The New button, clicked: two tiles again.
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.actions, alloc::vec!["New"]);
+        assert!(card.actions.is_empty(), "its New is drawn");
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
         let (w, h) = Desk::canvas_size(desk.window(id).unwrap().bounds);
@@ -8122,11 +8254,11 @@ mod tests {
     #[test]
     fn the_desk_asks_the_kernel_to_click_blip_and_chime() {
         let mut desk = Desk::new(1280, 800);
-        let tiles = desk.launch(DeskApp::Tiles);
+        let calendar = desk.launch(DeskApp::Calendar);
         let id = desk.launch(DeskApp::Timer);
         desk.tick(1_000);
-        // A chip: the Tiles card's New.
-        let (_, _) = desk.card_action(tiles, 0);
+        // A chip: the Calendar's Today.
+        let (_, _) = desk.card_action(calendar, 0);
         let requests = desk.tick(1_001);
         assert!(
             requests.contains(&DeskRequest::Sound(Sound::Click)),
