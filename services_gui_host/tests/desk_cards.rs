@@ -74,12 +74,23 @@ fn a_card_has_rounded_corners_a_ring_and_a_header() {
         theme.hairline,
         "no header separator"
     );
-    // The shadow lifts the card: two pixels beyond the bottom-right, inside
-    // the offset shape, is the shadow colour.
+    // The shadow lifts the card (GFX-099): just under it the background
+    // is darkened toward the shadow colour, and it fades with distance.
+    let bg = px(&target, 20, 20);
+    let near_edge = px(&target, 100 + 100, 80 + 240 + 2);
+    let far = px(&target, 100 + 100, 80 + 240 + 17);
+    assert!(
+        near_edge.r < bg.r || near_edge.g < bg.g || near_edge.b < bg.b,
+        "no shadow: {near_edge:?} on {bg:?}"
+    );
+    assert!(
+        near_edge.b <= far.b,
+        "the shadow does not fade: {near_edge:?} then {far:?}"
+    );
     assert_eq!(
-        px(&target, 100 + 200, 80 + 240 + 1),
-        theme.shadow,
-        "no lift under the card"
+        px(&target, 100 + 100, 80 + 240 + 40),
+        bg,
+        "the shadow spreads too far"
     );
 }
 

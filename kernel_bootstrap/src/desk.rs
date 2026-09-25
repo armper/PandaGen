@@ -916,6 +916,8 @@ impl DeskWindow {
     /// The header chips (GFX-056): each is a key the app already answers,
     /// so the pointer and the keyboard reach the same code. Files' depend
     /// on its state (GFX-057).
+    /// The header's x closes every card, so no chip says Close too
+    /// (GFX-099) -- except a prompt's, where Close means close the prompt.
     pub fn actions(&self) -> Vec<(String, u8)> {
         match &self.state {
             AppState::Notepad(notepad) if notepad.browsing_history() => alloc::vec![
@@ -952,27 +954,19 @@ impl DeskWindow {
                 ("Revert".to_string(), crate::notepad::ESC),
             ],
             AppState::Welcome => alloc::vec![("Got it".to_string(), crate::notepad::CTRL_W)],
-            AppState::Notices => alloc::vec![
-                ("Clear".to_string(), crate::notepad::KEY_DELETE),
-                ("Close".to_string(), crate::notepad::CTRL_W),
-            ],
+            AppState::Notices => alloc::vec![("Clear".to_string(), crate::notepad::KEY_DELETE),],
             AppState::Now => alloc::vec![
                 ("Notices".to_string(), b'n'),
                 ("Look".to_string(), b'l'),
                 ("Shortcuts".to_string(), b'k'),
-                ("Close".to_string(), crate::notepad::CTRL_W),
             ],
-            AppState::Shortcuts(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
-            AppState::Calculator(_) => alloc::vec![
-                ("Clear".to_string(), crate::notepad::ESC),
-                ("Close".to_string(), crate::notepad::CTRL_W),
-            ],
+            AppState::Shortcuts(_) => Vec::new(),
+            AppState::Calculator(_) => alloc::vec![("Clear".to_string(), crate::notepad::ESC),],
             AppState::Calendar(_) => alloc::vec![
                 ("Today".to_string(), b't'),
                 ("Earlier".to_string(), crate::notepad::KEY_PAGE_UP),
                 ("Later".to_string(), crate::notepad::KEY_PAGE_DOWN),
                 ("Note".to_string(), b'\n'),
-                ("Close".to_string(), crate::notepad::CTRL_W),
             ],
             AppState::Timer(timer) => alloc::vec![
                 (
@@ -980,12 +974,8 @@ impl DeskWindow {
                     b' ',
                 ),
                 ("Reset".to_string(), b'r'),
-                ("Close".to_string(), crate::notepad::CTRL_W),
             ],
-            AppState::Tiles(_) => alloc::vec![
-                ("New".to_string(), b'n'),
-                ("Close".to_string(), crate::notepad::CTRL_W),
-            ],
+            AppState::Tiles(_) => alloc::vec![("New".to_string(), b'n'),],
             AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
                 ("Add".to_string(), b'\n'),
                 ("Cancel".to_string(), crate::notepad::ESC),
@@ -994,15 +984,13 @@ impl DeskWindow {
                 ("Add".to_string(), b'a'),
                 ("Done".to_string(), b'\n'),
                 ("Remove".to_string(), crate::notepad::KEY_DELETE),
-                ("Close".to_string(), crate::notepad::CTRL_W),
             ],
             AppState::Sketch(_) => alloc::vec![
                 ("Colour".to_string(), b'c'),
                 ("Undo".to_string(), b'z'),
                 ("Clear".to_string(), b'x'),
-                ("Close".to_string(), crate::notepad::CTRL_W),
             ],
-            AppState::Launcher(_) => alloc::vec![("Close".to_string(), crate::notepad::CTRL_W)],
+            AppState::Launcher(_) => Vec::new(),
         }
     }
 }
@@ -6686,7 +6674,7 @@ mod tests {
             rows[1].starts_with("  1m ago") && rows[1].contains("Saved memo"),
             "{rows:?}"
         );
-        assert_eq!(card.actions, alloc::vec!["Clear", "Close"]);
+        assert_eq!(card.actions, alloc::vec!["Clear"]);
         // Delete clears; Esc closes; the bar is just the clock again.
         desk.handle_key(crate::notepad::KEY_DELETE);
         assert!(desk.notice_log().is_empty());
@@ -7313,7 +7301,7 @@ mod tests {
         let id = desk.launch(DeskApp::Calculator);
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.actions, alloc::vec!["Clear", "Close"]);
+        assert_eq!(card.actions, alloc::vec!["Clear"]);
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
         let bounds = desk.window(id).unwrap().bounds;
@@ -7522,7 +7510,7 @@ mod tests {
         // The New button, clicked: two tiles again.
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.actions, alloc::vec!["New", "Close"]);
+        assert_eq!(card.actions, alloc::vec!["New"]);
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
         let (w, h) = Desk::canvas_size(desk.window(id).unwrap().bounds);
@@ -7562,7 +7550,7 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
-        assert_eq!(card.actions, alloc::vec!["Add", "Done", "Remove", "Close"]);
+        assert_eq!(card.actions, alloc::vec!["Add", "Done", "Remove"]);
         // Add through the footer: the chips become Add / Cancel.
         desk.tick(10);
         desk.handle_key(b'a');
@@ -7622,10 +7610,7 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
-        assert_eq!(
-            card.actions,
-            alloc::vec!["Colour", "Undo", "Clear", "Close"]
-        );
+        assert_eq!(card.actions, alloc::vec!["Colour", "Undo", "Clear"]);
         let (ox, oy, _) = card.card_text_origin();
         let (x0, y0) = ((ox + 20) as i32, (oy + 30) as i32);
         route(&mut desk, &mut router, press(x0, y0));

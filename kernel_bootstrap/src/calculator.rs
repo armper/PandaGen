@@ -36,7 +36,7 @@ pub const KEYS: [[char; 4]; 5] = [
     ['0', '.', '<', '='],
 ];
 /// The display's height in canvas pixels.
-pub const DISPLAY_H: u32 = 64;
+pub const DISPLAY_H: u32 = 80;
 const GAP: u32 = 6;
 const KEY_ROWS_H: u32 = 244;
 const TAPE_PITCH: u32 = GLYPH_H + 2;
@@ -193,14 +193,21 @@ impl Calculator {
         ui.fill(layout.display, p.raised, 8);
         let right = width as i32 - 10;
         let expr_ink = if self.fresh { p.muted } else { p.text };
-        ui.text_right(right, 8, &self.expr, expr_ink, 1);
+        ui.text_right(right, 6, &self.expr, expr_ink, 1);
         let (shown, ink) = match &self.result {
             Some(Ok(value)) => (value.clone(), p.text),
             Some(Err(why)) => (why.clone(), p.accent),
             None => (String::new(), p.text),
         };
-        let scale = if shown.len() > 16 { 1 } else { 2 };
-        ui.text_right(right, 28, &shown, ink, scale);
+        // The result as large as it fits (GFX-099): three times the font
+        // for a number, smaller for a long one or a sentence.
+        let scale = match shown.len() {
+            0..=10 => 3,
+            11..=16 => 2,
+            _ => 1,
+        };
+        let top = DISPLAY_H as i32 - 8 - 16 * scale as i32;
+        ui.text_right(right, top, &shown, ink, scale);
         // The keys.
         for (cell, key) in layout.keys.iter().zip(KEYS.iter().flatten()) {
             let kind = match key {
@@ -209,9 +216,10 @@ impl Calculator {
                 'C' | '<' | '(' | ')' => ButtonKind::Quiet,
                 _ => ButtonKind::Plain,
             };
-            // Divide and multiply are drawn as the signs people know
-            // (GFX-096); the keys they stand for are the ones typed.
-            let drawn = matches!(key, '/' | '*');
+            // The operators are drawn as the signs people know (GFX-096),
+            // all four in one weight (GFX-099); the keys they stand for
+            // are the ones typed.
+            let drawn = matches!(key, '/' | '*' | '+' | '-');
             let label = if drawn {
                 String::from(" ")
             } else {
@@ -224,6 +232,11 @@ impl Calculator {
                 if *key == '*' {
                     ui.line(cx - 6, cy - 6, cx + 6, cy + 6, p.accent, 2);
                     ui.line(cx - 6, cy + 6, cx + 6, cy - 6, p.accent, 2);
+                } else if *key == '+' {
+                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
+                    ui.line(cx, cy - 8, cx, cy + 8, p.accent, 2);
+                } else if *key == '-' {
+                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
                 } else {
                     ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
                     ui.fill(rect(cx - 2, cy - 8, 4, 4), p.accent, 2);
@@ -426,9 +439,9 @@ mod tests {
         let palette = Palette::from_theme(&Theme::DEFAULT);
         let layout = Layout::new(284, 400);
         assert_eq!(layout.keys.len(), 20);
-        assert_eq!(layout.key_rect('7'), Some(rect(0, 122, 66, 44)));
-        assert_eq!(layout.key_rect('='), Some(rect(216, 272, 66, 44)));
-        assert_eq!(layout.tape_rows, 4);
+        assert_eq!(layout.key_rect('7'), Some(rect(0, 138, 66, 44)));
+        assert_eq!(layout.key_rect('='), Some(rect(216, 288, 66, 44)));
+        assert_eq!(layout.tape_rows, 3);
         let mut calc = Calculator::new();
         // Click 7, +, 8, = through the drawn keys.
         for key in ['7', '+', '8', '='] {
@@ -445,7 +458,7 @@ mod tests {
         // The display shows the result at twice the size; the tape once.
         let ops = calc.ui(284, 400, palette, None).into_ops();
         assert!(ops.iter().any(
-            |op| matches!(op, DrawOp::Text { text, style, .. } if text == "15" && style.scale == 2)
+            |op| matches!(op, DrawOp::Text { text, style, .. } if text == "15" && style.scale == 3)
         ));
         assert!(ops.iter().any(|op| matches!(
             op,

@@ -358,13 +358,77 @@ fn default_chrome() -> bool {
 pub const CARD_HEADER_HEIGHT: usize = 24;
 pub const CARD_PADDING: usize = 8;
 pub const CARD_LINE_HEIGHT: usize = 20;
-pub const CARD_RADIUS: usize = 6;
+pub const CARD_RADIUS: usize = 10;
 pub const CARD_FOOTER_HEIGHT: usize = 20;
 /// The close glyph's hit box, inset from the header's right edge.
 pub const CARD_CLOSE_SIZE: usize = 16;
 /// How far the shadow extends past a card, right and down. Damage for a
 /// moved card must grow by this much or it leaves a trail.
 pub const CARD_LIFT: usize = 2;
+/// A card's shadow (GFX-099): how far it spreads, how far it falls, and
+/// how dark it is at its darkest, out of 255.
+pub const CARD_SHADOW_SPREAD: usize = 14;
+pub const CARD_SHADOW_DROP: usize = 5;
+pub const CARD_SHADOW_ALPHA: u32 = 110;
+
+/// A soft shadow under `rect` (GFX-099): the theme's shadow colour, darkest
+/// under the card and fading over `CARD_SHADOW_SPREAD` pixels, drawn only
+/// outside the card, which paints over the rest. Blended, so it darkens
+/// whatever is under it -- the wallpaper or another card.
+fn soft_shadow<T: RenderTarget + ?Sized>(target: &mut T, rect: RasterRect, color: RgbaColor) {
+    let spread = CARD_SHADOW_SPREAD;
+    let drop = CARD_SHADOW_DROP;
+    // The shadow's own box: the card, fallen by `drop`.
+    let (bx0, bx1) = (rect.x, rect.right());
+    let (by0, by1) = (rect.y + drop, rect.bottom() + drop);
+    let x_start = rect.x.saturating_sub(spread);
+    let x_end = (rect.right() + spread).min(target.width());
+    let y_start = rect.y.saturating_sub(spread);
+    let y_end = (rect.bottom() + drop + spread).min(target.height());
+    let shade = |target: &mut T, x: usize, y: usize| {
+        let dx = if x < bx0 {
+            bx0 - x
+        } else if x >= bx1 {
+            x + 1 - bx1
+        } else {
+            0
+        };
+        let dy = if y < by0 {
+            by0 - y
+        } else if y >= by1 {
+            y + 1 - by1
+        } else {
+            0
+        };
+        let d = dx.max(dy) + dx.min(dy) / 2;
+        if d >= spread {
+            return;
+        }
+        let left = (spread - d) as u32;
+        let alpha = CARD_SHADOW_ALPHA * left * left / (spread * spread) as u32;
+        if alpha == 0 {
+            return;
+        }
+        let under = target.pixel(x, y).unwrap_or(color);
+        let src = RgbaColor::new(color.r, color.g, color.b, alpha as u8);
+        target.write_pixel(x, y, graphics_rasterizer::blend_over(under, src));
+    };
+    for y in y_start..y_end {
+        if y >= rect.y && y < rect.bottom() {
+            // Beside the card: only the bands left and right of it.
+            for x in x_start..rect.x.min(x_end) {
+                shade(target, x, y);
+            }
+            for x in rect.right().min(x_end)..x_end {
+                shade(target, x, y);
+            }
+        } else {
+            for x in x_start..x_end {
+                shade(target, x, y);
+            }
+        }
+    }
+}
 /// Dock tiles.
 pub const DOCK_TILE: usize = 48;
 pub const DOCK_TILE_GAP: usize = 10;
@@ -1878,24 +1942,19 @@ fn raster_card(
     // The lift extends two pixels past the card's bounds, so the clip has
     // to as well -- a scissor cut to the bounds alone clipped the shadow
     // away entirely, and the first pixel test caught it.
+    let spread = CARD_SHADOW_SPREAD;
     let lift = RasterRect::new(
-        clipped_rect.x,
-        clipped_rect.y,
-        clipped_rect.width + CARD_LIFT,
-        clipped_rect.height + CARD_LIFT,
+        clipped_rect.x.saturating_sub(spread),
+        clipped_rect.y.saturating_sub(spread),
+        clipped_rect.width + spread * 2,
+        clipped_rect.height + spread * 2 + CARD_SHADOW_DROP,
     )
     .clamped_to(target.width(), target.height());
     let mut painter = ScissorTarget::new(target, lift);
 
-    // Lift: a solid darker shape two pixels down and right. Fills overwrite
-    // on this rasterizer, so this is the honest version of a shadow.
-    let shadow = RasterRect::new(
-        rect.x + CARD_LIFT,
-        rect.y + CARD_LIFT,
-        rect.width,
-        rect.height,
-    );
-    painter.fill_rounded_rect(shadow, CARD_RADIUS, theme.shadow);
+    // A soft shadow under the card (GFX-099): blended, so the card floats
+    // over the wallpaper rather than sitting on a solid offset shape.
+    soft_shadow(&mut painter, rect, theme.shadow);
     painter.fill_rounded_rect(rect, CARD_RADIUS, theme.surface);
 
     // Focus is a ring, not a flooded title bar.
