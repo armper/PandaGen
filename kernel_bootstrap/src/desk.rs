@@ -3096,13 +3096,24 @@ impl Desk {
             parts.push(today.short());
         }
         if self.vitals.heap_total_kib > 0 {
-            parts.push(" ".repeat(METER_CELLS));
+            // The meter's cells, then its share in words (GFX-109).
+            parts.push(alloc::format!(
+                "{} {}% mem",
+                " ".repeat(METER_CELLS),
+                self.memory_percent()
+            ));
         }
         parts.push(clock.to_string());
         parts
     }
 
-    /// The bar's right-hand text: "3 new   Thu 24 Sep   ......   12:34",
+    /// How much of the heap is in use, in whole percent (GFX-109).
+    fn memory_percent(&self) -> usize {
+        let v = &self.vitals;
+        v.heap_used_kib.min(v.heap_total_kib) * 100 / v.heap_total_kib.max(1)
+    }
+
+    /// The bar's right-hand text: "3 new   Thu 24 Sep   ...... 25% mem   12:34",
     /// or just the clock.
     fn bar_right(&self, clock: &str) -> String {
         self.bar_parts(clock).join("   ")
@@ -3197,7 +3208,10 @@ impl Desk {
                     color: Some(rgb(theme.background)),
                     style: TextStyle::default(),
                 });
-            } else if part.trim().is_empty() && part.len() == METER_CELLS {
+            } else if part.starts_with(&" ".repeat(METER_CELLS)) && part.ends_with("% mem") {
+                // The track over the meter's cells; the share after it is
+                // the bar's own text.
+                let w = METER_CELLS * GLYPH_WIDTH;
                 let track = PixelRect {
                     x: x as u32,
                     y: (TOP_BAR_HEIGHT / 2 - 4) as u32,
@@ -8313,7 +8327,7 @@ mod tests {
         });
         desk.notify(NoticeLevel::Info, "Saved memo", 0);
         let top = bar(&mut desk);
-        assert_eq!(line(&top), "1 new   Thu 24 Sep            12:34");
+        assert_eq!(line(&top), "1 new   Thu 24 Sep          25% mem   12:34");
         // The mark, the space's number and rule, a badge (fill and text),
         // a meter (track and fill), and a hairline either side of the meter.
         assert_eq!(top.overlay.len(), 9);
