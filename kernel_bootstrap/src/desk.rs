@@ -488,6 +488,11 @@ impl DeskApp {
     }
 }
 
+/// Ctrl+L: rest (GFX-092).
+pub const KEY_CTRL_L: u8 = 0x0C;
+/// Five minutes without a key or the pointer, in ticks: the desk rests.
+pub const REST_AFTER_TICKS: u64 = 5 * 60 * 100;
+
 /// The top bar's left cells that open Apps (GFX-089).
 pub const BAR_APPS_COLUMNS: usize = 12;
 
@@ -1466,10 +1471,12 @@ pub enum PaletteAction {
     Sketch,
     /// Every app as a grid (GFX-089).
     Apps,
+    /// Rest: the time alone, until a key or the pointer (GFX-092).
+    Rest,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 41] = [
+    pub const ALL: [PaletteAction; 42] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -1511,6 +1518,7 @@ impl PaletteAction {
         PaletteAction::Tasks,
         PaletteAction::Sketch,
         PaletteAction::Apps,
+        PaletteAction::Rest,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -1556,6 +1564,7 @@ impl PaletteAction {
             PaletteAction::Tasks => "Tasks: the to-do list",
             PaletteAction::Sketch => "Sketch: draw with the pointer",
             PaletteAction::Apps => "Apps: every app on the desk",
+            PaletteAction::Rest => "Rest: just the time, until you are back",
         }
     }
 
@@ -1602,6 +1611,7 @@ impl PaletteAction {
             PaletteAction::Tasks => "",
             PaletteAction::Sketch => "",
             PaletteAction::Apps => "Ctrl+Space twice",
+            PaletteAction::Rest => "Ctrl+L",
         }
     }
 
@@ -1904,6 +1914,10 @@ pub struct Desk {
     overview_since: Option<u64>,
     /// Sounds to play, handed to the kernel on the next tick (GFX-087).
     pending_sounds: Vec<Sound>,
+    /// Resting (GFX-092): the desk shows only the time until a key or
+    /// the pointer wakes it. `last_input` is the tick of the last one.
+    resting: bool,
+    last_input: u64,
 }
 
 impl Desk {
@@ -1953,6 +1967,8 @@ impl Desk {
             motion_clock: 0,
             overview_since: None,
             pending_sounds: Vec::new(),
+            resting: false,
+            last_input: 0,
         }
     }
 
@@ -2260,6 +2276,11 @@ impl Desk {
         // Motion (GFX-085): the clock, what has arrived, and a repaint
         // every tick while anything moves.
         self.motion_clock = now.max(1);
+        // Five minutes with no one at the desk: rest (GFX-092).
+        if !self.resting && now.saturating_sub(self.last_input) >= REST_AFTER_TICKS {
+            self.rest();
+            requests.push(DeskRequest::Repaint);
+        }
         let clock = self.motion_clock;
         self.motions
             .retain(|m| clock.saturating_sub(m.start) < MOTION_TICKS);
@@ -3151,6 +3172,10 @@ impl Desk {
                 self.open_or_raise(DeskApp::Launcher);
                 None
             }
+            PaletteAction::Rest => {
+                self.rest();
+                None
+            }
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
                 let id = self.open_or_raise(DeskApp::Sketch);
@@ -3512,6 +3537,14 @@ impl Desk {
     ) -> (Vec<DeskRequest>, bool) {
         let mut requests = Vec::new();
         let mut changed = false;
+        // The pointer is input; while resting it only wakes (GFX-092).
+        if !deliveries.is_empty() {
+            self.last_input = self.motion_clock;
+            if self.resting {
+                self.resting = false;
+                return (requests, true);
+            }
+        }
         for delivery in deliveries {
             match delivery {
                 Delivery::FocusChanged { current, .. } => {
@@ -3948,7 +3981,85 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
+    /// Whether the desk is resting (GFX-092).
+    pub fn resting(&self) -> bool {
+        self.resting
+    }
+
+    /// Rest now: the cards are hidden behind the time, the palette and
+    /// the overview close, nothing is lost.
+    pub fn rest(&mut self) {
+        self.resting = true;
+        self.palette = None;
+        self.overview = None;
+        self.overview_since = None;
+        self.drag = None;
+        self.resize = None;
+        self.text_select = None;
+        self.sketching = None;
+    }
+
+    /// The rest screen (GFX-092): the whole screen, the time eight times
+    /// the font, the date under it, how to wake at the foot.
+    fn rest_screen(&self, clock: &str) -> DesktopWindow {
+        use crate::widgets::{rect, text_width, Palette, Ui};
+        let palette = Palette::from_theme(&self.theme());
+        let mut ui = Ui::new(palette, None);
+        let (w, h) = (self.width as u32, self.height as u32);
+        let clock_h = 16 * 8;
+        let top = (h / 2).saturating_sub(clock_h + 20) as i32;
+        let clock_w = text_width(clock, 8);
+        ui.text(
+            ((w - clock_w.min(w)) / 2) as i32,
+            top,
+            clock,
+            palette.text,
+            8,
+        );
+        if let Some(today) = self.today {
+            ui.text_centered(
+                &rect(0, top + clock_h as i32 + 24, w, 32),
+                &today.long(),
+                palette.muted,
+                2,
+            );
+        }
+        ui.text_centered(
+            &rect(0, h as i32 - 64, w, 16),
+            "A key or the pointer wakes the desk",
+            palette.muted,
+            1,
+        );
+        let frame = ViewFrame::new(
+            self.top_bar_id,
+            ViewKind::StatusLine,
+            0,
+            ViewContent::text_buffer(Vec::new()),
+            0,
+        );
+        DesktopWindow::new(frame, SurfaceRect::new(0, 0, 0, 0))
+            .with_role(DesktopWindowRole::Status)
+            .with_layer(DesktopWindowLayer::System)
+            .with_style(WindowStyle::TopBar)
+            .with_pixel_rect(RasterRect::new(0, 0, self.width, self.height))
+            .with_overlay(ui.into_ops())
+    }
+
     pub fn handle_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
+        // Any key is input; while resting it only wakes (GFX-092), so a
+        // key pressed to wake is not typed into a card.
+        self.last_input = self.motion_clock;
+        if self.resting {
+            if byte == crate::notepad::KEY_CTRL_RELEASED {
+                return (None, false);
+            }
+            self.resting = false;
+            return (None, true);
+        }
+        if byte == KEY_CTRL_L {
+            self.rest();
+            return (None, true);
+        }
         // The palette first: it is modal while open, and Ctrl+Space or
         // Ctrl+P opens it from anywhere.
         if self.palette.is_some() {
@@ -4614,6 +4725,9 @@ impl Desk {
             self.log_notice(now, notice);
         }
         self.last_shell_notices = shell_notices.to_vec();
+        if self.resting {
+            return alloc::vec![self.rest_screen(clock)];
+        }
         if self
             .focused_window()
             .map(|w| w.app == DeskApp::Notices)
@@ -7581,6 +7695,53 @@ mod tests {
         desk.launch(DeskApp::Calculator);
         desk.handle_key(KEY_CTRL_SPACE);
         assert!(!listed(&mut desk).iter().any(|r| r.contains("heading")));
+    }
+
+    /// Rest (GFX-092): Ctrl+L, or five minutes with no input, hides the
+    /// desk behind the time; the key or pointer that wakes it does
+    /// nothing else; the cards are as they were.
+    #[test]
+    fn the_desk_rests_on_ctrl_l_or_when_idle_and_wakes_on_any_input() {
+        let mut desk = Desk::new(1280, 800);
+        let mut router = DesktopInputRouter::new();
+        desk.set_today(Some(Date::new(2026, 9, 24)));
+        desk.tick(10);
+        let id = desk.launch(DeskApp::Notepad);
+        desk.handle_key(b'a');
+        desk.handle_key(KEY_CTRL_L);
+        assert!(desk.resting());
+        let screen = desk.windows("12:34", true, None);
+        assert_eq!(screen.len(), 1);
+        let texts: Vec<(String, u8)> = screen[0]
+            .overlay
+            .iter()
+            .filter_map(|op| match op {
+                view_types::DrawOp::Text { text, style, .. } => Some((text.clone(), style.scale)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts[0], ("12:34".to_string(), 8));
+        assert_eq!(texts[1], ("Thursday 24 September 2026".to_string(), 2));
+        // The key that wakes is not typed.
+        desk.handle_key(b'b');
+        assert!(!desk.resting());
+        assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "a");
+        assert!(desk.windows("12:34", true, None).len() > 1);
+        // Idle: five minutes after the last key, it rests on its own.
+        desk.tick(100);
+        desk.handle_key(b'c');
+        assert!(
+            desk.tick(99 + REST_AFTER_TICKS)
+                .iter()
+                .all(|r| *r != DeskRequest::Repaint)
+                || !desk.resting()
+        );
+        desk.tick(100 + REST_AFTER_TICKS);
+        assert!(desk.resting());
+        // The pointer wakes it, and the press does nothing else.
+        assert!(route(&mut desk, &mut router, press(640, 400)));
+        assert!(!desk.resting());
+        assert_eq!(desk.window(id).unwrap().notepad().unwrap().content(), "ac");
     }
 
     #[test]
