@@ -2811,9 +2811,61 @@ impl Desk {
         if let Some(id) = picture_id("panda", 20) {
             ops.push(DrawOp::Picture { x: 12, y: 4, id });
         }
+        // The spaces (GFX-096): the active number in the accent with a
+        // rule under it; a dot under any other space with cards on it.
+        let strip = self.space_strip();
+        let strip_col = services_gui_host::top_bar_centre_column(self.width, strip.chars().count());
+        let counts = self.space_counts();
+        for index in 0..SPACES {
+            let digit_x = ((strip_col + index * 6 + 1) * GLYPH_WIDTH) as u32;
+            if index == self.space {
+                ops.push(DrawOp::Text {
+                    x: digit_x,
+                    y: text_y,
+                    text: alloc::format!("{}", index + 1),
+                    color: Some(rgb(theme.accent)),
+                    style: TextStyle::default(),
+                });
+                ops.push(DrawOp::Fill {
+                    rect: PixelRect {
+                        x: digit_x.saturating_sub(2),
+                        y: (TOP_BAR_HEIGHT - 5) as u32,
+                        width: 12,
+                        height: 2,
+                    },
+                    color: rgb(theme.accent),
+                });
+            } else if counts[index] > 0 {
+                ops.push(DrawOp::RoundedFill {
+                    rect: PixelRect {
+                        x: digit_x + 2,
+                        y: (TOP_BAR_HEIGHT - 6) as u32,
+                        width: 4,
+                        height: 4,
+                    },
+                    radius: 2,
+                    color: rgb(theme.text_muted),
+                });
+            }
+        }
         let mut x = start;
-        for part in self.bar_parts(clock) {
+        let parts = self.bar_parts(clock);
+        let last = parts.len().saturating_sub(1);
+        for (n, part) in parts.into_iter().enumerate() {
             let w = part.chars().count() * GLYPH_WIDTH;
+            // A hairline between the tray's parts, after the badge.
+            let badge = self.unseen_notices > 0 && n == 0;
+            if n < last && !badge {
+                ops.push(DrawOp::Fill {
+                    rect: PixelRect {
+                        x: (x + w + 3 * GLYPH_WIDTH / 2) as u32,
+                        y: 8,
+                        width: 1,
+                        height: (TOP_BAR_HEIGHT - 16) as u32,
+                    },
+                    color: rgb(theme.hairline),
+                });
+            }
             if self.unseen_notices > 0 && part.ends_with(" new") && x == start {
                 ops.push(DrawOp::RoundedFill {
                     rect: PixelRect {
@@ -3168,17 +3220,18 @@ impl Desk {
     /// The top bar's centre text: `[1] 2 3 4`, with a dot after a space
     /// that holds cards, so the strip says where things are.
     fn space_strip(&self) -> String {
-        let counts = self.space_counts();
         let mut strip = String::new();
         for index in 0..SPACES {
             if index > 0 {
                 strip.push_str("  ");
             }
-            let mark = if counts[index] > 0 { "." } else { " " };
+            // Four cells a space, as before; the active number is drawn
+            // over its cell in the accent, underlined, and a space with
+            // cards has a dot under it (GFX-096).
             if index == self.space {
-                strip.push_str(&alloc::format!("[{}]{mark}", index + 1));
+                strip.push_str("    ");
             } else {
-                strip.push_str(&alloc::format!(" {} {mark}", index + 1));
+                strip.push_str(&alloc::format!(" {}  ", index + 1));
             }
         }
         strip
@@ -4219,7 +4272,7 @@ impl Desk {
         DesktopWindow::new(frame, SurfaceRect::new(0, 0, 0, 0))
             .with_role(DesktopWindowRole::Status)
             .with_layer(DesktopWindowLayer::System)
-            .with_style(WindowStyle::TopBar)
+            .with_style(WindowStyle::Veil)
             .with_pixel_rect(RasterRect::new(0, 0, self.width, self.height))
             .with_overlay(ui.into_ops())
     }
@@ -6496,9 +6549,20 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(
-            lines[1], " 1 .  [2]    3     4  ",
-            "4 cells a space, 2 between"
+            lines[1], " 1           3     4  ",
+            "4 cells a space, 2 between; the active one is drawn over its cell"
         );
+        // The active number is drawn in the accent and underlined; space
+        // 1, which has a card, has a dot (GFX-096).
+        let accent_digit = bar
+            .overlay
+            .iter()
+            .any(|op| matches!(op, view_types::DrawOp::Text { text, .. } if text == "2"));
+        assert!(accent_digit);
+        assert!(bar
+            .overlay
+            .iter()
+            .any(|op| matches!(op, view_types::DrawOp::RoundedFill { radius: 2, .. })));
         assert!(bar.frame.title.as_deref().unwrap().contains("Ctrl+Space"));
         // A card opened here is here; Ctrl+Tab stays on this space.
         let b = desk.launch(DeskApp::Terminal);
@@ -7774,7 +7838,11 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(line(&bar(&mut desk)), "12:34");
-        assert_eq!(bar(&mut desk).overlay.len(), 1, "just the mark");
+        assert_eq!(
+            bar(&mut desk).overlay.len(),
+            3,
+            "the mark, and the active space's number and rule"
+        );
         desk.set_today(Some(Date::new(2026, 9, 24)));
         desk.vitals_loaded(Vitals {
             heap_used_kib: 8 * 1024,
@@ -7784,8 +7852,9 @@ mod tests {
         desk.notify(NoticeLevel::Info, "Saved memo", 0);
         let top = bar(&mut desk);
         assert_eq!(line(&top), "1 new   Thu 24 Sep            12:34");
-        // The mark, a badge (fill and its text) and a meter (track and fill).
-        assert_eq!(top.overlay.len(), 5);
+        // The mark, the space's number and rule, a badge (fill and text),
+        // a meter (track and fill), and a hairline either side of the meter.
+        assert_eq!(top.overlay.len(), 9);
         let widths: Vec<u32> = top
             .overlay
             .iter()

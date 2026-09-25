@@ -36,6 +36,8 @@ pub struct Palette {
     pub accent: Color,
     /// Text on an accent fill.
     pub on_accent: Color,
+    /// Thin rules and field outlines (GFX-096).
+    pub hairline: Color,
 }
 
 fn color(c: graphics_rasterizer::RgbaColor) -> Color {
@@ -51,6 +53,7 @@ impl Palette {
             muted: color(theme.text_muted),
             accent: color(theme.accent),
             on_accent: color(theme.background),
+            hairline: color(theme.hairline),
         }
     }
 }
@@ -223,6 +226,44 @@ impl Ui {
     /// Any draw operation, as it is (GFX-089): an icon, a line.
     pub fn push(&mut self, op: DrawOp) {
         self.ops.push(op);
+    }
+
+    /// A line from `(x0, y0)` to `(x1, y1)`, `thickness` pixels across
+    /// (GFX-096): drawn as parallel one-pixel lines.
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, thickness: i32) {
+        let steep = (y1 - y0).abs() > (x1 - x0).abs();
+        for t in 0..thickness.max(1) {
+            let o = t - thickness / 2;
+            let (dx, dy) = if steep { (o, 0) } else { (0, o) };
+            self.ops.push(DrawOp::Line {
+                x0: x0 + dx,
+                y0: y0 + dy,
+                x1: x1 + dx,
+                y1: y1 + dy,
+                color,
+            });
+        }
+    }
+
+    /// A search field (GFX-096): a raised well with a hairline, a drawn
+    /// magnifier, and the text beside it.
+    pub fn search_field(&mut self, area: PixelRect, text: &str, placeholder: bool) {
+        let p = self.palette;
+        self.fill(area, p.raised, 8);
+        self.outline(area, p.hairline, 8, 1);
+        let cy = (area.y + area.height / 2) as i32;
+        let lens = rect(area.x as i32 + 10, cy - 7, 11, 11);
+        self.outline(lens, p.muted, 6, 2);
+        self.line(
+            area.x as i32 + 19,
+            cy + 2,
+            area.x as i32 + 24,
+            cy + 7,
+            p.muted,
+            2,
+        );
+        let ink = if placeholder { p.muted } else { p.text };
+        self.text(area.x as i32 + 32, cy - 8, text, ink, 1);
     }
 
     /// Make `area` answer `key` to a click without drawing anything: for

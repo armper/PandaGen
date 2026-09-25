@@ -107,12 +107,7 @@ impl LauncherView {
         } else {
             alloc::format!("{}_", self.query)
         };
-        let ink = if self.query.is_empty() {
-            p.muted
-        } else {
-            p.text
-        };
-        ui.text(4, 6, &search, ink, 1);
+        ui.search_field(rect(0, 0, width, 26), &search, self.query.is_empty());
         let shown = self.matches();
         if shown.is_empty() {
             ui.text(4, GRID_TOP + 12, "No app has that name", p.muted, 1);

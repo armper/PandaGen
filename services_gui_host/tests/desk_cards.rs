@@ -352,6 +352,38 @@ fn pictures_are_blended_by_their_alpha_in_the_dock_and_on_cards() {
     assert_ne!(px(&plain, 320, 368), RgbaColor::new(200, 0, 0, 255));
 }
 
+/// A veil (GFX-096) darkens what is under it and draws its overlay on
+/// top; a card under it is still seen, dimmer.
+#[test]
+fn a_veil_darkens_what_is_under_it() {
+    let theme = Theme::DEFAULT;
+    let card =
+        DesktopWindow::card(frame("Card", &["x"]), RasterRect::new(100, 80, 300, 200)).focused();
+    let veil = DesktopWindow::new(
+        frame("", &[]),
+        services_gui_host::SurfaceRect::new(0, 0, 0, 0),
+    )
+    .with_style(WindowStyle::Veil)
+    .with_pixel_rect(RasterRect::new(0, 0, W, H))
+    .with_z_index(1_000)
+    .with_overlay(vec![view_types::DrawOp::Fill {
+        rect: view_types::PixelRect {
+            x: 10,
+            y: 10,
+            width: 4,
+            height: 4,
+        },
+        color: view_types::Color::rgb(255, 255, 255),
+    }]);
+    let bare = render(vec![card.clone()]);
+    let veiled = render(vec![card, veil]);
+    let (a, b) = (px(&bare, 250, 200), px(&veiled, 250, 200));
+    assert_eq!(a, theme.surface);
+    assert!(b.r < a.r && b.g < a.g && b.b < a.b, "{a:?} -> {b:?}");
+    assert!(b.g > theme.shadow.g, "still seen through: {b:?}");
+    assert_eq!(px(&veiled, 11, 11), RgbaColor::new(255, 255, 255, 255));
+}
+
 /// A wallpaper is sampled to the surface, behind the cards, and a damage
 /// repaint reads the same pixels (GFX-066).
 #[test]

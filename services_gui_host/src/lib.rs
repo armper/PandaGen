@@ -345,6 +345,9 @@ pub enum WindowStyle {
     /// The desk's top bar: the window title at the left, the first content
     /// line right-aligned.
     TopBar,
+    /// A veil over everything (GFX-096): what is under it, darkened, and
+    /// the overlay drawn on top. The rest screen is one.
+    Veil,
 }
 
 fn default_chrome() -> bool {
@@ -593,7 +596,7 @@ impl DesktopWindow {
                     .saturating_sub(CARD_HEADER_HEIGHT + CARD_PADDING * 2 + footer)
                     / CARD_LINE_HEIGHT
             }
-            WindowStyle::Dock | WindowStyle::TopBar => 0,
+            WindowStyle::Dock | WindowStyle::TopBar | WindowStyle::Veil => 0,
             WindowStyle::Classic if self.chrome => self.rect.height.saturating_sub(2),
             WindowStyle::Classic => self.rect.height,
         }
@@ -1611,6 +1614,7 @@ fn raster_window(
         WindowStyle::Card => return raster_card(target, window, rect, clipped_rect, theme),
         WindowStyle::Dock => return raster_dock(target, window, rect, clipped_rect, theme),
         WindowStyle::TopBar => return raster_top_bar(target, window, rect, clipped_rect, theme),
+        WindowStyle::Veil => return raster_veil(target, window, rect, clipped_rect, theme),
         WindowStyle::Classic => {}
     }
 
@@ -1818,7 +1822,7 @@ fn hit_region_for_style(window: &DesktopWindow, x: usize, y: usize) -> Option<Hi
         }
         // The bar's text cells, so the desk can tell what was clicked
         // (GFX-067): the space strip, the notices, or the rest.
-        WindowStyle::TopBar => Some(HitRegion::Content {
+        WindowStyle::TopBar | WindowStyle::Veil => Some(HitRegion::Content {
             line: 0,
             column: x.saturating_sub(window.bounds().x) / RASTER_CELL_WIDTH.max(1),
         }),
@@ -2183,6 +2187,32 @@ fn raster_top_bar(
     // The tray's pictures (GFX-088): a badge, a meter, over the text,
     // in the bar's own pixels.
     if !window.overlay.is_empty() {
+        raster_graphics(&mut painter, rect, &window.overlay, theme);
+    }
+    true
+}
+
+/// How dark a veil makes what is under it (GFX-096), out of 255.
+pub const VEIL_ALPHA: u8 = 176;
+
+/// Paint a veil (GFX-096): the theme's shadow colour laid over what is
+/// already there at `VEIL_ALPHA`, then the overlay.
+fn raster_veil(
+    target: &mut impl RenderTarget,
+    window: &DesktopWindow,
+    rect: RasterRect,
+    clipped_rect: RasterRect,
+    theme: &Theme,
+) -> bool {
+    let shade = RgbaColor::new(theme.shadow.r, theme.shadow.g, theme.shadow.b, VEIL_ALPHA);
+    for y in clipped_rect.y..clipped_rect.bottom().min(target.height()) {
+        for x in clipped_rect.x..clipped_rect.right().min(target.width()) {
+            let under = target.pixel(x, y).unwrap_or(theme.background);
+            target.write_pixel(x, y, graphics_rasterizer::blend_over(under, shade));
+        }
+    }
+    if !window.overlay.is_empty() {
+        let mut painter = ScissorTarget::new(target, clipped_rect);
         raster_graphics(&mut painter, rect, &window.overlay, theme);
     }
     true

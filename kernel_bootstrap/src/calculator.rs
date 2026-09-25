@@ -209,8 +209,27 @@ impl Calculator {
                 'C' | '<' | '(' | ')' => ButtonKind::Quiet,
                 _ => ButtonKind::Plain,
             };
-            let label = key.to_string();
+            // Divide and multiply are drawn as the signs people know
+            // (GFX-096); the keys they stand for are the ones typed.
+            let drawn = matches!(key, '/' | '*');
+            let label = if drawn {
+                String::from(" ")
+            } else {
+                key.to_string()
+            };
             ui.button(*cell, &label, *key as u8, kind);
+            if drawn {
+                let cx = (cell.x + cell.width / 2) as i32;
+                let cy = (cell.y + cell.height / 2) as i32;
+                if *key == '*' {
+                    ui.line(cx - 6, cy - 6, cx + 6, cy + 6, p.accent, 2);
+                    ui.line(cx - 6, cy + 6, cx + 6, cy - 6, p.accent, 2);
+                } else {
+                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
+                    ui.fill(rect(cx - 2, cy - 8, 4, 4), p.accent, 2);
+                    ui.fill(rect(cx - 2, cy + 5, 4, 4), p.accent, 2);
+                }
+            }
         }
         // The tape, newest first, in the muted tone.
         for (i, (expr, value)) in self.tape.iter().take(layout.tape_rows as usize).enumerate() {
