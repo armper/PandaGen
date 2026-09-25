@@ -49,5 +49,39 @@ def export():
     print("exported", len(NAMES) * len(SIZES), "icons")
 
 
+THUMBS = {
+    "picture": "wallpaper.png",
+    "aurora": "wallpapers/aurora.jpg",
+    "bamboo": "wallpapers/bamboo.jpg",
+    "nebula": "wallpapers/nebula.jpg",
+}
+THUMB_SIZE = (100, 62)
+
+
+def rounded_mask(size, radius, ss=4):
+    from PIL import ImageDraw
+    w, h = size
+    m = Image.new("L", (w * ss, h * ss), 0)
+    ImageDraw.Draw(m).rounded_rectangle((0, 0, w * ss - 1, h * ss - 1), radius * ss, fill=255)
+    return m.resize(size, Image.LANCZOS)
+
+
+def thumbnails():
+    # Look's wallpaper thumbnails (GFX-100): each wallpaper cropped to
+    # 16:10, 100x62, corners rounded.
+    assets = os.path.join(ROOT, "kernel_bootstrap", "assets")
+    for name, src in THUMBS.items():
+        im = Image.open(os.path.join(assets, src)).convert("RGB")
+        w, h = im.size
+        th = w * 10 // 16
+        top = max(0, (h - th) // 2)
+        im = im.crop((0, top, w, min(h, top + th))).resize(THUMB_SIZE, Image.LANCZOS).convert("RGBA")
+        im.putalpha(rounded_mask(THUMB_SIZE, 6))
+        with open(os.path.join(ICONS, f"thumb_{name}.rgba"), "wb") as f:
+            f.write(im.tobytes())
+    print("exported", len(THUMBS), "thumbnails")
+
+
 if __name__ == "__main__":
     export()
+    thumbnails()

@@ -779,7 +779,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-pixel".to_string(),
         "600,200,40,28,30".to_string(),
         "--expect-pixel".to_string(),
-        "430,200,52,211,153".to_string(),
+        "361,200,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];

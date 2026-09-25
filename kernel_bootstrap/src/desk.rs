@@ -44,6 +44,28 @@ macro_rules! picture {
     };
 }
 
+/// A wallpaper's thumbnail for Look (GFX-100): 100x62, rounded.
+macro_rules! thumbnail {
+    ($name:literal) => {
+        services_gui_host::Picture {
+            width: THUMB_W as u16,
+            height: THUMB_H as u16,
+            rgba: include_bytes!(concat!("../assets/icons/thumb_", $name, ".rgba")),
+        }
+    };
+}
+pub const THUMB_W: u32 = 100;
+pub const THUMB_H: u32 = 62;
+/// The wallpapers that have a thumbnail, in `PICTURES` after the icons.
+pub const THUMB_NAMES: [&str; 4] = ["picture", "aurora", "bamboo", "nebula"];
+
+/// The thumbnail of wallpaper `name` (as Look names it), if it has one.
+pub fn thumbnail_id(name: &str) -> Option<u32> {
+    let lower = name.to_ascii_lowercase();
+    let n = THUMB_NAMES.iter().position(|t| *t == lower)?;
+    Some((PICTURE_NAMES.len() * PICTURE_SIZES.len() + n) as u32)
+}
+
 /// The order of `PICTURES`: a name, then its sizes.
 pub const PICTURE_NAMES: [&str; 11] = [
     "notepad",
@@ -60,7 +82,7 @@ pub const PICTURE_NAMES: [&str; 11] = [
 ];
 pub const PICTURE_SIZES: [u32; 6] = [64, 48, 40, 32, 20, 16];
 
-pub static PICTURES: [services_gui_host::Picture; 66] = [
+pub static PICTURES: [services_gui_host::Picture; 70] = [
     picture!("notepad", 64),
     picture!("notepad", 48),
     picture!("notepad", 40),
@@ -127,6 +149,11 @@ pub static PICTURES: [services_gui_host::Picture; 66] = [
     picture!("panda", 32),
     picture!("panda", 20),
     picture!("panda", 16),
+    // Look's wallpaper thumbnails (GFX-100), after the icons.
+    thumbnail!("picture"),
+    thumbnail!("aurora"),
+    thumbnail!("bamboo"),
+    thumbnail!("nebula"),
 ];
 
 /// The picture of `name` at `size`, as its number in `PICTURES`.
@@ -736,7 +763,14 @@ pub const WELCOME_LINES: [&str; 5] = [
 ];
 
 /// The Look card (GFX-059).
-pub const LOOK_SIZE: (usize, usize) = (420, 480);
+pub const LOOK_SIZE: (usize, usize) = (560, 430);
+/// A Look tile's key (GFX-100): `LOOK_KEY_FIRST + row`, above anything the
+/// keyboard parser produces.
+pub const LOOK_KEY_FIRST: u8 = 0xC0;
+/// Where Look's three rows of tiles sit on its canvas.
+const LOOK_THEMES_TOP: i32 = 24;
+const LOOK_ACCENTS_TOP: i32 = 150;
+const LOOK_WALLS_TOP: i32 = 250;
 
 /// What the desk looks like: a preset and an accent, by name (GFX-059).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,65 +865,6 @@ impl LookView {
     const ACCENT_ROWS: usize = Theme::PRESETS.len() + Theme::ACCENTS.len();
     const ROWS: usize = Self::ACCENT_ROWS + WALLPAPERS.len();
 
-    /// The content lines: a heading, the presets, a gap, a heading, the
-    /// accents. `line_of_row` maps a row to its line for the highlight.
-    fn lines(kept: &LookChoice, preview: &LookChoice) -> Vec<String> {
-        let mark = |name: &str, current: &str| {
-            if name.eq_ignore_ascii_case(current) {
-                alloc::format!("  * {name}")
-            } else {
-                alloc::format!("    {name}")
-            }
-        };
-        let mut lines = alloc::vec!["Theme".to_string()];
-        for (name, _) in Theme::PRESETS.iter() {
-            let mut line = mark(name, &preview.theme);
-            if name.eq_ignore_ascii_case(&kept.theme) && !name.eq_ignore_ascii_case(&preview.theme)
-            {
-                line.push_str("   (kept)");
-            }
-            lines.push(line);
-        }
-        lines.push(String::new());
-        lines.push("Accent".to_string());
-        for (name, _) in Theme::ACCENTS.iter() {
-            let mut line = mark(name, &preview.accent);
-            if name.eq_ignore_ascii_case(&kept.accent)
-                && !name.eq_ignore_ascii_case(&preview.accent)
-            {
-                line.push_str("   (kept)");
-            }
-            lines.push(line);
-        }
-        lines.push(String::new());
-        lines.push("Wallpaper".to_string());
-        for name in WALLPAPERS.iter() {
-            let mut line = mark(name, &preview.wallpaper);
-            if name.eq_ignore_ascii_case(&kept.wallpaper)
-                && !name.eq_ignore_ascii_case(&preview.wallpaper)
-            {
-                line.push_str("   (kept)");
-            }
-            lines.push(line);
-        }
-        lines
-    }
-
-    fn line_of_row(row: usize) -> usize {
-        if row < Self::THEME_ROWS {
-            1 + row
-        } else if row < Self::ACCENT_ROWS {
-            3 + row
-        } else {
-            5 + row
-        }
-    }
-
-    /// The inverse of `line_of_row`: headings and the gap are no row.
-    fn row_of_line(line: usize) -> Option<usize> {
-        (0..Self::ROWS).find(|row| Self::line_of_row(*row) == line)
-    }
-
     /// The choice the highlighted row stands for, given the current one.
     fn choice_at(&self, current: &LookChoice) -> LookChoice {
         let mut choice = current.clone();
@@ -901,6 +876,135 @@ impl LookView {
             choice.wallpaper = WALLPAPERS[self.row - Self::ACCENT_ROWS].to_string();
         }
         choice
+    }
+
+    /// The tile of `row` on a canvas `width` wide (GFX-100): themes on
+    /// the first line, accents on the second, wallpapers on the third,
+    /// five columns to a line.
+    pub fn cell_of_row(width: u32, row: usize) -> view_types::PixelRect {
+        use crate::widgets::{grid, rect};
+        let (top, h, col) = if row < Self::THEME_ROWS {
+            (LOOK_THEMES_TOP, 64, row)
+        } else if row < Self::ACCENT_ROWS {
+            (LOOK_ACCENTS_TOP, 36, row - Self::THEME_ROWS)
+        } else {
+            (LOOK_WALLS_TOP, THUMB_H, row - Self::ACCENT_ROWS)
+        };
+        grid(rect(0, top, width, h), 5, 1, 8)[col]
+    }
+
+    /// Look, drawn (GFX-100): each theme as a little desk in its own
+    /// colours, each accent as a swatch, each wallpaper as a thumbnail.
+    /// The highlighted tile is ringed in the accent; what is kept has a
+    /// dot under its name. A tile answers a click with its row's key.
+    pub fn ui(
+        &self,
+        width: u32,
+        palette: crate::widgets::Palette,
+        hover: Option<(i32, i32)>,
+        kept: &LookChoice,
+        preview: &LookChoice,
+    ) -> crate::widgets::Ui {
+        use crate::widgets::{rect, Ui};
+        use view_types::{Color, DrawOp};
+        let rgb = |c: graphics_rasterizer::RgbaColor| Color::rgba(c.r, c.g, c.b, 255);
+        let mut ui = Ui::new(palette, hover);
+        let p = palette;
+        let accent = Theme::accent_named(&preview.accent).unwrap_or(Theme::ACCENTS[0].1);
+        ui.text(0, 0, "Theme", p.muted, 1);
+        ui.text(0, LOOK_ACCENTS_TOP - 20, "Accent", p.muted, 1);
+        ui.text(0, LOOK_WALLS_TOP - 20, "Wallpaper", p.muted, 1);
+        for row in 0..Self::ROWS {
+            let cell = Self::cell_of_row(width, row);
+            let (name, is_kept): (&str, bool) = if row < Self::THEME_ROWS {
+                let (name, theme) = Theme::PRESETS[row];
+                // A little desk in the theme's colours.
+                ui.fill(cell, rgb(theme.background_bottom), 8);
+                let inner = rect(cell.x as i32 + 12, cell.y as i32 + 12, cell.width - 24, 42);
+                ui.fill(inner, rgb(theme.surface), 5);
+                ui.outline(inner, rgb(theme.hairline), 5, 1);
+                ui.fill(
+                    rect(inner.x as i32, inner.y as i32, inner.width, 3),
+                    rgb(accent),
+                    1,
+                );
+                for k in 0..3 {
+                    let w = [inner.width - 16, inner.width - 28, inner.width - 40][k];
+                    ui.fill(
+                        rect(inner.x as i32 + 8, inner.y as i32 + 12 + 9 * k as i32, w, 3),
+                        rgb(if k == 0 { theme.text } else { theme.text_muted }),
+                        1,
+                    );
+                }
+                (name, name.eq_ignore_ascii_case(&kept.theme))
+            } else if row < Self::ACCENT_ROWS {
+                let (name, colour) = Theme::ACCENTS[row - Self::THEME_ROWS];
+                let d = 32;
+                let swatch = rect(
+                    (cell.x + (cell.width - d) / 2) as i32,
+                    cell.y as i32 + 2,
+                    d,
+                    d,
+                );
+                ui.fill(swatch, rgb(colour), d / 2);
+                (name, name.eq_ignore_ascii_case(&kept.accent))
+            } else {
+                let name = WALLPAPERS[row - Self::ACCENT_ROWS];
+                let thumb = rect(
+                    (cell.x + (cell.width - THUMB_W) / 2) as i32,
+                    cell.y as i32,
+                    THUMB_W,
+                    THUMB_H,
+                );
+                match thumbnail_id(name) {
+                    Some(id) => ui.push(DrawOp::Picture {
+                        x: thumb.x,
+                        y: thumb.y,
+                        id,
+                    }),
+                    None => {
+                        // Gradient: the desk's own two colours, top and
+                        // bottom.
+                        let theme = Theme::named(&preview.theme).unwrap_or(Theme::DESK);
+                        ui.fill(thumb, rgb(theme.background), 6);
+                        ui.fill(
+                            rect(
+                                thumb.x as i32,
+                                (thumb.y + THUMB_H / 2) as i32,
+                                THUMB_W,
+                                THUMB_H / 2,
+                            ),
+                            rgb(theme.background_bottom),
+                            6,
+                        );
+                    }
+                }
+                (name, name.eq_ignore_ascii_case(&kept.wallpaper))
+            };
+            let ring = rect(
+                cell.x as i32 - 3,
+                cell.y as i32 - 3,
+                cell.width + 6,
+                cell.height + 6,
+            );
+            if row == self.row {
+                ui.outline(ring, p.accent, 10, 2);
+            } else if ui.hovered(&cell) {
+                ui.outline(ring, p.hairline, 10, 1);
+            }
+            let label_y = (cell.y + cell.height) as i32 + 4;
+            let ink = if row == self.row { p.text } else { p.muted };
+            ui.text_centered(&rect(cell.x as i32, label_y, cell.width, 16), name, ink, 1);
+            if is_kept {
+                ui.fill(
+                    rect((cell.x + cell.width / 2) as i32 - 2, label_y + 19, 4, 4),
+                    p.accent,
+                    2,
+                );
+            }
+            ui.hit_area(ring, LOOK_KEY_FIRST + row as u8);
+        }
+        ui
     }
 
     /// The row that stands for `choice`'s theme (so the card opens on it).
@@ -4089,31 +4193,30 @@ impl Desk {
                             if clicked {
                                 self.say(Sound::Click);
                             }
-                            // Look: a click on a row previews it; a click on
-                            // the row already under the highlight keeps it.
-                            let look_row = self
-                                .window(*target)
-                                .filter(|w| w.app == DeskApp::Look)
-                                .and_then(|_| LookView::row_of_line(line));
-                            if let Some(row) = look_row {
-                                let current = self
-                                    .look_preview
-                                    .clone()
-                                    .unwrap_or_else(|| self.look.clone());
-                                let mut keep = false;
-                                if let Some(look) =
-                                    self.window_mut(*target).and_then(|w| w.look_mut())
-                                {
-                                    keep = look.row == row;
-                                    look.row = row;
-                                    if !keep {
-                                        self.look_preview = Some(look.choice_at(&current));
-                                    }
-                                }
-                                if keep {
-                                    let (request, _) = self.handle_app_key(*target, b'\n');
-                                    requests.extend(request);
-                                }
+                            // Look: a tile, by pixel (GFX-100); its key
+                            // previews it, or keeps it if it is highlighted.
+                            let look_key =
+                                match (self.canvas_point(*target, px, py), self.window(*target)) {
+                                    (Some((x, y)), Some(w)) => match &w.state {
+                                        AppState::Look(look) => {
+                                            let (cw, _) = Self::canvas_size(w.bounds);
+                                            let kept = self.look.clone();
+                                            let preview = self
+                                                .look_preview
+                                                .clone()
+                                                .unwrap_or_else(|| kept.clone());
+                                            let palette =
+                                                crate::widgets::Palette::from_theme(&self.theme());
+                                            look.ui(cw, palette, None, &kept, &preview).hit(x, y)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                            if let Some(key) = look_key {
+                                let (request, _) = self.handle_app_key(*target, key);
+                                requests.extend(request);
+                                self.say(Sound::Click);
                             }
                             changed = true;
                         }
@@ -4776,6 +4879,23 @@ impl Desk {
                         self.close(id);
                         (None, true)
                     }
+                    // A tile (GFX-100): another one previews, the one
+                    // already highlighted keeps.
+                    key if key >= LOOK_KEY_FIRST
+                        && ((key - LOOK_KEY_FIRST) as usize) < LookView::ROWS =>
+                    {
+                        let row = (key - LOOK_KEY_FIRST) as usize;
+                        if row == look.row {
+                            let chosen = self.look_preview.take().unwrap_or(current);
+                            let text = chosen.to_text();
+                            self.look = chosen;
+                            (Some(DeskRequest::SaveLook { text }), true)
+                        } else {
+                            look.row = row;
+                            self.look_preview = Some(look.choice_at(&current));
+                            (None, true)
+                        }
+                    }
                     _ => (None, false),
                 }
             }
@@ -5263,8 +5383,9 @@ impl Desk {
                 }
                 AppState::Look(look) => {
                     let preview = look_preview.clone().unwrap_or_else(|| kept_look.clone());
-                    let lines = LookView::lines(&kept_look, &preview);
-                    highlight = Some(LookView::line_of_row(look.row));
+                    let (w, _) = Self::canvas_size(window.bounds);
+                    graphics = Some(look.ui(w, palette, hover, &kept_look, &preview).into_ops());
+                    let lines = Vec::new();
                     let footer = if look_preview.is_some() {
                         alloc::format!(
                             "Previewing {} + {}   Enter keeps it   Esc goes back",
@@ -6058,11 +6179,11 @@ mod tests {
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert_eq!(card.actions, alloc::vec!["Keep", "Revert"]);
-        assert_eq!(
-            card.highlight_line,
-            Some(1),
+        assert!(
+            matches!(&desk.window(id).unwrap().state, AppState::Look(l) if l.row == 0),
             "opens on the kept theme, Dusk"
         );
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
 
         // Down twice: Ember, previewed at once, not kept.
         desk.handle_key(crate::notepad::KEY_DOWN);
@@ -6439,9 +6560,13 @@ mod tests {
         let id = desk.launch(DeskApp::Look);
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        let (ox, oy, pitch) = card.card_text_origin();
-        let ember_line = LookView::line_of_row(2);
-        let (cx, cy) = ((ox + 40) as i32, (oy + pitch * ember_line + 4) as i32);
+        let (ox, oy, _) = card.card_text_origin();
+        let (cw, _) = Desk::canvas_size(desk.window(id).unwrap().bounds);
+        let ember = LookView::cell_of_row(cw, 2);
+        let (cx, cy) = (
+            (ox as u32 + ember.x + ember.width / 2) as i32,
+            (oy as u32 + ember.y + ember.height / 2) as i32,
+        );
         let click = press(cx, cy);
         let deliveries = router.route(&compositor, &windows, click);
         desk.handle_deliveries_with_requests(&deliveries);
@@ -8092,7 +8217,11 @@ mod tests {
     /// the dock's tiles name their pictures.
     #[test]
     fn every_app_has_its_picture_at_every_size_and_the_dock_uses_them() {
-        for (n, picture) in PICTURES.iter().enumerate() {
+        for (n, picture) in PICTURES
+            .iter()
+            .take(PICTURE_NAMES.len() * PICTURE_SIZES.len())
+            .enumerate()
+        {
             let size = PICTURE_SIZES[n % PICTURE_SIZES.len()] as usize;
             assert_eq!(
                 (picture.width as usize, picture.height as usize),
@@ -8144,6 +8273,49 @@ mod tests {
             assert_eq!(back.wallpaper, name);
         }
         assert_eq!(WALLPAPER_AURORA.width, 640);
+    }
+
+    /// Look, drawn (GFX-100): a tile per theme, accent and wallpaper, the
+    /// wallpapers but Gradient as thumbnails, the highlighted one ringed,
+    /// and every tile answering a click with its row's key.
+    #[test]
+    fn look_draws_previews_swatches_and_thumbnails_and_tiles_take_clicks() {
+        let palette = crate::widgets::Palette::from_theme(&Theme::DEFAULT);
+        let kept = LookChoice::default();
+        let view = LookView { row: 0 };
+        let ui = view.ui(544, palette, None, &kept, &kept);
+        for row in 0..LookView::ROWS {
+            let cell = LookView::cell_of_row(544, row);
+            let key = ui.hit(cell.x as i32 + 4, cell.y as i32 + 4);
+            assert_eq!(key, Some(LOOK_KEY_FIRST + row as u8), "row {row}");
+        }
+        let ops = ui.into_ops();
+        let thumbs = ops
+            .iter()
+            .filter(|op| matches!(op, view_types::DrawOp::Picture { .. }))
+            .count();
+        assert_eq!(thumbs, WALLPAPERS.len() - 1, "every wallpaper but Gradient");
+        for name in ["Dusk", "Mint", "Aurora", "Gradient"] {
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, view_types::DrawOp::Text { text, .. } if text == name)),
+                "{name}"
+            );
+        }
+        assert_eq!(thumbnail_id("Aurora"), Some(67));
+        assert_eq!(thumbnail_id("Gradient"), None);
+        let t = &PICTURES[thumbnail_id("Nebula").unwrap() as usize];
+        assert_eq!((t.width as u32, t.height as u32), (THUMB_W, THUMB_H));
+        // A tile's key previews it; the same key again keeps it.
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.launch(DeskApp::Look);
+        let aurora = LOOK_KEY_FIRST + (LookView::ACCENT_ROWS + 1) as u8;
+        assert_eq!(desk.handle_app_key(id, aurora), (None, true));
+        assert_eq!(desk.look().wallpaper, "Picture", "previewed, not kept");
+        assert!(desk.wallpaper().is_some());
+        let (request, _) = desk.handle_app_key(id, aurora);
+        assert!(matches!(request, Some(DeskRequest::SaveLook { .. })));
+        assert_eq!(desk.look().wallpaper, "Aurora");
     }
 
     #[test]
