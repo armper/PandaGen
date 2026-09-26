@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("remote-key") => cmd_remote_key(args),
         Some("image") => cmd_image(),
         Some("limine-fetch") => cmd_limine_fetch(args),
-        Some("gauntlet") => cmd_gauntlet(),
+        Some("gauntlet") => cmd_gauntlet(args),
         Some("wallpaper") => cmd_wallpaper(args),
         _ => usage(),
     }
@@ -204,124 +204,112 @@ impl Drop for GauntletLock {
 /// forwarded ports -- for a person's own `cargo xtask qemu` session.
 const GAUNTLET_PORT_BASE: u32 = 1;
 
-fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let _lock = GauntletLock::acquire(&root)?;
-
-    println!("== cargo test --workspace");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args(["test", "--workspace"])
-        .status()?;
-    if !status.success() {
-        return Err("workspace tests failed".into());
-    }
-
-    // `--workspace` builds default features only, so anything behind a
-    // non-default feature is never compiled, let alone tested. `hal_mode`
-    // held a real defect for exactly that reason.
-    println!("== cargo test --workspace --all-features");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args(["test", "--workspace", "--all-features"])
-        .status()?;
-    if !status.success() {
-        return Err("workspace tests with all features failed".into());
-    }
-
-    // Every crate on its own. Cargo unifies features across a workspace
-    // build, so a crate that does not declare what it actually needs
-    // compiles anyway as long as some *other* member happens to turn the
-    // feature on. Two crates were in that state: `workspace_access` and
-    // `console_vga`, the latter declaring serde only as a dev-dependency
-    // while its library derives Serialize. `--workspace` was green for both.
-    println!("== cargo check, one crate at a time");
-    // `cargo metadata`'s JSON has `name` on targets and dependencies too,
-    // so ask for the package list in a form with one name per line.
-    let members = Command::new("cargo")
-        .current_dir(&root)
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .output()?;
-    let metadata = String::from_utf8_lossy(&members.stdout);
-    // Every workspace member appears in `"workspace_members"` as an id whose
-    // first token is the package name.
-    let mut names: Vec<String> = Vec::new();
-    if let Some(list) = metadata
-        .split_once("\"workspace_members\":[")
-        .and_then(|(_, rest)| rest.split_once(']'))
-        .map(|(list, _)| list)
-    {
-        for entry in list.split(',') {
-            let entry = entry.trim().trim_matches('"');
-            // Ids look like `path+file:///…/crate#1.0.0` or `crate 1.0.0 (…)`.
-            let name = entry
-                .rsplit_once('#')
-                .map(|(_, tail)| match tail.split_once('@') {
-                    Some((name, _)) => name,
-                    None => {
-                        // `#1.0.0` means the name is the last path segment.
-                        entry
-                            .split('#')
-                            .next()
-                            .and_then(|p| p.rsplit('/').next())
-                            .unwrap_or(tail)
-                    }
-                })
-                .unwrap_or_else(|| entry.split(' ').next().unwrap_or(entry));
-            if !name.is_empty() && !names.iter().any(|seen| seen == name) {
-                names.push(name.to_string());
-            }
-        }
-    }
-    if names.is_empty() {
-        return Err("could not list workspace members".into());
-    }
-    println!("   {} crates", names.len());
-    let mut alone_failed = Vec::new();
-    for name in &names {
+    // `--boots-only`: the image and the boots, without the tests before
+    // them -- for going round again on a boot that failed (DEV-001).
+    let boots_only = args.any(|a| a == "--boots-only");
+    let began = std::time::Instant::now();
+    if !boots_only {
+        println!("== cargo test --workspace");
         let status = Command::new("cargo")
             .current_dir(&root)
-            .args(["check", "-p", name, "--all-targets", "--quiet"])
+            .args(["test", "--workspace"])
             .status()?;
         if !status.success() {
-            alone_failed.push(name.clone());
+            return Err("workspace tests failed".into());
+        }
+
+        // `--workspace` builds default features only, so anything behind a
+        // non-default feature is never compiled, let alone tested. `hal_mode`
+        // held a real defect for exactly that reason.
+        println!("== cargo test --workspace --all-features");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["test", "--workspace", "--all-features"])
+            .status()?;
+        if !status.success() {
+            return Err("workspace tests with all features failed".into());
+        }
+
+        // Every crate on its own. Cargo unifies features across a workspace
+        // build, so a crate that does not declare what it actually needs
+        // compiles anyway as long as some *other* member happens to turn the
+        // feature on. Two crates were in that state: `workspace_access` and
+        // `console_vga`, the latter declaring serde only as a dev-dependency
+        // while its library derives Serialize. `--workspace` was green for both.
+        println!("== cargo check, one crate at a time");
+        // `cargo metadata`'s JSON has `name` on targets and dependencies too,
+        // so ask for the package list in a form with one name per line.
+        let members = Command::new("cargo")
+            .current_dir(&root)
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .output()?;
+        let metadata = String::from_utf8_lossy(&members.stdout);
+        // Every workspace member appears in `"workspace_members"` as an id whose
+        // first token is the package name.
+        let mut names: Vec<String> = Vec::new();
+        if let Some(list) = metadata
+            .split_once("\"workspace_members\":[")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+        {
+            for entry in list.split(',') {
+                let entry = entry.trim().trim_matches('"');
+                // Ids look like `path+file:///…/crate#1.0.0` or `crate 1.0.0 (…)`.
+                let name = entry
+                    .rsplit_once('#')
+                    .map(|(_, tail)| match tail.split_once('@') {
+                        Some((name, _)) => name,
+                        None => {
+                            // `#1.0.0` means the name is the last path segment.
+                            entry
+                                .split('#')
+                                .next()
+                                .and_then(|p| p.rsplit('/').next())
+                                .unwrap_or(tail)
+                        }
+                    })
+                    .unwrap_or_else(|| entry.split(' ').next().unwrap_or(entry));
+                if !name.is_empty() && !names.iter().any(|seen| seen == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        if names.is_empty() {
+            return Err("could not list workspace members".into());
+        }
+        println!("   {} crates", names.len());
+        let mut alone_failed = Vec::new();
+        for name in &names {
+            let status = Command::new("cargo")
+                .current_dir(&root)
+                .args(["check", "-p", name, "--all-targets", "--quiet"])
+                .status()?;
+            if !status.success() {
+                alone_failed.push(name.clone());
+            }
+        }
+        if !alone_failed.is_empty() {
+            return Err(format!(
+                "these crates do not build on their own, and pass only through \
+             workspace feature unification: {}",
+                alone_failed.join(", ")
+            )
+            .into());
         }
     }
-    if !alone_failed.is_empty() {
-        return Err(format!(
-            "these crates do not build on their own, and pass only through \
-             workspace feature unification: {}",
-            alone_failed.join(", ")
-        )
-        .into());
-    }
-
-    println!("== cargo xtask iso");
+    println!(
+        "== cargo xtask iso ({:.0}s in)",
+        began.elapsed().as_secs_f64()
+    );
     cmd_iso()?;
 
-    // From a freshly formatted disk. The image is only created when absent,
-    // so it otherwise accumulates every previous run's writes and is never
-    // refreshed after an on-disk-format change -- a judge could pass, or
-    // fail, because of state a run from days ago left behind.
-    //
-    // The gauntlet runs on its own port base with its own private disk, so
-    // it can run while `cargo xtask qemu` has the machine open on the
-    // default ports for a person -- which is how the desk is being tried.
-    let private_disk = root.join(format!("dist/pandagen-{GAUNTLET_PORT_BASE}.disk"));
-    let _ = fs::remove_file(&private_disk);
-    // ...and a blank one, not a copy of the person's. `qemu-script` seeds a
-    // missing private disk from `dist/pandagen.disk`, which is the disk
-    // `cargo xtask qemu` gives a person: the first time someone kept a
-    // theme there, every desk shape here booted into it and failed on
-    // pixels that had nothing to do with the change under test (H1). The
-    // kernel formats an all-zero image on first mount.
-    {
-        let base_len = fs::metadata(root.join(DISK_OUTPUT))
-            .map(|m| m.len())
-            .unwrap_or(64 * 1024 * 1024);
-        let blank = fs::File::create(&private_disk)?;
-        blank.set_len(base_len)?;
-    }
+    // Every boot below is a shape, run by `run_shapes`: several at once,
+    // each on its own ports and its own blank disk (DEV-001).
+    let mut shapes: Vec<Shape> = Vec::new();
+    let mut title: String;
 
     let mut judges: Vec<String> = fs::read_dir(root.join("gauntlet"))?
         .filter_map(|entry| entry.ok())
@@ -339,7 +327,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no gauntlet judges found; the suite cannot pass vacuously".into());
     }
     judges.sort();
-    println!("== {} judges: {}", judges.len(), judges.join(" "));
+    title = format!("{} judges: {}", judges.len(), judges.join(" "));
 
     let keys = format!("sleep:3,remote:cpus;online=,{},sleep:1", judges.join(","));
     let args = [
@@ -350,7 +338,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-serial".to_string(),
         "flush=negotiated".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
     // A machine without a working 8254. The LAPIC calibration used to wait
     // for a PIT tick that never came, so the boot CPU stopped for good after
@@ -362,7 +350,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // run on a smaller heap or refuse legibly -- never abort.
     // A ping to an unreachable address holds the network lock while it
     // spins. The machine must keep serving and must not wedge.
-    println!("== serve while a ping is in flight");
+    title = "serve while a ping is in flight".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -381,9 +369,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== boot on a small machine");
+    title = "boot on a small machine".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -398,7 +386,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "ALLOCATION ERROR".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
     // More CPUs than there are per-CPU tables. Those without a GDT and TSS
     // must park rather than join: a double fault on one of them would load
@@ -408,7 +396,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
     // Two CPUs: the sole application processor used to submit jobs and then
     // wait on itself, so the console answered nothing for twenty seconds.
     // It must answer, whichever way.
-    println!("== smp run on a two-CPU machine");
+    title = "smp run on a two-CPU machine".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -427,9 +415,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-serial".to_string(),
         "smp: no application processor free to run jobs".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== boot on q35");
+    title = "boot on q35".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -444,9 +432,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-serial".to_string(),
         "net: virtio-net-pci".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== boot with more CPUs than tables");
+    title = "boot with more CPUs than tables".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -461,13 +449,13 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "[timeout]".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
     // The desk (GFX-050): switch to it, launch Notepad from the keyboard,
     // type into it, and check the pixels a card, a dock and a top bar must
     // put on the screen. The card sits at a known cascade position, so the
     // focus ring and the surface can be asserted by coordinate.
-    println!("== desk: a card, a dock and a top bar");
+    title = "desk: a card, a dock and a top bar".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -514,9 +502,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: the Calculator from the palette, worked with the keyboard");
+    title = "the desk: the Calculator from the palette, worked with the keyboard".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -542,9 +530,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: the Calendar from the palette, a month on screen");
+    title = "the desk: the Calendar from the palette, a month on screen".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -566,9 +554,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: the Timer from the palette, a stopwatch running");
+    title = "the desk: the Timer from the palette, a stopwatch running".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -592,9 +580,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Tiles from the palette, four moves");
+    title = "the desk: Tiles from the palette, four moves".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -615,9 +603,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Tasks from the palette, one added and saved");
+    title = "the desk: Tasks from the palette, one added and saved".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -638,9 +626,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Sketch from the palette, the colour swatch");
+    title = "the desk: Sketch from the palette, the colour swatch".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -669,9 +657,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Apps from Ctrl+Space twice, Timer by name");
+    title = "the desk: Apps from Ctrl+Space twice, Timer by name".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -688,9 +676,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: a save, Files from the palette, a file opened from it");
+    title = "the desk: a save, Files from the palette, a file opened from it".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -729,9 +717,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Files with its chips, columns and details");
+    title = "the desk: Files with its chips, columns and details".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -759,9 +747,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: Look previews a theme as the highlight moves");
+    title = "the desk: Look previews a theme as the highlight moves".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -788,9 +776,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: a document's history, browsed and restored");
+    title = "the desk: a document's history, browsed and restored".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -816,9 +804,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: the light theme, from the palette");
+    title = "the desk: the light theme, from the palette".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -842,9 +830,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== the desk: select, copy, paste, find");
+    title = "the desk: select, copy, paste, find".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -872,11 +860,10 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!(
-        "== the desk: typing on the bare desk is a palette search, and the console is a row in it"
-    );
+    title = "the desk: typing on the bare desk is a palette search, and the console is a row in it"
+        .to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -894,9 +881,9 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())?;
+    shapes.push(Shape::new(&title, &args));
 
-    println!("== boot without a PIT");
+    title = "boot without a PIT".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -909,7 +896,8 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-serial".to_string(),
         "PandaGen Workspace".to_string(),
     ];
-    cmd_qemu_script(args.into_iter())
+    shapes.push(Shape::new(&title, &args));
+    run_shapes(&root, shapes, began)
 }
 
 fn usage() -> Result<(), Box<dyn std::error::Error>> {
@@ -2498,5 +2486,138 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         Err(io::Error::other(format!("command failed with status {status}")).into())
+    }
+}
+
+/// One boot of the gauntlet (DEV-001): what it proves, and its
+/// `qemu-script` arguments.
+struct Shape {
+    title: String,
+    args: Vec<String>,
+}
+
+impl Shape {
+    fn new(title: &str, args: &[String]) -> Self {
+        Self {
+            title: title.to_string(),
+            args: args.to_vec(),
+        }
+    }
+}
+
+/// How many shapes boot at once, unless `GAUNTLET_JOBS` says otherwise.
+/// Each machine has four CPUs; four machines keep a sixteen-thread host
+/// busy without starving the guests' timers.
+const GAUNTLET_JOBS: usize = 4;
+/// The workers' port bases: this and the next few. Clear of 0 (a person's
+/// `cargo xtask qemu`), 1 (`GAUNTLET_PORT_BASE`, the shapes' own) and the
+/// low bases people pass by hand.
+const GAUNTLET_WORKER_BASE: u16 = 10;
+
+/// Boot every shape, `GAUNTLET_JOBS` at a time (DEV-001).
+///
+/// The shapes used to run one after another on one private disk, and a
+/// run spent most of its half hour waiting on sleeps inside the guests.
+/// Now each worker has its own port base -- so their forwarded ports never
+/// meet -- and each shape starts from its own blank disk, made just before
+/// it boots: nothing one shape leaves behind can reach another, which is
+/// what a blank disk at the start was for (H1), now for every shape.
+///
+/// A shape's output goes to `dist/<out>.gauntlet.log` and is printed only
+/// when it fails. After a failure no new shape starts; the ones running
+/// finish, and every failure is named.
+fn run_shapes(
+    root: &Path,
+    shapes: Vec<Shape>,
+    began: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    let jobs = env::var("GAUNTLET_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(GAUNTLET_JOBS)
+        .clamp(1, 8);
+    let total = shapes.len();
+    println!(
+        "== {total} boots, {jobs} at a time ({:.0}s in)",
+        began.elapsed().as_secs_f64()
+    );
+    let exe = env::current_exe()?;
+    let blank_len = fs::metadata(root.join(DISK_OUTPUT))
+        .map(|m| m.len())
+        .unwrap_or(64 * 1024 * 1024);
+    let queue: Mutex<VecDeque<(usize, Shape)>> =
+        Mutex::new(shapes.into_iter().enumerate().collect());
+    let stop = AtomicBool::new(false);
+    let failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for worker in 0..jobs {
+            let (queue, stop, failures, exe) = (&queue, &stop, &failures, &exe);
+            scope.spawn(move || loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some((index, shape)) = queue.lock().unwrap().pop_front() else {
+                    break;
+                };
+                let base = GAUNTLET_WORKER_BASE + worker as u16;
+                // Its own blank disk, all zeros: the kernel formats it.
+                let disk = root.join(format!("dist/pandagen-{base}.disk"));
+                let _ = fs::remove_file(&disk);
+                let made = fs::File::create(&disk).and_then(|f| f.set_len(blank_len));
+                // Its own ports.
+                let mut args = shape.args.clone();
+                if let Some(at) = args.iter().position(|a| a == "--port-base") {
+                    if let Some(value) = args.get_mut(at + 1) {
+                        *value = base.to_string();
+                    }
+                }
+                let out_name = args
+                    .iter()
+                    .position(|a| a == "--out")
+                    .and_then(|at| args.get(at + 1).cloned())
+                    .unwrap_or_else(|| format!("dist/gauntlet_{index}"));
+                let started = std::time::Instant::now();
+                let run = match made {
+                    Ok(()) => Command::new(exe)
+                        .current_dir(root)
+                        .arg("qemu-script")
+                        .args(&args)
+                        .output(),
+                    Err(e) => Err(e),
+                };
+                let (ok, text) = match run {
+                    Ok(o) => {
+                        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                        text.push_str(&String::from_utf8_lossy(&o.stderr));
+                        (o.status.success(), text)
+                    }
+                    Err(e) => (false, format!("could not run qemu-script: {e}")),
+                };
+                let _ = fs::write(root.join(format!("{out_name}.gauntlet.log")), &text);
+                println!(
+                    "   [{:>2}/{total}] {} {} ({:.0}s)",
+                    index + 1,
+                    if ok { "PASS" } else { "FAIL" },
+                    shape.title,
+                    started.elapsed().as_secs_f64()
+                );
+                if !ok {
+                    stop.store(true, Ordering::SeqCst);
+                    println!("---- {} ----\n{}\n----", shape.title, text.trim_end());
+                    failures.lock().unwrap().push(shape.title.clone());
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    println!("== done in {:.0}s", began.elapsed().as_secs_f64());
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("gauntlet boots failed: {}", failures.join("; ")).into())
     }
 }
