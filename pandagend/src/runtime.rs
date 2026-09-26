@@ -148,6 +148,8 @@ pub struct HostRuntime {
     steps: usize,
     /// Host command buffer (for control mode)
     command_buffer: String,
+    /// What the last `list` command found.
+    last_listing: Vec<String>,
     /// HAL input integration (only used in hal mode)
     #[cfg(feature = "hal_mode")]
     hal_input: Option<HalInputContext>,
@@ -216,6 +218,7 @@ impl HostRuntime {
             state: HostState::Running,
             steps: 0,
             command_buffer: String::new(),
+            last_listing: Vec::new(),
             #[cfg(feature = "hal_mode")]
             hal_input,
         })
@@ -483,71 +486,17 @@ impl HostRuntime {
                 self.command_buffer.pop();
             }
             _ => {
-                // Append character (simplified, doesn't handle Shift or other modifiers)
+                // The event's own text when it has some; otherwise what the
+                // key types, Shift included (HOST-004).
                 if let Some(text) = &key_event.text {
                     self.command_buffer.push_str(text);
-                } else if let Some(c) = Self::keycode_to_char(key_event.code) {
+                } else if let Some(c) = key_event.code.to_char(key_event.modifiers.is_shift()) {
                     self.command_buffer.push(c);
                 }
             }
         }
 
         Ok(())
-    }
-
-    /// Converts a KeyCode to a character (simplified)
-    ///
-    /// **NOTE**: This is a minimal implementation that:
-    /// - Only maps to lowercase letters
-    /// - Does not handle Shift modifier for uppercase
-    /// - Does not handle all punctuation
-    /// - Should be replaced with proper text input handling in production
-    fn keycode_to_char(code: input_types::KeyCode) -> Option<char> {
-        use input_types::KeyCode;
-        match code {
-            KeyCode::A => Some('a'),
-            KeyCode::B => Some('b'),
-            KeyCode::C => Some('c'),
-            KeyCode::D => Some('d'),
-            KeyCode::E => Some('e'),
-            KeyCode::F => Some('f'),
-            KeyCode::G => Some('g'),
-            KeyCode::H => Some('h'),
-            KeyCode::I => Some('i'),
-            KeyCode::J => Some('j'),
-            KeyCode::K => Some('k'),
-            KeyCode::L => Some('l'),
-            KeyCode::M => Some('m'),
-            KeyCode::N => Some('n'),
-            KeyCode::O => Some('o'),
-            KeyCode::P => Some('p'),
-            KeyCode::Q => Some('q'),
-            KeyCode::R => Some('r'),
-            KeyCode::S => Some('s'),
-            KeyCode::T => Some('t'),
-            KeyCode::U => Some('u'),
-            KeyCode::V => Some('v'),
-            KeyCode::W => Some('w'),
-            KeyCode::X => Some('x'),
-            KeyCode::Y => Some('y'),
-            KeyCode::Z => Some('z'),
-            KeyCode::Num0 => Some('0'),
-            KeyCode::Num1 => Some('1'),
-            KeyCode::Num2 => Some('2'),
-            KeyCode::Num3 => Some('3'),
-            KeyCode::Num4 => Some('4'),
-            KeyCode::Num5 => Some('5'),
-            KeyCode::Num6 => Some('6'),
-            KeyCode::Num7 => Some('7'),
-            KeyCode::Num8 => Some('8'),
-            KeyCode::Num9 => Some('9'),
-            KeyCode::Space => Some(' '),
-            KeyCode::Semicolon => Some(':'),
-            KeyCode::Slash => Some('/'),
-            KeyCode::Period => Some('.'),
-            KeyCode::Comma => Some(','),
-            _ => None,
-        }
     }
 
     /// Executes a host command
@@ -578,7 +527,17 @@ impl HostRuntime {
                 self.workspace.launch_component(config)?;
             }
             HostCommand::List => {
-                // List will be rendered in status (future enhancement)
+                // What runs, said in the status line and printed by the
+                // host (HOST-004). This arm did nothing: `list` was parsed,
+                // accepted, and answered with silence.
+                let lines = self.component_listing();
+                let summary = match lines.len() {
+                    0 => "No components".to_string(),
+                    n => format!("{n} running: {}", lines.join(", ")),
+                };
+                println!("{summary}");
+                self.workspace.workspace_status_mut().last_action = Some(summary);
+                self.last_listing = lines;
             }
             HostCommand::Focus { component_id } => {
                 self.workspace.focus_component(component_id)?;
@@ -599,6 +558,37 @@ impl HostRuntime {
         }
 
         Ok(())
+    }
+
+    /// One line per running component, by name: its name, its kind, and
+    /// whether it has the focus.
+    fn component_listing(&self) -> Vec<String> {
+        let focused = self.workspace.get_focused_component();
+        let mut lines: Vec<String> = self
+            .workspace
+            .list_components()
+            .into_iter()
+            .filter(|c| c.is_running())
+            .map(|c| {
+                format!(
+                    "{} ({:?}){}",
+                    c.name,
+                    c.component_type,
+                    if Some(c.id) == focused {
+                        ", focused"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    /// What the last `list` said (for tests and embedders).
+    pub fn last_listing(&self) -> &[String] {
+        &self.last_listing
     }
 
     /// Renders the current workspace state
@@ -679,6 +669,23 @@ mod tests {
     use super::*;
     #[cfg(feature = "hal_mode")]
     use hal::HalKeyEvent;
+
+    #[test]
+    fn list_says_what_runs() {
+        let mut runtime = HostRuntime::new(HostRuntimeConfig::default()).unwrap();
+        runtime.execute_command("list").unwrap();
+        let before = runtime.last_listing().len();
+        runtime.execute_command("open editor").unwrap();
+        runtime.execute_command("list").unwrap();
+        let listing = runtime.last_listing();
+        assert_eq!(listing.len(), before + 1, "{listing:?}");
+        assert!(
+            listing
+                .iter()
+                .any(|l| l.contains("Editor") && l.ends_with(", focused")),
+            "{listing:?}"
+        );
+    }
 
     #[test]
     fn test_runtime_creation() {

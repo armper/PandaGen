@@ -615,6 +615,85 @@ pub enum KeyCode {
     Unknown,
 }
 
+impl KeyCode {
+    /// The character this key types on a US keyboard, with or without
+    /// Shift (HOST-004). `None` for keys that type nothing (arrows,
+    /// modifiers, function keys). Letters are lowercase unless `shift`.
+    ///
+    /// One table for every host that turns keys into text; the host
+    /// simulator had its own, lowercase only, with `;` typing `:`.
+    pub const fn to_char(self, shift: bool) -> Option<char> {
+        use KeyCode::*;
+        let (plain, shifted) = match self {
+            A => ('a', 'A'),
+            B => ('b', 'B'),
+            C => ('c', 'C'),
+            D => ('d', 'D'),
+            E => ('e', 'E'),
+            F => ('f', 'F'),
+            G => ('g', 'G'),
+            H => ('h', 'H'),
+            I => ('i', 'I'),
+            J => ('j', 'J'),
+            K => ('k', 'K'),
+            L => ('l', 'L'),
+            M => ('m', 'M'),
+            N => ('n', 'N'),
+            O => ('o', 'O'),
+            P => ('p', 'P'),
+            Q => ('q', 'Q'),
+            R => ('r', 'R'),
+            S => ('s', 'S'),
+            T => ('t', 'T'),
+            U => ('u', 'U'),
+            V => ('v', 'V'),
+            W => ('w', 'W'),
+            X => ('x', 'X'),
+            Y => ('y', 'Y'),
+            Z => ('z', 'Z'),
+            Num0 => ('0', ')'),
+            Num1 => ('1', '!'),
+            Num2 => ('2', '@'),
+            Num3 => ('3', '#'),
+            Num4 => ('4', '$'),
+            Num5 => ('5', '%'),
+            Num6 => ('6', '^'),
+            Num7 => ('7', '&'),
+            Num8 => ('8', '*'),
+            Num9 => ('9', '('),
+            Space => (' ', ' '),
+            Minus => ('-', '_'),
+            Equal => ('=', '+'),
+            LeftBracket => ('[', '{'),
+            RightBracket => (']', '}'),
+            Backslash => ('\\', '|'),
+            Semicolon => (';', ':'),
+            Quote => ('\'', '"'),
+            Comma => (',', '<'),
+            Period => ('.', '>'),
+            Slash => ('/', '?'),
+            Grave => ('`', '~'),
+            NumpadDivide => ('/', '/'),
+            NumpadMultiply => ('*', '*'),
+            NumpadMinus => ('-', '-'),
+            NumpadPlus => ('+', '+'),
+            NumpadPeriod => ('.', '.'),
+            Numpad0 => ('0', '0'),
+            Numpad1 => ('1', '1'),
+            Numpad2 => ('2', '2'),
+            Numpad3 => ('3', '3'),
+            Numpad4 => ('4', '4'),
+            Numpad5 => ('5', '5'),
+            Numpad6 => ('6', '6'),
+            Numpad7 => ('7', '7'),
+            Numpad8 => ('8', '8'),
+            Numpad9 => ('9', '9'),
+            _ => return None,
+        };
+        Some(if shift { shifted } else { plain })
+    }
+}
+
 impl fmt::Display for KeyCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -719,6 +798,20 @@ impl fmt::Display for Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_type_their_characters_with_and_without_shift() {
+        assert_eq!(KeyCode::A.to_char(false), Some('a'));
+        assert_eq!(KeyCode::A.to_char(true), Some('A'));
+        assert_eq!(KeyCode::Semicolon.to_char(false), Some(';'));
+        assert_eq!(KeyCode::Semicolon.to_char(true), Some(':'));
+        assert_eq!(KeyCode::Num1.to_char(true), Some('!'));
+        assert_eq!(KeyCode::Quote.to_char(true), Some('"'));
+        assert_eq!(KeyCode::Backslash.to_char(false), Some('\\'));
+        assert_eq!(KeyCode::Numpad7.to_char(true), Some('7'));
+        assert_eq!(KeyCode::Left.to_char(false), None);
+        assert_eq!(KeyCode::LeftShift.to_char(true), None);
+    }
     use alloc::string::ToString;
     use alloc::vec;
 
