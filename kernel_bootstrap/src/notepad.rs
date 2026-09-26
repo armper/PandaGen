@@ -174,6 +174,11 @@ pub struct Document {
     edited: bool,
     /// When the document was last edited, as `autosave_due` saw it.
     idle_since: Option<u64>,
+    /// Where the typing that is still one undo step ended, and whether its
+    /// last key was a space (KBD-015). A key typed exactly there joins the
+    /// step, unless it starts a new word; anything else ends it.
+    typing_at: Option<Position>,
+    typing_space: bool,
 }
 
 impl Document {
@@ -186,6 +191,8 @@ impl Document {
             path,
             edited: false,
             idle_since: None,
+            typing_at: None,
+            typing_space: false,
         }
     }
 }
@@ -1222,6 +1229,9 @@ impl Notepad {
             return self.handle_prompt_byte(byte);
         }
         self.clamp_cursor();
+        if !(0x20..=0x7E).contains(&byte) {
+            self.doc_mut().typing_at = None;
+        }
         if byte == CTRL_Y {
             let path = self.doc().path.clone();
             return match path {
@@ -1387,6 +1397,7 @@ impl Notepad {
                 let now = self.snapshot();
                 let restored = {
                     let mut doc = self.doc_mut();
+                    doc.typing_at = None;
                     let taken = if redo { doc.redo.pop() } else { doc.undo.pop() };
                     if let Some((buffer, _)) = &taken {
                         // What is there now goes on the other stack.
@@ -1480,11 +1491,25 @@ impl Notepad {
                 }
             }
             0x20..=0x7E => {
-                let before = self.snapshot();
+                // A word typed is one undo step, not one per key: each step
+                // held a copy of the whole document, a hundred of them, and
+                // undoing a sentence took a keystroke per letter. A space
+                // after a word starts the next step.
+                let joins = {
+                    let doc = self.doc();
+                    doc.typing_at == Some(self.cursor) && (byte != b' ' || doc.typing_space)
+                };
+                let before = (!joins).then(|| self.snapshot());
                 let put = self.doc_mut().buffer.insert_char(self.cursor, byte as char);
                 if put {
-                    self.push_undo(before);
+                    match before {
+                        Some(before) => self.push_undo(before),
+                        None => self.mark_edited(),
+                    }
                     self.cursor.col += 1;
+                    let mut doc = self.doc_mut();
+                    doc.typing_at = Some(self.cursor);
+                    doc.typing_space = byte == b' ';
                     NotepadEffect::Redraw
                 } else {
                     NotepadEffect::None
@@ -1684,15 +1709,25 @@ impl Notepad {
     /// the document's: whichever card undoes, the last edit goes, and the
     /// caret lands where that edit was made.
     fn push_undo(&mut self, before: (TextBuffer, Position)) {
-        let mut doc = self.doc_mut();
-        doc.undo.push(before);
-        if doc.undo.len() > MAX_UNDO {
-            doc.undo.remove(0);
+        {
+            let mut doc = self.doc_mut();
+            doc.undo.push(before);
+            if doc.undo.len() > MAX_UNDO {
+                doc.undo.remove(0);
+            }
         }
+        self.mark_edited();
+    }
+
+    /// The document changed: unsaved, due an autosave, and the end of any
+    /// run of typing that was one undo step.
+    fn mark_edited(&mut self) {
+        let mut doc = self.doc_mut();
         // A new edit is a new branch: what was undone is gone.
         doc.redo.clear();
         doc.dirty = true;
         doc.edited = true;
+        doc.typing_at = None;
         drop(doc);
         self.close_armed = false;
     }
@@ -1843,20 +1878,50 @@ mod tests {
     }
 
     #[test]
+    fn typing_is_undone_a_word_at_a_time() {
+        let mut pad = Notepad::new();
+        type_str(&mut pad, "hello big  world");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "hello big");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "hello");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "");
+        // A caret move ends the step, even mid-word.
+        type_str(&mut pad, "abc");
+        pad.handle_byte(KEY_LEFT);
+        pad.handle_byte(KEY_RIGHT);
+        type_str(&mut pad, "de");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "abc");
+        // So does any other edit: Backspace is its own step.
+        type_str(&mut pad, "de");
+        pad.handle_byte(BACKSPACE);
+        type_str(&mut pad, "f");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "abcd");
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "abcde");
+        // Typing still marks the document unsaved.
+        assert!(pad.is_dirty());
+    }
+
+    #[test]
     fn redo_brings_back_what_undo_took_and_a_new_edit_forgets_it() {
         let mut pad = Notepad::new();
-        type_str(&mut pad, "abc");
+        // Three words, three steps (KBD-015).
+        type_str(&mut pad, "a b c");
         pad.handle_byte(CTRL_Z);
         pad.handle_byte(CTRL_Z);
         assert_eq!(pad.content(), "a");
         assert_eq!(pad.handle_byte(KEY_CTRL_SHIFT_Z), NotepadEffect::Redraw);
-        assert_eq!(pad.content(), "ab");
+        assert_eq!(pad.content(), "a b");
         pad.handle_byte(KEY_CTRL_SHIFT_Z);
-        assert_eq!(pad.content(), "abc");
+        assert_eq!(pad.content(), "a b c");
         pad.handle_byte(KEY_CTRL_SHIFT_Z);
         assert!(pad.footer().contains("Nothing to redo"), "{}", pad.footer());
         pad.handle_byte(CTRL_Z);
-        assert_eq!(pad.content(), "ab");
+        assert_eq!(pad.content(), "a b");
         // Undo after redo still walks back.
         pad.handle_byte(CTRL_Z);
         assert_eq!(pad.content(), "a");
@@ -1921,7 +1986,8 @@ mod tests {
     #[test]
     fn undo_restores_what_the_last_edit_changed_and_no_ops_do_not_count() {
         let mut pad = Notepad::new();
-        type_str(&mut pad, "ab");
+        // Two words, two undo steps (KBD-015).
+        type_str(&mut pad, "a b");
         // Backspace at the start of an empty second line is not an edit.
         for _ in 0..50 {
             pad.handle_byte(KEY_LEFT);
