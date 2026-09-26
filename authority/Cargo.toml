@@ -8,6 +8,8 @@ description = "Who may do what to a document: principals, rights, grants, roles,
 
 [dependencies]
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# SHA-256 and HMAC for passphrase verifiers (FS-002).
+remote_ipc = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }

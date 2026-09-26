@@ -19,6 +19,8 @@
 
 extern crate alloc;
 
+pub mod credential;
+
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
