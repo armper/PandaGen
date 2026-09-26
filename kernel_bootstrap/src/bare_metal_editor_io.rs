@@ -21,6 +21,8 @@ pub const RECENT_FILE: &str = ".recent";
 pub const WELCOMED_FILE: &str = ".welcomed";
 /// The desk's layout: the open cards and where they are (DESK-020).
 pub const LAYOUT_FILE: &str = ".desk";
+/// The Web cards' bookmarks (WEB-002).
+pub const BOOKMARKS_FILE: &str = ".bookmarks";
 
 /// Editor I/O error
 #[derive(Debug)]

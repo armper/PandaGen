@@ -62,6 +62,11 @@ pub enum BlockKind {
 pub struct Block {
     pub kind: BlockKind,
     pub spans: Vec<Span>,
+    /// Columns in from the left: nested lists and quotes (WEB-002).
+    pub indent: u8,
+    /// Further in for the rows after the first: a list item's text hangs
+    /// under its own start, not under its bullet.
+    pub hang: u8,
 }
 
 /// A page, read.
@@ -313,7 +318,13 @@ struct Reader {
     title: String,
     in_title: bool,
     pre: usize,
-    lists: usize,
+    /// The lists this text is in, innermost last: `None` for bullets, the
+    /// next number for a numbered one (WEB-002).
+    lists: Vec<Option<u32>>,
+    /// Blockquotes this text is in.
+    quote: usize,
+    /// The hang of the block being built (a list item's marker width).
+    hang: u8,
     /// A space is owed before the next word.
     space: bool,
     /// The row has had a cell: the next one is set off.
@@ -414,8 +425,15 @@ impl Reader {
         let spans = core::mem::take(&mut self.spans);
         self.space = false;
         if spans.iter().any(|s| !s.text.trim().is_empty()) || kind == BlockKind::Pre {
-            self.blocks.push(Block { kind, spans });
+            let indent = (self.lists.len().saturating_sub(1) * 3 + self.quote * 2).min(24) as u8;
+            self.blocks.push(Block {
+                kind,
+                spans,
+                indent,
+                hang: self.hang,
+            });
         }
+        self.hang = 0;
         self.kind = if self.pre > 0 {
             BlockKind::Pre
         } else {
@@ -434,6 +452,8 @@ impl Reader {
             self.blocks.push(Block {
                 kind: BlockKind::Blank,
                 spans: Vec::new(),
+                indent: 0,
+                hang: 0,
             });
         }
     }
@@ -442,16 +462,30 @@ impl Reader {
         match name {
             "title" => self.in_title = !closing,
             "br" => self.flush(self.kind),
-            "p" | "ul" | "ol" | "dl" | "table" | "blockquote" | "figure" | "form" => {
-                if name == "ul" || name == "ol" {
-                    if closing {
-                        self.lists = self.lists.saturating_sub(1);
-                    } else {
-                        self.lists += 1;
-                    }
+            "ul" | "ol" | "menu" => {
+                // A list inside a list item continues it; one on its own is
+                // set off like a paragraph.
+                if self.lists.is_empty() {
+                    self.paragraph();
+                } else {
+                    self.flush(self.kind);
                 }
-                self.paragraph();
+                if closing {
+                    self.lists.pop();
+                } else {
+                    let start = attr(attrs, "start").and_then(|s| s.trim().parse::<u32>().ok());
+                    self.lists.push((name == "ol").then(|| start.unwrap_or(1)));
+                }
             }
+            "blockquote" => {
+                self.paragraph();
+                if closing {
+                    self.quote = self.quote.saturating_sub(1);
+                } else {
+                    self.quote += 1;
+                }
+            }
+            "p" | "dl" | "table" | "figure" | "form" => self.paragraph(),
             "div" | "section" | "article" | "header" | "footer" | "nav" | "main" | "aside"
             | "tr" | "dt" | "dd" | "figcaption" | "address" | "center" | "summary" | "details"
             | "tbody" | "thead" => {
@@ -470,9 +504,18 @@ impl Reader {
             "li" => {
                 self.flush(self.kind);
                 if !closing {
-                    let indent = "  ".repeat(self.lists.saturating_sub(1));
+                    // Numbered in a numbered list, a bullet otherwise.
+                    let marker = match self.lists.last_mut() {
+                        Some(Some(n)) => {
+                            let m = alloc::format!("{n}. ");
+                            *n += 1;
+                            m
+                        }
+                        _ => String::from("- "),
+                    };
+                    self.hang = marker.len() as u8;
                     self.spans.push(Span {
-                        text: alloc::format!("{indent}- "),
+                        text: marker,
                         link: None,
                     });
                 }
@@ -503,6 +546,8 @@ impl Reader {
                 self.blocks.push(Block {
                     kind: BlockKind::Rule,
                     spans: Vec::new(),
+                    indent: 0,
+                    hang: 0,
                 });
             }
             "a" => {
@@ -627,7 +672,9 @@ pub fn read_html(html: &str, url: &str, status: u16) -> Page {
         title: String::new(),
         in_title: false,
         pre: 0,
-        lists: 0,
+        lists: Vec::new(),
+        quote: 0,
+        hang: 0,
         space: false,
         cells: 0,
     };
@@ -706,7 +753,9 @@ pub fn read_text(text: &str, url: &str, status: u16) -> Page {
         title: String::new(),
         in_title: false,
         pre: 1,
-        lists: 0,
+        lists: Vec::new(),
+        quote: 0,
+        hang: 0,
         space: false,
         cells: 0,
     };
@@ -749,8 +798,13 @@ pub fn wrap(page: &Page, cols: usize) -> Vec<Row> {
                     .iter()
                     .flat_map(|s| s.text.chars().map(move |c| (c, s.link)))
                     .collect();
+                let indent = (block.indent as usize).min(cols / 2);
+                let hang = (block.hang as usize).min(cols / 4);
                 let mut start = 0;
                 loop {
+                    // The first row starts at the indent, the rest also hang.
+                    let lead = if start == 0 { indent } else { indent + hang };
+                    let cols = cols - lead;
                     let remaining = chars.len() - start;
                     let end = if remaining <= cols {
                         chars.len()
@@ -763,10 +817,11 @@ pub fn wrap(page: &Page, cols: usize) -> Vec<Row> {
                             .find(|i| chars[*i - 1].0 == ' ')
                             .unwrap_or(start + cols)
                     };
-                    rows.push(Row {
-                        kind,
-                        runs: runs_of(&chars[start..end]),
-                    });
+                    let mut runs = runs_of(&chars[start..end]);
+                    if lead > 0 {
+                        runs.insert(0, (" ".repeat(lead), None));
+                    }
+                    rows.push(Row { kind, runs });
                     start = end;
                     // A wrapped line does not start with the space it broke at.
                     while kind != BlockKind::Pre && start < chars.len() && chars[start].0 == ' ' {
@@ -795,6 +850,22 @@ fn runs_of(chars: &[(char, Option<usize>)]) -> Vec<(String, Option<usize>)> {
 
 // ---- The card ----
 
+/// The start page's address: bookmarks and recent pages, made here, not
+/// fetched (WEB-002).
+pub const START: &str = "about:start";
+/// Forward, the start page, and bookmarking the page shown.
+pub const KEY_FORWARD: u8 = 0xB4;
+pub const KEY_START: u8 = 0xB5;
+pub const KEY_BOOKMARK: u8 = 0xB6;
+/// Ctrl+F finds in the page; Ctrl+C copies the link Tab reached, or the
+/// page's address.
+pub const CTRL_F: u8 = 0x06;
+pub const CTRL_C: u8 = 0x03;
+/// Pages kept to show again at once, going back or forward.
+const CACHE_MAX: usize = 8;
+/// Pages the start page lists as recent.
+const RECENT_MAX: usize = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebEffect {
     None,
@@ -802,6 +873,58 @@ pub enum WebEffect {
     /// Fetch this URL, then call `loaded`.
     Fetch(String),
     Close,
+    /// The bookmarks changed: keep these (every Web card shares them).
+    Bookmarks(Vec<Bookmark>),
+    /// Put this on the clipboard.
+    Copy(String),
+}
+
+/// A page kept to come back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    pub title: String,
+    pub url: String,
+}
+
+/// The bookmarks as kept on disk: `url<TAB>title`, a line each.
+pub fn bookmarks_text(list: &[Bookmark]) -> String {
+    let mut text = String::new();
+    for b in list {
+        text.push_str(&b.url);
+        text.push('\t');
+        text.push_str(&b.title.replace(['\t', '\n'], " "));
+        text.push('\n');
+    }
+    text
+}
+
+/// Bookmarks read back from `bookmarks_text`.
+pub fn parse_bookmarks(text: &str) -> Vec<Bookmark> {
+    text.lines()
+        .filter_map(|line| {
+            let (url, title) = line.split_once('\t').unwrap_or((line, ""));
+            let url = url.trim();
+            (!url.is_empty()).then(|| Bookmark {
+                title: String::from(title.trim()),
+                url: String::from(url),
+            })
+        })
+        .collect()
+}
+
+/// `text` safe inside HTML.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -816,14 +939,26 @@ pub struct WebView {
     message: Option<String>,
     scroll: usize,
     back: Vec<String>,
+    forward: Vec<String>,
+    /// Pages already read, and where each was scrolled to, so Back and
+    /// Forward show them at once.
+    cache: Vec<(Page, usize)>,
+    /// Pages visited, newest first: `(title, url)`.
+    recent: Vec<(String, String)>,
+    bookmarks: Vec<Bookmark>,
     /// The link Tab has reached, by index into the page's links.
     selected: Option<usize>,
     redirects: u8,
+    /// Find in page: the query, and which match is the current one.
+    find: Option<(LineEdit, usize)>,
     /// The page wrapped at the last width drawn, and that width.
     rows: RefCell<Option<(usize, Vec<Row>)>>,
     /// The canvas the card was last drawn at, so a link's key can be
     /// mapped back to the link.
     last_size: core::cell::Cell<(u32, u32)>,
+    /// The link under the pointer when last drawn: the footer says where
+    /// it goes.
+    hover_link: core::cell::Cell<Option<usize>>,
 }
 
 impl Default for WebView {
@@ -834,7 +969,7 @@ impl Default for WebView {
 
 impl WebView {
     pub fn new() -> Self {
-        Self {
+        let mut view = Self {
             address: LineEdit::new(),
             editing: true,
             page: None,
@@ -842,16 +977,28 @@ impl WebView {
             message: None,
             scroll: 0,
             back: Vec::new(),
+            forward: Vec::new(),
+            cache: Vec::new(),
+            recent: Vec::new(),
+            bookmarks: Vec::new(),
             selected: None,
             redirects: 0,
+            find: None,
             rows: RefCell::new(None),
             last_size: core::cell::Cell::new((0, 0)),
-        }
+            hover_link: core::cell::Cell::new(None),
+        };
+        view.show_start();
+        view
     }
 
     /// The page shown, if any.
     pub fn page(&self) -> Option<&Page> {
         self.page.as_ref()
+    }
+
+    fn showing_start(&self) -> bool {
+        self.page.as_ref().is_some_and(|p| p.url == START)
     }
 
     /// The URL of the page shown, or being fetched.
@@ -864,13 +1011,111 @@ impl WebView {
     /// The card's title: the page's, once there is one.
     pub fn title(&self) -> String {
         match &self.page {
-            Some(page) if !page.title.is_empty() => alloc::format!("Web - {}", page.title),
+            Some(page) if !page.title.is_empty() && page.url != START => {
+                alloc::format!("Web - {}", page.title)
+            }
             _ => String::from("Web"),
+        }
+    }
+
+    /// The bookmarks every Web card shares, from the desk.
+    pub fn set_bookmarks(&mut self, list: Vec<Bookmark>) {
+        self.bookmarks = list;
+        if self.showing_start() {
+            let scroll = self.scroll;
+            self.show_start();
+            self.scroll = scroll;
+        }
+    }
+
+    /// Whether the page shown is bookmarked.
+    pub fn bookmarked(&self) -> bool {
+        self.page
+            .as_ref()
+            .is_some_and(|p| self.bookmarks.iter().any(|b| b.url == p.url))
+    }
+
+    /// The start page: bookmarks, then recent pages, as links.
+    fn start_page(&self) -> Page {
+        let mut html = String::from("<title>Start</title><h1>Bookmarks</h1>");
+        if self.bookmarks.is_empty() {
+            html.push_str("<p>None yet: the Bookmark chip keeps the page you are on.</p>");
+        } else {
+            html.push_str("<ul>");
+            for b in &self.bookmarks {
+                let title = if b.title.is_empty() { &b.url } else { &b.title };
+                html.push_str(&alloc::format!(
+                    "<li><a href=\"{}\">{}</a></li>",
+                    escape_html(&b.url),
+                    escape_html(title)
+                ));
+            }
+            html.push_str("</ul>");
+        }
+        html.push_str("<h1>Recent</h1>");
+        if self.recent.is_empty() {
+            html.push_str(
+                "<p>Nothing yet. Type an address above: example.com, or an IP and a port.</p>",
+            );
+        } else {
+            html.push_str("<ul>");
+            for (title, url) in &self.recent {
+                let title = if title.is_empty() { url } else { title };
+                html.push_str(&alloc::format!(
+                    "<li><a href=\"{}\">{}</a></li>",
+                    escape_html(url),
+                    escape_html(title)
+                ));
+            }
+            html.push_str("</ul>");
+        }
+        html.push_str(
+            "<h1>Keys</h1><p>Tab and Enter follow links; Backspace goes back; Ctrl+F finds; \
+             Ctrl+C copies a link; Esc goes to the address.</p>",
+        );
+        read_html(&html, START, 200)
+    }
+
+    fn show_start(&mut self) {
+        let page = self.start_page();
+        self.show(page, 0);
+        self.address.set("");
+        self.editing = true;
+    }
+
+    /// Put `page` on screen at `scroll`.
+    fn show(&mut self, page: Page, scroll: usize) {
+        self.address.set(&page.url);
+        self.page = Some(page);
+        *self.rows.borrow_mut() = None;
+        self.scroll = scroll;
+        self.selected = None;
+        self.editing = false;
+        self.find = None;
+    }
+
+    /// Keep the page shown, and where it is scrolled, for Back and Forward.
+    fn stash(&mut self) {
+        let Some(page) = self.page.clone() else {
+            return;
+        };
+        if page.url == START {
+            return;
+        }
+        self.cache.retain(|(p, _)| p.url != page.url);
+        self.cache.push((page, self.scroll));
+        if self.cache.len() > CACHE_MAX {
+            self.cache.remove(0);
         }
     }
 
     /// Start fetching `url` (a restored card, or a link from elsewhere).
     pub fn open(&mut self, url: &str) -> WebEffect {
+        if url == START {
+            self.stash();
+            self.show_start();
+            return WebEffect::Redraw;
+        }
         let url = normalize(url);
         self.address.set(&url);
         self.loading = Some(url.clone());
@@ -889,8 +1134,52 @@ impl WebView {
                 }
             }
         }
+        self.forward.clear();
+        self.stash();
         self.editing = false;
         self.open(&url)
+    }
+
+    /// Show `url` for Back or Forward: from the cache when it is there.
+    fn revisit(&mut self, url: String) -> WebEffect {
+        self.stash();
+        if url == START {
+            self.show_start();
+            return WebEffect::Redraw;
+        }
+        match self.cache.iter().position(|(p, _)| p.url == url) {
+            Some(at) => {
+                let (page, scroll) = self.cache[at].clone();
+                self.loading = None;
+                self.message = None;
+                self.show(page, scroll);
+                WebEffect::Redraw
+            }
+            None => {
+                self.editing = false;
+                self.open(&url)
+            }
+        }
+    }
+
+    fn back(&mut self) -> WebEffect {
+        let Some(url) = self.back.pop() else {
+            return WebEffect::None;
+        };
+        if let Some(page) = &self.page {
+            self.forward.push(page.url.clone());
+        }
+        self.revisit(url)
+    }
+
+    fn forward(&mut self) -> WebEffect {
+        let Some(url) = self.forward.pop() else {
+            return WebEffect::None;
+        };
+        if let Some(page) = &self.page {
+            self.back.push(page.url.clone());
+        }
+        self.revisit(url)
     }
 
     /// The fetch for this card ended.
@@ -912,7 +1201,7 @@ impl WebView {
                 .as_deref()
                 .and_then(|l| resolve_url(&response.url, l))
             {
-                if to.starts_with("https://") {
+                if to.to_ascii_lowercase().starts_with("https://") {
                     self.message = Some(alloc::format!(
                         "{} moved to {to}, and there is no TLS here yet to follow it",
                         response.url
@@ -941,12 +1230,12 @@ impl WebView {
         } else {
             read_text(&body, &response.url, response.status)
         };
-        self.address.set(&page.url);
-        self.page = Some(page);
-        *self.rows.borrow_mut() = None;
-        self.scroll = 0;
-        self.selected = None;
-        self.editing = false;
+        self.recent.retain(|(_, u)| *u != page.url);
+        self.recent
+            .insert(0, (page.title.clone(), page.url.clone()));
+        self.recent.truncate(RECENT_MAX);
+        self.show(page, 0);
+        self.stash();
         self.message = if (200..300).contains(&response.status) {
             None
         } else {
@@ -969,8 +1258,17 @@ impl WebView {
         core::cell::Ref::map(self.rows.borrow(), |r| &r.as_ref().expect("wrapped").1)
     }
 
+    fn cols(&self) -> usize {
+        let (w, _) = self.last_size.get();
+        (w.max(8 * GLYPH_W) / GLYPH_W) as usize
+    }
+
     fn page_rows(h: u32) -> usize {
         (h.saturating_sub(TOP) / ROW).max(1) as usize
+    }
+
+    fn shown_rows(&self) -> usize {
+        Self::page_rows(self.last_size.get().1.max(TOP + ROW))
     }
 
     /// The links on screen, in order, as the keys that click them answer.
@@ -992,47 +1290,130 @@ impl WebView {
 
     /// Scroll by `rows` (the wheel).
     pub fn scroll_by(&mut self, rows: i32) {
-        let (w, h) = self.last_size.get();
-        let total = self.rows((w.max(8 * GLYPH_W) / GLYPH_W) as usize).len();
-        let max = total.saturating_sub(Self::page_rows(h.max(TOP + ROW)));
+        let total = self.rows(self.cols()).len();
+        let max = total.saturating_sub(self.shown_rows());
         self.scroll = (self.scroll as i64 + rows as i64).clamp(0, max as i64) as usize;
     }
 
-    fn scroll_to_link(&mut self, link: usize) {
-        let (w, h) = self.last_size.get();
-        let rows = self.rows((w.max(8 * GLYPH_W) / GLYPH_W) as usize);
-        if let Some(at) = rows
-            .iter()
-            .position(|r| r.runs.iter().any(|(_, l)| *l == Some(link)))
-        {
-            let shown = Self::page_rows(h.max(TOP + ROW));
-            drop(rows);
-            if at < self.scroll || at >= self.scroll + shown {
-                self.scroll = at.saturating_sub(shown / 3);
-            }
+    /// Bring row `at` into view, a third of the way down.
+    fn scroll_to_row(&mut self, at: usize) {
+        let shown = self.shown_rows();
+        if at < self.scroll || at >= self.scroll + shown {
+            self.scroll = at.saturating_sub(shown / 3);
         }
     }
 
-    pub fn handle_byte(&mut self, byte: u8) -> WebEffect {
-        use crate::notepad::{
-            BACKSPACE, CTRL_W, ESC, KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP,
+    fn scroll_to_link(&mut self, link: usize) {
+        let at = self
+            .rows(self.cols())
+            .iter()
+            .position(|r| r.runs.iter().any(|(_, l)| *l == Some(link)));
+        if let Some(at) = at {
+            self.scroll_to_row(at);
+        }
+    }
+
+    /// Where the find query is on the page: `(row, column, length)`,
+    /// ignoring case (WEB-002).
+    fn matches(&self) -> Vec<(usize, usize, usize)> {
+        let Some((query, _)) = &self.find else {
+            return Vec::new();
         };
+        let needle = String::from_utf8_lossy(query.text()).to_ascii_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (r, row) in self.rows(self.cols()).iter().enumerate() {
+            let text: String = row.runs.iter().map(|(t, _)| t.as_str()).collect();
+            let lower = text.to_ascii_lowercase();
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(&needle) {
+                let col = lower[..from + at].chars().count();
+                found.push((r, col, needle.chars().count()));
+                from += at + needle.len();
+            }
+        }
+        found
+    }
+
+    /// The find bar's keys.
+    fn find_key(&mut self, byte: u8) -> WebEffect {
+        use crate::notepad::{ESC, KEY_DOWN, KEY_UP};
+        let count = self.matches().len();
+        let Some((query, current)) = self.find.as_mut() else {
+            return WebEffect::None;
+        };
+        match byte {
+            ESC => {
+                self.find = None;
+            }
+            b'\n' | b'\r' | KEY_DOWN if count > 0 => *current = (*current + 1) % count,
+            KEY_UP if count > 0 => *current = (*current + count - 1) % count,
+            _ => match query.key(byte, &[]) {
+                Edit::Unhandled | Edit::Nothing => return WebEffect::None,
+                // A new query starts from the first match.
+                _ => *current = 0,
+            },
+        }
+        let current = self.find.as_ref().map(|(_, c)| *c);
+        if let (Some(current), Some(&(row, _, _))) =
+            (current, self.matches().get(current.unwrap_or(0)))
+        {
+            let _ = current;
+            self.scroll_to_row(row);
+        }
+        WebEffect::Redraw
+    }
+
+    pub fn handle_byte(&mut self, byte: u8) -> WebEffect {
+        use crate::notepad::{CTRL_W, ESC};
         match byte {
             CTRL_W => return WebEffect::Close,
             KEY_ADDRESS => {
                 self.editing = true;
+                self.find = None;
                 return WebEffect::Redraw;
             }
-            KEY_GO if self.editing || self.page.is_none() => {
+            KEY_GO if self.editing || self.page.is_none() || self.showing_start() => {
                 return self.submit();
             }
             KEY_GO | KEY_RELOAD => {
                 return match self.page.as_ref().map(|p| p.url.clone()) {
-                    Some(url) => self.open(&url),
-                    None => WebEffect::None,
+                    Some(url) if url != START => self.open(&url),
+                    _ => WebEffect::None,
                 };
             }
             KEY_BACK => return self.back(),
+            KEY_FORWARD => return self.forward(),
+            KEY_START => {
+                return if self.showing_start() {
+                    WebEffect::None
+                } else {
+                    self.go(String::from(START))
+                };
+            }
+            // Ctrl+D, as browsers have it.
+            KEY_BOOKMARK | crate::notepad::CTRL_D => return self.toggle_bookmark(),
+            CTRL_F if self.page.is_some() => {
+                self.find = Some((LineEdit::new(), 0));
+                self.editing = false;
+                return WebEffect::Redraw;
+            }
+            CTRL_C => {
+                let url = self
+                    .selected
+                    .and_then(|s| self.page.as_ref()?.links.get(s).cloned())
+                    .or_else(|| self.page.as_ref().map(|p| p.url.clone()))
+                    .filter(|u| u != START);
+                return match url {
+                    Some(url) => {
+                        self.message = Some(alloc::format!("Copied {url}"));
+                        WebEffect::Copy(url)
+                    }
+                    None => WebEffect::None,
+                };
+            }
             b if (LINK_KEY_FIRST..=LINK_KEY_FIRST + (LINK_KEYS - 1) as u8).contains(&b) => {
                 let (w, h) = self.last_size.get();
                 let link = self
@@ -1046,20 +1427,44 @@ impl WebView {
             }
             _ => {}
         }
+        if self.find.is_some() {
+            return self.find_key(byte);
+        }
+        // On the start page, with nothing typed, Tab, the arrows and Enter
+        // are the page's: they walk and open its links.
+        if self.editing && self.showing_start() && self.address.is_empty() {
+            use crate::notepad::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
+            if matches!(
+                byte,
+                b'\t' | b'\n' | b'\r' | KEY_UP | KEY_DOWN | KEY_PAGE_UP | KEY_PAGE_DOWN
+            ) {
+                return self.page_key(byte);
+            }
+        }
         if self.editing {
             return match self.address.key(byte, &[]) {
                 Edit::Submit => self.submit(),
-                Edit::Unhandled if byte == ESC && self.page.is_some() => {
+                Edit::Unhandled if byte == ESC && !self.showing_start() && self.page.is_some() => {
                     self.editing = false;
                     if let Some(url) = self.page.as_ref().map(|p| p.url.clone()) {
                         self.address.set(&url);
                     }
                     WebEffect::Redraw
                 }
+                // On the start page the arrows and Tab still reach its links.
+                Edit::Unhandled if self.showing_start() => self.page_key(byte),
                 Edit::Unhandled => WebEffect::None,
                 _ => WebEffect::Redraw,
             };
         }
+        self.page_key(byte)
+    }
+
+    /// A key for the page itself.
+    fn page_key(&mut self, byte: u8) -> WebEffect {
+        use crate::notepad::{
+            BACKSPACE, ESC, KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP,
+        };
         let links = self.page.as_ref().map_or(0, |p| p.links.len());
         match byte {
             KEY_UP => self.scroll_by(-1),
@@ -1098,35 +1503,65 @@ impl WebView {
         WebEffect::Redraw
     }
 
+    fn toggle_bookmark(&mut self) -> WebEffect {
+        let Some(page) = self.page.as_ref().filter(|p| p.url != START) else {
+            return WebEffect::None;
+        };
+        let (title, url) = (page.title.clone(), page.url.clone());
+        if self.bookmarks.iter().any(|b| b.url == url) {
+            self.bookmarks.retain(|b| b.url != url);
+            self.message = Some(String::from("Bookmark removed"));
+        } else {
+            self.bookmarks.push(Bookmark { title, url });
+            self.message = Some(String::from("Bookmarked: it is on the start page"));
+        }
+        WebEffect::Bookmarks(self.bookmarks.clone())
+    }
+
     fn submit(&mut self) -> WebEffect {
         let typed = String::from_utf8_lossy(self.address.text()).into_owned();
         if typed.trim().is_empty() {
             return WebEffect::None;
         }
-        self.go(normalize(&typed))
-    }
-
-    fn back(&mut self) -> WebEffect {
-        match self.back.pop() {
-            Some(url) => {
-                self.editing = false;
-                self.open(&url)
-            }
-            None => WebEffect::None,
-        }
+        let url = if typed.trim() == START {
+            String::from(START)
+        } else {
+            normalize(&typed)
+        };
+        self.go(url)
     }
 
     pub fn footer(&self) -> String {
         if let Some(url) = &self.loading {
             return alloc::format!("Loading {url} ...");
         }
+        if let Some((query, current)) = &self.find {
+            let count = self.matches().len();
+            let where_ = match count {
+                0 if query.is_empty() => String::new(),
+                0 => String::from("   no matches"),
+                n => alloc::format!("   {} of {n}", current + 1),
+            };
+            return alloc::format!(
+                "Find: {}_{where_}   Enter or Down next, Up back, Esc closes",
+                query.shown()
+            );
+        }
+        if let Some(link) = self.hover_link.get() {
+            if let Some(url) = self.page.as_ref().and_then(|p| p.links.get(link)) {
+                return url.clone();
+            }
+        }
         if let Some(message) = &self.message {
             return message.clone();
         }
         match &self.page {
             None => String::from("Type an address and press Enter   http:// only for now"),
+            Some(page) if page.url == START => {
+                String::from("Type an address, or pick a page   http:// only for now")
+            }
             Some(page) => alloc::format!(
-                "{} link{}   Tab and Enter follow them   Backspace goes back   Esc: address",
+                "{} link{}   Tab and Enter follow them   Backspace goes back   Ctrl+F finds",
                 page.links.len(),
                 if page.links.len() == 1 { "" } else { "s" }
             ),
@@ -1137,14 +1572,28 @@ impl WebView {
         self.last_size.set((w, h));
         let p = palette;
         let mut ui = Ui::new(palette, hover);
-        // The address bar: Back, the field, Go.
-        let back_kind = if self.back.is_empty() {
-            ButtonKind::Quiet
-        } else {
-            ButtonKind::Plain
+        // The bar: Back, Forward, the address, Go.
+        let quiet = |empty: bool| {
+            if empty {
+                ButtonKind::Quiet
+            } else {
+                ButtonKind::Plain
+            }
         };
-        ui.button(rect(0, 0, 36, BAR_H), "<", KEY_BACK, back_kind);
-        let field = rect(44, 0, w.saturating_sub(44 + 84), BAR_H);
+        ui.button(
+            rect(0, 0, 32, BAR_H),
+            "<",
+            KEY_BACK,
+            quiet(self.back.is_empty()),
+        );
+        ui.button(
+            rect(38, 0, 32, BAR_H),
+            ">",
+            KEY_FORWARD,
+            quiet(self.forward.is_empty()),
+        );
+        let field_x = 78;
+        let field = rect(field_x, 0, w.saturating_sub(field_x as u32 + 84), BAR_H);
         ui.fill(field, p.raised, 8);
         ui.outline(
             field,
@@ -1154,23 +1603,29 @@ impl WebView {
         );
         let text = self.address.shown();
         let room = (field.width.saturating_sub(24) / GLYPH_W) as usize;
-        let mut shown: String = if text.chars().count() > room {
-            text.chars().skip(text.chars().count() - room).collect()
+        let count = text.chars().count();
+        let shown: String = if count > room {
+            text.chars().skip(count - room).collect()
         } else {
             text.clone()
         };
-        let ink = if text.is_empty() { p.muted } else { p.text };
-        if text.is_empty() && self.editing {
-            shown = String::from("Type an address");
-        }
-        ui.text(56, (BAR_H as i32 - 16) / 2, &shown, ink, 1);
+        let text_x = field_x + 12;
+        let (shown, ink) = if text.is_empty() && self.editing {
+            (String::from("Type an address"), p.muted)
+        } else {
+            (shown, p.text)
+        };
+        ui.text(text_x, (BAR_H as i32 - 16) / 2, &shown, ink, 1);
         if self.editing {
-            let caret = 56 + (text.chars().count().min(room) as i32) * GLYPH_W as i32;
-            let caret = if text.is_empty() { 56 } else { caret };
+            let caret = if text.is_empty() {
+                text_x
+            } else {
+                text_x + (count.min(room) as i32) * GLYPH_W as i32
+            };
             ui.fill(rect(caret, 7, 2, BAR_H - 14), p.accent, 0);
         }
         ui.hit_area(field, KEY_ADDRESS);
-        let go = if self.editing || self.page.is_none() {
+        let go = if self.editing || self.page.is_none() || self.showing_start() {
             "Go"
         } else {
             "Reload"
@@ -1190,8 +1645,7 @@ impl WebView {
             1,
         );
 
-        // The page.
-        let Some(page) = &self.page else {
+        let Some(_) = &self.page else {
             let say = self
                 .message
                 .clone()
@@ -1200,19 +1654,38 @@ impl WebView {
                         .as_ref()
                         .map(|u| alloc::format!("Loading {u} ..."))
                 })
-                .unwrap_or_else(|| String::from("A page from the network, as text"));
+                .unwrap_or_default();
             ui.text(4, TOP as i32 + 8, &say, p.muted, 1);
+            self.hover_link.set(None);
             return ui;
         };
         let cols = (w / GLYPH_W) as usize;
         let visible = self.visible_links(w, h);
+        let matches = self.matches();
+        let current = self.find.as_ref().map(|(_, c)| *c);
         let rows = self.rows(cols);
-        for (n, row) in rows
-            .iter()
-            .skip(self.scroll)
-            .take(Self::page_rows(h))
-            .enumerate()
-        {
+        let mut hovered = None;
+        let shown_rows = Self::page_rows(h);
+        // Find's matches, behind the text: the current one in the accent.
+        for (n, &(row, col, len)) in matches.iter().enumerate() {
+            if row < self.scroll || row >= self.scroll + shown_rows {
+                continue;
+            }
+            let y = TOP as i32 + (row - self.scroll) as i32 * ROW as i32;
+            let area = rect(
+                col as i32 * GLYPH_W as i32,
+                y,
+                len as u32 * GLYPH_W,
+                ROW - 2,
+            );
+            if Some(n) == current {
+                ui.fill(area, p.accent, 3);
+            } else {
+                ui.fill(area, p.raised, 3);
+                ui.outline(area, p.hairline, 3, 1);
+            }
+        }
+        for (n, row) in rows.iter().skip(self.scroll).take(shown_rows).enumerate() {
             let y = TOP as i32 + n as i32 * ROW as i32;
             if row.kind == BlockKind::Rule {
                 ui.line(
@@ -1228,18 +1701,16 @@ impl WebView {
             let mut x = 0i32;
             for (text, link) in &row.runs {
                 let width = (text.chars().count() as u32 * GLYPH_W) as i32;
-                let ink = match (row.kind, link) {
-                    (_, Some(_)) => p.accent,
-                    (BlockKind::Heading, None) => p.text,
-                    (BlockKind::Pre, None) => p.text,
-                    _ => p.text,
-                };
+                let ink = p.text;
                 if let Some(link) = link {
                     let area = rect(x, y, width.max(0) as u32, ROW);
                     if self.selected == Some(*link) {
                         ui.fill(area, p.raised, 4);
                     }
-                    ui.text(x, y + 2, text, ink, 1);
+                    if ui.hovered(&area) {
+                        hovered = Some(*link);
+                    }
+                    ui.text(x, y + 2, text, p.accent, 1);
                     ui.line(x, y + 17, x + width, y + 17, p.accent, 1);
                     if let Some(n) = visible.iter().position(|v| v == link) {
                         ui.hit_area(area, LINK_KEY_FIRST + n as u8);
@@ -1253,8 +1724,21 @@ impl WebView {
                 }
                 x += width;
             }
+            // The current match's own letters, again, on the accent.
+            if let Some(&(r, col, len)) = current.and_then(|c| matches.get(c)) {
+                if r == self.scroll + n {
+                    let text: String = row
+                        .runs
+                        .iter()
+                        .flat_map(|(t, _)| t.chars())
+                        .skip(col)
+                        .take(len)
+                        .collect();
+                    ui.text(col as i32 * GLYPH_W as i32, y + 2, &text, p.on_accent, 1);
+                }
+            }
         }
-        let _ = page;
+        self.hover_link.set(hovered);
         ui
     }
 }
@@ -1432,16 +1916,19 @@ c</pre>
             200,
             "<p>Second</p>",
         ));
-        // Back.
+        // Back: at once, from what was read (WEB-002), no fetch.
         assert_eq!(
             view.handle_byte(crate::notepad::BACKSPACE),
-            WebEffect::Fetch("http://10.0.2.2:18080/".into())
+            WebEffect::Redraw
         );
-        view.loaded(response(
-            "http://10.0.2.2:18080/",
-            200,
-            "<p>Go <a href='next.html'>next</a></p>",
-        ));
+        assert_eq!(view.url().as_deref(), Some("http://10.0.2.2:18080/"));
+        // Forward, the same way.
+        assert_eq!(view.handle_byte(KEY_FORWARD), WebEffect::Redraw);
+        assert_eq!(
+            view.url().as_deref(),
+            Some("http://10.0.2.2:18080/next.html")
+        );
+        view.handle_byte(KEY_BACK);
         // A click on a link: the drawn card's hit areas.
         let palette = Palette::from_theme(&services_gui_host::Theme::DEFAULT);
         let ui = view.ui(640, 400, palette, None);
@@ -1500,5 +1987,124 @@ c</pre>
         let page = view.page().unwrap();
         assert_eq!(page.title, "notes.txt");
         assert_eq!(text_of(&page.blocks[1]), "  indented <b>not bold</b>");
+    }
+
+    #[test]
+    fn lists_are_numbered_and_nested_lists_and_quotes_indent() {
+        let page = read_html(
+            "<ol start=3><li>three</li><li>four and a long tail that wraps<ul><li>inner</li></ul></li></ol><blockquote>quoted</blockquote>",
+            "http://h/",
+            200,
+        );
+        let rows = wrap(&page, 20);
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.runs.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        assert_eq!(texts[0], "3. three");
+        assert_eq!(texts[1], "4. four and a long ");
+        // A wrapped item hangs under its text, not its number.
+        assert_eq!(texts[2], "   tail that wraps");
+        assert_eq!(texts[3], "   - inner", "{texts:?}");
+        assert!(texts.contains(&"  quoted".to_string()), "{texts:?}");
+    }
+
+    #[test]
+    fn the_start_page_lists_bookmarks_and_recent_pages() {
+        let mut view = WebView::new();
+        assert_eq!(view.url().as_deref(), Some(START));
+        assert_eq!(view.title(), "Web");
+        assert!(view.editing, "ready for an address");
+        view.set_bookmarks(alloc::vec![Bookmark {
+            title: "Panda".into(),
+            url: "http://panda.test/".into()
+        }]);
+        let page = view.page().unwrap();
+        assert_eq!(page.links, ["http://panda.test/"]);
+        // Down and Tab reach it even while the address has the keys.
+        view.handle_byte(b'\t');
+        assert_eq!(
+            view.handle_byte(b'\n'),
+            WebEffect::Fetch("http://panda.test/".into()),
+            "Enter follows the reached link when the address is empty"
+        );
+    }
+
+    #[test]
+    fn a_page_is_bookmarked_and_unbookmarked_and_the_list_survives_a_round_trip() {
+        let mut view = WebView::new();
+        view.open("http://a/");
+        view.loaded(response("http://a/", 200, "<title>A page</title><p>x</p>"));
+        let WebEffect::Bookmarks(list) = view.handle_byte(KEY_BOOKMARK) else {
+            panic!("a bookmark list to keep");
+        };
+        assert_eq!(
+            list,
+            [Bookmark {
+                title: "A page".into(),
+                url: "http://a/".into()
+            }]
+        );
+        assert!(view.bookmarked());
+        assert_eq!(parse_bookmarks(&bookmarks_text(&list)), list);
+        let WebEffect::Bookmarks(list) = view.handle_byte(KEY_BOOKMARK) else {
+            panic!();
+        };
+        assert!(list.is_empty());
+        // The start page shows recent pages.
+        view.handle_byte(KEY_START);
+        assert!(view
+            .page()
+            .unwrap()
+            .links
+            .contains(&"http://a/".to_string()));
+    }
+
+    #[test]
+    fn find_counts_matches_moves_between_them_and_scrolls() {
+        let mut view = WebView::new();
+        view.open("http://a/");
+        let mut body = String::new();
+        for i in 0..60 {
+            body.push_str(&alloc::format!("<p>line {i}</p>"));
+        }
+        body.push_str("<p>the Needle here</p><p>and a needle there</p>");
+        view.loaded(response("http://a/", 200, &body));
+        let palette = Palette::from_theme(&services_gui_host::Theme::DEFAULT);
+        let _ = view.ui(640, 400, palette, None);
+        view.handle_byte(CTRL_F);
+        for b in b"needle" {
+            view.handle_byte(*b);
+        }
+        assert!(view.footer().contains("1 of 2"), "{}", view.footer());
+        assert!(view.scroll > 0, "scrolled to the first match");
+        view.handle_byte(b'\n');
+        assert!(view.footer().contains("2 of 2"));
+        view.handle_byte(crate::notepad::KEY_UP);
+        assert!(view.footer().contains("1 of 2"));
+        view.handle_byte(crate::notepad::ESC);
+        assert!(!view.footer().starts_with("Find"));
+    }
+
+    #[test]
+    fn a_hovered_link_says_where_it_goes_and_ctrl_c_copies_links() {
+        let mut view = WebView::new();
+        view.open("http://a/");
+        view.loaded(response("http://a/", 200, "<p>Go <a href='/b'>b</a></p>"));
+        let palette = Palette::from_theme(&services_gui_host::Theme::DEFAULT);
+        let over = (3 * GLYPH_W as i32 + 2, TOP as i32 + 5);
+        let _ = view.ui(640, 400, palette, Some(over));
+        assert_eq!(view.footer(), "http://a/b");
+        let _ = view.ui(640, 400, palette, None);
+        assert_ne!(view.footer(), "http://a/b");
+        assert_eq!(
+            view.handle_byte(CTRL_C),
+            WebEffect::Copy("http://a/".into())
+        );
+        view.handle_byte(b'\t');
+        assert_eq!(
+            view.handle_byte(CTRL_C),
+            WebEffect::Copy("http://a/b".into())
+        );
     }
 }

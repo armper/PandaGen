@@ -1432,7 +1432,19 @@ impl DeskWindow {
                 ),
                 ("Again".to_string(), 0x12),
             ],
-            AppState::Web(_) => Vec::new(),
+            AppState::Web(view) => alloc::vec![
+                ("Start".to_string(), crate::web::KEY_START),
+                (
+                    if view.bookmarked() {
+                        "Unbookmark"
+                    } else {
+                        "Bookmark"
+                    }
+                    .to_string(),
+                    crate::web::KEY_BOOKMARK,
+                ),
+                ("Find".to_string(), crate::web::CTRL_F),
+            ],
         }
     }
 }
@@ -1895,7 +1907,9 @@ pub enum AppState {
     Sharing(crate::sharing::SharingView),
     Access(crate::access_card::AccessView),
     Audit(crate::audit_card::AuditView),
-    Web(crate::web::WebView),
+    /// Boxed: a page, its cache and its history are far bigger than any
+    /// other card's state, and every card would pay for them.
+    Web(alloc::boxed::Box<crate::web::WebView>),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -2098,6 +2112,8 @@ pub enum DeskRequest {
     /// Fetch `url` for Web card `id` (WEB-001), then call
     /// [`Desk::web_loaded`].
     Fetch { id: ViewId, url: String },
+    /// Keep the Web cards' bookmarks (WEB-002); read back with the look.
+    SaveBookmarks { text: String },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -2169,10 +2185,12 @@ pub enum PaletteAction {
     /// Who tried what on one's documents (FS-009).
     Audit,
     Web,
+    WebBookmark,
+    WebStart,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 51] = [
+    pub const ALL: [PaletteAction; 53] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2217,6 +2235,8 @@ impl PaletteAction {
         PaletteAction::Tasks,
         PaletteAction::Sketch,
         PaletteAction::Web,
+        PaletteAction::WebBookmark,
+        PaletteAction::WebStart,
         PaletteAction::Apps,
         PaletteAction::Rest,
         PaletteAction::Lock,
@@ -2272,6 +2292,8 @@ impl PaletteAction {
             PaletteAction::Tasks => "Tasks: the to-do list",
             PaletteAction::Sketch => "Sketch: draw with the pointer",
             PaletteAction::Web => "Web: pages over HTTP, read as text",
+            PaletteAction::WebBookmark => "Bookmark this page (or take it off)",
+            PaletteAction::WebStart => "Web start page: bookmarks and recent pages",
             PaletteAction::Apps => "Apps: every app on the desk",
             PaletteAction::Rest => "Rest: just the time, until you are back",
             PaletteAction::Lock => "Lock: rest, and ask for the passphrase",
@@ -2328,6 +2350,8 @@ impl PaletteAction {
             PaletteAction::Tasks => "",
             PaletteAction::Sketch => "",
             PaletteAction::Web => "",
+            PaletteAction::WebBookmark => "Ctrl+D",
+            PaletteAction::WebStart => "",
             PaletteAction::Apps => "Ctrl+Space twice",
             PaletteAction::Rest => "Ctrl+L",
             PaletteAction::Lock => "",
@@ -2360,6 +2384,11 @@ impl PaletteAction {
     }
 
     /// Whether the action needs any focused window.
+    /// Whether the action needs a focused Web card.
+    const fn needs_web(self) -> bool {
+        matches!(self, PaletteAction::WebBookmark | PaletteAction::WebStart)
+    }
+
     const fn needs_window(self) -> bool {
         matches!(
             self,
@@ -2388,6 +2417,8 @@ pub struct Palette {
     /// The focused document's headings (GFX-091): `(row, text, level)`,
     /// refreshed by the desk whenever the palette is drawn or keyed.
     pub headings: Vec<(usize, String, usize)>,
+    /// A Web card has the focus: its rows are offered (WEB-002).
+    pub web: bool,
 }
 
 /// Content search starts at this many characters, so one letter does not
@@ -2569,6 +2600,7 @@ impl Palette {
                 .copied()
                 .filter(|action| has_notepad || !action.needs_notepad())
                 .filter(|action| has_window || !action.needs_window())
+                .filter(|action| self.web || !action.needs_web())
                 .filter(|action| fits(action.label()))
                 .map(PaletteRow::Action),
         );
@@ -2620,6 +2652,8 @@ pub struct Desk {
     look_preview: Option<LookChoice>,
     /// Files opened or saved lately, newest first (GFX-060).
     recent: Vec<String>,
+    /// The Web cards' bookmarks (WEB-002).
+    web_bookmarks: Vec<crate::web::Bookmark>,
     /// The Welcome card was closed this session; the kernel writes
     /// `.welcomed` and never shows it again (GFX-065).
     welcome_dismissed: bool,
@@ -2722,6 +2756,7 @@ impl Desk {
             clipboard_history: Vec::new(),
             look: LookChoice::default(),
             look_preview: None,
+            web_bookmarks: Vec::new(),
             recent: Vec::new(),
             welcome_dismissed: false,
             layout_loaded: false,
@@ -3427,7 +3462,11 @@ impl Desk {
                 DeskApp::Sharing => AppState::Sharing(crate::sharing::SharingView::new("")),
                 DeskApp::Access => AppState::Access(crate::access_card::AccessView::new()),
                 DeskApp::Audit => AppState::Audit(crate::audit_card::AuditView::new()),
-                DeskApp::Web => AppState::Web(crate::web::WebView::new()),
+                DeskApp::Web => {
+                    let mut view = crate::web::WebView::new();
+                    view.set_bookmarks(self.web_bookmarks.clone());
+                    AppState::Web(alloc::boxed::Box::new(view))
+                }
             },
         });
         self.focus = Some(id);
@@ -4214,6 +4253,8 @@ impl Desk {
                 self.open_or_raise(DeskApp::Web);
                 None
             }
+            PaletteAction::WebBookmark => self.forward_to_notepad(crate::web::KEY_BOOKMARK),
+            PaletteAction::WebStart => self.forward_to_notepad(crate::web::KEY_START),
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
                 let id = self.open_or_raise(DeskApp::Sketch);
@@ -4301,8 +4342,10 @@ impl Desk {
 
     fn handle_palette_key(&mut self, byte: u8) -> (Option<DeskRequest>, bool) {
         let headings = self.focused_headings();
+        let web_focused = self.focused_window().map(|w| w.app) == Some(DeskApp::Web);
         if let Some(palette) = self.palette.as_mut() {
             palette.headings = headings;
+            palette.web = web_focused;
         }
         let has_window = self.focused_window().is_some();
         let has_notepad = self.focused_window().and_then(|w| w.notepad()).is_some();
@@ -5114,7 +5157,31 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
-    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// The fetch for Web card `id` ended (WEB-001); a redirect asks for the
+    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// Every Web card's bookmarks are now `list`: tell them, and keep it.
+    fn set_web_bookmarks(&mut self, list: Vec<crate::web::Bookmark>) -> DeskRequest {
+        self.web_bookmarks = list.clone();
+        for window in &mut self.windows {
+            if let AppState::Web(view) = &mut window.state {
+                view.set_bookmarks(list.clone());
+            }
+        }
+        DeskRequest::SaveBookmarks {
+            text: crate::web::bookmarks_text(&list),
+        }
+    }
+
+    /// The bookmarks read from disk with the look (WEB-002).
+    pub fn apply_bookmarks(&mut self, text: Option<&str>) {
+        let list = text.map(crate::web::parse_bookmarks).unwrap_or_default();
+        self.web_bookmarks = list.clone();
+        for window in &mut self.windows {
+            if let AppState::Web(view) = &mut window.state {
+                view.set_bookmarks(list.clone());
+            }
+        }
+    }
+
+    /// The fetch for Web card `id` ended (WEB-001); a redirect asks for the
     /// next.
     pub fn web_loaded(
         &mut self,
@@ -5789,6 +5856,14 @@ impl Desk {
                 crate::web::WebEffect::None => (None, false),
                 crate::web::WebEffect::Redraw => (None, true),
                 crate::web::WebEffect::Fetch(url) => (Some(DeskRequest::Fetch { id, url }), true),
+                crate::web::WebEffect::Bookmarks(list) => {
+                    (Some(self.set_web_bookmarks(list)), true)
+                }
+                crate::web::WebEffect::Copy(text) => {
+                    self.remember_copy(text.clone());
+                    self.clipboard = text;
+                    (None, true)
+                }
                 crate::web::WebEffect::Close => {
                     self.close(id);
                     (None, true)
@@ -6575,8 +6650,10 @@ impl Desk {
         // The palette: a card near the top, above everything, without a
         // close glyph -- Esc or a click elsewhere closes it.
         let headings = self.focused_headings();
+        let web_focused = self.focused_window().map(|w| w.app) == Some(DeskApp::Web);
         if let Some(palette) = self.palette.as_mut() {
             palette.headings = headings;
+            palette.web = web_focused;
         }
         if let Some(palette) = &self.palette {
             let has_window = focus.is_some();
@@ -7031,6 +7108,60 @@ mod tests {
         desk.launch(DeskApp::Files);
         desk.handle_key(crate::notepad::CTRL_N);
         assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Files));
+    }
+
+    #[test]
+    fn web_rows_are_offered_over_a_web_card_and_bookmarks_are_shared_and_kept() {
+        let mut desk = Desk::new(1280, 800);
+        let web_rows = |desk: &Desk| {
+            let palette = Palette {
+                web: desk.focused_window().map(|w| w.app) == Some(DeskApp::Web),
+                ..Palette::default()
+            };
+            palette
+                .matches(true, false, &[], &[])
+                .into_iter()
+                .filter(|r| matches!(r, PaletteRow::Action(PaletteAction::WebBookmark)))
+                .count()
+        };
+        desk.launch(DeskApp::Calculator);
+        assert_eq!(web_rows(&desk), 0);
+        let a = desk.launch(DeskApp::Web);
+        assert_eq!(web_rows(&desk), 1);
+        // A bookmark made in one card is every card's, and is kept.
+        if let Some(AppState::Web(view)) = desk.window_mut(a).map(|w| &mut w.state) {
+            view.open("http://a/");
+            view.loaded(Ok(crate::web::WebResponse {
+                url: "http://a/".into(),
+                status: 200,
+                reason: "OK".into(),
+                location: None,
+                content_type: Some("text/html".into()),
+                body: b"<title>A</title>".to_vec(),
+            }));
+        }
+        let (request, _) = desk.handle_key(crate::notepad::CTRL_D);
+        let Some(DeskRequest::SaveBookmarks { text }) = request else {
+            panic!("{request:?}");
+        };
+        assert_eq!(text, "http://a/\tA\n");
+        let b = desk.launch(DeskApp::Web);
+        let Some(AppState::Web(view)) = desk.window(b).map(|w| &w.state) else {
+            panic!();
+        };
+        assert_eq!(
+            view.page().unwrap().links,
+            ["http://a/"],
+            "on its start page"
+        );
+        // Read back at sign-in.
+        let mut fresh = Desk::new(1280, 800);
+        fresh.apply_bookmarks(Some(&text));
+        let c = fresh.launch(DeskApp::Web);
+        let Some(AppState::Web(view)) = fresh.window(c).map(|w| &w.state) else {
+            panic!();
+        };
+        assert_eq!(view.page().unwrap().links, ["http://a/"]);
     }
 
     #[test]

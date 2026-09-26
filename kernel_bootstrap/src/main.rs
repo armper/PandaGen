@@ -2370,9 +2370,11 @@ fn workspace_loop(
                                 .read_setting(bare_metal_editor_io::WELCOMED_FILE)
                                 .is_some();
                             let layout = io.read_setting(bare_metal_editor_io::LAYOUT_FILE);
+                            let bookmarks = io.read_setting(bare_metal_editor_io::BOOKMARKS_FILE);
                             workspace.set_filesystem(io.into_filesystem());
                             desk.apply_look(text.as_deref());
                             desk.apply_recent(recent.as_deref());
+                            desk.apply_bookmarks(bookmarks.as_deref());
                             // The cards as they were left (DESK-020).
                             let before = desk.window_count();
                             desk_requests.extend(desk.apply_layout(layout.as_deref()));
@@ -2453,6 +2455,14 @@ fn workspace_loop(
                             let mut io =
                                 bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
                             let _ = io.write_setting(bare_metal_editor_io::WELCOMED_FILE, "yes\n");
+                            workspace.set_filesystem(io.into_filesystem());
+                        }
+                    }
+                    desk::DeskRequest::SaveBookmarks { text } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let _ = io.write_setting(bare_metal_editor_io::BOOKMARKS_FILE, &text);
                             workspace.set_filesystem(io.into_filesystem());
                         }
                     }
