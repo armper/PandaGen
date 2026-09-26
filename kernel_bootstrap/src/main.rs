@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod access_card;
 mod access_shell;
+mod audit_card;
 mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
 mod bare_metal_net;
@@ -2167,6 +2168,14 @@ fn workspace_loop(
                             kprintln!(serial, "authority: signed out");
                             workspace.request_clear();
                             desk.signed_out(people, preferred.as_deref());
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::LoadAudit { id } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            let lines = guard::audit_lines(&mut fs);
+                            workspace.set_filesystem(fs);
+                            desk.audit_loaded(id, lines);
                             output_dirty = true;
                         }
                     }

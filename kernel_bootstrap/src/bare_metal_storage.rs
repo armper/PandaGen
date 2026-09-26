@@ -563,6 +563,7 @@ impl BareMetalFilesystem {
         schema: Option<&str>,
     ) -> Result<ObjectId, TransactionError> {
         self.assert_boot_cpu();
+        let now = if now == 0 { self.clock } else { now };
         self.set_clock(now);
         let previous = self
             .fs

@@ -388,6 +388,8 @@ pub enum DeskApp {
     Sharing,
     /// The people on this machine, and roles (FS-008).
     Access,
+    /// Who tried what on one's documents, and what the guard said (FS-009).
+    Audit,
 }
 
 impl DeskApp {
@@ -440,6 +442,7 @@ impl DeskApp {
             DeskApp::Launcher => "Apps",
             DeskApp::Sharing => "Sharing",
             DeskApp::Access => "Access",
+            DeskApp::Audit => "Audit",
         }
     }
 
@@ -673,6 +676,7 @@ impl DeskApp {
             DeskApp::Launcher => "Ap",
             DeskApp::Sharing => "Sh",
             DeskApp::Access => "Ac",
+            DeskApp::Audit => "Au",
         }
     }
 
@@ -695,6 +699,7 @@ impl DeskApp {
             DeskApp::Launcher => LAUNCHER_SIZE,
             DeskApp::Sharing => SHARING_SIZE,
             DeskApp::Access => ACCESS_SIZE,
+            DeskApp::Audit => AUDIT_SIZE,
         }
     }
 }
@@ -737,6 +742,8 @@ pub const LAUNCHER_SIZE: (usize, usize) = (560, 324);
 pub const SHARING_SIZE: (usize, usize) = (600, 520);
 /// The Access card (FS-008).
 pub const ACCESS_SIZE: (usize, usize) = (640, 600);
+/// The Audit card (FS-009).
+pub const AUDIT_SIZE: (usize, usize) = (760, 520);
 /// Files' Share chip: open the Sharing card for the selected document.
 pub const KEY_SHARE: u8 = 0xA1;
 
@@ -1358,6 +1365,13 @@ impl DeskWindow {
             AppState::Launcher(_) => Vec::new(),
             AppState::Sharing(_) => Vec::new(),
             AppState::Access(_) => Vec::new(),
+            AppState::Audit(view) => alloc::vec![
+                (
+                    if view.refused_only { "All" } else { "Refused" }.to_string(),
+                    crate::audit_card::KEY_REFUSED_ONLY,
+                ),
+                ("Again".to_string(), 0x12),
+            ],
         }
     }
 }
@@ -1819,6 +1833,7 @@ pub enum AppState {
     Launcher(LauncherView),
     Sharing(crate::sharing::SharingView),
     Access(crate::access_card::AccessView),
+    Audit(crate::audit_card::AuditView),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -2012,6 +2027,9 @@ pub enum DeskRequest {
         id: ViewId,
         act: crate::access_card::AccessAct,
     },
+    /// Say what the Audit card `id` shows (FS-009), then call
+    /// [`Desk::audit_loaded`].
+    LoadAudit { id: ViewId },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -2077,10 +2095,12 @@ pub enum PaletteAction {
     ShareDocument,
     /// The people on this machine, and roles (FS-008).
     Access,
+    /// Who tried what on one's documents (FS-009).
+    Audit,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 46] = [
+    pub const ALL: [PaletteAction; 47] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2127,6 +2147,7 @@ impl PaletteAction {
         PaletteAction::SignOut,
         PaletteAction::ShareDocument,
         PaletteAction::Access,
+        PaletteAction::Audit,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -2177,6 +2198,7 @@ impl PaletteAction {
             PaletteAction::SignOut => "Sign out: close everything, let someone else in",
             PaletteAction::ShareDocument => "Share this document: who may read it",
             PaletteAction::Access => "Access: people, clearances and roles",
+            PaletteAction::Audit => "Audit: who tried what on your documents",
         }
     }
 
@@ -2228,6 +2250,7 @@ impl PaletteAction {
             PaletteAction::SignOut => "",
             PaletteAction::ShareDocument => "",
             PaletteAction::Access => "",
+            PaletteAction::Audit => "",
         }
     }
 
@@ -3165,6 +3188,7 @@ impl Desk {
                 DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
                 DeskApp::Sharing => AppState::Sharing(crate::sharing::SharingView::new("")),
                 DeskApp::Access => AppState::Access(crate::access_card::AccessView::new()),
+                DeskApp::Audit => AppState::Audit(crate::audit_card::AuditView::new()),
             },
         });
         self.focus = Some(id);
@@ -3640,6 +3664,10 @@ impl Desk {
                 "Access".to_string(),
                 alloc::vec!["people and roles".to_string()],
             ),
+            AppState::Audit(_) => (
+                "Audit".to_string(),
+                alloc::vec!["who tried what".to_string()],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -3920,6 +3948,10 @@ impl Desk {
             }
             PaletteAction::SignOut => Some(DeskRequest::SignOut),
             PaletteAction::Access => self.open_access(),
+            PaletteAction::Audit => {
+                let id = self.open_or_raise(DeskApp::Audit);
+                Some(DeskRequest::LoadAudit { id })
+            }
             PaletteAction::ShareDocument => {
                 let path = self
                     .focused_window()
@@ -4819,7 +4851,18 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
-    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// Open the Access card (FS-008); the kernel is asked what to show.
+    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// The kernel's answer for Audit card `id` (FS-009).
+    pub fn audit_loaded(
+        &mut self,
+        id: ViewId,
+        lines: Result<Vec<crate::audit_card::AuditLine>, String>,
+    ) {
+        if let Some(AppState::Audit(view)) = self.window_mut(id).map(|w| &mut w.state) {
+            view.loaded(lines);
+        }
+    }
+
+    /// Open the Access card (FS-008); the kernel is asked what to show.
     pub fn open_access(&mut self) -> Option<DeskRequest> {
         let id = self.open_or_raise(DeskApp::Access);
         Some(DeskRequest::LoadAccess { id })
@@ -5457,6 +5500,17 @@ impl Desk {
                     }
                 }
             }
+            AppState::Audit(view) => match view.handle_byte(byte) {
+                crate::audit_card::AuditEffect::None => (None, false),
+                crate::audit_card::AuditEffect::Redraw => (None, true),
+                crate::audit_card::AuditEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+                crate::audit_card::AuditEffect::Reload => {
+                    (Some(DeskRequest::LoadAudit { id }), true)
+                }
+            },
             AppState::Access(view) => match view.handle_byte(byte) {
                 crate::access_card::AccessEffect::None => (None, false),
                 crate::access_card::AccessEffect::Redraw => (None, true),
@@ -6062,6 +6116,11 @@ impl Desk {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(view.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), "Access".to_string(), view.footer(), None)
+                }
+                AppState::Audit(view) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(view.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), "Audit".to_string(), view.footer(), None)
                 }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
@@ -9373,6 +9432,44 @@ mod tests {
         assert!(desk.signing_in());
         desk.signed_in("armando");
         assert!(desk.focused_window().is_none(), "every card closed");
+    }
+
+    /// The palette opens Audit, which asks the kernel for the log; R
+    /// narrows it and the Again chip asks again (FS-009).
+    #[test]
+    fn audit_opens_from_the_palette_narrows_and_asks_again() {
+        let mut desk = Desk::new(1280, 800);
+        let Some(DeskRequest::LoadAudit { id }) = desk.run_action(PaletteAction::Audit) else {
+            panic!()
+        };
+        desk.audit_loaded(
+            id,
+            Ok(alloc::vec![crate::audit_card::AuditLine {
+                when: "2026-09-26 02:00".into(),
+                who: "armando".into(),
+                right: "history".into(),
+                doc: "plan".into(),
+                allowed: false,
+                reason: "holds only read".into(),
+            }]),
+        );
+        let card = |desk: &mut Desk| {
+            desk.windows("", true, None)
+                .into_iter()
+                .find(|w| w.frame.view_id == id)
+                .unwrap()
+        };
+        assert_eq!(card(&mut desk).actions, alloc::vec!["Refused", "Again"]);
+        desk.handle_app_key(id, b'r');
+        assert_eq!(card(&mut desk).actions, alloc::vec!["All", "Again"]);
+        assert_eq!(
+            desk.handle_app_key(id, 0x12).0,
+            Some(DeskRequest::LoadAudit { id })
+        );
+        assert!(matches!(
+            card(&mut desk).frame.content,
+            ViewContent::Graphics { .. }
+        ));
     }
 
     /// The palette opens Access and asks the kernel what to show; its acts

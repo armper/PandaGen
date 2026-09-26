@@ -457,6 +457,45 @@ pub fn access_act(
     }
 }
 
+/// Most lines the Audit card is given, newest first.
+pub const AUDIT_CARD_LINES: usize = 200;
+
+/// What the Audit card shows (FS-009): the decisions on the one acting's
+/// documents -- all of them, for the administrator -- newest first.
+pub fn audit_lines(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+) -> Result<Vec<crate::audit_card::AuditLine>, String> {
+    let who = fs
+        .guard
+        .principal()
+        .ok_or_else(|| String::from("Not signed in"))?;
+    let admin = fs.guard.console.as_deref() == Some(fs.guard.name_of(who.0).as_str());
+    let docs = fs.document_index().unwrap_or_default();
+    let g = &fs.guard;
+    Ok(g.authority
+        .audit()
+        .rev()
+        .filter_map(|e| {
+            let doc = docs.iter().find(|(id, _, _)| *id == e.doc.0);
+            let owner = doc.map(|(_, _, o)| *o);
+            if !admin && owner != Some(who.0) {
+                return None;
+            }
+            Some(crate::audit_card::AuditLine {
+                when: crate::rtc::format_unix_minutes(e.at),
+                who: g.name_of(e.principal.0),
+                right: alloc::format!("{}", e.right),
+                doc: doc
+                    .map(|(_, n, _)| n.clone())
+                    .unwrap_or_else(|| alloc::format!("doc {}", e.doc.0)),
+                allowed: e.allowed,
+                reason: alloc::format!("{}", e.reason),
+            })
+        })
+        .take(AUDIT_CARD_LINES)
+        .collect())
+}
+
 /// Sign out: close the console's session; nobody is signed in.
 pub fn sign_out(fs: &mut crate::bare_metal_storage::BareMetalFilesystem) {
     if let Actor::Session(handle) = fs.guard.actor() {
@@ -587,10 +626,14 @@ impl Guard {
         if who == SYSTEM {
             return Ok(());
         }
-        let d = self
-            .authority
-            .check_and_log(who, &doc_ref(entry), right, now);
-        self.dirty = true;
+        let doc = doc_ref(entry);
+        let d = self.authority.check(who, &doc, right, now);
+        // Kept (FS-009): everyone else's acts, and every refusal -- not the
+        // owner's own reads and writes, which would crowd them out.
+        if !(d.allowed && who == doc.owner) {
+            self.authority.check_and_log(who, &doc, right, now);
+            self.dirty = true;
+        }
         if d.allowed {
             Ok(())
         } else {
@@ -609,10 +652,13 @@ impl Guard {
         if who == SYSTEM {
             return Ok(());
         }
-        let d = self
-            .authority
-            .check_version_and_log(who, &doc_ref(entry), saved_at, now);
-        self.dirty = true;
+        let doc = doc_ref(entry);
+        let d = self.authority.check_version(who, &doc, saved_at, now);
+        if !(d.allowed && who == doc.owner) {
+            self.authority
+                .check_version_and_log(who, &doc, saved_at, now);
+            self.dirty = true;
+        }
         if d.allowed {
             Ok(())
         } else {
@@ -1008,6 +1054,37 @@ mod tests {
             [0; 16]
         )
         .is_err());
+    }
+
+    /// The Audit card's lines (FS-009): Alice sees the refusals on her
+    /// document, newest first; Armando sees none of hers.
+    #[test]
+    fn the_audit_card_shows_the_owner_what_was_refused() {
+        let mut w = world();
+        let fs = &mut w.fs;
+        fs.guard.act_as(Actor::Session(w.alice));
+        fs.write_named("plan", b"x", 1, None).unwrap();
+        fs.write_named("plan", b"y", 2, None).unwrap();
+        fs.share("plan", "armando", authority::Terms::of(Rights::READ))
+            .unwrap();
+        fs.guard.act_as(Actor::Session(w.armando));
+        fs.read_file_by_name("plan").unwrap();
+        assert!(fs.list_versions("plan").is_err());
+        fs.guard.act_as(Actor::Session(w.alice));
+        let lines = audit_lines(fs).unwrap();
+        assert!(!lines[0].allowed, "newest first: the refusal");
+        assert_eq!(
+            (
+                lines[0].who.as_str(),
+                lines[0].doc.as_str(),
+                lines[0].right.as_str()
+            ),
+            ("armando", "plan", "history")
+        );
+        assert_eq!(lines[0].reason, "holds only read");
+        assert!(lines.iter().any(|l| l.allowed && l.who == "armando"));
+        fs.guard.act_as(Actor::Session(w.armando));
+        assert!(audit_lines(fs).unwrap().is_empty());
     }
 
     /// With a passphrase the next boot signs no one in; the sign-in screen's
