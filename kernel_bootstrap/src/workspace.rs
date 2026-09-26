@@ -1068,6 +1068,9 @@ impl WorkspaceSession {
             "help" => {
                 self.emit_line(serial, "Workspace Commands:");
                 self.emit_line(serial, "help           - Show this help");
+                for line in crate::access_shell::help() {
+                    self.emit_line(serial, &line);
+                }
                 self.emit_line(serial, "open <what>    - Open editor, CLI, or file picker");
                 self.emit_line(serial, "list           - List components");
                 self.emit_line(serial, "focus <id>     - Focus component");
@@ -1246,6 +1249,26 @@ impl WorkspaceSession {
                 }
                 #[cfg(test)]
                 self.emit_line(serial, "cat: not available in test mode");
+            }
+            // Who may do what (FS-005): the filesystem's guard answers.
+            word if crate::access_shell::handles(word) => {
+                #[cfg(not(test))]
+                {
+                    if let Some(ref mut fs) = self.filesystem {
+                        let now = fs.clock();
+                        let lines = crate::access_shell::run(fs, command, now, fresh_salt());
+                        for line in lines {
+                            self.emit_line(serial, &line);
+                        }
+                    } else {
+                        self.emit_line(serial, "Error: filesystem not initialized");
+                    }
+                }
+                #[cfg(test)]
+                {
+                    let _ = word;
+                    self.emit_line(serial, "access: not available in test mode");
+                }
             }
             "write" => {
                 #[cfg(not(test))]
@@ -2628,4 +2651,23 @@ mod tests {
         session.set_cli_active(true, &mut serial);
         assert!(session.status_line().starts_with("CLI:"));
     }
+}
+
+/// Sixteen bytes for a passphrase's salt (FS-005): the time-stamp counter
+/// and a count of salts made, hashed. Not a cryptographic generator, but a
+/// salt only has to be unlikely to repeat.
+#[cfg(not(test))]
+fn fresh_salt() -> [u8; 16] {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let n = MADE.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: RDTSC reads a counter; it has no side effects.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut seed = [0u8; 16];
+    seed[..8].copy_from_slice(&tsc.to_le_bytes());
+    seed[8..].copy_from_slice(&n.to_le_bytes());
+    let digest = remote_ipc::sha256::digest(&seed);
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&digest[..16]);
+    salt
 }

@@ -34,6 +34,7 @@ pub mod timer;
 pub mod widgets;
 
 // Storage modules (available in both test and non-test)
+pub mod access_shell;
 pub mod bare_metal_editor_io;
 pub mod bare_metal_storage;
 pub mod guard;

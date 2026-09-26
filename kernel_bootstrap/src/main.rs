@@ -16,6 +16,7 @@ extern crate std;
 #[cfg(not(test))]
 extern crate alloc;
 
+mod access_shell;
 mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
 mod bare_metal_net;

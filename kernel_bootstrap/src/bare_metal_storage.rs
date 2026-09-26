@@ -422,6 +422,18 @@ impl BareMetalFilesystem {
             .collect())
     }
 
+    /// Every document by id, with its name and owner's number -- for the
+    /// audit log, which names documents and shows each person their own
+    /// (FS-005). Crate-private: a listing of everything is not for people.
+    pub(crate) fn document_index(&mut self) -> Result<Vec<(u64, String, u32)>, TransactionError> {
+        let dir = self.fs.read_directory(self.root_id)?;
+        Ok(dir
+            .entries
+            .values()
+            .map(|e| (e.doc_id, e.name.clone(), e.owner))
+            .collect())
+    }
+
     /// Keep the guard's state in `.authority`, as the system, whoever is
     /// acting (FS-003).
     pub fn save_guard(&mut self) -> Result<(), TransactionError> {
