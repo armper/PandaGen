@@ -1820,6 +1820,49 @@ fn workspace_loop(
             get_tick_count(),
         );
 
+        // The Terminal's `fetch` and `resolve` (NET-033): started here, and
+        // their lines carried back as they come.
+        #[cfg(all(not(test), target_os = "none"))]
+        {
+            if let Some(request) = workspace.take_net_request() {
+                let started = match NET.lock().as_mut() {
+                    None => Err(alloc::string::String::from("net: no device")),
+                    Some(net) => match request {
+                        workspace::NetRequest::Fetch(url) => {
+                            net.start_fetch(&url, get_tick_count())
+                        }
+                        workspace::NetRequest::Resolve { name, server } => {
+                            let server = match server.as_deref() {
+                                None => Ok(None),
+                                Some(spec) => parse_server(spec).map(Some).ok_or_else(|| {
+                                    alloc::string::String::from(
+                                        "resolve: the server is <ip>[:port]",
+                                    )
+                                }),
+                            };
+                            server.and_then(|server| {
+                                net.start_resolve(&name, server, get_tick_count())
+                            })
+                        }
+                    },
+                };
+                if let Err(why) = started {
+                    workspace.emit_net_line(serial, &why);
+                    output_dirty = true;
+                }
+            }
+            let lines = NET
+                .try_lock()
+                .and_then(|mut net| net.as_mut().map(|n| n.take_fetch_lines()))
+                .unwrap_or_default();
+            if !lines.is_empty() {
+                for line in &lines {
+                    workspace.emit_net_line(serial, line);
+                }
+                output_dirty = true;
+            }
+        }
+
         // Try to receive response
         if let Some(KernelMessage::CommandResponse(response)) = ctx.try_recv(workspace_response) {
             {
@@ -5795,6 +5838,16 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 const PAGE_SIZE: u64 = 4096;
 const CHANNEL_CAPACITY: usize = 8;
 const COMMAND_MAX: usize = 64;
+/// `<ip>[:port]`, port 53 when none is given.
+#[cfg(all(not(test), target_os = "none"))]
+fn parse_server(spec: &str) -> Option<(net_stack::Ipv4, u16)> {
+    let (ip, port) = match spec.split_once(':') {
+        Some((ip, port)) => (ip, port.parse::<u16>().ok()?),
+        None => (spec, net_stack::dns::PORT),
+    };
+    Some((net_stack::wire::parse_ipv4(ip)?, port))
+}
+
 /// Command output capacity; `net`/`cpus` status fits, and a full response
 /// still fits one UDP datagram once base64-wrapped in a remote_ipc envelope.
 const RESPONSE_MAX: usize = 512;

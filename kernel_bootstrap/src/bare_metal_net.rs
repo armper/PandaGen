@@ -6,6 +6,8 @@
 
 extern crate alloc;
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::bare_metal_storage::StorageBootInfo;
@@ -194,6 +196,10 @@ pub struct NetStack {
     dhcp_server: Ipv4,
     lease_started_tick: u64,
     renewals: u32,
+    /// The `fetch` or `resolve` under way (NET-033), and the lines it has
+    /// for the Terminal.
+    fetch: Option<Fetch>,
+    fetch_lines: Vec<String>,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -233,6 +239,7 @@ impl NetStack {
             iface.bind(REMOTE_PORT);
         }
         iface.bind(DHCP_CLIENT_PORT);
+        iface.bind(DNS_CLIENT_PORT);
         let _ = iface.tcp_listen(TCP_ECHO_PORT);
         if remote_enabled {
             let _ = iface.tcp_listen(TCP_COMMAND_PORT);
@@ -258,6 +265,8 @@ impl NetStack {
             lease_started_tick: 0,
             renewals: 0,
             dns: None,
+            fetch: None,
+            fetch_lines: Vec::new(),
         })
     }
 
@@ -556,7 +565,15 @@ impl NetStack {
                 }
                 Event::TcpReady { conn } => {
                     let port = self.iface.tcp().connection(conn).map(|c| c.local_port);
+                    // A connection this machine opened is its fetch's
+                    // (`advance_fetch` reads it), never a service's.
+                    let outbound = self
+                        .iface
+                        .tcp()
+                        .connection(conn)
+                        .is_some_and(|c| c.outbound);
                     match port {
+                        _ if outbound => {}
                         Some(HTTP_PORT) => self.http_service(conn, status, log),
                         Some(TCP_COMMAND_PORT) => {
                             if let Some(line) = self.tcp_command_service(conn, log) {
@@ -586,6 +603,17 @@ impl NetStack {
                         src_port,
                         bytes: payload.to_vec(),
                     }));
+                }
+                Event::Udp {
+                    src,
+                    src_port,
+                    dst_port,
+                    payload_offset,
+                    payload_len,
+                } if dst_port == DNS_CLIENT_PORT => {
+                    let payload =
+                        self.rx_frame[payload_offset..payload_offset + payload_len].to_vec();
+                    self.dns_reply(src, src_port, &payload);
                 }
                 Event::Udp {
                     src,
@@ -636,6 +664,8 @@ impl NetStack {
         // until the 120-second idle reaper. That is F2 again, fixed for the
         // command port and never for this one.
         self.buffered_http(status, log);
+        // The fetch under way: its request out, its window updates, its end.
+        self.advance_fetch(clock());
         // Top up any response still streaming out, then push everything.
         self.pump_http();
         self.flush_tcp();
@@ -1641,4 +1671,460 @@ td:first-child{{color:#7f93a8}}a{{color:#7fd6c2}}\
         status.presents,
         status.storage,
     );
+}
+
+// ---- Asking the network (NET-033): `resolve` and `fetch` from the Terminal. ----
+
+/// The UDP port DNS queries go out from.
+pub const DNS_CLIENT_PORT: u16 = 53053;
+/// QEMU user networking's resolver, when DHCP named none.
+const QEMU_DNS: Ipv4 = [10, 0, 2, 3];
+/// Most of a response kept; the rest is counted, not stored.
+const FETCH_MAX_BYTES: usize = 64 * 1024;
+/// How long a fetch may take, all told (10 s).
+const FETCH_TIMEOUT_TICKS: u64 = 1000;
+/// A DNS query is asked again after this long, `DNS_TRIES` times in all.
+const DNS_RETRY_TICKS: u64 = 100;
+const DNS_TRIES: u8 = 3;
+/// Lines of a body shown, and characters of each.
+const FETCH_LINES: usize = 40;
+const FETCH_LINE_CHARS: usize = 100;
+
+enum FetchStage {
+    /// A query is out to `server`, or waits on its next hop's address.
+    Resolving {
+        server: Ipv4,
+        server_port: u16,
+        id: u16,
+        /// When the query last went out; `None` until it has.
+        sent_at: Option<u64>,
+        tries: u8,
+    },
+    Connecting {
+        conn: usize,
+    },
+    Receiving {
+        conn: usize,
+    },
+}
+
+/// The one request the machine has out (NET-033).
+pub struct Fetch {
+    /// `resolve`: say the address and stop.
+    resolve_only: bool,
+    host: String,
+    port: u16,
+    path: String,
+    stage: FetchStage,
+    started: u64,
+    data: Vec<u8>,
+    /// Bytes past `FETCH_MAX_BYTES`, counted and dropped.
+    dropped: usize,
+}
+
+impl NetStack {
+    /// Whether a `fetch` or `resolve` is under way.
+    pub fn fetch_busy(&self) -> bool {
+        self.fetch.is_some()
+    }
+
+    /// Look `name` up, through `server` or the resolver DHCP named. The
+    /// answer arrives as a line from `take_fetch_lines`.
+    pub fn start_resolve(
+        &mut self,
+        name: &str,
+        server: Option<(Ipv4, u16)>,
+        now: u64,
+    ) -> Result<(), String> {
+        self.begin(
+            Fetch {
+                resolve_only: true,
+                host: String::from(name),
+                port: 0,
+                path: String::new(),
+                stage: FetchStage::Connecting { conn: usize::MAX },
+                started: now,
+                data: Vec::new(),
+                dropped: 0,
+            },
+            server,
+            now,
+        )
+    }
+
+    /// Fetch `url` over HTTP. Progress and the response arrive as lines
+    /// from `take_fetch_lines`.
+    pub fn start_fetch(&mut self, url: &str, now: u64) -> Result<(), String> {
+        use net_stack::http::{parse_url, UrlError};
+        let parsed = parse_url(url).map_err(|e| {
+            String::from(match e {
+                UrlError::NotHttp => "fetch: only http:// -- there is no TLS here yet",
+                UrlError::Malformed => "fetch: that is not a URL (http://host[:port]/path)",
+            })
+        })?;
+        let fetch = Fetch {
+            resolve_only: false,
+            host: String::from(parsed.host),
+            port: parsed.port,
+            path: String::from(parsed.path),
+            stage: FetchStage::Connecting { conn: usize::MAX },
+            started: now,
+            data: Vec::new(),
+            dropped: 0,
+        };
+        self.begin(fetch, None, now)
+    }
+
+    fn begin(
+        &mut self,
+        mut fetch: Fetch,
+        server: Option<(Ipv4, u16)>,
+        now: u64,
+    ) -> Result<(), String> {
+        if self.fetch.is_some() {
+            return Err(String::from(
+                "net: one request at a time; the last is still out",
+            ));
+        }
+        if !self.iface.config().is_configured() {
+            return Err(String::from("net: no address yet"));
+        }
+        match net_stack::wire::parse_ipv4(&fetch.host) {
+            // An address needs no looking up.
+            Some(addr) if fetch.resolve_only => {
+                self.fetch_lines.push(alloc::format!(
+                    "resolve: {} is {}",
+                    fetch.host,
+                    fmt_ipv4(addr)
+                ));
+                return Ok(());
+            }
+            Some(addr) => self.connect_for(&mut fetch, addr)?,
+            None => {
+                if !self.iface.is_bound(DNS_CLIENT_PORT) && !self.iface.bind(DNS_CLIENT_PORT) {
+                    return Err(String::from("net: no UDP port free for DNS"));
+                }
+                let (server, server_port) =
+                    server.unwrap_or((self.dns.unwrap_or(QEMU_DNS), net_stack::dns::PORT));
+                // An id no one watching the wire could guess at a glance.
+                let id = (now as u16 ^ (now >> 16) as u16 ^ 0x5047).wrapping_mul(40503);
+                fetch.stage = FetchStage::Resolving {
+                    server,
+                    server_port,
+                    id,
+                    sent_at: None,
+                    tries: 0,
+                };
+            }
+        }
+        self.fetch = Some(fetch);
+        self.advance_fetch(now);
+        Ok(())
+    }
+
+    /// Open the connection for `fetch` to `addr`.
+    fn connect_for(&mut self, fetch: &mut Fetch, addr: Ipv4) -> Result<(), String> {
+        let conn = self
+            .iface
+            .tcp_mut()
+            .connect(addr, fetch.port)
+            .ok_or_else(|| String::from("net: no connection free"))?;
+        fetch.stage = FetchStage::Connecting { conn };
+        Ok(())
+    }
+
+    /// Lines for the Terminal from the request under way.
+    pub fn take_fetch_lines(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.fetch_lines)
+    }
+
+    /// A datagram on `DNS_CLIENT_PORT`: the answer, if it is ours.
+    fn dns_reply(&mut self, src: Ipv4, src_port: u16, payload: &[u8]) {
+        let Some(mut fetch) = self.fetch.take() else {
+            return;
+        };
+        let FetchStage::Resolving {
+            server,
+            server_port,
+            id,
+            ..
+        } = fetch.stage
+        else {
+            self.fetch = Some(fetch);
+            return;
+        };
+        // Only the resolver we asked may answer.
+        if src != server || src_port != server_port {
+            self.fetch = Some(fetch);
+            return;
+        }
+        use net_stack::dns::{parse_answer, DnsError};
+        match parse_answer(id, &fetch.host, payload) {
+            Ok(addr) if fetch.resolve_only => {
+                self.fetch_lines.push(alloc::format!(
+                    "resolve: {} is {}",
+                    fetch.host,
+                    fmt_ipv4(addr)
+                ));
+            }
+            Ok(addr) => {
+                self.fetch_lines.push(alloc::format!(
+                    "fetch: {} is {}",
+                    fetch.host,
+                    fmt_ipv4(addr)
+                ));
+                match self.connect_for(&mut fetch, addr) {
+                    Ok(()) => self.fetch = Some(fetch),
+                    Err(why) => self.fetch_lines.push(why),
+                }
+            }
+            // Someone else's, or a stale reply: keep waiting.
+            Err(DnsError::NotOurs) => self.fetch = Some(fetch),
+            Err(why) => {
+                let said = match why {
+                    DnsError::NoSuchName => "no such name",
+                    DnsError::NoAddress => "the name has no IPv4 address",
+                    DnsError::ServerFailure(_) => "the resolver failed",
+                    _ => "the answer made no sense",
+                };
+                let verb = if fetch.resolve_only {
+                    "resolve"
+                } else {
+                    "fetch"
+                };
+                self.fetch_lines
+                    .push(alloc::format!("{verb}: {}: {said}", fetch.host));
+            }
+        }
+    }
+
+    /// Move the request under way along: send, resend, read, finish.
+    fn advance_fetch(&mut self, now: u64) {
+        let Some(mut fetch) = self.fetch.take() else {
+            return;
+        };
+        let verb = if fetch.resolve_only {
+            "resolve"
+        } else {
+            "fetch"
+        };
+        if now.saturating_sub(fetch.started) > FETCH_TIMEOUT_TICKS {
+            if let FetchStage::Receiving { conn } | FetchStage::Connecting { conn } = fetch.stage {
+                if conn != usize::MAX {
+                    self.iface.tcp_mut().abort(conn);
+                }
+            }
+            if matches!(fetch.stage, FetchStage::Receiving { .. }) && !fetch.data.is_empty() {
+                self.fetch_lines
+                    .push(String::from("fetch: timed out; what arrived:"));
+                self.report(&fetch);
+            } else {
+                self.fetch_lines
+                    .push(alloc::format!("{verb}: {}: no answer in 10 s", fetch.host));
+            }
+            return;
+        }
+        match fetch.stage {
+            FetchStage::Resolving {
+                server,
+                server_port,
+                id,
+                sent_at,
+                tries,
+            } => {
+                let due = sent_at.is_none_or(|at| now.saturating_sub(at) >= DNS_RETRY_TICKS);
+                if due {
+                    if tries >= DNS_TRIES {
+                        self.fetch_lines.push(alloc::format!(
+                            "{verb}: {}: {} did not answer",
+                            fetch.host,
+                            fmt_ipv4(server)
+                        ));
+                        return;
+                    }
+                    let mut query = [0u8; 300];
+                    let Ok(len) = net_stack::dns::build_query(id, &fetch.host, &mut query) else {
+                        self.fetch_lines
+                            .push(alloc::format!("{verb}: {}: not a name", fetch.host));
+                        return;
+                    };
+                    match self.iface.udp_send(
+                        server,
+                        server_port,
+                        DNS_CLIENT_PORT,
+                        &query[..len],
+                        &mut self.tx_frame,
+                    ) {
+                        Ok(n) => {
+                            let _ = self.device.transmit(&self.tx_frame[..n]);
+                            fetch.stage = FetchStage::Resolving {
+                                server,
+                                server_port,
+                                id,
+                                sent_at: Some(now),
+                                tries: tries + 1,
+                            };
+                        }
+                        // The next hop's address first; the query goes on a
+                        // later pass, once the reply is in.
+                        Err(SendError::NeedArp) => {
+                            let n = self.iface.pending_frame_len();
+                            let _ = self.device.transmit(&self.tx_frame[..n]);
+                            self.iface.clear_pending_frame();
+                        }
+                        Err(_) => {
+                            self.fetch_lines
+                                .push(alloc::format!("{verb}: could not send the query"));
+                            return;
+                        }
+                    }
+                }
+                self.fetch = Some(fetch);
+            }
+            FetchStage::Connecting { conn } => {
+                let state = self
+                    .iface
+                    .tcp()
+                    .connection(conn)
+                    .map(|c| c.is_established());
+                match state {
+                    None => {
+                        self.fetch_lines.push(alloc::format!(
+                            "fetch: {}:{} refused or did not answer",
+                            fetch.host,
+                            fetch.port
+                        ));
+                    }
+                    Some(false) => self.fetch = Some(fetch),
+                    Some(true) => {
+                        let mut request = [0u8; 1024];
+                        let url = net_stack::http::Url {
+                            host: &fetch.host,
+                            port: fetch.port,
+                            path: &fetch.path,
+                        };
+                        match net_stack::http::write_request(&url, &mut request) {
+                            Some(len) => {
+                                self.iface.tcp_mut().write(conn, &request[..len]);
+                                fetch.stage = FetchStage::Receiving { conn };
+                                self.fetch = Some(fetch);
+                            }
+                            None => {
+                                self.iface.tcp_mut().abort(conn);
+                                self.fetch_lines
+                                    .push(String::from("fetch: that URL is too long"));
+                            }
+                        }
+                    }
+                }
+            }
+            FetchStage::Receiving { conn } => {
+                let mut buf = [0u8; 2048];
+                loop {
+                    let n = match self.iface.tcp().connection(conn) {
+                        Some(_) => self.iface.tcp_mut().read(conn, &mut buf),
+                        None => 0,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    let room = FETCH_MAX_BYTES.saturating_sub(fetch.data.len());
+                    fetch.data.extend_from_slice(&buf[..n.min(room)]);
+                    fetch.dropped += n.saturating_sub(room);
+                }
+                let (open, peer_done) = match self.iface.tcp().connection(conn) {
+                    Some(c) => (true, c.peer_closed() && c.readable() == 0),
+                    None => (false, true),
+                };
+                let complete = match net_stack::http::parse_response(&fetch.data) {
+                    net_stack::http::ResponseParse::Complete(r) => r
+                        .content_length
+                        .is_some_and(|len| fetch.data.len() + fetch.dropped >= r.head_len + len),
+                    _ => false,
+                };
+                if peer_done || complete {
+                    if open {
+                        self.iface.tcp_mut().close(conn);
+                    }
+                    self.report(&fetch);
+                } else {
+                    self.fetch = Some(fetch);
+                }
+            }
+        }
+    }
+
+    /// The response, as lines for the Terminal.
+    fn report(&mut self, fetch: &Fetch) {
+        use net_stack::http::{dechunk, parse_response, ResponseParse};
+        let response = match parse_response(&fetch.data) {
+            ResponseParse::Complete(r) => r,
+            ResponseParse::Incomplete if fetch.data.is_empty() => {
+                self.fetch_lines.push(alloc::format!(
+                    "fetch: {} closed without answering",
+                    fetch.host
+                ));
+                return;
+            }
+            _ => {
+                self.fetch_lines.push(alloc::format!(
+                    "fetch: {} did not answer in HTTP",
+                    fetch.host
+                ));
+                return;
+            }
+        };
+        let raw = &fetch.data[response.head_len..];
+        let mut decoded = Vec::new();
+        let body: &[u8] = if response.chunked {
+            decoded.resize(raw.len(), 0);
+            match dechunk(raw, &mut decoded) {
+                Some(n) => &decoded[..n],
+                None => raw,
+            }
+        } else {
+            match response.content_length {
+                Some(len) => &raw[..len.min(raw.len())],
+                None => raw,
+            }
+        };
+        let total = body.len() + fetch.dropped;
+        self.fetch_lines.push(alloc::format!(
+            "HTTP {} {}, {} bytes",
+            response.status,
+            response.reason,
+            total
+        ));
+        if let Some(to) = response.location {
+            self.fetch_lines.push(alloc::format!("  -> {to}"));
+        }
+        let text = core::str::from_utf8(body)
+            .ok()
+            .filter(|t| !t.contains('\0'));
+        let Some(text) = text else {
+            if !body.is_empty() {
+                self.fetch_lines
+                    .push(alloc::format!("  (not text: {total} bytes)"));
+            }
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for line in lines.iter().take(FETCH_LINES) {
+            let shown: String = line.chars().take(FETCH_LINE_CHARS).collect();
+            self.fetch_lines.push(shown);
+        }
+        if lines.len() > FETCH_LINES {
+            self.fetch_lines.push(alloc::format!(
+                "... {} more lines",
+                lines.len() - FETCH_LINES
+            ));
+        }
+        if fetch.dropped > 0 {
+            self.fetch_lines.push(alloc::format!(
+                "... and {} bytes past the first {} KiB",
+                fetch.dropped,
+                FETCH_MAX_BYTES / 1024
+            ));
+        }
+    }
 }

@@ -75,7 +75,7 @@ fn command_words() -> Vec<&'static str> {
     let mut words = vec![
         "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
         "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
-        "ticks", "editor", "fault",
+        "ticks", "editor", "fault", "fetch", "resolve",
     ];
     words.extend(crate::access_shell::WORDS);
     words
@@ -252,6 +252,40 @@ pub struct WorkspaceSession {
     gfx_snapshot: Option<GfxSnapshot>,
     /// Set by `gfx reset`; consumed by the loop.
     gfx_reset_requested: bool,
+    /// A `fetch` or `resolve` for the loop to hand the network (NET-033).
+    net_request: Option<NetRequest>,
+}
+
+/// `fetch <url>`, `resolve <name> [server]`, or the same after `net`:
+/// `None` for any other line, `Some(None)` for one of these said wrongly.
+pub fn net_request_of(command: &str) -> Option<Option<NetRequest>> {
+    let mut words = command.split_whitespace();
+    let mut word = words.next()?;
+    if word == "net" {
+        word = words.next().filter(|w| *w == "fetch" || *w == "resolve")?;
+    }
+    let request = match (word, words.next(), words.next(), words.next()) {
+        ("fetch", Some(url), None, None) => Some(NetRequest::Fetch(String::from(url))),
+        ("resolve", Some(name), server, None) => Some(NetRequest::Resolve {
+            name: String::from(name),
+            server: server.map(String::from),
+        }),
+        ("fetch" | "resolve", ..) => None,
+        _ => return None,
+    };
+    Some(request)
+}
+
+/// What the Terminal asked of the network; the loop starts it, and the
+/// answer comes back as lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetRequest {
+    Fetch(String),
+    Resolve {
+        name: String,
+        /// `server[:port]`, when not the resolver DHCP named.
+        server: Option<String>,
+    },
 }
 
 /// Lifecycle of one pipeline stage.
@@ -569,6 +603,7 @@ impl WorkspaceSession {
             stress_blocks: Vec::new(),
             gfx_snapshot: None,
             gfx_reset_requested: false,
+            net_request: None,
         }
     }
 
@@ -968,6 +1003,20 @@ impl WorkspaceSession {
             return;
         }
 
+        // Asking the network (NET-033): the loop starts it, and the
+        // answer arrives as lines while the prompt stays free.
+        if let Some(request) = net_request_of(command) {
+            self.emit_command_line(serial, command.as_bytes());
+            match request {
+                Some(request) => self.net_request = Some(request),
+                None => self.emit_line(
+                    serial,
+                    "Usage: fetch http://host[:port]/path | resolve <name> [server[:port]]",
+                ),
+            }
+            return;
+        }
+
         if cmd == "net" {
             self.emit_command_line(serial, command.as_bytes());
             self.delegate_to_command_service(ctx, serial, command);
@@ -1040,6 +1089,14 @@ impl WorkspaceSession {
                 self.emit_line(
                     serial,
                     "net [status|ping <ip>|udp <ip> <port> <text>] - Network",
+                );
+                self.emit_line(
+                    serial,
+                    "fetch http://host[:port]/path - Get a page over HTTP",
+                );
+                self.emit_line(
+                    serial,
+                    "resolve <name> [server[:port]] - Look a name up (DNS)",
                 );
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
@@ -1523,6 +1580,16 @@ impl WorkspaceSession {
             if self.pointer_captured { b"1" } else { b"0" },
         );
         let line = core::str::from_utf8(&buffer[..cursor]).unwrap_or("Routing: ?");
+        self.emit_line(serial, line);
+    }
+
+    /// Take the `fetch` or `resolve` the Terminal asked for.
+    pub fn take_net_request(&mut self) -> Option<NetRequest> {
+        self.net_request.take()
+    }
+
+    /// A line of the network's answer, into the transcript.
+    pub fn emit_net_line(&mut self, serial: &mut SerialPort, line: &str) {
         self.emit_line(serial, line);
     }
 
@@ -2467,6 +2534,33 @@ mod tests {
 
     // Note: Full integration tests with WorkspaceSession require kernel context
     // These are simpler unit tests of individual components
+
+    #[test]
+    fn test_fetch_and_resolve_lines_become_requests() {
+        assert_eq!(
+            net_request_of("fetch example.com/a"),
+            Some(Some(NetRequest::Fetch("example.com/a".into())))
+        );
+        assert_eq!(
+            net_request_of("net fetch http://10.0.2.2:18080/"),
+            Some(Some(NetRequest::Fetch("http://10.0.2.2:18080/".into())))
+        );
+        assert_eq!(
+            net_request_of("resolve panda.test 10.0.2.2:15353"),
+            Some(Some(NetRequest::Resolve {
+                name: "panda.test".into(),
+                server: Some("10.0.2.2:15353".into())
+            }))
+        );
+        assert_eq!(net_request_of("fetch"), Some(None), "usage");
+        assert_eq!(net_request_of("fetch a b"), Some(None), "usage");
+        assert_eq!(
+            net_request_of("net ping 10.0.2.2"),
+            None,
+            "the command service's"
+        );
+        assert_eq!(net_request_of("ls"), None);
+    }
 
     #[test]
     fn test_output_line_creation() {

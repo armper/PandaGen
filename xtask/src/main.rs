@@ -977,6 +977,35 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "KERNEL PANIC".to_string(),
     ];
     shapes.push(Shape::new(&title, &args).then(&again));
+
+    // Asking the network (NET-033): a name looked up through a resolver on
+    // the host, and a page fetched from a web server there -- a hundred
+    // lines, which only all arrive if the receive window reopens as the
+    // Terminal reads.
+    title = "the Terminal: resolve a name, fetch a page".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--http-serve".to_string(),
+        "18080".to_string(),
+        "--dns-serve".to_string(),
+        "15353".to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,e,s,o,l,v,e,spc,p,a,n,d,a,dot,t,e,s,t,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,5,3,5,3,ret,sleep:3,f,e,t,c,h,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,0,8,0,slash,h,i,ret,sleep:4".to_string(),
+        "--out".to_string(),
+        "dist/qemu_terminal_fetch".to_string(),
+        "--expect-serial".to_string(),
+        "resolve: panda.test is 10.0.2.2".to_string(),
+        "--expect-serial".to_string(),
+        "HTTP 200 OK, 3492 bytes".to_string(),
+        "--expect-serial".to_string(),
+        "line 40 of the PandaGen fetch test".to_string(),
+        "--expect-serial".to_string(),
+        "... 60 more lines".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
     run_shapes(&root, shapes, began)
 }
 
@@ -1727,6 +1756,8 @@ fn cmd_qemu_script(
     let mut machine = "pc".to_string();
     let mut memory = "512M".to_string();
     let mut smp = QEMU_SMP.to_string();
+    let mut http_serve: Option<u16> = None;
+    let mut dns_serve: Option<u16> = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next().ok_or_else(|| {
@@ -1762,6 +1793,12 @@ fn cmd_qemu_script(
             // CPU count, so a run can boot more CPUs than the kernel has
             // per-CPU tables for.
             "--smp" => smp = value("--smp")?,
+            // A web server on the host's loopback, which the guest reaches
+            // as 10.0.2.2:<port> (NET-033): `fetch` has something to get.
+            "--http-serve" => http_serve = Some(value("--http-serve")?.parse()?),
+            // A resolver the same way, answering every name with 10.0.2.2,
+            // so `resolve` is tested without the host's own DNS.
+            "--dns-serve" => dns_serve = Some(value("--dns-serve")?.parse()?),
             other => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -1770,6 +1807,12 @@ fn cmd_qemu_script(
                 .into())
             }
         }
+    }
+    if let Some(port) = http_serve {
+        serve_http(port)?;
+    }
+    if let Some(port) = dns_serve {
+        serve_dns(port)?;
     }
     // Each port base gets its own disk image so concurrent runs do not
     // corrupt one another's filesystem.
@@ -2723,4 +2766,73 @@ fn run_shapes(
     } else {
         Err(format!("gauntlet boots failed: {}", failures.join("; ")).into())
     }
+}
+
+/// The page `--http-serve` gives every request: a hundred numbered lines,
+/// more than the guest's 2 KiB receive buffer, so a fetch only completes
+/// if the window reopens as it reads.
+fn fetch_test_page() -> String {
+    (1..=100)
+        .map(|i| format!("line {i} of the PandaGen fetch test\n"))
+        .collect()
+}
+
+/// Serve `fetch_test_page` on 127.0.0.1:`port` from a thread, for as long
+/// as this process lives (NET-033).
+fn serve_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && head.len() < 8192 {
+                match stream.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => break,
+                }
+            }
+            let body = fetch_test_page();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    Ok(())
+}
+
+/// Answer every A query on 127.0.0.1:`port` with 10.0.2.2, from a thread
+/// (NET-033).
+fn serve_dns(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = std::net::UdpSocket::bind(("127.0.0.1", port))?;
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        while let Ok((len, from)) = socket.recv_from(&mut buf) {
+            if len < 12 {
+                continue;
+            }
+            // The question ends after its name's zero byte and four more.
+            let Some(name_end) = buf[12..len].iter().position(|&b| b == 0) else {
+                continue;
+            };
+            let question_end = 12 + name_end + 1 + 4;
+            if question_end > len {
+                continue;
+            }
+            let mut reply = buf[..question_end].to_vec();
+            reply[2] = 0x81;
+            reply[3] = 0x80;
+            reply[6] = 0;
+            reply[7] = 1;
+            reply[8..12].fill(0);
+            reply.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 10, 0, 2, 2]);
+            let _ = socket.send_to(&reply, from);
+        }
+    });
+    Ok(())
 }
