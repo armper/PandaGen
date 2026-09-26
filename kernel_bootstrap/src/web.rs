@@ -9,7 +9,7 @@
 //! The card is drawn with the desk's widgets: an address bar with Back and
 //! Go, then the page, wrapped to the card. Links are the accent colour,
 //! underlined; a click follows one, as do Tab and Enter. Redirects are
-//! followed (plain HTTP only: there is no TLS yet, and the card says so).
+//! followed, over HTTP and HTTPS alike (NET-040).
 
 extern crate alloc;
 
@@ -692,7 +692,11 @@ pub fn read_html(html: &str, url: &str, status: u16) -> Page {
                 .get(at + 1)
                 .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'/' || *b == b'!' || *b == b'?');
         if !is_tag {
-            let end = html[at + 1..].find('<').map_or(html.len(), |e| at + 1 + e);
+            // Past this character, whatever its width: a text that starts
+            // with a multi-byte one ('日') is not cut inside it -- that was
+            // a kernel panic on the first real page that had one.
+            let next = at + html[at..].chars().next().map_or(1, char::len_utf8);
+            let end = html[next..].find('<').map_or(html.len(), |e| next + e);
             reader.push_text(&html[at..end]);
             at = end;
             continue;
@@ -1211,13 +1215,6 @@ impl WebView {
                 .as_deref()
                 .and_then(|l| resolve_url(&response.url, l))
             {
-                if to.to_ascii_lowercase().starts_with("https://") {
-                    self.message = Some(alloc::format!(
-                        "{} moved to {to}, and there is no TLS here yet to follow it",
-                        response.url
-                    ));
-                    return WebEffect::Redraw;
-                }
                 if self.redirects >= MAX_REDIRECTS {
                     self.message = Some(String::from("Too many redirects"));
                     return WebEffect::Redraw;
@@ -1566,10 +1563,8 @@ impl WebView {
             return message.clone();
         }
         match &self.page {
-            None => String::from("Type an address and press Enter   http:// only for now"),
-            Some(page) if page.url == START => {
-                String::from("Type an address, or pick a page   http:// only for now")
-            }
+            None => String::from("Type an address and press Enter"),
+            Some(page) if page.url == START => String::from("Type an address, or pick a page"),
             Some(page) => alloc::format!(
                 "{} link{}   Tab and Enter follow them   Backspace goes back   Ctrl+F finds",
                 page.links.len(),
@@ -1954,7 +1949,7 @@ c</pre>
     }
 
     #[test]
-    fn redirects_are_followed_over_http_and_https_is_said_plainly() {
+    fn redirects_are_followed_over_http_and_https() {
         let mut view = WebView::new();
         view.open("http://a/");
         let moved = Ok(WebResponse {
@@ -1974,8 +1969,11 @@ c</pre>
             content_type: None,
             body: Vec::new(),
         });
-        assert_eq!(view.loaded(secure), WebEffect::Redraw);
-        assert!(view.footer().contains("no TLS"), "{}", view.footer());
+        // Over TLS now (NET-040): followed like any other.
+        assert_eq!(
+            view.loaded(secure),
+            WebEffect::Fetch("https://a/new".into())
+        );
         // A failure says why.
         view.open("http://nowhere/");
         view.loaded(Err("fetch: nowhere: no such name".into()));
@@ -2134,5 +2132,113 @@ c</pre>
             WebEffect::Redraw
         );
         assert_eq!(view.page().unwrap().url, "http://b/");
+    }
+
+    #[test]
+    fn a_chain_of_redirects_ends_on_the_page() {
+        let mut view = WebView::new();
+        let typed = "https://www.rustlang.org";
+        assert_eq!(view.open(typed), WebEffect::Fetch(typed.into()));
+        let hop = |from: &str, to: &str| {
+            Ok(WebResponse {
+                url: from.into(),
+                status: 301,
+                reason: "Moved".into(),
+                location: Some(to.into()),
+                content_type: Some("text/html".into()),
+                body: Vec::new(),
+            })
+        };
+        let WebEffect::Fetch(one) = view.loaded_for(
+            typed,
+            hop("https://www.rustlang.org/", "https://www.rust-lang.org/"),
+        ) else {
+            panic!("first hop");
+        };
+        let WebEffect::Fetch(two) = view.loaded_for(
+            &one,
+            hop("https://www.rust-lang.org/", "https://rust-lang.org/"),
+        ) else {
+            panic!("second hop");
+        };
+        assert_eq!(
+            view.loaded_for(
+                &two,
+                response(
+                    "https://rust-lang.org/",
+                    200,
+                    "<title>Rust</title><p>hi</p>"
+                )
+            ),
+            WebEffect::Redraw
+        );
+        assert_eq!(view.title(), "Web - Rust");
+    }
+
+    #[test]
+    fn text_that_starts_with_a_wide_character_is_read_not_cut() {
+        let page = read_html(
+            "<ul><li><a href='/ja'>日本語</a></li><li>Ελληνικά and é</li></ul><p>€5</p>",
+            "https://h/",
+            200,
+        );
+        let text: String = page
+            .blocks
+            .iter()
+            .flat_map(|b| b.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(text.contains("- ???"), "{text}");
+        assert!(text.contains("and e"), "{text}");
+        assert!(text.contains("?5"), "{text}");
+    }
+
+    /// A page is untrusted input: nothing in it may panic the kernel.
+    /// Thousands of generated pages made of the pieces that break parsers
+    /// -- tags cut short, entities, quotes, comments, wide characters.
+    #[test]
+    fn no_page_panics_the_reader() {
+        const PIECES: [&str; 24] = [
+            "<",
+            ">",
+            "</",
+            "<a href='",
+            "'>",
+            "\"",
+            "&",
+            "&#",
+            "&#x1F600;",
+            "&amp",
+            ";",
+            "日",
+            "é",
+            "€",
+            "\u{1F600}",
+            "<!--",
+            "-->",
+            "<script>",
+            "</script",
+            "<pre>",
+            "\n",
+            " ",
+            "<li>",
+            "<ol start=x>",
+        ];
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        for round in 0..3000 {
+            let mut html = String::new();
+            for _ in 0..(round % 40) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                html.push_str(PIECES[(seed % PIECES.len() as u64) as usize]);
+            }
+            let page = read_html(&html, "https://h/a/b", 200);
+            for cols in [8, 13, 80] {
+                let _ = wrap(&page, cols);
+            }
+            let _ = read_text(&html, "https://h/", 200);
+            let _ = resolve_url("https://h/a/b", &html);
+            let _ = decode_entities(&html);
+        }
     }
 }

@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 remote_ipc = { path = "../remote_ipc" }
 ipc = { path = "../ipc" }
+# The gauntlet's HTTPS server (NET-040), with the test CA's certificate.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["std", "tls12"] }

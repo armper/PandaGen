@@ -375,8 +375,12 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
+        // 18 MiB: TLS (NET-040) grew the kernel by 1.6 MiB, and at 16 MiB
+        // what is left (2008 KiB usable) no longer holds the 2 MiB heap --
+        // the kernel says so plainly and stops, which is right; the floor
+        // just moved.
         "--memory".to_string(),
-        "16M".to_string(),
+        "18M".to_string(),
         "--keys".to_string(),
         "sleep:8".to_string(),
         "--out".to_string(),
@@ -1035,6 +1039,31 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "web: loaded http://10.0.2.2:18081/page.html (200,".to_string(),
         "--expect-serial".to_string(),
         "web: loaded http://10.0.2.2:18081/second.html (200,".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
+    // HTTPS (NET-040): the Terminal fetches the numbered page over TLS --
+    // a handshake, a certificate checked against the test CA, and 3.4 KiB
+    // of records -- and the Web card loads a page and follows its link,
+    // over TLS too.
+    title = "HTTPS: the Terminal and the Web card, over TLS".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--https-serve".to_string(),
+        "18443".to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,f,e,t,c,h,spc,h,t,t,p,s,shift-semicolon,slash,slash,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,4,4,3,slash,h,i,ret,sleep:5,ctrl-spc,sleep:1,w,e,b,ret,sleep:2,h,t,t,p,s,shift-semicolon,slash,slash,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,4,4,3,slash,p,a,g,e,dot,h,t,m,l,ret,sleep:5,tab,ret,sleep:5".to_string(),
+        "--out".to_string(),
+        "dist/qemu_https".to_string(),
+        "--expect-serial".to_string(),
+        "HTTP 200 OK, 3492 bytes".to_string(),
+        "--expect-serial".to_string(),
+        "web: loaded https://10.0.2.2:18443/page.html (200,".to_string(),
+        "--expect-serial".to_string(),
+        "web: loaded https://10.0.2.2:18443/second.html (200,".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -1790,6 +1819,7 @@ fn cmd_qemu_script(
     let mut memory = "512M".to_string();
     let mut smp = QEMU_SMP.to_string();
     let mut http_serve: Option<u16> = None;
+    let mut https_serve: Option<u16> = None;
     let mut dns_serve: Option<u16> = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -1829,6 +1859,8 @@ fn cmd_qemu_script(
             // A web server on the host's loopback, which the guest reaches
             // as 10.0.2.2:<port> (NET-033): `fetch` has something to get.
             "--http-serve" => http_serve = Some(value("--http-serve")?.parse()?),
+            // The same over TLS, with the test CA's certificate (NET-040).
+            "--https-serve" => https_serve = Some(value("--https-serve")?.parse()?),
             // A resolver the same way, answering every name with 10.0.2.2,
             // so `resolve` is tested without the host's own DNS.
             "--dns-serve" => dns_serve = Some(value("--dns-serve")?.parse()?),
@@ -1843,6 +1875,9 @@ fn cmd_qemu_script(
     }
     if let Some(port) = http_serve {
         serve_http(port)?;
+    }
+    if let Some(port) = https_serve {
+        serve_https(port)?;
     }
     if let Some(port) = dns_serve {
         serve_dns(port)?;
@@ -2810,49 +2845,85 @@ fn fetch_test_page() -> String {
         .collect()
 }
 
-/// Serve `fetch_test_page` on 127.0.0.1:`port` from a thread, for as long
+/// Answer one request on `stream` with the test page its path names:
+/// two HTML pages that link to each other for the Web card (WEB-001), the
+/// numbered lines for the rest.
+fn answer_test_request<S: std::io::Read + std::io::Write>(stream: &mut S) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && head.len() < 8192 {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    let path = head.split_whitespace().nth(1).unwrap_or("/");
+    let (kind, body) = match path {
+        "/page.html" => (
+            "text/html; charset=utf-8",
+            "<!doctype html><html><head><title>PandaGen test page</title>\
+             <style>p{color:red}</style></head><body><h1>It works</h1>\
+             <p>A page served by the gauntlet&rsquo;s host. Follow \
+             <a href=\"second.html\">the second page</a>.</p></body></html>"
+                .to_string(),
+        ),
+        "/second.html" => (
+            "text/html",
+            "<title>Second page</title><p>You followed the link.</p>".to_string(),
+        ),
+        _ => ("text/plain", fetch_test_page()),
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.flush();
+}
+
+/// Serve the test pages on 127.0.0.1:`port` from a thread, for as long
 /// as this process lives (NET-033).
 fn serve_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            answer_test_request(&mut stream);
+        }
+    });
+    Ok(())
+}
+
+/// The same pages over TLS (NET-040), with the certificate the test CA
+/// signed for `10.0.2.2` and `web.pandagen.test` -- which the kernel
+/// trusts, and nothing else does.
+fn serve_https(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    const CERT: &[u8] = include_bytes!("../../net_tls/testdata/server.der");
+    const KEY: &[u8] = include_bytes!("../../net_tls/testdata/server.key.der");
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls_rustcrypto::provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(CERT)],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY)),
+    )?;
+    let config = std::sync::Arc::new(config);
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") && head.len() < 8192 {
-                match stream.read(&mut byte) {
-                    Ok(1) => head.push(byte[0]),
-                    _ => break,
-                }
-            }
-            // The path picks the page: two HTML pages that link to each
-            // other for the Web card (WEB-001), the numbered lines for the
-            // rest.
-            let head = String::from_utf8_lossy(&head);
-            let path = head.split_whitespace().nth(1).unwrap_or("/");
-            let (kind, body) = match path {
-                "/page.html" => (
-                    "text/html; charset=utf-8",
-                    "<!doctype html><html><head><title>PandaGen test page</title>\
-                     <style>p{color:red}</style></head><body><h1>It works</h1>\
-                     <p>A page served by the gauntlet&rsquo;s host. Follow \
-                     <a href=\"second.html\">the second page</a>.</p></body></html>"
-                        .to_string(),
-                ),
-                "/second.html" => (
-                    "text/html",
-                    "<title>Second page</title><p>You followed the link.</p>".to_string(),
-                ),
-                _ => ("text/plain", fetch_test_page()),
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let Ok(conn) = rustls::ServerConnection::new(config.clone()) else {
+                continue;
             };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
+            let mut tls = rustls::StreamOwned::new(conn, stream);
+            answer_test_request(&mut tls);
+            tls.conn.send_close_notify();
+            let _ = std::io::Write::flush(&mut tls);
         }
     });
     Ok(())

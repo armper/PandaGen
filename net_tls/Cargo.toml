@@ -1,0 +1,21 @@
+[package]
+name = "net_tls"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# TLS for the machine's own requests (NET-040): rustls's sans-IO client
+# over RustCrypto's pure-Rust primitives, no_std with an allocator.
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"] }
+webpki-roots = "0.26"
+getrandom = { version = "0.2", features = ["custom"] }
+# The software SHA-2: the kernel's target has no SSE, and the SIMD paths
+# do not build for it.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["tls12", "std"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["std", "tls12"] }

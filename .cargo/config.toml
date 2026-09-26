@@ -6,4 +6,11 @@ rustflags = [
     "-C", "link-arg=-Tkernel_bootstrap/linker.ld",
     "-C", "relocation-model=static",
     "-C", "no-redzone",
+    # TLS's crypto (NET-040) without SIMD: the target has no SSE, and the
+    # vector code paths crash LLVM's type legalizer when built for it.
+    "--cfg", "polyval_force_soft",
+    "--cfg", "aes_force_soft",
+    "--cfg", "chacha20_force_soft",
+    "--cfg", "poly1305_force_soft",
+    "--cfg", 'curve25519_dalek_backend="serial"',
 ]

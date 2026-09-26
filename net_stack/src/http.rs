@@ -257,13 +257,15 @@ pub fn write_headers(
 pub struct Url<'a> {
     pub host: &'a str,
     pub port: u16,
+    /// `https://`: the request goes over TLS (NET-040).
+    pub secure: bool,
     /// Path and query, starting with `/`.
     pub path: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlError {
-    /// `https://` or another scheme.
+    /// A scheme other than `http://` and `https://`.
     NotHttp,
     /// No host, a bad port, or characters that do not belong.
     Malformed,
@@ -272,11 +274,13 @@ pub enum UrlError {
 /// Parse `http://host[:port][/path]`; a bare `host/path` is taken as
 /// `http://` too, since that is how people type it.
 pub fn parse_url(url: &str) -> Result<Url<'_>, UrlError> {
-    let rest = match url.split_once("://") {
-        Some(("http", rest)) | Some(("HTTP", rest)) => rest,
+    let (secure, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => (false, rest),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => (true, rest),
         Some(_) => return Err(UrlError::NotHttp),
-        None => url,
+        None => (false, url),
     };
+    let default_port = if secure { 443 } else { 80 };
     let (authority, path) = match rest.find(['/', '?']) {
         Some(at) if rest.as_bytes()[at] == b'/' => (&rest[..at], &rest[at..]),
         Some(at) => (&rest[..at], &rest[at..]),
@@ -290,7 +294,7 @@ pub fn parse_url(url: &str) -> Result<Url<'_>, UrlError> {
     }
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port)) => (host, port.parse::<u16>().map_err(|_| UrlError::Malformed)?),
-        None => (authority, 80),
+        None => (authority, default_port),
     };
     let host_ok = !host.is_empty()
         && host
@@ -299,7 +303,12 @@ pub fn parse_url(url: &str) -> Result<Url<'_>, UrlError> {
     if !host_ok || port == 0 || path.bytes().any(|b| b <= b' ' || b == 0x7F) {
         return Err(UrlError::Malformed);
     }
-    Ok(Url { host, port, path })
+    Ok(Url {
+        host,
+        port,
+        secure,
+        path,
+    })
 }
 
 /// Write the GET request for `url` into `out`; returns its length. The
@@ -314,7 +323,7 @@ pub fn write_request(url: &Url<'_>, out: &mut [u8]) -> Option<usize> {
     w.put(url.path.as_bytes())?;
     w.put(b" HTTP/1.1\r\nHost: ")?;
     w.put(url.host.as_bytes())?;
-    if url.port != 80 {
+    if url.port != if url.secure { 443 } else { 80 } {
         w.put(b":")?;
         let mut digits = [0u8; 5];
         let mut n = url.port;
@@ -651,6 +660,7 @@ mod client_tests {
             Ok(Url {
                 host: "10.0.2.2",
                 port: 8080,
+                secure: false,
                 path: "/a?b=1"
             })
         );
@@ -659,6 +669,7 @@ mod client_tests {
             Ok(Url {
                 host: "example.com",
                 port: 80,
+                secure: false,
                 path: "/"
             })
         );
@@ -667,10 +678,20 @@ mod client_tests {
             Ok(Url {
                 host: "example.com",
                 port: 80,
+                secure: false,
                 path: "?q"
             })
         );
-        assert_eq!(parse_url("https://example.com/"), Err(UrlError::NotHttp));
+        assert_eq!(
+            parse_url("https://example.com/"),
+            Ok(Url {
+                host: "example.com",
+                port: 443,
+                secure: true,
+                path: "/"
+            })
+        );
+        assert_eq!(parse_url("ftp://example.com/"), Err(UrlError::NotHttp));
         assert_eq!(parse_url("http://:80/"), Err(UrlError::Malformed));
         assert_eq!(
             parse_url("http://a:b@example.com/"),

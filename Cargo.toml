@@ -4,6 +4,7 @@ members = [
     "graphics_rasterizer",
     "net_stack",
     "entropy",
+    "net_tls",
     "kernel_bootstrap",
     "core_types",
     "ipc",
@@ -95,6 +96,7 @@ strip = "debuginfo"
 graphics_rasterizer = { path = "graphics_rasterizer" }
 net_stack = { path = "net_stack" }
 entropy = { path = "entropy" }
+net_tls = { path = "net_tls" }
 core_types = { path = "core_types" }
 ipc = { path = "ipc" }
 kernel_api = { path = "kernel_api" }

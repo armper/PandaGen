@@ -200,6 +200,9 @@ pub struct NetStack {
     /// for the Terminal.
     fetch: Option<Fetch>,
     fetch_lines: Vec<String>,
+    /// TLS's configuration -- Mozilla's roots, parsed -- made at the first
+    /// `https` request and kept (NET-040).
+    tls_config: Option<net_tls::Config>,
     /// The request under way is a Web card's (WEB-001): its lines are not
     /// the Terminal's, and its end is a `WebOutcome`.
     card_fetch: Option<u64>,
@@ -276,6 +279,7 @@ impl NetStack {
             dns: None,
             fetch: None,
             fetch_lines: Vec::new(),
+            tls_config: None,
             card_fetch: None,
             card_answered: false,
             web_outcomes: Vec::new(),
@@ -1749,6 +1753,9 @@ pub struct Fetch {
     path: String,
     stage: FetchStage,
     started: u64,
+    /// `https`: the session, once the connection is up (NET-040).
+    secure: bool,
+    tls: Option<net_tls::TlsClient>,
     data: Vec<u8>,
     /// Bytes past `FETCH_MAX_BYTES`, counted and dropped.
     dropped: usize,
@@ -1811,7 +1818,7 @@ impl NetStack {
         use net_stack::http::{parse_url, UrlError};
         parse_url(url).map_err(|e| {
             String::from(match e {
-                UrlError::NotHttp => "fetch: only http:// -- there is no TLS here yet",
+                UrlError::NotHttp => "fetch: only http:// and https://",
                 UrlError::Malformed => "fetch: that is not a URL (http://host[:port]/path)",
             })
         })
@@ -1847,6 +1854,8 @@ impl NetStack {
             path,
             stage: FetchStage::Connecting { conn: usize::MAX },
             started: now,
+            secure: false,
+            tls: None,
             data: Vec::new(),
             dropped: 0,
         };
@@ -1858,7 +1867,12 @@ impl NetStack {
             }
             Queued::Fetch { url, card } => {
                 let fetch = match Self::check_url(&url) {
-                    Ok(u) => blank(String::from(u.host), u.port, String::from(u.path), false),
+                    Ok(u) => {
+                        let mut f =
+                            blank(String::from(u.host), u.port, String::from(u.path), false);
+                        f.secure = u.secure;
+                        f
+                    }
                     Err(why) => {
                         self.fetch_lines.push(why);
                         return;
@@ -1920,6 +1934,26 @@ impl NetStack {
         self.fetch = Some(fetch);
         self.advance_fetch(now);
         Ok(())
+    }
+
+    /// TLS's configuration, made once (parsing the roots takes a moment).
+    fn tls_config(&mut self) -> Result<net_tls::Config, String> {
+        if let Some(config) = &self.tls_config {
+            return Ok(config.clone());
+        }
+        let config = net_tls::client_config(unix_now)?;
+        self.tls_config = Some(config.clone());
+        Ok(config)
+    }
+
+    /// Hand the TLS session's bytes to TCP, as much as it will take.
+    fn pump_tls(&mut self, fetch: &mut Fetch, conn: usize) {
+        if let Some(tls) = fetch.tls.as_mut() {
+            if !tls.outgoing().is_empty() && self.iface.tcp().connection(conn).is_some() {
+                let n = self.iface.tcp_mut().write(conn, tls.outgoing());
+                tls.consume(n);
+            }
+        }
     }
 
     /// Open the connection for `fetch` to `addr`.
@@ -2132,9 +2166,33 @@ impl NetStack {
                         let url = net_stack::http::Url {
                             host: &fetch.host,
                             port: fetch.port,
+                            secure: fetch.secure,
                             path: &fetch.path,
                         };
                         match net_stack::http::write_request(&url, &mut request) {
+                            Some(len) if fetch.secure => {
+                                // Over TLS (NET-040): the request waits in
+                                // the session for the handshake.
+                                let session = self.tls_config().and_then(|config| {
+                                    net_tls::TlsClient::new(config, &fetch.host)
+                                });
+                                match session {
+                                    Ok(mut tls) => {
+                                        tls.send(&request[..len]);
+                                        fetch.tls = Some(tls);
+                                        fetch.stage = FetchStage::Receiving { conn };
+                                        self.pump_tls(&mut fetch, conn);
+                                        self.fetch = Some(fetch);
+                                    }
+                                    Err(why) => {
+                                        self.iface.tcp_mut().abort(conn);
+                                        self.fetch_lines.push(alloc::format!(
+                                            "fetch: {}: TLS: {why}",
+                                            fetch.host
+                                        ));
+                                    }
+                                }
+                            }
                             Some(len) => {
                                 self.iface.tcp_mut().write(conn, &request[..len]);
                                 fetch.stage = FetchStage::Receiving { conn };
@@ -2159,12 +2217,37 @@ impl NetStack {
                     if n == 0 {
                         break;
                     }
+                    // Over TLS the bytes are records; the plaintext is what
+                    // the page is.
+                    let plain = match fetch.tls.as_mut() {
+                        Some(tls) => {
+                            tls.feed(&buf[..n]);
+                            tls.take_plaintext()
+                        }
+                        None => buf[..n].to_vec(),
+                    };
                     let room = FETCH_MAX_BYTES.saturating_sub(fetch.data.len());
-                    fetch.data.extend_from_slice(&buf[..n.min(room)]);
-                    fetch.dropped += n.saturating_sub(room);
+                    fetch
+                        .data
+                        .extend_from_slice(&plain[..plain.len().min(room)]);
+                    fetch.dropped += plain.len().saturating_sub(room);
                 }
+                self.pump_tls(&mut fetch, conn);
+                if let Some(net_tls::Phase::Failed(why)) = fetch.tls.as_ref().map(|t| t.phase()) {
+                    let why = why.clone();
+                    self.iface.tcp_mut().abort(conn);
+                    self.fetch_lines
+                        .push(alloc::format!("fetch: {}: TLS: {why}", fetch.host));
+                    return;
+                }
+                let tls_done = fetch.tls.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.phase(),
+                        net_tls::Phase::PeerClosed | net_tls::Phase::Closed
+                    )
+                });
                 let (open, peer_done) = match self.iface.tcp().connection(conn) {
-                    Some(c) => (true, c.peer_closed() && c.readable() == 0),
+                    Some(c) => (true, tls_done || (c.peer_closed() && c.readable() == 0)),
                     None => (false, true),
                 };
                 let complete = match net_stack::http::parse_response(&fetch.data) {
@@ -2222,7 +2305,7 @@ impl NetStack {
         let total = body.len() + fetch.dropped;
         if let Some(card) = self.card_fetch {
             self.card_answered = true;
-            let port = if fetch.port == 80 {
+            let port = if fetch.port == if fetch.secure { 443 } else { 80 } {
                 String::new()
             } else {
                 alloc::format!(":{}", fetch.port)
@@ -2235,7 +2318,11 @@ impl NetStack {
             self.web_outcomes.push((
                 card,
                 Ok(crate::web::WebResponse {
-                    url: alloc::format!("http://{}{port}{path}", fetch.host),
+                    url: alloc::format!(
+                        "{}://{}{port}{path}",
+                        if fetch.secure { "https" } else { "http" },
+                        fetch.host
+                    ),
                     status: response.status,
                     reason: String::from(response.reason),
                     location: response.location.map(String::from),
@@ -2283,4 +2370,12 @@ impl NetStack {
             ));
         }
     }
+}
+
+/// The time for TLS's certificate checks: the real-time clock, in Unix
+/// seconds (0 when it cannot be read, which fails every certificate).
+fn unix_now() -> u64 {
+    crate::rtc::read_clock(&mut hal_x86_64::RealPortIo::new())
+        .map(|d| d.unix_seconds())
+        .unwrap_or(0)
 }

@@ -1279,6 +1279,8 @@ pub extern "C" fn rust_main() -> ! {
         personal[..8].copy_from_slice(&now.to_le_bytes());
         personal[8..].copy_from_slice(b"PandaGen");
         let hardware = random::seed(&personal);
+        // TLS's keys come from it too (NET-040).
+        net_tls::set_entropy_source(random::fill);
         kprintln!(
             serial,
             "entropy: seeded from {}",
