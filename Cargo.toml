@@ -23,6 +23,7 @@ members = [
     "remote_ipc",
     "distributed_storage",
     "workspace_access",
+    "authority",
     "services_app_store",
     "formal_verification",
     "package_registry",
@@ -115,6 +116,7 @@ services_gui_host = { path = "services_gui_host" }
 remote_ipc = { path = "remote_ipc" }
 distributed_storage = { path = "distributed_storage" }
 workspace_access = { path = "workspace_access" }
+authority = { path = "authority" }
 services_app_store = { path = "services_app_store" }
 formal_verification = { path = "formal_verification" }
 package_registry = { path = "package_registry" }
