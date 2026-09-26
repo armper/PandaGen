@@ -214,6 +214,114 @@ pub fn unlock(
     }
 }
 
+/// What the Sharing card shows about `name` (FS-007), as the one acting
+/// sees it: its owner and label, what they hold, the grants on it if they
+/// may share it, and whom it could be shared with.
+pub fn sharing_info(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    name: &str,
+) -> Result<crate::sharing::SharingInfo, String> {
+    let who = fs
+        .guard
+        .principal()
+        .ok_or_else(|| String::from("Not signed in"))?;
+    let entry = fs
+        .document(name)
+        .ok()
+        .flatten()
+        .ok_or_else(|| alloc::format!("No {name} here"))?;
+    let now = fs.clock();
+    let held = fs.guard.held(&entry, now);
+    let owner = PrincipalId(entry.owner);
+    let grants = if held.contains(Rights::SHARE) {
+        fs.grants_on(name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| crate::sharing::GrantLine {
+                id: g.id.0,
+                holder: fs.guard.name_of(g.holder.0),
+                rights: g.rights.0,
+                until: g.expires_at,
+                since: g.history_since,
+                live: fs.guard.authority.grant_live(g.id, now),
+                revocable: who == owner || g.issued_by == who || who == SYSTEM,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let people = fs
+        .guard
+        .authority
+        .principals()
+        .iter()
+        .filter(|p| p.id != SYSTEM && p.id != who && p.id != owner)
+        .map(|p| p.name.clone())
+        .collect();
+    Ok(crate::sharing::SharingInfo {
+        name: name.into(),
+        owner: fs.guard.name_of(entry.owner),
+        label: entry.label,
+        can_relabel: who == owner,
+        can_share: held.contains(Rights::SHARE),
+        held: held.0,
+        grants,
+        people,
+    })
+}
+
+fn said(e: services_storage::TransactionError) -> String {
+    match e {
+        services_storage::TransactionError::Denied(why) => why,
+        services_storage::TransactionError::ObjectNotFound(_) => "Not there".into(),
+        other => alloc::format!("{other}"),
+    }
+}
+
+/// Share `name` with `to` from the Sharing card; what happened, in words.
+pub fn share_doc(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    name: &str,
+    to: &str,
+    rights: u8,
+) -> Result<String, String> {
+    fs.share(name, to, authority::Terms::of(Rights(rights)))
+        .map(|_| alloc::format!("Shared with {to}: {}", Rights(rights)))
+        .map_err(said)
+}
+
+/// Revoke grant `grant` on `name` from the Sharing card.
+pub fn revoke_doc(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    name: &str,
+    grant: u32,
+) -> Result<String, String> {
+    fs.revoke(name, authority::GrantId(grant))
+        .map(|n| {
+            if n > 1 {
+                alloc::format!("Revoked, and {} shared on from it", n - 1)
+            } else {
+                "Revoked".into()
+            }
+        })
+        .map_err(said)
+}
+
+/// Relabel `name` from the Sharing card.
+pub fn relabel_doc(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    name: &str,
+    label: u8,
+) -> Result<String, String> {
+    let label = Label::ALL
+        .get(label as usize)
+        .copied()
+        .unwrap_or(Label::Internal);
+    fs.relabel(name, label)
+        .map(|_| alloc::format!("Now {label}"))
+        .map_err(said)
+}
+
 /// Sign out: close the console's session; nobody is signed in.
 pub fn sign_out(fs: &mut crate::bare_metal_storage::BareMetalFilesystem) {
     if let Actor::Session(handle) = fs.guard.actor() {
@@ -652,6 +760,35 @@ mod tests {
             }
         );
         assert_eq!(fs.read_file_by_name("plan").unwrap(), b"mine");
+    }
+
+    /// The Sharing card's calls (FS-007): what the owner sees, sharing,
+    /// revoking and relabelling; what someone holding only READ sees.
+    #[test]
+    fn the_sharing_card_sees_what_the_guard_allows() {
+        let mut w = world();
+        let fs = &mut w.fs;
+        fs.guard.act_as(Actor::Session(w.alice));
+        fs.write_named("plan", b"x", 1, None).unwrap();
+        let info = sharing_info(fs, "plan").unwrap();
+        assert!(info.can_share && info.can_relabel && info.grants.is_empty());
+        assert_eq!(info.people, alloc::vec!["armando".to_string()]);
+        assert!(share_doc(fs, "plan", "armando", Rights::READ.0).is_ok());
+        let info = sharing_info(fs, "plan").unwrap();
+        assert_eq!(info.grants.len(), 1);
+        assert!(info.grants[0].live && info.grants[0].revocable);
+        assert_eq!(relabel_doc(fs, "plan", 0).unwrap(), "Now public");
+        fs.guard.act_as(Actor::Session(w.armando));
+        let his = sharing_info(fs, "plan").unwrap();
+        assert!(!his.can_share && !his.can_relabel && his.grants.is_empty());
+        assert_eq!(his.owner, "alice");
+        assert!(share_doc(fs, "plan", "alice", Rights::READ.0).is_err());
+        assert!(relabel_doc(fs, "plan", 3).is_err());
+        fs.guard.act_as(Actor::Session(w.alice));
+        let id = sharing_info(fs, "plan").unwrap().grants[0].id;
+        assert_eq!(revoke_doc(fs, "plan", id).unwrap(), "Revoked");
+        assert!(!sharing_info(fs, "plan").unwrap().grants[0].live);
+        assert!(sharing_info(fs, "nothing").is_err());
     }
 
     /// With a passphrase the next boot signs no one in; the sign-in screen's

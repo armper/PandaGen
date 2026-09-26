@@ -383,6 +383,9 @@ pub enum DeskApp {
     /// Every app as a grid of icons (GFX-089). Not on the dock: it is the
     /// way to the dock's apps by name.
     Launcher,
+    /// Who has a document, and giving it to more (FS-007). Opened from
+    /// Files' Share chip or the palette, for one document.
+    Sharing,
 }
 
 impl DeskApp {
@@ -433,6 +436,7 @@ impl DeskApp {
             DeskApp::Tasks => "Tasks",
             DeskApp::Sketch => "Sketch",
             DeskApp::Launcher => "Apps",
+            DeskApp::Sharing => "Sharing",
         }
     }
 
@@ -664,6 +668,7 @@ impl DeskApp {
             DeskApp::Tasks => "Td",
             DeskApp::Sketch => "Sk",
             DeskApp::Launcher => "Ap",
+            DeskApp::Sharing => "Sh",
         }
     }
 
@@ -684,6 +689,7 @@ impl DeskApp {
             DeskApp::Tasks => TASKS_SIZE,
             DeskApp::Sketch => SKETCH_SIZE,
             DeskApp::Launcher => LAUNCHER_SIZE,
+            DeskApp::Sharing => SHARING_SIZE,
         }
     }
 }
@@ -722,6 +728,10 @@ pub const BAR_APPS_COLUMNS: usize = 12;
 
 /// The Apps card (GFX-089): two rows of five.
 pub const LAUNCHER_SIZE: (usize, usize) = (560, 324);
+/// The Sharing card (FS-007).
+pub const SHARING_SIZE: (usize, usize) = (600, 520);
+/// Files' Share chip: open the Sharing card for the selected document.
+pub const KEY_SHARE: u8 = 0xA1;
 
 /// The Sketch card (GFX-080): a canvas.
 pub const SKETCH_SIZE: (usize, usize) = (520, 420);
@@ -1339,6 +1349,7 @@ impl DeskWindow {
             AppState::Tasks(_) => Vec::new(),
             AppState::Sketch(_) => Vec::new(),
             AppState::Launcher(_) => Vec::new(),
+            AppState::Sharing(_) => Vec::new(),
         }
     }
 }
@@ -1696,6 +1707,7 @@ impl FilesView {
                 ("New".to_string(), crate::notepad::CTRL_N),
                 ("Rename".to_string(), CTRL_E),
                 ("Tag".to_string(), CTRL_K),
+                ("Share".to_string(), KEY_SHARE),
                 ("Bin it".to_string(), crate::notepad::KEY_DELETE),
                 (gather, CTRL_G),
                 (sort.to_string(), crate::notepad::CTRL_S),
@@ -1797,6 +1809,7 @@ pub enum AppState {
     Tasks(TasksView),
     Sketch(SketchView),
     Launcher(LauncherView),
+    Sharing(crate::sharing::SharingView),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -1964,6 +1977,24 @@ pub enum DeskRequest {
     Unlock { passphrase: String },
     /// Sign the person out, then call [`Desk::signed_out`].
     SignOut,
+    /// Say what the Sharing card `id` shows for `name` (FS-007), then
+    /// call [`Desk::sharing_loaded`].
+    LoadSharing { id: ViewId, name: String },
+    /// Share `name` with `to`, then answer as for `LoadSharing`.
+    ShareDoc {
+        id: ViewId,
+        name: String,
+        to: String,
+        rights: u8,
+    },
+    /// Revoke grant `grant` on `name`, then answer as for `LoadSharing`.
+    RevokeGrant {
+        id: ViewId,
+        name: String,
+        grant: u32,
+    },
+    /// Relabel `name`, then answer as for `LoadSharing`.
+    RelabelDoc { id: ViewId, name: String, label: u8 },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -2025,10 +2056,12 @@ pub enum PaletteAction {
     Lock,
     /// Sign out: every card closes, and the desk asks who is here.
     SignOut,
+    /// Who has the focused document, and share it (FS-007).
+    ShareDocument,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 44] = [
+    pub const ALL: [PaletteAction; 45] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2073,6 +2106,7 @@ impl PaletteAction {
         PaletteAction::Rest,
         PaletteAction::Lock,
         PaletteAction::SignOut,
+        PaletteAction::ShareDocument,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -2121,6 +2155,7 @@ impl PaletteAction {
             PaletteAction::Rest => "Rest: just the time, until you are back",
             PaletteAction::Lock => "Lock: rest, and ask for the passphrase",
             PaletteAction::SignOut => "Sign out: close everything, let someone else in",
+            PaletteAction::ShareDocument => "Share this document: who may read it",
         }
     }
 
@@ -2170,6 +2205,7 @@ impl PaletteAction {
             PaletteAction::Rest => "Ctrl+L",
             PaletteAction::Lock => "",
             PaletteAction::SignOut => "",
+            PaletteAction::ShareDocument => "",
         }
     }
 
@@ -3105,6 +3141,7 @@ impl Desk {
                 DeskApp::Tasks => AppState::Tasks(TasksView::new()),
                 DeskApp::Sketch => AppState::Sketch(SketchView::new()),
                 DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
+                DeskApp::Sharing => AppState::Sharing(crate::sharing::SharingView::new("")),
             },
         });
         self.focus = Some(id);
@@ -3575,6 +3612,7 @@ impl Desk {
                 alloc::vec![alloc::format!("{} strokes", sketch.strokes().len())],
             ),
             AppState::Launcher(_) => ("Apps".to_string(), alloc::vec!["every app".to_string()]),
+            AppState::Sharing(view) => ("Sharing".to_string(), alloc::vec![view.name.clone()]),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -3854,6 +3892,16 @@ impl Desk {
                 None
             }
             PaletteAction::SignOut => Some(DeskRequest::SignOut),
+            PaletteAction::ShareDocument => {
+                let path = self
+                    .focused_window()
+                    .and_then(|w| w.notepad())
+                    .and_then(|n| n.path().map(String::from));
+                match path {
+                    Some(path) => self.open_sharing(&path),
+                    None => None,
+                }
+            }
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
                 let id = self.open_or_raise(DeskApp::Sketch);
@@ -4528,6 +4576,27 @@ impl Desk {
                                     },
                                     _ => None,
                                 };
+                            // Sharing: a control, by pixel (FS-007).
+                            let sharing_key =
+                                match (self.canvas_point(*target, px, py), self.window(*target)) {
+                                    (Some((x, y)), Some(w)) => match &w.state {
+                                        AppState::Sharing(view) => {
+                                            let (cw, ch) = Self::canvas_size(w.bounds);
+                                            let palette =
+                                                crate::widgets::Palette::from_theme(&self.theme());
+                                            view.ui(cw, ch, palette, None).hit(x, y)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                            if let Some(key) = sharing_key {
+                                let (request, _) = self.handle_app_key(*target, key);
+                                requests.extend(request);
+                                self.say(Sound::Click);
+                                changed = true;
+                                continue;
+                            }
                             if let Some(key) = launcher_key {
                                 let (request, _) = self.handle_app_key(*target, key);
                                 requests.extend(request);
@@ -4716,6 +4785,31 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
+    /// Open the Sharing card for `name` (FS-007); the kernel is asked what
+    /// to show in it.
+    pub fn open_sharing(&mut self, name: &str) -> Option<DeskRequest> {
+        let id = self.launch(DeskApp::Sharing);
+        if let Some(AppState::Sharing(view)) = self.window_mut(id).map(|w| &mut w.state) {
+            *view = crate::sharing::SharingView::new(name);
+        }
+        Some(DeskRequest::LoadSharing {
+            id,
+            name: name.into(),
+        })
+    }
+
+    /// The kernel's answer for Sharing card `id`.
+    pub fn sharing_loaded(
+        &mut self,
+        id: ViewId,
+        info: Result<crate::sharing::SharingInfo, String>,
+        message: Option<String>,
+    ) {
+        if let Some(AppState::Sharing(view)) = self.window_mut(id).map(|w| &mut w.state) {
+            view.loaded(info, message);
+        }
+    }
+
     /// Show the sign-in screen for `people`, `preferred` chosen (FS-006).
     pub fn show_sign_in(&mut self, people: Vec<String>, preferred: Option<&str>) {
         self.resting = false;
@@ -5104,6 +5198,14 @@ impl Desk {
                         (None, true)
                     }
                     CTRL_R => (Some(DeskRequest::ListFiles { id }), true),
+                    // Share the selected document (FS-007).
+                    KEY_SHARE => {
+                        let name = files.selected().map(|e| e.name.clone());
+                        match name {
+                            Some(name) => (self.open_sharing(&name), true),
+                            None => (None, false),
+                        }
+                    }
                     CTRL_U => {
                         files.list_only = !files.list_only;
                         (None, true)
@@ -5278,6 +5380,32 @@ impl Desk {
                     (None, true)
                 }
             },
+            AppState::Sharing(view) => {
+                let name = view.name.clone();
+                match view.handle_byte(byte) {
+                    crate::sharing::SharingEffect::None => (None, false),
+                    crate::sharing::SharingEffect::Redraw => (None, true),
+                    crate::sharing::SharingEffect::Close => {
+                        self.close(id);
+                        (None, true)
+                    }
+                    crate::sharing::SharingEffect::Share { to, rights } => (
+                        Some(DeskRequest::ShareDoc {
+                            id,
+                            name,
+                            to,
+                            rights,
+                        }),
+                        true,
+                    ),
+                    crate::sharing::SharingEffect::Revoke(grant) => {
+                        (Some(DeskRequest::RevokeGrant { id, name, grant }), true)
+                    }
+                    crate::sharing::SharingEffect::Relabel(label) => {
+                        (Some(DeskRequest::RelabelDoc { id, name, label }), true)
+                    }
+                }
+            }
             AppState::Launcher(launcher) => match launcher.handle_byte(byte) {
                 LauncherEffect::None => (None, false),
                 LauncherEffect::Redraw => (None, true),
@@ -5857,6 +5985,16 @@ impl Desk {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(launcher.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), "Apps".to_string(), launcher.footer(), None)
+                }
+                AppState::Sharing(view) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(view.ui(w, h, palette, hover).into_ops());
+                    (
+                        Vec::new(),
+                        alloc::format!("Sharing - {}", view.name),
+                        view.footer(),
+                        None,
+                    )
                 }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
@@ -8011,7 +8149,7 @@ mod tests {
         let card = windows.iter().find(|w| w.frame.view_id == files).unwrap();
         assert_eq!(
             card.actions,
-            alloc::vec!["New", "Rename", "Tag", "Bin it", "All", "Recent", "List", "Bin"]
+            alloc::vec!["New", "Rename", "Tag", "Share", "Bin it", "All", "Recent", "List", "Bin"]
         );
         let terminal = desk.launch(DeskApp::Terminal);
         let windows = desk.windows("", true, None);
@@ -9168,6 +9306,59 @@ mod tests {
         assert!(desk.signing_in());
         desk.signed_in("armando");
         assert!(desk.focused_window().is_none(), "every card closed");
+    }
+
+    /// Files' Share chip opens the Sharing card for the selected document
+    /// and asks the kernel what to show; the card's acts go back as
+    /// requests (FS-007).
+    #[test]
+    fn the_share_chip_opens_the_sharing_card_and_its_acts_are_requests() {
+        let mut desk = Desk::new(1280, 800);
+        let files = desk.launch(DeskApp::Files);
+        desk.files_listed(files, alloc::vec![FileEntry::named("plan")]);
+        let (req, _) = desk.handle_app_key(files, KEY_SHARE);
+        let Some(DeskRequest::LoadSharing { id, name }) = req else {
+            panic!("{req:?}");
+        };
+        assert_eq!(name, "plan");
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Sharing);
+        desk.sharing_loaded(
+            id,
+            Ok(crate::sharing::SharingInfo {
+                name: "plan".into(),
+                owner: "me".into(),
+                label: 1,
+                can_relabel: true,
+                can_share: true,
+                held: authority::Rights::ALL.0,
+                grants: Vec::new(),
+                people: alloc::vec!["armando".into()],
+            }),
+            None,
+        );
+        assert_eq!(
+            desk.handle_app_key(id, b'\n').0,
+            Some(DeskRequest::ShareDoc {
+                id,
+                name: "plan".into(),
+                to: "armando".into(),
+                rights: authority::Rights::READ.0
+            })
+        );
+        assert_eq!(
+            desk.handle_app_key(id, crate::sharing::LABEL_KEY + 3).0,
+            Some(DeskRequest::RelabelDoc {
+                id,
+                name: "plan".into(),
+                label: 3
+            })
+        );
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
+        assert_eq!(card.frame.title.as_deref(), Some("Sharing - plan"));
+        desk.handle_app_key(id, crate::notepad::ESC);
+        assert!(desk.window(id).is_none());
     }
 
     #[test]

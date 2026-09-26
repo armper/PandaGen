@@ -38,6 +38,7 @@ pub mod access_shell;
 pub mod bare_metal_editor_io;
 pub mod bare_metal_storage;
 pub mod guard;
+pub mod sharing;
 pub mod sign_in;
 
 // Workspace platform adapter (test-only for now until no_std dependencies resolved)

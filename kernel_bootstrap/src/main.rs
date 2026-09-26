@@ -40,6 +40,7 @@ mod palette_overlay;
 mod present_policy;
 mod render_stats;
 mod rtc;
+mod sharing;
 mod sign_in;
 mod sketch;
 mod speaker;
@@ -2165,6 +2166,51 @@ fn workspace_loop(
                             kprintln!(serial, "authority: signed out");
                             workspace.request_clear();
                             desk.signed_out(people, preferred.as_deref());
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::LoadSharing { id, name } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            fs.set_clock(now_secs);
+                            let info = guard::sharing_info(&mut fs, &name);
+                            workspace.set_filesystem(fs);
+                            desk.sharing_loaded(id, info, None);
+                            output_dirty = true;
+                        }
+                    }
+                    op @ (desk::DeskRequest::ShareDoc { .. }
+                    | desk::DeskRequest::RevokeGrant { .. }
+                    | desk::DeskRequest::RelabelDoc { .. }) => {
+                        // Do it as the one signed in; show the card again as
+                        // the guard now sees it (FS-007).
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            fs.set_clock(now_secs);
+                            let (id, name, result) = match op {
+                                desk::DeskRequest::ShareDoc {
+                                    id,
+                                    name,
+                                    to,
+                                    rights,
+                                } => {
+                                    let r = guard::share_doc(&mut fs, &name, &to, rights);
+                                    (id, name, r)
+                                }
+                                desk::DeskRequest::RevokeGrant { id, name, grant } => {
+                                    let r = guard::revoke_doc(&mut fs, &name, grant);
+                                    (id, name, r)
+                                }
+                                desk::DeskRequest::RelabelDoc { id, name, label } => {
+                                    let r = guard::relabel_doc(&mut fs, &name, label);
+                                    (id, name, r)
+                                }
+                                _ => unreachable!(),
+                            };
+                            let info = guard::sharing_info(&mut fs, &name);
+                            workspace.set_filesystem(fs);
+                            let message = match result {
+                                Ok(m) | Err(m) => m,
+                            };
+                            desk.sharing_loaded(id, info, Some(message));
                             output_dirty = true;
                         }
                     }
