@@ -5862,7 +5862,8 @@ impl Desk {
                 ViewContent::text_buffer(lines),
                 0,
             );
-            frame.title = Some(alloc::format!("> {}_", palette.query));
+            // The compositor draws a magnifier before it (GFX-113).
+            frame.title = Some(alloc::format!("{}_", palette.query));
             let mut card = DesktopWindow::card(
                 frame,
                 RasterRect::new(

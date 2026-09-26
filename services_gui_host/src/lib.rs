@@ -362,6 +362,23 @@ pub const CARD_RADIUS: usize = 10;
 pub const CARD_FOOTER_HEIGHT: usize = 20;
 /// The close glyph's hit box, inset from the header's right edge.
 pub const CARD_CLOSE_SIZE: usize = 16;
+/// Room the palette's magnifier takes before its query (GFX-113).
+pub const SEARCH_GLYPH_W: usize = 20;
+
+/// A magnifier with its top-left at `(x, y)` (GFX-113): a 10px ring two
+/// pixels thick and a short handle down to the right.
+fn magnifier<T: RenderTarget + ?Sized>(target: &mut T, x: usize, y: usize, color: RgbaColor) {
+    target.draw_rounded_border(RasterRect::new(x, y, 11, 11), 5, 2, color);
+    for d in 0..2i64 {
+        target.draw_line(
+            (x + 9) as i64 + d,
+            (y + 9) as i64,
+            (x + 13) as i64 + d,
+            (y + 13) as i64,
+            color,
+        );
+    }
+}
 /// Half the close cross's arms, in pixels (GFX-104): a 9px cross in the
 /// 16px hit box.
 pub const CARD_CLOSE_ARM: i32 = 4;
@@ -2015,15 +2032,26 @@ fn raster_card(
         .or(close.map(|c| c.x))
         .map(|x| x.saturating_sub(rect.x + CARD_PADDING + 4 + CARD_CHIP_GAP))
         .unwrap_or(rect.width.saturating_sub(CARD_PADDING * 2));
+    // The palette's header is its search field (GFX-113): a magnifier,
+    // then the query.
+    let search = window.role == DesktopWindowRole::Palette;
+    let title_x = rect.x + CARD_PADDING + 4 + if search { SEARCH_GLYPH_W } else { 0 };
+    if search {
+        magnifier(
+            &mut painter,
+            rect.x + CARD_PADDING + 4,
+            title_y + 2,
+            theme.text_muted,
+        );
+    }
+    let title_room = if search {
+        title_room.saturating_sub(SEARCH_GLYPH_W)
+    } else {
+        title_room
+    };
     let title = window_chrome_label(window);
     let title = fit_text(&title, title_room / RASTER_CELL_WIDTH.max(1));
-    painter.draw_text_with_font(
-        rect.x + CARD_PADDING + 4,
-        title_y,
-        &title,
-        &SMOOTH_FONT,
-        title_color,
-    );
+    painter.draw_text_with_font(title_x, title_y, &title, &SMOOTH_FONT, title_color);
     let header_bottom = rect.y + CARD_HEADER_HEIGHT;
     if header_bottom < rect.bottom() {
         painter.draw_hline(

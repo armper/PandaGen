@@ -165,6 +165,33 @@ fn the_close_cross_is_two_smooth_diagonals() {
     assert_eq!(at(2, 2), header);
 }
 
+/// The palette's header is a search field (GFX-113): a magnifier where
+/// another card's title starts, and the query after it.
+#[test]
+fn the_palettes_header_has_a_magnifier() {
+    use services_gui_host::{DesktopWindowRole, CARD_PADDING, SEARCH_GLYPH_W};
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(100, 80, 400, 240);
+    let palette =
+        DesktopWindow::card(frame("memo_", &["one"]), bounds).with_role(DesktopWindowRole::Palette);
+    let plain = DesktopWindow::card(frame("memo_", &["one"]), bounds);
+    let with = render(vec![palette]);
+    let without = render(vec![plain]);
+    let x = 100 + CARD_PADDING + 4;
+    let title_y = 80 + (CARD_HEADER_HEIGHT - 16) / 2;
+    // The ring's left edge, halfway down it.
+    assert_eq!(px(&with, x, title_y + 2 + 5), theme.text_muted);
+    assert_ne!(px(&without, x, title_y + 2 + 5), theme.text_muted);
+    // The query starts after the magnifier: where the plain title's first
+    // letter is, the palette has nothing of it.
+    let inked = |t: &RgbaBuffer, x0: usize| {
+        (x0..x0 + 8).any(|x| (title_y..title_y + 16).any(|y| px(t, x, y) != px(t, 300, y)))
+    };
+    // (The label starts with a space: its first letter is a cell in.)
+    assert!(inked(&without, x + 8));
+    assert!(inked(&with, x + SEARCH_GLYPH_W + 8));
+}
+
 #[test]
 fn pixel_bounds_win_over_the_cell_rect() {
     let bounds = RasterRect::new(123, 77, 210, 150);
