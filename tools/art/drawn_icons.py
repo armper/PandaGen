@@ -127,7 +127,44 @@ def rubbish_bin():
     return glyph_onto(gradient((248, 113, 113), (185, 28, 28)), m)
 
 
-ICONS = {"notices": bell, "now": gauge, "shortcuts": keyboard, "bin": rubbish_bin}
+def globe():
+    """The Web card's (WEB-001): a globe of meridians and parallels, with a
+    mint orbit round it for the network."""
+    m = canvas()
+    d = ImageDraw.Draw(m)
+    box = (232, 232, 792, 792)
+    d.ellipse(box, fill=255)
+    lines = canvas()
+    ld = ImageDraw.Draw(lines)
+    w = 34
+    # Inside the disc: the rim's inner edge, two meridian arcs, the axis,
+    # the equator and two parallels, cut out of the white.
+    ld.ellipse((box[0] + w, box[1] + w, box[2] - w, box[3] - w), fill=255)
+    m2 = ImageChops.subtract(m, lines)
+    g = canvas()
+    gd = ImageDraw.Draw(g)
+    gd.ellipse((box[0], box[1], box[2], box[3]), outline=255, width=w)
+    gd.ellipse((392, 232, 632, 792), outline=255, width=w)
+    gd.rectangle((512 - w // 2, 232, 512 + w // 2, 792), fill=255)
+    gd.rectangle((232, 512 - w // 2, 792, 512 + w // 2), fill=255)
+    for y in (372, 652):
+        half = int(((280 ** 2) - (y - 512) ** 2) ** 0.5)
+        gd.rectangle((512 - half, y - w // 2, 512 + half, y + w // 2), fill=255)
+    disc = canvas()
+    ImageDraw.Draw(disc).ellipse(box, fill=255)
+    m = ImageChops.lighter(m2, ImageChops.multiply(g, disc))
+    orbit = canvas()
+    od = ImageDraw.Draw(orbit)
+    od.ellipse((150, 430, 874, 594), outline=255, width=26)
+    od.ellipse((736, 404, 816, 484), fill=255)
+    # The orbit passes behind the globe on its far side.
+    behind = canvas()
+    ImageDraw.Draw(behind).rectangle((0, 0, 1024, 512), fill=255)
+    orbit = ImageChops.subtract(orbit, ImageChops.multiply(disc, behind))
+    return glyph_onto(gradient((56, 189, 248), (29, 78, 216)), m, (orbit, (52, 211, 153)))
+
+
+ICONS = {"notices": bell, "now": gauge, "shortcuts": keyboard, "bin": rubbish_bin, "web": globe}
 
 
 def main():

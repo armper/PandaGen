@@ -474,11 +474,12 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--expect-pixel".to_string(),
         "640,4,35,52,73".to_string(),
         // Dock capsule (GFX-114): liquid glass over the blurred wallpaper, in
-        // the gap between the first two tiles (tile 0 at x=249..313, 64
-        // wide, 6 apart), within a few levels -- the blur is the
-        // wallpaper's, and the wallpaper is fixed.
+        // the gap between the first two tiles (tile 0 at x=214..278, 64
+        // wide, 6 apart, since the Web tile made eleven -- WEB-001), within
+        // a few levels -- the blur is the wallpaper's, and the wallpaper is
+        // fixed.
         "--expect-pixel".to_string(),
-        "316,740,54,56,54,8".to_string(),
+        "281,740,47,48,49,8".to_string(),
         // The Notepad card: 720 wide, centred, first cascade step, at y=44.
         // It has lost focus to the Terminal, so its ring is the hairline...
         "--expect-pixel".to_string(),
@@ -707,13 +708,14 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--expect-pixel".to_string(),
         "1200,81,28,34,48".to_string(),
         // Two dock tiles lit (GFX-114): the lights under Notepad (focused,
-        // longer) and Files. Ten app tiles and Apps past a divider are 782px
-        // wide centred on 640, so the first centre is at 281, the next 351;
-        // the lights sit three pixels under the tiles, at y=777..779.
+        // longer) and Files. Eleven app tiles (Web, WEB-001) and Apps past a
+        // divider are 852px wide centred on 640, so the first centre is at
+        // 246, the next 316; the lights sit three pixels under the tiles, at
+        // y=777..779.
         "--expect-pixel".to_string(),
-        "281,778,52,211,153".to_string(),
+        "246,778,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "351,778,52,211,153".to_string(),
+        "316,778,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -1002,6 +1004,29 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "line 40 of the PandaGen fetch test".to_string(),
         "--expect-serial".to_string(),
         "... 60 more lines".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
+    // The Web card (WEB-001): the palette opens it, an address typed in it
+    // loads an HTML page from the host, and Tab and Enter follow its link.
+    // Its server has its own port: shapes run side by side, and the
+    // Terminal's fetch shape has 18080.
+    title = "the desk: the Web card loads a page and follows its link".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--http-serve".to_string(),
+        "18081".to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,w,e,b,ret,sleep:2,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,0,8,1,slash,p,a,g,e,dot,h,t,m,l,ret,sleep:3,tab,ret,sleep:3".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_web".to_string(),
+        "--expect-serial".to_string(),
+        "web: loaded http://10.0.2.2:18081/page.html (200,".to_string(),
+        "--expect-serial".to_string(),
+        "web: loaded http://10.0.2.2:18081/second.html (200,".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -2794,10 +2819,29 @@ fn serve_http(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     _ => break,
                 }
             }
-            let body = fetch_test_page();
+            // The path picks the page: two HTML pages that link to each
+            // other for the Web card (WEB-001), the numbered lines for the
+            // rest.
+            let head = String::from_utf8_lossy(&head);
+            let path = head.split_whitespace().nth(1).unwrap_or("/");
+            let (kind, body) = match path {
+                "/page.html" => (
+                    "text/html; charset=utf-8",
+                    "<!doctype html><html><head><title>PandaGen test page</title>\
+                     <style>p{color:red}</style></head><body><h1>It works</h1>\
+                     <p>A page served by the gauntlet&rsquo;s host. Follow \
+                     <a href=\"second.html\">the second page</a>.</p></body></html>"
+                        .to_string(),
+                ),
+                "/second.html" => (
+                    "text/html",
+                    "<title>Second page</title><p>You followed the link.</p>".to_string(),
+                ),
+                _ => ("text/plain", fetch_test_page()),
+            };
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );

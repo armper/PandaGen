@@ -68,7 +68,7 @@ pub fn thumbnail_id(name: &str) -> Option<u32> {
 
 /// The order of `PICTURES`: a name, then its sizes. After the apps and
 /// the panda, the desk's own (GFX-107): notices, now, shortcuts, bin.
-pub const PICTURE_NAMES: [&str; 15] = [
+pub const PICTURE_NAMES: [&str; 16] = [
     "notepad",
     "files",
     "terminal",
@@ -84,10 +84,12 @@ pub const PICTURE_NAMES: [&str; 15] = [
     "now",
     "shortcuts",
     "bin",
+    // Drawn by tools/art/drawn_icons.py (WEB-001).
+    "web",
 ];
 pub const PICTURE_SIZES: [u32; 6] = [64, 48, 40, 32, 20, 16];
 
-pub static PICTURES: [services_gui_host::Picture; 94] = [
+pub static PICTURES: [services_gui_host::Picture; 100] = [
     picture!("notepad", 64),
     picture!("notepad", 48),
     picture!("notepad", 40),
@@ -179,6 +181,12 @@ pub static PICTURES: [services_gui_host::Picture; 94] = [
     picture!("bin", 32),
     picture!("bin", 20),
     picture!("bin", 16),
+    picture!("web", 64),
+    picture!("web", 48),
+    picture!("web", 40),
+    picture!("web", 32),
+    picture!("web", 20),
+    picture!("web", 16),
     // Look's wallpaper thumbnails (GFX-100), after the icons.
     thumbnail!("picture"),
     thumbnail!("aurora"),
@@ -390,12 +398,14 @@ pub enum DeskApp {
     Access,
     /// Who tried what on one's documents, and what the guard said (FS-009).
     Audit,
+    /// Pages over HTTP, read as text (WEB-001).
+    Web,
 }
 
 /// The cards a reboot brings back (DESK-020). Not the Welcome card, the
 /// Apps grid, or the cards about one document's sharing and the machine's
 /// people, which are opened for a moment and a purpose.
-pub const RESTORABLE: [DeskApp; 13] = [
+pub const RESTORABLE: [DeskApp; 14] = [
     DeskApp::Notepad,
     DeskApp::Files,
     DeskApp::Terminal,
@@ -409,13 +419,14 @@ pub const RESTORABLE: [DeskApp; 13] = [
     DeskApp::Tiles,
     DeskApp::Tasks,
     DeskApp::Sketch,
+    DeskApp::Web,
 ];
 
 /// How long the layout holds still before it is written, in ticks.
 pub const LAYOUT_SETTLE_TICKS: u64 = 200;
 
 impl DeskApp {
-    pub const ALL: [DeskApp; 10] = [
+    pub const ALL: [DeskApp; 11] = [
         DeskApp::Notepad,
         DeskApp::Files,
         DeskApp::Terminal,
@@ -426,6 +437,7 @@ impl DeskApp {
         DeskApp::Tiles,
         DeskApp::Tasks,
         DeskApp::Sketch,
+        DeskApp::Web,
     ];
 
     /// What the desk must ask the kernel for right after `app` opens in
@@ -461,6 +473,7 @@ impl DeskApp {
             DeskApp::Tiles => "Tiles",
             DeskApp::Tasks => "Tasks",
             DeskApp::Sketch => "Sketch",
+            DeskApp::Web => "Web",
             DeskApp::Launcher => "Apps",
             DeskApp::Sharing => "Sharing",
             DeskApp::Access => "Access",
@@ -635,6 +648,25 @@ impl DeskApp {
                 0b0000000000000000,
                 0b0000000000000000,
             ]),
+            // A globe: its rim, a parallel above and below, and a meridian.
+            DeskApp::Web => Some([
+                0b0000011111100000,
+                0b0001100110011000,
+                0b0010001001000100,
+                0b0100010000100010,
+                0b0100010000100010,
+                0b1111111111111111,
+                0b1000100000010001,
+                0b1000100000010001,
+                0b1000100000010001,
+                0b1000100000010001,
+                0b1111111111111111,
+                0b0100010000100010,
+                0b0100010000100010,
+                0b0010001001000100,
+                0b0001100110011000,
+                0b0000011111100000,
+            ]),
             DeskApp::Sketch => Some([
                 0b0000000000000000,
                 0b0000000000001100,
@@ -670,6 +702,7 @@ impl DeskApp {
             DeskApp::Tiles => "tiles",
             DeskApp::Tasks => "tasks",
             DeskApp::Sketch => "sketch",
+            DeskApp::Web => "web",
             // The Apps grid wears the desk's mark (GFX-114).
             DeskApp::Launcher => "panda",
             _ => return None,
@@ -695,6 +728,7 @@ impl DeskApp {
             DeskApp::Tiles => "2k",
             DeskApp::Tasks => "Td",
             DeskApp::Sketch => "Sk",
+            DeskApp::Web => "Wb",
             DeskApp::Launcher => "Ap",
             DeskApp::Sharing => "Sh",
             DeskApp::Access => "Ac",
@@ -718,6 +752,7 @@ impl DeskApp {
             DeskApp::Tiles => TILES_SIZE,
             DeskApp::Tasks => TASKS_SIZE,
             DeskApp::Sketch => SKETCH_SIZE,
+            DeskApp::Web => WEB_SIZE,
             DeskApp::Launcher => LAUNCHER_SIZE,
             DeskApp::Sharing => SHARING_SIZE,
             DeskApp::Access => ACCESS_SIZE,
@@ -758,14 +793,16 @@ pub const REST_AFTER_TICKS: u64 = 5 * 60 * 100;
 /// The top bar's left cells that open Apps (GFX-089).
 pub const BAR_APPS_COLUMNS: usize = 12;
 
-/// The Apps card (GFX-089): two rows of five.
-pub const LAUNCHER_SIZE: (usize, usize) = (560, 324);
+/// The Apps card (GFX-089): two rows of six (WEB-001 made eleven apps).
+pub const LAUNCHER_SIZE: (usize, usize) = (640, 324);
 /// The Sharing card (FS-007).
 pub const SHARING_SIZE: (usize, usize) = (600, 520);
 /// The Access card (FS-008).
 pub const ACCESS_SIZE: (usize, usize) = (640, 600);
 /// The Audit card (FS-009).
 pub const AUDIT_SIZE: (usize, usize) = (760, 520);
+/// The Web card (WEB-001): a page wants width.
+pub const WEB_SIZE: (usize, usize) = (860, 600);
 /// Files' Share chip: open the Sharing card for the selected document.
 pub const KEY_SHARE: u8 = 0xA1;
 
@@ -1395,6 +1432,7 @@ impl DeskWindow {
                 ),
                 ("Again".to_string(), 0x12),
             ],
+            AppState::Web(_) => Vec::new(),
         }
     }
 }
@@ -1857,6 +1895,7 @@ pub enum AppState {
     Sharing(crate::sharing::SharingView),
     Access(crate::access_card::AccessView),
     Audit(crate::audit_card::AuditView),
+    Web(crate::web::WebView),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -2056,6 +2095,9 @@ pub enum DeskRequest {
     /// Say what the Audit card `id` shows (FS-009), then call
     /// [`Desk::audit_loaded`].
     LoadAudit { id: ViewId },
+    /// Fetch `url` for Web card `id` (WEB-001), then call
+    /// [`Desk::web_loaded`].
+    Fetch { id: ViewId, url: String },
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -2126,10 +2168,11 @@ pub enum PaletteAction {
     Access,
     /// Who tried what on one's documents (FS-009).
     Audit,
+    Web,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 50] = [
+    pub const ALL: [PaletteAction; 51] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2173,6 +2216,7 @@ impl PaletteAction {
         PaletteAction::Tiles,
         PaletteAction::Tasks,
         PaletteAction::Sketch,
+        PaletteAction::Web,
         PaletteAction::Apps,
         PaletteAction::Rest,
         PaletteAction::Lock,
@@ -2227,6 +2271,7 @@ impl PaletteAction {
             PaletteAction::Tiles => "Tiles: the 2048 game",
             PaletteAction::Tasks => "Tasks: the to-do list",
             PaletteAction::Sketch => "Sketch: draw with the pointer",
+            PaletteAction::Web => "Web: pages over HTTP, read as text",
             PaletteAction::Apps => "Apps: every app on the desk",
             PaletteAction::Rest => "Rest: just the time, until you are back",
             PaletteAction::Lock => "Lock: rest, and ask for the passphrase",
@@ -2282,6 +2327,7 @@ impl PaletteAction {
             PaletteAction::Tiles => "",
             PaletteAction::Tasks => "",
             PaletteAction::Sketch => "",
+            PaletteAction::Web => "",
             PaletteAction::Apps => "Ctrl+Space twice",
             PaletteAction::Rest => "Ctrl+L",
             PaletteAction::Lock => "",
@@ -2433,6 +2479,7 @@ impl PaletteRow {
                 PaletteAction::Tiles => Some(DeskApp::Tiles),
                 PaletteAction::Tasks => Some(DeskApp::Tasks),
                 PaletteAction::Sketch => Some(DeskApp::Sketch),
+                PaletteAction::Web => Some(DeskApp::Web),
                 _ => None,
             },
             PaletteRow::Recent(file) | PaletteRow::Hit { file, .. } => Some(document_app(file)),
@@ -2456,6 +2503,7 @@ impl PaletteRow {
                 PaletteAction::Tiles => DeskApp::Tiles.icon(),
                 PaletteAction::Tasks => DeskApp::Tasks.icon(),
                 PaletteAction::Sketch => DeskApp::Sketch.icon(),
+                PaletteAction::Web => DeskApp::Web.icon(),
                 _ => None,
             },
             PaletteRow::Recent(_) | PaletteRow::Hit { .. } => DeskApp::Files.icon(),
@@ -2891,7 +2939,10 @@ impl Desk {
             .collect();
         cards.sort_by_key(|w| w.z);
         for w in cards {
-            let doc = w.notepad().and_then(|n| n.path()).unwrap_or_default();
+            let doc = match &w.state {
+                AppState::Web(view) => view.url().unwrap_or_default(),
+                _ => w.notepad().and_then(|n| n.path()).unwrap_or_default(),
+            };
             if w.app == DeskApp::Notepad && doc.is_empty() {
                 continue;
             }
@@ -2968,6 +3019,14 @@ impl Desk {
                             id,
                             effect: NotepadEffect::Open { path: doc },
                         });
+                    } else if app == DeskApp::Web && !doc.is_empty() {
+                        // The page it showed, fetched again.
+                        if let Some(AppState::Web(view)) = self.window_mut(id).map(|w| &mut w.state)
+                        {
+                            if let crate::web::WebEffect::Fetch(url) = view.open(&doc) {
+                                requests.push(DeskRequest::Fetch { id, url });
+                            }
+                        }
                     } else if let Some(request) = app.launch_request(id) {
                         requests.push(request);
                     }
@@ -3368,6 +3427,7 @@ impl Desk {
                 DeskApp::Sharing => AppState::Sharing(crate::sharing::SharingView::new("")),
                 DeskApp::Access => AppState::Access(crate::access_card::AccessView::new()),
                 DeskApp::Audit => AppState::Audit(crate::audit_card::AuditView::new()),
+                DeskApp::Web => AppState::Web(crate::web::WebView::new()),
             },
         });
         self.focus = Some(id);
@@ -3847,6 +3907,10 @@ impl Desk {
                 "Audit".to_string(),
                 alloc::vec!["who tried what".to_string()],
             ),
+            AppState::Web(view) => (
+                "Web".to_string(),
+                alloc::vec![view.page().map(|p| p.title.clone()).unwrap_or_default()],
+            ),
         };
         let mut frame = ViewFrame::new(
             window.id,
@@ -4145,6 +4209,10 @@ impl Desk {
                     Some(path) => self.open_sharing(&path),
                     None => None,
                 }
+            }
+            PaletteAction::Web => {
+                self.open_or_raise(DeskApp::Web);
+                None
             }
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
@@ -4836,6 +4904,12 @@ impl Desk {
                                                 crate::widgets::Palette::from_theme(&self.theme());
                                             view.ui(cw, ch, palette, None).hit(x, y)
                                         }
+                                        AppState::Web(view) => {
+                                            let (cw, ch) = Self::canvas_size(w.bounds);
+                                            let palette =
+                                                crate::widgets::Palette::from_theme(&self.theme());
+                                            view.ui(cw, ch, palette, None).hit(x, y)
+                                        }
                                         _ => None,
                                     },
                                     _ => None,
@@ -4933,6 +5007,11 @@ impl Desk {
                                 // The console's scrollback is the
                                 // workspace's; ask for it.
                                 requests.push(DeskRequest::TerminalScroll { notches: *dy * 3 });
+                                changed = true;
+                            } else if let Some(AppState::Web(view)) =
+                                self.window_mut(*target).map(|w| &mut w.state)
+                            {
+                                view.scroll_by(-(*dy) * 3);
                                 changed = true;
                             } else if let Some(AppState::Shortcuts(scroll)) =
                                 self.window_mut(*target).map(|w| &mut w.state)
@@ -5035,7 +5114,23 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
-    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// The kernel's answer for Audit card `id` (FS-009).
+    /// Open the Sharing card for `name` (FS-007); the kernel is asked what    /// The fetch for Web card `id` ended (WEB-001); a redirect asks for the
+    /// next.
+    pub fn web_loaded(
+        &mut self,
+        id: ViewId,
+        outcome: crate::web::WebOutcome,
+    ) -> Option<DeskRequest> {
+        let Some(AppState::Web(view)) = self.window_mut(id).map(|w| &mut w.state) else {
+            return None;
+        };
+        match view.loaded(outcome) {
+            crate::web::WebEffect::Fetch(url) => Some(DeskRequest::Fetch { id, url }),
+            _ => None,
+        }
+    }
+
+    /// The kernel's answer for Audit card `id` (FS-009).
     pub fn audit_loaded(
         &mut self,
         id: ViewId,
@@ -5690,6 +5785,15 @@ impl Desk {
                     }
                 }
             }
+            AppState::Web(view) => match view.handle_byte(byte) {
+                crate::web::WebEffect::None => (None, false),
+                crate::web::WebEffect::Redraw => (None, true),
+                crate::web::WebEffect::Fetch(url) => (Some(DeskRequest::Fetch { id, url }), true),
+                crate::web::WebEffect::Close => {
+                    self.close(id);
+                    (None, true)
+                }
+            },
             AppState::Audit(view) => match view.handle_byte(byte) {
                 crate::audit_card::AuditEffect::None => (None, false),
                 crate::audit_card::AuditEffect::Redraw => (None, true),
@@ -6326,6 +6430,11 @@ impl Desk {
                     graphics = Some(view.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), "Audit".to_string(), view.footer(), None)
                 }
+                AppState::Web(view) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(view.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), view.title(), view.footer(), None)
+                }
                 AppState::Shortcuts(scroll) => {
                     let all = Self::shortcut_lines();
                     let shown: Vec<String> = all.iter().skip(*scroll).cloned().collect();
@@ -6922,6 +7031,53 @@ mod tests {
         desk.launch(DeskApp::Files);
         desk.handle_key(crate::notepad::CTRL_N);
         assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Files));
+    }
+
+    #[test]
+    fn the_web_card_fetches_what_is_typed_and_shows_the_page() {
+        let mut desk = Desk::new(1280, 800);
+        assert_eq!(desk.run_action(PaletteAction::Web), None);
+        let id = desk.focus.unwrap();
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Web);
+        let mut request = None;
+        for b in b"10.0.2.2:18080/page.html\n" {
+            let (r, _) = desk.handle_key(*b);
+            request = request.or(r);
+        }
+        assert_eq!(
+            request,
+            Some(DeskRequest::Fetch {
+                id,
+                url: "http://10.0.2.2:18080/page.html".into()
+            })
+        );
+        let next = desk.web_loaded(
+            id,
+            Ok(crate::web::WebResponse {
+                url: "http://10.0.2.2:18080/page.html".into(),
+                status: 200,
+                reason: "OK".into(),
+                location: None,
+                content_type: Some("text/html".into()),
+                body: b"<title>Test</title><p><a href=second.html>on</a></p>".to_vec(),
+            }),
+        );
+        assert_eq!(next, None);
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.frame.title.as_deref(), Some("Web - Test"));
+        // The layout keeps the page, so a reboot fetches it again.
+        assert!(
+            desk.layout_text().contains("card Web 0 "),
+            "{}",
+            desk.layout_text()
+        );
+        assert!(desk
+            .layout_text()
+            .contains(" http://10.0.2.2:18080/page.html\n"));
+        // The Apps grid and the dock have eleven apps.
+        assert_eq!(DeskApp::ALL.len(), 11);
+        assert!(DeskApp::Web.picture(64).is_some());
     }
 
     #[test]
@@ -9581,7 +9737,11 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(thumbnail_id("Aurora"), Some(91));
+        assert_eq!(
+            thumbnail_id("Aurora"),
+            Some(97),
+            "after the icons, the Web globe's included"
+        );
         assert_eq!(thumbnail_id("Gradient"), None);
         let t = &PICTURES[thumbnail_id("Nebula").unwrap() as usize];
         assert_eq!((t.width as u32, t.height as u32), (THUMB_W, THUMB_H));

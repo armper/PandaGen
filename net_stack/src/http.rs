@@ -357,6 +357,8 @@ pub struct Response<'a> {
     pub chunked: bool,
     /// Where a redirect points, if one does.
     pub location: Option<&'a str>,
+    /// What the body is (`text/html; charset=utf-8`), if said.
+    pub content_type: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +395,7 @@ pub fn parse_response(buf: &[u8]) -> ResponseParse<'_> {
         content_length: None,
         chunked: false,
         location: None,
+        content_type: None,
     };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -411,6 +414,8 @@ pub fn parse_response(buf: &[u8]) -> ResponseParse<'_> {
                 .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
         } else if name.eq_ignore_ascii_case("location") {
             response.location = Some(value);
+        } else if name.eq_ignore_ascii_case("content-type") {
+            response.content_type = Some(value);
         }
     }
     ResponseParse::Complete(response)

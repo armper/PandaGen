@@ -26,6 +26,9 @@ pub const EPHEMERAL_FIRST: u16 = 49152;
 /// normally abandons it first, after `MAX_RETRIES` attempts one `RTO_TICKS`
 /// apart; this only catches a connection the retransmit path somehow misses.
 pub const SYN_TIMEOUT_TICKS: u64 = RTO_TICKS * (MAX_RETRIES as u64) + 300;
+/// The backstop for our own SYN: its backoff (1+2+4+8+16 s, then 16 s to
+/// give up) plus the same margin.
+pub const SYN_SENT_TIMEOUT_TICKS: u64 = RTO_TICKS * 47 + 300;
 /// An established connection that says nothing for this long is reaped. With
 /// a small table an idle peer is indistinguishable from a vanished one.
 pub const IDLE_TIMEOUT_TICKS: u64 = 12_000;
@@ -353,7 +356,8 @@ impl Tcp {
         for conn in self.conns.iter_mut() {
             let limit = match conn.state {
                 State::Closed => continue,
-                State::SynReceived | State::SynSent => SYN_TIMEOUT_TICKS,
+                State::SynReceived => SYN_TIMEOUT_TICKS,
+                State::SynSent => SYN_SENT_TIMEOUT_TICKS,
                 State::Established => IDLE_TIMEOUT_TICKS,
                 // CloseWait means the peer is gone and nothing further will
                 // ever arrive; only our own side is still open. Holding a
@@ -463,6 +467,18 @@ impl Tcp {
         });
         self.accepted += 1;
         Some(index)
+    }
+
+    /// How long before `conn`'s segment in flight is sent again. Our own
+    /// SYN backs off -- 1, 2, 4, 8, 16 s -- as RFC 6298 asks: a server
+    /// slow to answer its first SYN was given up on after five seconds,
+    /// where a few more would have found it.
+    fn rto(conn: &Connection) -> u64 {
+        if conn.state == State::SynSent {
+            RTO_TICKS << conn.retries.min(4)
+        } else {
+            RTO_TICKS
+        }
     }
 
     fn syn_of(conn: &Connection) -> Outgoing {
@@ -735,7 +751,7 @@ impl Tcp {
                 || conn.tx_unacked > 0
                 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
             // Retransmit what is in flight after the timeout.
-            if in_flight && self.now.saturating_sub(conn.last_send_tick) >= RTO_TICKS {
+            if in_flight && self.now.saturating_sub(conn.last_send_tick) >= Self::rto(conn) {
                 if conn.retries >= MAX_RETRIES {
                     conn.state = State::Closed;
                     self.reaped += 1;
@@ -852,7 +868,7 @@ impl Tcp {
         let in_flight =
             syn_pending || conn.tx_unacked > 0 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
         if in_flight {
-            return now.saturating_sub(conn.last_send_tick) >= RTO_TICKS;
+            return now.saturating_sub(conn.last_send_tick) >= Self::rto(conn);
         }
         let unsent = conn.tx_len - conn.tx_unacked;
         if unsent > 0 && matches!(conn.state, State::Established | State::CloseWait) {
@@ -1429,12 +1445,18 @@ mod tests {
         let conn = tcp.connect(SERVER, 80).unwrap();
         tcp.poll().unwrap();
         assert_eq!(tcp.poll(), None, "not yet");
-        for round in 1..=MAX_RETRIES as u64 {
-            tcp.set_now(round * RTO_TICKS);
+        // Backing off: 1, 2, 4, 8, 16 s after each send.
+        let mut at = 0;
+        for round in 0..MAX_RETRIES as u32 {
+            let wait = RTO_TICKS << round;
+            tcp.set_now(at + wait - 1);
+            assert_eq!(tcp.poll(), None, "not before {wait} ticks");
+            at += wait;
+            tcp.set_now(at);
             let again = tcp.poll().expect("the SYN again");
             assert_eq!(again.flags, TCP_SYN);
         }
-        tcp.set_now((MAX_RETRIES as u64 + 1) * RTO_TICKS);
+        tcp.set_now(at + (RTO_TICKS << 4));
         assert_eq!(tcp.poll(), None);
         assert!(tcp.connection(conn).is_none(), "given up");
     }

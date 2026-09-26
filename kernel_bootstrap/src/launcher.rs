@@ -18,7 +18,7 @@ use crate::widgets::{grid, rect, Palette, Ui};
 /// A cell's key byte: `CELL_KEY_FIRST + n` is the n-th cell shown.
 pub const CELL_KEY_FIRST: u8 = 0xC0;
 /// Five across; the grid starts under the search line.
-pub const COLUMNS: u32 = 5;
+pub const COLUMNS: u32 = 6;
 pub const GRID_TOP: i32 = 32;
 pub const CELL_H: u32 = 104;
 
@@ -92,7 +92,7 @@ impl LauncherView {
         LauncherEffect::Redraw
     }
 
-    /// The cells for a canvas `width` wide: two rows of five.
+    /// The cells for a canvas `width` wide: two rows of six.
     pub fn cells(width: u32) -> Vec<PixelRect> {
         grid(rect(0, GRID_TOP, width, CELL_H * 2 + 8), COLUMNS, 2, 8)
     }

@@ -200,6 +200,10 @@ pub struct NetStack {
     /// for the Terminal.
     fetch: Option<Fetch>,
     fetch_lines: Vec<String>,
+    /// The request under way is a Web card's (WEB-001): its lines are not
+    /// the Terminal's, and its end is a `WebOutcome`.
+    card_fetch: bool,
+    web_outcome: Option<crate::web::WebOutcome>,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -267,6 +271,8 @@ impl NetStack {
             dns: None,
             fetch: None,
             fetch_lines: Vec::new(),
+            card_fetch: false,
+            web_outcome: None,
         })
     }
 
@@ -666,6 +672,7 @@ impl NetStack {
         self.buffered_http(status, log);
         // The fetch under way: its request out, its window updates, its end.
         self.advance_fetch(clock());
+        self.settle_card_fetch();
         // Top up any response still streaming out, then push everything.
         self.pump_http();
         self.flush_tcp();
@@ -1833,9 +1840,57 @@ impl NetStack {
         Ok(())
     }
 
-    /// Lines for the Terminal from the request under way.
+    /// Lines for the Terminal from the request under way. None while a
+    /// Web card's is: those are the card's.
     pub fn take_fetch_lines(&mut self) -> Vec<String> {
+        if self.card_fetch {
+            return Vec::new();
+        }
         core::mem::take(&mut self.fetch_lines)
+    }
+
+    /// Fetch `url` for a Web card (WEB-001): the end comes from
+    /// `take_web_outcome`, not as lines.
+    pub fn start_web_fetch(&mut self, url: &str, now: u64) -> Result<(), String> {
+        if self.fetch.is_some() {
+            return Err(String::from(
+                "The network is busy with another request; try again in a moment",
+            ));
+        }
+        self.fetch_lines.clear();
+        self.card_fetch = true;
+        match self.start_fetch(url, now) {
+            Ok(()) => {
+                self.settle_card_fetch();
+                Ok(())
+            }
+            Err(why) => {
+                self.card_fetch = false;
+                Err(why)
+            }
+        }
+    }
+
+    /// The Web card's fetch has ended, if it has.
+    pub fn take_web_outcome(&mut self) -> Option<crate::web::WebOutcome> {
+        self.web_outcome.take()
+    }
+
+    /// A card's fetch that has ended without a response ended with its
+    /// last line: that is the card's answer.
+    fn settle_card_fetch(&mut self) {
+        if !self.card_fetch || self.fetch.is_some() {
+            return;
+        }
+        self.card_fetch = false;
+        let lines = core::mem::take(&mut self.fetch_lines);
+        if self.web_outcome.is_none() {
+            let why = lines
+                .into_iter()
+                .last()
+                .unwrap_or_else(|| String::from("The request ended with no answer"));
+            self.web_outcome = Some(Err(why));
+        }
     }
 
     /// A datagram on `DNS_CLIENT_PORT`: the answer, if it is ours.
@@ -2089,6 +2144,27 @@ impl NetStack {
             }
         };
         let total = body.len() + fetch.dropped;
+        if self.card_fetch {
+            let port = if fetch.port == 80 {
+                String::new()
+            } else {
+                alloc::format!(":{}", fetch.port)
+            };
+            let path = if fetch.path.starts_with('?') {
+                alloc::format!("/{}", fetch.path)
+            } else {
+                fetch.path.clone()
+            };
+            self.web_outcome = Some(Ok(crate::web::WebResponse {
+                url: alloc::format!("http://{}{port}{path}", fetch.host),
+                status: response.status,
+                reason: String::from(response.reason),
+                location: response.location.map(String::from),
+                content_type: response.content_type.map(String::from),
+                body: body.to_vec(),
+            }));
+            return;
+        }
         self.fetch_lines.push(alloc::format!(
             "HTTP {} {}, {} bytes",
             response.status,

@@ -32,6 +32,7 @@ pub mod sketch;
 pub mod speaker;
 pub mod tasks;
 pub mod timer;
+pub mod web;
 pub mod widgets;
 
 // Storage modules (available in both test and non-test)
