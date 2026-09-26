@@ -1597,7 +1597,13 @@ fn workspace_loop(
         not(all(not(test), target_os = "none")),
         allow(unused_mut, unused_variables)
     )]
-    let mut web_waiting: Option<(view_types::ViewId, alloc::string::String)> = None;
+    let mut web_waiting: alloc::vec::Vec<(u64, view_types::ViewId, alloc::string::String)> =
+        alloc::vec::Vec::new();
+    #[cfg_attr(
+        not(all(not(test), target_os = "none")),
+        allow(unused_mut, unused_variables)
+    )]
+    let mut next_web_request: u64 = 0;
     // The desk's look is read from disk once, on the first desk frame.
     let mut look_loaded = false;
     // GFX-048: degrade in a fixed order under memory pressure instead of
@@ -1859,11 +1865,16 @@ fn workspace_loop(
                 }
             }
             // A Web card's fetch that has ended goes to its card.
-            let outcome = NET
+            let outcomes = NET
                 .try_lock()
-                .and_then(|mut net| net.as_mut().and_then(|n| n.take_web_outcome()));
-            if let Some(outcome) = outcome {
-                if let Some((id, url)) = web_waiting.take() {
+                .and_then(|mut net| net.as_mut().map(|n| n.take_web_outcomes()))
+                .unwrap_or_default();
+            for (request, outcome) in outcomes {
+                let Some(at) = web_waiting.iter().position(|(r, _, _)| *r == request) else {
+                    continue;
+                };
+                let (_, id, url) = web_waiting.remove(at);
+                {
                     match &outcome {
                         Ok(r) => kprintln!(
                             serial,
@@ -1875,7 +1886,7 @@ fn workspace_loop(
                         Err(why) => kprintln!(serial, "web: {}: {}", url, why),
                     }
                     if let Some(desk) = desk.as_mut() {
-                        if let Some(next) = desk.web_loaded(id, outcome) {
+                        if let Some(next) = desk.web_loaded(id, &url, outcome) {
                             desk_requests.push(next);
                         }
                     }
@@ -2264,17 +2275,19 @@ fn workspace_loop(
                         // request, answered by `take_web_outcome`.
                         #[cfg(all(not(test), target_os = "none"))]
                         {
+                            next_web_request += 1;
+                            let request = next_web_request;
                             let started = match NET.lock().as_mut() {
-                                Some(net) => net.start_web_fetch(&url, get_tick_count()),
+                                Some(net) => net.start_web_fetch(&url, request, get_tick_count()),
                                 None => {
                                     Err(alloc::string::String::from("There is no network device"))
                                 }
                             };
                             match started {
-                                Ok(()) => web_waiting = Some((id, url)),
+                                Ok(()) => web_waiting.push((request, id, url)),
                                 Err(why) => {
                                     kprintln!(serial, "web: {}: {}", url, why);
-                                    if let Some(next) = desk.web_loaded(id, Err(why)) {
+                                    if let Some(next) = desk.web_loaded(id, &url, Err(why)) {
                                         desk_requests.push(next);
                                     }
                                     output_dirty = true;
@@ -2283,7 +2296,7 @@ fn workspace_loop(
                         }
                         #[cfg(not(all(not(test), target_os = "none")))]
                         {
-                            let _ = desk.web_loaded(id, Err(url));
+                            let _ = desk.web_loaded(id, &url, Err(url.clone()));
                         }
                     }
                     desk::DeskRequest::LoadAudit { id } => {

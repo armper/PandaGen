@@ -1182,6 +1182,16 @@ impl WebView {
         self.revisit(url)
     }
 
+    /// The fetch for `asked` ended (NET-034): taken only if it is the one
+    /// this card is waiting for -- a click on another link while one was
+    /// loading leaves the first one's answer stale.
+    pub fn loaded_for(&mut self, asked: &str, outcome: WebOutcome) -> WebEffect {
+        if self.loading.as_deref() != Some(asked) {
+            return WebEffect::None;
+        }
+        self.loaded(outcome)
+    }
+
     /// The fetch for this card ended.
     pub fn loaded(&mut self, outcome: WebOutcome) -> WebEffect {
         if self.loading.take().is_none() {
@@ -2106,5 +2116,23 @@ c</pre>
             view.handle_byte(CTRL_C),
             WebEffect::Copy("http://a/b".into())
         );
+    }
+
+    #[test]
+    fn an_answer_for_a_page_no_longer_wanted_is_dropped() {
+        let mut view = WebView::new();
+        view.open("http://a/");
+        // Another link before the first answered.
+        view.open("http://b/");
+        assert_eq!(
+            view.loaded_for("http://a/", response("http://a/", 200, "<p>stale</p>")),
+            WebEffect::None
+        );
+        assert_eq!(view.url().as_deref(), Some("http://b/"));
+        assert_eq!(
+            view.loaded_for("http://b/", response("http://b/", 200, "<p>fresh</p>")),
+            WebEffect::Redraw
+        );
+        assert_eq!(view.page().unwrap().url, "http://b/");
     }
 }

@@ -5186,12 +5186,13 @@ impl Desk {
     pub fn web_loaded(
         &mut self,
         id: ViewId,
+        asked: &str,
         outcome: crate::web::WebOutcome,
     ) -> Option<DeskRequest> {
         let Some(AppState::Web(view)) = self.window_mut(id).map(|w| &mut w.state) else {
             return None;
         };
-        match view.loaded(outcome) {
+        match view.loaded_for(asked, outcome) {
             crate::web::WebEffect::Fetch(url) => Some(DeskRequest::Fetch { id, url }),
             _ => None,
         }
@@ -7184,6 +7185,7 @@ mod tests {
         );
         let next = desk.web_loaded(
             id,
+            "http://10.0.2.2:18080/page.html",
             Ok(crate::web::WebResponse {
                 url: "http://10.0.2.2:18080/page.html".into(),
                 status: 200,

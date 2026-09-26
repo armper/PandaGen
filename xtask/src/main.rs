@@ -984,6 +984,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     // the host, and a page fetched from a web server there -- a hundred
     // lines, which only all arrive if the receive window reopens as the
     // Terminal reads.
+    // The fetch is typed while the lookup is still out: it waits its turn
+    // in the network's queue (NET-034).
     title = "the Terminal: resolve a name, fetch a page".to_string();
     let args = [
         "--port-base".to_string(),
@@ -993,7 +995,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--dns-serve".to_string(),
         "15353".to_string(),
         "--keys".to_string(),
-        "sleep:6,ctrl-t,sleep:2,r,e,s,o,l,v,e,spc,p,a,n,d,a,dot,t,e,s,t,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,5,3,5,3,ret,sleep:3,f,e,t,c,h,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,0,8,0,slash,h,i,ret,sleep:4".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,e,s,o,l,v,e,spc,p,a,n,d,a,dot,t,e,s,t,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,5,3,5,3,ret,f,e,t,c,h,spc,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,0,8,0,slash,h,i,ret,sleep:4".to_string(),
         "--out".to_string(),
         "dist/qemu_terminal_fetch".to_string(),
         "--expect-serial".to_string(),

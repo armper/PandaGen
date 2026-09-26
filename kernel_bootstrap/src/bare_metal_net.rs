@@ -202,8 +202,12 @@ pub struct NetStack {
     fetch_lines: Vec<String>,
     /// The request under way is a Web card's (WEB-001): its lines are not
     /// the Terminal's, and its end is a `WebOutcome`.
-    card_fetch: bool,
-    web_outcome: Option<crate::web::WebOutcome>,
+    card_fetch: Option<u64>,
+    /// The card's fetch under way has had its answer.
+    card_answered: bool,
+    web_outcomes: Vec<(u64, crate::web::WebOutcome)>,
+    /// Requests waiting for the one under way (NET-034).
+    queue: alloc::collections::VecDeque<Queued>,
 }
 
 // SAFETY: the stack is only ever driven from one CPU at a time, under the
@@ -271,8 +275,10 @@ impl NetStack {
             dns: None,
             fetch: None,
             fetch_lines: Vec::new(),
-            card_fetch: false,
-            web_outcome: None,
+            card_fetch: None,
+            card_answered: false,
+            web_outcomes: Vec::new(),
+            queue: alloc::collections::VecDeque::new(),
         })
     }
 
@@ -673,6 +679,7 @@ impl NetStack {
         // The fetch under way: its request out, its window updates, its end.
         self.advance_fetch(clock());
         self.settle_card_fetch();
+        self.pump_queue(clock());
         // Top up any response still streaming out, then push everything.
         self.pump_http();
         self.flush_tcp();
@@ -1715,6 +1722,22 @@ enum FetchStage {
     },
 }
 
+/// Requests that may wait behind the one under way (NET-034).
+const QUEUE_MAX: usize = 8;
+
+/// A request waiting its turn.
+enum Queued {
+    Fetch {
+        url: String,
+        /// The Web card request it answers, or `None` for the Terminal.
+        card: Option<u64>,
+    },
+    Resolve {
+        name: String,
+        server: Option<(Ipv4, u16)>,
+    },
+}
+
 /// The one request the machine has out (NET-033).
 pub struct Fetch {
     /// `resolve`: say the address and stop.
@@ -1736,50 +1759,120 @@ impl NetStack {
     }
 
     /// Look `name` up, through `server` or the resolver DHCP named. The
-    /// answer arrives as a line from `take_fetch_lines`.
+    /// answer arrives as a line from `take_fetch_lines`; behind another
+    /// request, it waits its turn (NET-034).
     pub fn start_resolve(
         &mut self,
         name: &str,
         server: Option<(Ipv4, u16)>,
         now: u64,
     ) -> Result<(), String> {
-        self.begin(
-            Fetch {
-                resolve_only: true,
-                host: String::from(name),
-                port: 0,
-                path: String::new(),
-                stage: FetchStage::Connecting { conn: usize::MAX },
-                started: now,
-                data: Vec::new(),
-                dropped: 0,
+        if name.trim().is_empty() {
+            return Err(String::from("resolve: which name?"));
+        }
+        self.enqueue(
+            Queued::Resolve {
+                name: String::from(name),
+                server,
             },
-            server,
             now,
         )
     }
 
     /// Fetch `url` over HTTP. Progress and the response arrive as lines
-    /// from `take_fetch_lines`.
+    /// from `take_fetch_lines`; behind another request, it waits its turn.
     pub fn start_fetch(&mut self, url: &str, now: u64) -> Result<(), String> {
+        Self::check_url(url)?;
+        self.enqueue(
+            Queued::Fetch {
+                url: String::from(url),
+                card: None,
+            },
+            now,
+        )
+    }
+
+    /// Fetch `url` for Web card request `card` (WEB-001): the end comes
+    /// from `take_web_outcomes`, not as lines.
+    pub fn start_web_fetch(&mut self, url: &str, card: u64, now: u64) -> Result<(), String> {
+        Self::check_url(url)?;
+        self.enqueue(
+            Queued::Fetch {
+                url: String::from(url),
+                card: Some(card),
+            },
+            now,
+        )
+    }
+
+    fn check_url(url: &str) -> Result<net_stack::http::Url<'_>, String> {
         use net_stack::http::{parse_url, UrlError};
-        let parsed = parse_url(url).map_err(|e| {
+        parse_url(url).map_err(|e| {
             String::from(match e {
                 UrlError::NotHttp => "fetch: only http:// -- there is no TLS here yet",
                 UrlError::Malformed => "fetch: that is not a URL (http://host[:port]/path)",
             })
-        })?;
-        let fetch = Fetch {
-            resolve_only: false,
-            host: String::from(parsed.host),
-            port: parsed.port,
-            path: String::from(parsed.path),
+        })
+    }
+
+    /// Wait behind the request under way, or start at once.
+    fn enqueue(&mut self, request: Queued, now: u64) -> Result<(), String> {
+        if self.queue.len() >= QUEUE_MAX {
+            return Err(String::from("net: too many requests waiting"));
+        }
+        self.queue.push_back(request);
+        self.pump_queue(now);
+        Ok(())
+    }
+
+    /// Start waiting requests while none is under way.
+    fn pump_queue(&mut self, now: u64) {
+        while self.fetch.is_none() && self.card_fetch.is_none() {
+            let Some(request) = self.queue.pop_front() else {
+                return;
+            };
+            self.start_now(request, now);
+        }
+    }
+
+    /// Start `request` now. A failure to start is its answer: a line for
+    /// the Terminal, or the card's outcome.
+    fn start_now(&mut self, request: Queued, now: u64) {
+        let blank = |host: String, port: u16, path: String, resolve_only: bool| Fetch {
+            resolve_only,
+            host,
+            port,
+            path,
             stage: FetchStage::Connecting { conn: usize::MAX },
             started: now,
             data: Vec::new(),
             dropped: 0,
         };
-        self.begin(fetch, None, now)
+        match request {
+            Queued::Resolve { name, server } => {
+                if let Err(why) = self.begin(blank(name, 0, String::new(), true), server, now) {
+                    self.fetch_lines.push(why);
+                }
+            }
+            Queued::Fetch { url, card } => {
+                let fetch = match Self::check_url(&url) {
+                    Ok(u) => blank(String::from(u.host), u.port, String::from(u.path), false),
+                    Err(why) => {
+                        self.fetch_lines.push(why);
+                        return;
+                    }
+                };
+                if let Some(card) = card {
+                    self.fetch_lines.clear();
+                    self.card_fetch = Some(card);
+                    self.card_answered = false;
+                }
+                if let Err(why) = self.begin(fetch, None, now) {
+                    self.fetch_lines.push(why);
+                }
+                self.settle_card_fetch();
+            }
+        }
     }
 
     fn begin(
@@ -1788,11 +1881,6 @@ impl NetStack {
         server: Option<(Ipv4, u16)>,
         now: u64,
     ) -> Result<(), String> {
-        if self.fetch.is_some() {
-            return Err(String::from(
-                "net: one request at a time; the last is still out",
-            ));
-        }
         if !self.iface.config().is_configured() {
             return Err(String::from("net: no address yet"));
         }
@@ -1843,54 +1931,37 @@ impl NetStack {
     /// Lines for the Terminal from the request under way. None while a
     /// Web card's is: those are the card's.
     pub fn take_fetch_lines(&mut self) -> Vec<String> {
-        if self.card_fetch {
+        if self.card_fetch.is_some() {
             return Vec::new();
         }
         core::mem::take(&mut self.fetch_lines)
     }
 
-    /// Fetch `url` for a Web card (WEB-001): the end comes from
-    /// `take_web_outcome`, not as lines.
-    pub fn start_web_fetch(&mut self, url: &str, now: u64) -> Result<(), String> {
-        if self.fetch.is_some() {
-            return Err(String::from(
-                "The network is busy with another request; try again in a moment",
-            ));
-        }
-        self.fetch_lines.clear();
-        self.card_fetch = true;
-        match self.start_fetch(url, now) {
-            Ok(()) => {
-                self.settle_card_fetch();
-                Ok(())
-            }
-            Err(why) => {
-                self.card_fetch = false;
-                Err(why)
-            }
-        }
-    }
-
-    /// The Web card's fetch has ended, if it has.
-    pub fn take_web_outcome(&mut self) -> Option<crate::web::WebOutcome> {
-        self.web_outcome.take()
+    /// The Web cards' fetches that have ended, by the request each was
+    /// started with.
+    pub fn take_web_outcomes(&mut self) -> Vec<(u64, crate::web::WebOutcome)> {
+        core::mem::take(&mut self.web_outcomes)
     }
 
     /// A card's fetch that has ended without a response ended with its
     /// last line: that is the card's answer.
     fn settle_card_fetch(&mut self) {
-        if !self.card_fetch || self.fetch.is_some() {
+        let Some(card) = self.card_fetch else {
+            return;
+        };
+        if self.fetch.is_some() {
             return;
         }
-        self.card_fetch = false;
+        self.card_fetch = None;
         let lines = core::mem::take(&mut self.fetch_lines);
-        if self.web_outcome.is_none() {
+        if !self.card_answered {
             let why = lines
                 .into_iter()
                 .last()
                 .unwrap_or_else(|| String::from("The request ended with no answer"));
-            self.web_outcome = Some(Err(why));
+            self.web_outcomes.push((card, Err(why)));
         }
+        self.card_answered = false;
     }
 
     /// A datagram on `DNS_CLIENT_PORT`: the answer, if it is ours.
@@ -2144,7 +2215,8 @@ impl NetStack {
             }
         };
         let total = body.len() + fetch.dropped;
-        if self.card_fetch {
+        if let Some(card) = self.card_fetch {
+            self.card_answered = true;
             let port = if fetch.port == 80 {
                 String::new()
             } else {
@@ -2155,14 +2227,17 @@ impl NetStack {
             } else {
                 fetch.path.clone()
             };
-            self.web_outcome = Some(Ok(crate::web::WebResponse {
-                url: alloc::format!("http://{}{port}{path}", fetch.host),
-                status: response.status,
-                reason: String::from(response.reason),
-                location: response.location.map(String::from),
-                content_type: response.content_type.map(String::from),
-                body: body.to_vec(),
-            }));
+            self.web_outcomes.push((
+                card,
+                Ok(crate::web::WebResponse {
+                    url: alloc::format!("http://{}{port}{path}", fetch.host),
+                    status: response.status,
+                    reason: String::from(response.reason),
+                    location: response.location.map(String::from),
+                    content_type: response.content_type.map(String::from),
+                    body: body.to_vec(),
+                }),
+            ));
             return;
         }
         self.fetch_lines.push(alloc::format!(
