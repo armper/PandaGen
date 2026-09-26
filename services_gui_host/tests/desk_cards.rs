@@ -294,7 +294,7 @@ fn line_styles_change_tone_weight_and_rule_but_not_the_grid() {
 #[test]
 fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
     let theme = Theme::DEFAULT;
-    let bounds = RasterRect::new(200, 340, 240, 56);
+    let bounds = RasterRect::new(200, 300, 240, 84);
     // A frame: the top row and the left column lit, nothing else.
     let mut icon = [0u16; 16];
     icon[0] = 0xFFFF;
@@ -312,9 +312,10 @@ fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
         DesktopTab::new("Fi", false),
     ]);
     let target = render(vec![dock]);
-    // Two tiles: row 106 wide, starts at 200 + (240-106)/2 = 267; tiles are
-    // centred vertically in the 56px pill, at y=344.
-    let (tx, ty) = (267, 344);
+    // Two tiles (GFX-114): row 2*64 + 6 = 134 wide, starts at
+    // 200 + (240-134)/2 = 253; in the 84px capsule the tiles sit at
+    // y = 300 + (84-72)/2 = 306, room for the light under them.
+    let (tx, ty) = (253, 306);
     let (ox, oy) = (tx + (DOCK_TILE - 32) / 2, ty + (DOCK_TILE - 32) / 2);
     assert_eq!(px(&target, ox, oy), theme.text, "top-left bit");
     assert_eq!(
@@ -330,8 +331,8 @@ fn a_dock_tile_draws_its_icon_in_place_of_the_monogram() {
     );
     // The second tile has no icon: its monogram puts text pixels in the
     // middle of the tile.
-    let middle: Vec<RgbaColor> = (tx + 58 + 12..tx + 58 + 28)
-        .flat_map(|x| (ty + 12..ty + 28).map(move |y| (x, y)))
+    let middle: Vec<RgbaColor> = (tx + 70 + 20..tx + 70 + 44)
+        .flat_map(|x| (ty + 20..ty + 44).map(move |y| (x, y)))
         .map(|(x, y)| px(&target, x, y))
         .collect();
     assert!(middle.contains(&theme.text));
@@ -390,7 +391,7 @@ fn pictures_are_blended_by_their_alpha_in_the_dock_and_on_cards() {
         rgba: &RGBA,
     }];
     let theme = Theme::DEFAULT.with_pictures(&PICTURES);
-    let bounds = RasterRect::new(200, 340, 240, 56);
+    let bounds = RasterRect::new(200, 300, 240, 84);
     let dock = DesktopWindow::new(
         frame("", &[]),
         services_gui_host::SurfaceRect::new(0, 0, 0, 0),
@@ -408,9 +409,10 @@ fn pictures_are_blended_by_their_alpha_in_the_dock_and_on_cards() {
     let compositor = Compositor::with_theme(theme);
     let mut target = RgbaBuffer::new(W, H, RgbaColor::new(0, 0, 0, 255));
     compositor.render_desktop_to_target(&mut target, vec![dock.clone(), card.clone()]);
-    // One tile, centred: starts at 200 + (240-40)/2 = 300, y = 348.
-    assert_eq!(px(&target, 320, 368), RgbaColor::new(200, 0, 0, 255));
-    let edge = px(&target, 300, 368);
+    // One tile, centred: the 64px tile at 288, 306; the 40px picture in
+    // its middle at 300, 318.
+    assert_eq!(px(&target, 320, 338), RgbaColor::new(200, 0, 0, 255));
+    let edge = px(&target, 300, 338);
     assert!(edge.r > 90 && edge.r < 130, "half blended: {edge:?}");
     assert_eq!(
         px(&target, ox + 30, oy + 30),
@@ -419,7 +421,7 @@ fn pictures_are_blended_by_their_alpha_in_the_dock_and_on_cards() {
     // Without the table, neither draws: the tile is gone too, so the
     // pill shows through where the picture would be.
     let plain = render(vec![dock, card]);
-    assert_ne!(px(&plain, 320, 368), RgbaColor::new(200, 0, 0, 255));
+    assert_ne!(px(&plain, 320, 338), RgbaColor::new(200, 0, 0, 255));
 }
 
 /// A veil (GFX-096) darkens what is under it and draws its overlay on
@@ -621,7 +623,7 @@ fn selection_spans_paint_behind_the_selected_cells_only() {
 #[test]
 fn the_dock_paints_a_tile_per_app_and_names_the_tile_that_was_hit() {
     let theme = Theme::DEFAULT;
-    let bounds = RasterRect::new(200, 340, 240, 56);
+    let bounds = RasterRect::new(200, 300, 240, 84);
     let dock = DesktopWindow::new(
         frame("", &[]),
         services_gui_host::SurfaceRect::new(0, 0, 0, 0),
@@ -635,30 +637,90 @@ fn the_dock_paints_a_tile_per_app_and_names_the_tile_that_was_hit() {
     ]);
     let target = render(vec![dock.clone()]);
 
-    // The pill is the raised surface, as glass over what is under it.
-    assert!(near(px(&target, 204, 368), theme.surface_raised, 4));
+    // The capsule is glass (GFX-114): frosted, so lighter than the desk
+    // around it; outside its rounded end, the desk.
+    let glass = px(&target, 222, 342);
+    let desk = px(&target, 100, 342);
+    let sum = |c: RgbaColor| c.r as u32 + c.g as u32 + c.b as u32;
+    assert!(sum(glass) > sum(desk), "{glass:?} over {desk:?}");
+    assert_eq!(px(&target, 201, 301), desk, "the capsule's corner is round");
 
     let compositor = Compositor::new();
     let windows = vec![dock];
-    // Three tiles, centred: total row = 3*48 + 2*10 = 164; starts at 200 + (240-164)/2 = 238.
-    let first_x = 238 + DOCK_TILE / 2;
-    let y = 340 + 56 / 2;
+    // Three tiles, centred: total row = 3*64 + 2*6 = 204; starts at 200 + (240-204)/2 = 218.
+    let first_x = 218 + DOCK_TILE / 2;
+    let y = 306 + DOCK_TILE / 2;
     let hit = compositor.hit_test(&windows, first_x, y).unwrap();
     assert_eq!(hit.region, HitRegion::DockTile { index: 0 });
-    let hit = compositor.hit_test(&windows, first_x + 58 * 2, y).unwrap();
+    let hit = compositor.hit_test(&windows, first_x + 70 * 2, y).unwrap();
     assert_eq!(hit.region, HitRegion::DockTile { index: 2 });
     // Between tiles is the pill, not a tile.
     let hit = compositor
-        .hit_test(&windows, 238 + DOCK_TILE + 4, y)
+        .hit_test(&windows, 218 + DOCK_TILE + 3, y)
         .unwrap();
     assert_eq!(hit.region, HitRegion::Border);
-    // A tile is drawn as the inactive tab colour, and the running dot under
-    // the first one is the accent.
+    // A tile is drawn as the inactive tab colour, and the running light
+    // under the first one is the accent.
     assert_eq!(px(&target, first_x, y), theme.tab_inactive);
+    assert_eq!(px(&target, first_x, 306 + DOCK_TILE + 4), theme.accent);
+}
+
+/// The dock's extras (GFX-114): a divider before a tile that asks for
+/// one, a puck and the tile's name over the dock under the pointer, and a
+/// longer light for the focused app.
+#[test]
+fn the_dock_divides_names_the_hovered_tile_and_lengthens_the_focused_light() {
+    use services_gui_host::{dock_row_width, DOCK_DIVIDER, DOCK_TILE_GAP};
+    let theme = Theme::DEFAULT;
+    let bounds = RasterRect::new(120, 300, 400, 84);
+    let mut hovered = DesktopTab::new("Fi", true);
+    hovered.hovered = true;
+    hovered.name = "Files".to_string();
+    let mut focused = DesktopTab::new("Np", true);
+    focused.focused = true;
+    let mut apps = DesktopTab::new("Ap", false);
+    apps.divider_before = true;
+    let tabs = vec![focused, hovered, apps];
     assert_eq!(
-        px(&target, first_x, 340 + (56 - DOCK_TILE) / 2 + DOCK_TILE + 3),
-        theme.accent
+        dock_row_width(&tabs),
+        3 * 64 + 2 * DOCK_TILE_GAP + DOCK_DIVIDER
     );
+    let dock = DesktopWindow::new(
+        frame("", &[]),
+        services_gui_host::SurfaceRect::new(0, 0, 0, 0),
+    )
+    .with_style(WindowStyle::Dock)
+    .with_pixel_rect(bounds)
+    .with_tabs(tabs);
+    let target = render(vec![dock.clone()]);
+    let start = 120 + (400 - dock_row_width(&dock.tabs)) / 2;
+    // The third tile starts past the divider; the divider is a line of
+    // light in the middle of its room.
+    let third = start + 2 * (64 + DOCK_TILE_GAP) + DOCK_DIVIDER;
+    let hit = Compositor::new()
+        .hit_test(&[dock.clone()], third + 4, 330)
+        .unwrap();
+    assert_eq!(hit.region, HitRegion::DockTile { index: 2 });
+    let line_x = third - (DOCK_TILE_GAP + DOCK_DIVIDER) / 2;
+    let sum = |c: RgbaColor| c.r as u32 + c.g as u32 + c.b as u32;
+    assert!(sum(px(&target, line_x, 342)) > sum(px(&target, line_x - 3, 342)));
+    // The name is over the dock: something is drawn above the capsule,
+    // over the hovered tile, where the desk is otherwise plain.
+    let label_centre = start + 64 + DOCK_TILE_GAP + 32;
+    let desk = px(&target, 20, 280);
+    assert!((270..292).any(|y| px(&target, label_centre, y) != desk));
+    assert!((270..292).all(|y| px(&target, 20, y) == desk));
+    // The focused light is longer than a running one's.
+    let lit = |x0: usize| {
+        (x0..x0 + 64)
+            .filter(|x| px(&target, *x, 306 + DOCK_TILE + 4) == theme.accent)
+            .count()
+    };
+    assert!(
+        lit(start) > lit(start + 64 + DOCK_TILE_GAP),
+        "focused is longer"
+    );
+    assert!(lit(start + 64 + DOCK_TILE_GAP) > 0);
 }
 
 #[test]
@@ -672,7 +734,11 @@ fn the_top_bar_is_a_raised_strip_with_a_hairline() {
     .with_style(WindowStyle::TopBar)
     .with_pixel_rect(bounds);
     let target = render(vec![bar]);
-    assert!(near(px(&target, 320, 4), theme.surface_raised, 4));
+    // Frosted glass (GFX-114): the tint over the blurred desk, so near
+    // the raised surface but not it.
+    let glass = px(&target, 320, 4);
+    assert!(near(glass, theme.surface_raised, 24), "{glass:?}");
+    assert_ne!(glass, theme.background);
     assert_eq!(px(&target, 320, 27), theme.hairline);
 }
 

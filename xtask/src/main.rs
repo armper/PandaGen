@@ -481,16 +481,16 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // The machine boots into the desk; the boot log says so, by label.
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
-        // Top bar: the raised surface as glass over the wallpaper (GFX-098),
-        // four pixels down, mid-screen.
+        // Top bar: frosted glass over the blurred wallpaper (GFX-114), four
+        // pixels down, mid-screen.
         "--expect-pixel".to_string(),
-        "640,4,23,33,49".to_string(),
-        // Dock pill: raised surface. Tiles are 40px tall centred in the
-        // 56px pill (740..780), so three pixels under the pill's top edge at
-        // its centre is pill whatever the number of tiles -- the first
-        // version of this pinned an x that a second tile then covered.
+        "640,4,35,52,73".to_string(),
+        // Dock capsule (GFX-114): liquid glass over the blurred wallpaper, in
+        // the gap between the first two tiles (tile 0 at x=249..313, 64
+        // wide, 6 apart), within a few levels -- the blur is the
+        // wallpaper's, and the wallpaper is fixed.
         "--expect-pixel".to_string(),
-        "640,735,24,29,39".to_string(),
+        "316,740,54,56,54,8".to_string(),
         // The Notepad card: 720 wide, centred, first cascade step, at y=44.
         // It has lost focus to the Terminal, so its ring is the hairline...
         "--expect-pixel".to_string(),
@@ -718,12 +718,14 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // the bare gradient would otherwise be.
         "--expect-pixel".to_string(),
         "1200,81,28,34,48".to_string(),
-        // Two dock tiles lit: Notepad and Files. Ten tiles (GFX-080) are
-        // 472px wide centred on 640, so the first centre is at 424.
+        // Two dock tiles lit (GFX-114): the lights under Notepad (focused,
+        // longer) and Files. Ten app tiles and Apps past a divider are 782px
+        // wide centred on 640, so the first centre is at 281, the next 351;
+        // the lights sit three pixels under the tiles, at y=777..779.
         "--expect-pixel".to_string(),
-        "379,785,52,211,153".to_string(),
+        "281,778,52,211,153".to_string(),
         "--expect-pixel".to_string(),
-        "437,785,52,211,153".to_string(),
+        "351,778,52,211,153".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -778,7 +780,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         // (100,400) is the wallpaper now, whatever the theme (GFX-066).
         "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
-        "640,4,31,28,35".to_string(),
+        "640,4,40,48,65".to_string(),
         "--expect-pixel".to_string(),
         "600,200,40,28,30".to_string(),
         "--expect-pixel".to_string(),
@@ -834,7 +836,7 @@ fn cmd_gauntlet() -> Result<(), Box<dyn std::error::Error>> {
         "--expect-pixel".to_string(),
         "100,400,9,9,5".to_string(),
         "--expect-pixel".to_string(),
-        "640,4,204,212,222".to_string(),
+        "640,4,144,159,177".to_string(),
         "--expect-pixel".to_string(),
         "640,300,250,250,252".to_string(),
         "--forbid-serial".to_string(),

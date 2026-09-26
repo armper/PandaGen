@@ -237,7 +237,7 @@ use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
 use crate::timer::{TimerEffect, TimerView};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
-pub const DOCK_HEIGHT: usize = 64;
+pub const DOCK_HEIGHT: usize = 84;
 pub const DOCK_MARGIN: usize = 12;
 pub const NOTEPAD_SIZE: (usize, usize) = (720, 480);
 pub const TERMINAL_SIZE: (usize, usize) = (800, 520);
@@ -638,6 +638,8 @@ impl DeskApp {
             DeskApp::Tiles => "tiles",
             DeskApp::Tasks => "tasks",
             DeskApp::Sketch => "sketch",
+            // The Apps grid wears the desk's mark (GFX-114).
+            DeskApp::Launcher => "panda",
             _ => return None,
         };
         picture_id(name, size)
@@ -4099,8 +4101,18 @@ impl Desk {
         }
     }
 
+    /// The app of dock tile `index` (GFX-114): the apps in order, then,
+    /// past a divider, the Apps grid.
+    pub fn dock_app(index: usize) -> Option<DeskApp> {
+        match DeskApp::ALL.get(index) {
+            Some(app) => Some(*app),
+            None if index == DeskApp::ALL.len() => Some(DeskApp::Launcher),
+            None => None,
+        }
+    }
+
     pub fn activate_dock_tile(&mut self, index: usize) -> Option<DeskRequest> {
-        let app = DeskApp::ALL.get(index).copied()?;
+        let app = Self::dock_app(index)?;
         // A tucked window of this app comes back first.
         let tucked = self
             .windows
@@ -5958,7 +5970,7 @@ impl Desk {
         // With nothing open the bar says how to begin, once; a desk with
         // no hint on it is a desk the first visitor stares at.
         let left = match (
-            self.hovered_tile.and_then(|i| DeskApp::ALL.get(i)),
+            self.hovered_tile.and_then(Self::dock_app).as_ref(),
             self.focused_window(),
         ) {
             _ if self.overview.is_some() => {
@@ -5997,30 +6009,32 @@ impl Desk {
                 .with_overlay(self.tray_overlay(clock)),
         );
 
-        // Dock: one tile per app, the running ones marked, the hovered one lit.
-        let tabs: Vec<DesktopTab> = DeskApp::ALL
-            .iter()
-            .filter(|app| {
-                !matches!(
-                    app,
-                    DeskApp::Welcome | DeskApp::Notices | DeskApp::Now | DeskApp::Shortcuts
-                )
-            })
-            .enumerate()
+        // Dock: one tile per app, then past a divider the Apps grid
+        // (GFX-114); the running ones lit, the focused one's light longer,
+        // the hovered one large with its name over it.
+        let focused_app = self.focused_window().map(|w| w.app);
+        let tabs: Vec<DesktopTab> = (0..=DeskApp::ALL.len())
+            .filter_map(|index| Self::dock_app(index).map(|app| (index, app)))
             .map(|(index, app)| {
+                let hovered = self.hovered_tile == Some(index);
+                let size = if hovered {
+                    services_gui_host::DOCK_TILE
+                } else {
+                    services_gui_host::DOCK_ICON_REST
+                };
                 let mut tab =
-                    DesktopTab::new(app.monogram(), self.windows.iter().any(|w| w.app == *app))
+                    DesktopTab::new(app.monogram(), self.windows.iter().any(|w| w.app == app))
                         .with_icon(app.icon())
-                        .with_picture(app.picture(services_gui_host::DOCK_TILE as u32));
-                tab.hovered = self.hovered_tile == Some(index);
-                tab.tucked = self.windows.iter().any(|w| w.app == *app && w.tucked);
+                        .with_picture(app.picture(size as u32));
+                tab.hovered = hovered;
+                tab.tucked = self.windows.iter().any(|w| w.app == app && w.tucked);
+                tab.name = app.name().to_string();
+                tab.focused = focused_app == Some(app);
+                tab.divider_before = app == DeskApp::Launcher;
                 tab
             })
             .collect();
-        let count = tabs.len();
-        let pill_width = count * services_gui_host::DOCK_TILE
-            + count.saturating_sub(1) * services_gui_host::DOCK_TILE_GAP
-            + 32;
+        let pill_width = services_gui_host::dock_row_width(&tabs) + 40;
         let dock_frame = ViewFrame::new(
             self.dock_id,
             ViewKind::Panel,
@@ -6049,11 +6063,14 @@ impl Desk {
 mod tests {
     use super::*;
 
-    /// The dock's tile row: every tile and the gaps between, so a test
-    /// finds the first tile whatever the number of apps.
+    /// The dock's tile row: every tile, the gaps between, and the divider
+    /// before the Apps tile (GFX-114), so a test finds the first tile
+    /// whatever the number of apps.
     fn dock_row_width() -> usize {
-        let n = DeskApp::ALL.len();
-        n * services_gui_host::DOCK_TILE + (n - 1) * services_gui_host::DOCK_TILE_GAP
+        let n = DeskApp::ALL.len() + 1;
+        n * services_gui_host::DOCK_TILE
+            + (n - 1) * services_gui_host::DOCK_TILE_GAP
+            + services_gui_host::DOCK_DIVIDER
     }
     use input_types::{ButtonState, Modifiers, PointerButtons, PointerEvent, PointerPosition};
     use services_gui_host::{Compositor, DesktopInputRouter};
@@ -6305,7 +6322,11 @@ mod tests {
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap()
             .bounds();
-        let files_x = (pill.x + (pill.width - dock_row_width()) / 2 + 20 + 48) as i32;
+        let files_x = (pill.x
+            + (pill.width - dock_row_width()) / 2
+            + 20
+            + services_gui_host::DOCK_TILE
+            + services_gui_host::DOCK_TILE_GAP) as i32;
         let y = (pill.y + pill.height / 2) as i32;
         let compositor = Compositor::new();
         let deliveries = router.route(&compositor, &windows, press(files_x, y));
@@ -6869,7 +6890,11 @@ mod tests {
         route(
             &mut desk,
             &mut router,
-            moved(first_x + 48, y, PointerButtons::none()),
+            moved(
+                first_x + (services_gui_host::DOCK_TILE + services_gui_host::DOCK_TILE_GAP) as i32,
+                y,
+                PointerButtons::none(),
+            ),
         );
         assert_eq!(bar_title(&mut desk), "Files   -   click to open");
         // Off the dock: the focused card's name again.
@@ -7041,7 +7066,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dock.tabs.len(),
-            DeskApp::ALL.len(),
+            DeskApp::ALL.len() + 1,
             "Welcome is not in ALL, so not a tile"
         );
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
@@ -7219,7 +7244,7 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs.len(), DeskApp::ALL.len());
+        assert_eq!(dock.tabs.len(), DeskApp::ALL.len() + 1, "the apps and Apps");
         for i in 0..(NOTICE_LOG + 10) {
             desk.notify(NoticeLevel::Info, alloc::format!("n{i}"), 10_000 + i as u64);
         }
@@ -7543,7 +7568,7 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert_eq!(dock.tabs.len(), DeskApp::ALL.len());
+        assert_eq!(dock.tabs.len(), DeskApp::ALL.len() + 1, "the apps and Apps");
     }
 
     #[test]
@@ -8289,8 +8314,19 @@ mod tests {
             .iter()
             .find(|w| w.style == WindowStyle::Dock)
             .unwrap();
-        assert!(dock.tabs.iter().all(|t| t.icon.is_some()));
+        assert!(dock
+            .tabs
+            .iter()
+            .take(DeskApp::ALL.len())
+            .all(|t| t.icon.is_some()));
         assert_eq!(dock.tabs[0].icon, DeskApp::Notepad.icon());
+        // Past a divider, the Apps grid wears the panda (GFX-114).
+        let apps = dock.tabs.last().unwrap();
+        assert!(apps.divider_before);
+        assert_eq!(apps.picture, picture_id("panda", 48));
+        assert_eq!(apps.name, "Apps");
+        assert_eq!(Desk::dock_app(DeskApp::ALL.len()), Some(DeskApp::Launcher));
+        assert_eq!(Desk::dock_app(DeskApp::ALL.len() + 1), None);
     }
 
     /// Motion (GFX-085): once the desk has a clock, a new card rises into

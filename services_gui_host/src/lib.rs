@@ -190,6 +190,17 @@ pub struct DesktopTab {
     /// tile, the icon and the monogram when the theme has it.
     #[serde(default)]
     pub picture: Option<u32>,
+    /// The app's whole name, for the label over the tile under the
+    /// pointer (GFX-114); the monogram when empty.
+    #[serde(default)]
+    pub name: String,
+    /// The focused card is this app's (GFX-114): its light is longer.
+    #[serde(default)]
+    pub focused: bool,
+    /// A divider stands before this tile (GFX-114): the desk's own
+    /// buttons after the apps.
+    #[serde(default)]
+    pub divider_before: bool,
 }
 
 impl DesktopTab {
@@ -201,6 +212,9 @@ impl DesktopTab {
             tucked: false,
             icon: None,
             picture: None,
+            name: String::new(),
+            focused: false,
+            divider_before: false,
         }
     }
 
@@ -481,8 +495,13 @@ fn soft_shadow<T: RenderTarget + ?Sized>(target: &mut T, rect: RasterRect, color
     }
 }
 /// Dock tiles.
-pub const DOCK_TILE: usize = 48;
-pub const DOCK_TILE_GAP: usize = 10;
+/// A dock tile (GFX-114): room for the large icon under the pointer; an
+/// icon at rest is `DOCK_ICON_REST` in the middle of it.
+pub const DOCK_TILE: usize = 64;
+pub const DOCK_TILE_GAP: usize = 6;
+pub const DOCK_ICON_REST: usize = 48;
+/// The room a divider takes between two tiles, the gap included.
+pub const DOCK_DIVIDER: usize = 18;
 pub const DOCK_RADIUS: usize = 18;
 pub const DOCK_TILE_RADIUS: usize = 10;
 /// How much of the top bar and the dock is their own colour, out of 255
@@ -1916,17 +1935,31 @@ fn card_content_rect(window: &DesktopWindow) -> Option<RasterRect> {
 }
 
 /// A dock tile's rectangle, or `None` past the end of `tabs`.
+/// The width of a dock's row of tiles (GFX-114): the tiles, the gaps
+/// between them, and a divider's room wherever one stands.
+pub fn dock_row_width(tabs: &[DesktopTab]) -> usize {
+    let count = tabs.len();
+    let dividers = tabs.iter().filter(|t| t.divider_before).count();
+    count * DOCK_TILE + count.saturating_sub(1) * DOCK_TILE_GAP + dividers * DOCK_DIVIDER
+}
+
+/// Tile `index` of the dock: the row centred in the capsule, a divider's
+/// room before any tile that has one, the tile a little above the middle
+/// so the running light fits under it.
 fn dock_tile_rect(window: &DesktopWindow, index: usize) -> Option<RasterRect> {
     if index >= window.tabs.len() {
         return None;
     }
     let bounds = window.bounds();
-    let count = window.tabs.len();
-    let row_width = count * DOCK_TILE + count.saturating_sub(1) * DOCK_TILE_GAP;
+    let row_width = dock_row_width(&window.tabs);
     let start_x = bounds.x + bounds.width.saturating_sub(row_width) / 2;
-    let y = bounds.y + bounds.height.saturating_sub(DOCK_TILE) / 2;
+    let dividers = window.tabs[..=index]
+        .iter()
+        .filter(|t| t.divider_before)
+        .count();
+    let y = bounds.y + bounds.height.saturating_sub(DOCK_TILE + 8) / 2;
     Some(RasterRect::new(
-        start_x + index * (DOCK_TILE + DOCK_TILE_GAP),
+        start_x + index * (DOCK_TILE + DOCK_TILE_GAP) + dividers * DOCK_DIVIDER,
         y,
         DOCK_TILE,
         DOCK_TILE,
@@ -2217,8 +2250,299 @@ fn raster_card(
     true
 }
 
-/// Paint the dock (GFX-050): a raised pill holding one rounded tile per
-/// `tabs` entry, the label as a monogram, a dot under the running ones.
+/// The dock's liquid glass (GFX-114): how much of the glass is its own
+/// tint, out of 255 -- the rest is the blurred desk behind it.
+pub const DOCK_TINT: u32 = 96;
+/// A frost of white over the tint, out of 256: glass lifts what is behind
+/// it a little rather than darkening it.
+pub const DOCK_FROST: u32 = 28;
+/// How far the backdrop is blurred: a box of this radius, run twice each
+/// way, which is close to a Gaussian.
+pub const DOCK_BLUR: usize = 7;
+/// How deep the glass's rim bends what is behind it, in pixels: within it
+/// the backdrop is drawn from nearer the capsule's spine, a lens.
+pub const DOCK_RIM: u32 = 10;
+/// The capsule's shadow: how far it spreads, falls and how dark it gets.
+pub const DOCK_SHADOW_SPREAD: u32 = 18;
+pub const DOCK_SHADOW_DROP: u32 = 7;
+pub const DOCK_SHADOW_ALPHA: u32 = 120;
+/// Room the dock may paint above its capsule, for the label naming the
+/// tile under the pointer, in pixels.
+pub const DOCK_REACH: usize = 44;
+
+/// The integer square root of `n` (the compositor has no floating point).
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// A capsule's geometry in sixteenths of a pixel: its spine (a horizontal
+/// segment at the middle) and its radius, half its height.
+struct Capsule {
+    x0: i64,
+    x1: i64,
+    cy: i64,
+    r: i64,
+}
+
+impl Capsule {
+    fn of(rect: RasterRect) -> Self {
+        let r = rect.height as i64 * 8;
+        Self {
+            x0: rect.x as i64 * 16 + r,
+            x1: (rect.x + rect.width) as i64 * 16 - r,
+            cy: rect.y as i64 * 16 + r,
+            r,
+        }
+    }
+
+    /// Pixel `(x, y)`'s centre: the nearest point on the spine, and its
+    /// signed distance from the edge (negative inside), all in sixteenths.
+    fn at(&self, x: usize, y: usize) -> (i64, i64, i64) {
+        let px = x as i64 * 16 + 8;
+        let py = y as i64 * 16 + 8;
+        let sx = px.clamp(self.x0, self.x1.max(self.x0));
+        let (dx, dy) = (px - sx, py - self.cy);
+        let dist = isqrt((dx * dx + dy * dy) as u64) as i64;
+        (sx, self.cy, dist - self.r)
+    }
+}
+
+/// `color` over `under` by `alpha` out of 256.
+fn mix(under: RgbaColor, color: RgbaColor, alpha: u32) -> RgbaColor {
+    let a = alpha.min(256);
+    let m = |u: u8, c: u8| ((u as u32 * (256 - a) + c as u32 * a) / 256) as u8;
+    RgbaColor::new(
+        m(under.r, color.r),
+        m(under.g, color.g),
+        m(under.b, color.b),
+        255,
+    )
+}
+
+/// A box blur of `radius`, run twice along rows and twice along columns,
+/// over a `w` x `h` buffer of RGB sums.
+fn blur(buf: &mut [[u32; 3]], w: usize, h: usize, radius: usize) {
+    let mut line: Vec<[u32; 3]> = Vec::new();
+    let pass = |line: &mut Vec<[u32; 3]>, get: &dyn Fn(usize) -> [u32; 3], n: usize| {
+        line.clear();
+        let span = (radius * 2 + 1) as u32;
+        let at = |i: isize| get(i.clamp(0, n as isize - 1) as usize);
+        let mut sum = [0u32; 3];
+        for i in -(radius as isize)..=(radius as isize) {
+            let c = at(i);
+            for k in 0..3 {
+                sum[k] += c[k];
+            }
+        }
+        for i in 0..n as isize {
+            line.push([sum[0] / span, sum[1] / span, sum[2] / span]);
+            let (add, sub) = (at(i + radius as isize + 1), at(i - radius as isize));
+            for k in 0..3 {
+                sum[k] = sum[k] + add[k] - sub[k];
+            }
+        }
+    };
+    for _ in 0..2 {
+        for y in 0..h {
+            let row: Vec<[u32; 3]> = buf[y * w..(y + 1) * w].to_vec();
+            pass(&mut line, &|i| row[i], w);
+            buf[y * w..(y + 1) * w].copy_from_slice(&line);
+        }
+        for x in 0..w {
+            let col: Vec<[u32; 3]> = (0..h).map(|y| buf[y * w + x]).collect();
+            pass(&mut line, &|i| col[i], h);
+            for (y, c) in line.iter().enumerate() {
+                buf[y * w + x] = *c;
+            }
+        }
+    }
+}
+
+/// The dock's capsule of liquid glass (GFX-114), in one pass over its
+/// pixels once the backdrop is read and blurred:
+///
+/// - a soft shadow the capsule's own shape, fallen a little, outside it;
+/// - inside, the blurred backdrop -- drawn from nearer the spine within
+///   `DOCK_RIM` of the edge, so the rim bends what is behind it like a
+///   lens -- under the theme's raised tint at `DOCK_TINT`;
+/// - a sheen over the top half, a bright specular rim along the top edge
+///   fading down the sides, a second fainter line just inside it, and a
+///   darker rim along the bottom;
+/// - an antialiased edge, from the capsule's signed distance.
+fn liquid_glass<T: RenderTarget + ?Sized>(target: &mut T, rect: RasterRect, theme: &Theme) {
+    let (tw, th) = (target.width(), target.height());
+    if rect.width == 0 || rect.height == 0 || rect.x >= tw || rect.y >= th {
+        return;
+    }
+    let cap = Capsule::of(rect);
+    // The backdrop, with a margin so the blur sees past the edge.
+    let m = DOCK_BLUR * 2;
+    let bx0 = rect.x.saturating_sub(m);
+    let by0 = rect.y.saturating_sub(m);
+    let bx1 = (rect.right() + m).min(tw);
+    let by1 = (rect.bottom() + m).min(th);
+    let (bw, bh) = (bx1 - bx0, by1 - by0);
+    let mut back: Vec<[u32; 3]> = Vec::with_capacity(bw * bh);
+    for y in by0..by1 {
+        for x in bx0..bx1 {
+            let c = target.pixel(x, y).unwrap_or(theme.background);
+            back.push([c.r as u32, c.g as u32, c.b as u32]);
+        }
+    }
+    blur(&mut back, bw, bh, DOCK_BLUR);
+    let sample = |x: i64, y: i64| {
+        let x = (x.clamp(bx0 as i64, bx1 as i64 - 1) as usize) - bx0;
+        let y = (y.clamp(by0 as i64, by1 as i64 - 1) as usize) - by0;
+        let c = back[y * bw + x];
+        RgbaColor::new(c[0] as u8, c[1] as u8, c[2] as u8, 255)
+    };
+
+    // The shadow first, outside the capsule: its own shape, fallen.
+    let spread = DOCK_SHADOW_SPREAD as i64 * 16;
+    let fallen = Capsule {
+        cy: cap.cy + DOCK_SHADOW_DROP as i64 * 16,
+        ..Capsule::of(rect)
+    };
+    let sy0 = rect.y.saturating_sub(DOCK_SHADOW_SPREAD as usize);
+    let sy1 = (rect.bottom() + (DOCK_SHADOW_SPREAD + DOCK_SHADOW_DROP) as usize).min(th);
+    let sx0 = rect.x.saturating_sub(DOCK_SHADOW_SPREAD as usize);
+    let sx1 = (rect.right() + DOCK_SHADOW_SPREAD as usize).min(tw);
+    for y in sy0..sy1 {
+        for x in sx0..sx1 {
+            let (_, _, own) = cap.at(x, y);
+            if own < 8 {
+                continue;
+            }
+            let (_, _, d) = fallen.at(x, y);
+            let d = d.max(0);
+            if d >= spread {
+                continue;
+            }
+            let left = (spread - d) as u64;
+            let alpha = DOCK_SHADOW_ALPHA as u64 * left * left / (spread * spread) as u64;
+            if alpha == 0 {
+                continue;
+            }
+            let under = target.pixel(x, y).unwrap_or(theme.background);
+            let s = theme.shadow;
+            target.write_pixel(
+                x,
+                y,
+                graphics_rasterizer::blend_over(under, RgbaColor::new(s.r, s.g, s.b, alpha as u8)),
+            );
+        }
+    }
+
+    // The glass.
+    let white = RgbaColor::new(255, 255, 255, 255);
+    let black = RgbaColor::new(0, 0, 0, 255);
+    let tint = theme.surface_raised;
+    let h16 = rect.height as i64 * 16;
+    let rim = DOCK_RIM as i64 * 16;
+    for y in rect.y..rect.bottom().min(th) {
+        // 0 at the top edge, 256 at the bottom.
+        let t = ((y - rect.y) as i64 * 16 * 256 / h16.max(1)) as u32;
+        for x in rect.x..rect.right().min(tw) {
+            let (sx, sy, sd) = cap.at(x, y);
+            if sd >= 8 {
+                continue;
+            }
+            let depth = -sd;
+            // The lens: near the rim, sample nearer the spine.
+            let (px, py) = (x as i64 * 16 + 8, y as i64 * 16 + 8);
+            let bend = (rim - depth).clamp(0, rim);
+            let bx = px + (sx - px) * bend / (rim * 3);
+            let by = py + (sy - py) * bend / (rim * 3);
+            let mut c = sample(bx / 16, by / 16);
+            c = mix(c, tint, DOCK_TINT * 256 / 255);
+            c = mix(c, white, DOCK_FROST);
+            // Sheen over the top half.
+            if t < 128 {
+                c = mix(c, white, (128 - t) * 30 / 128);
+            }
+            // The specular rim: bright along the top, fading down the
+            // sides; dark along the bottom.
+            if depth < 24 {
+                // All the way round, brightest at the top.
+                c = mix(c, white, 56 + (256 - t) * 150 / 256);
+            } else if depth < 40 && t > 176 {
+                // Just inside the bottom rim, a shade.
+                c = mix(c, black, (t - 176) * 56 / 80);
+            } else if (40..56).contains(&depth) && t < 96 {
+                c = mix(c, white, (96 - t) * 45 / 96);
+            }
+            // The antialiased edge.
+            let cover = (8 - sd).clamp(0, 16) as u32 * 16;
+            let under = target.pixel(x, y).unwrap_or(theme.background);
+            target.write_pixel(x, y, mix(under, c, cover));
+        }
+    }
+}
+
+/// A strip of frosted glass over `rect` (GFX-114): the desk behind it
+/// blurred as the dock's is, under the same tint and frost, square -- the
+/// top bar's material, so bar and dock are one glass.
+fn frosted<T: RenderTarget + ?Sized>(target: &mut T, rect: RasterRect, theme: &Theme) {
+    let (tw, th) = (target.width(), target.height());
+    if rect.width == 0 || rect.height == 0 || rect.x >= tw || rect.y >= th {
+        return;
+    }
+    let m = DOCK_BLUR * 2;
+    let bx0 = rect.x.saturating_sub(m);
+    let by0 = rect.y.saturating_sub(m);
+    let bx1 = (rect.right() + m).min(tw);
+    let by1 = (rect.bottom() + m).min(th);
+    let (bw, bh) = (bx1 - bx0, by1 - by0);
+    let mut back: Vec<[u32; 3]> = Vec::with_capacity(bw * bh);
+    for y in by0..by1 {
+        for x in bx0..bx1 {
+            let c = target.pixel(x, y).unwrap_or(theme.background);
+            back.push([c.r as u32, c.g as u32, c.b as u32]);
+        }
+    }
+    blur(&mut back, bw, bh, DOCK_BLUR);
+    let white = RgbaColor::new(255, 255, 255, 255);
+    for y in rect.y..rect.bottom().min(th) {
+        for x in rect.x..rect.right().min(tw) {
+            let b = back[(y - by0) * bw + (x - bx0)];
+            let c = RgbaColor::new(b[0] as u8, b[1] as u8, b[2] as u8, 255);
+            let c = mix(c, theme.surface_raised, DOCK_TINT * 256 / 255 + 40);
+            target.write_pixel(x, y, mix(c, white, DOCK_FROST / 2));
+        }
+    }
+}
+
+/// A small label of glass with `text` in it, centred on `cx` with its
+/// bottom at `bottom` (GFX-114): the dock names the tile under the pointer.
+fn glass_label<T: RenderTarget + ?Sized>(
+    target: &mut T,
+    cx: usize,
+    bottom: usize,
+    text: &str,
+    theme: &Theme,
+) {
+    let w = text.chars().count() * RASTER_CELL_WIDTH + 24;
+    let h = 26;
+    let rect = RasterRect::new(cx.saturating_sub(w / 2), bottom.saturating_sub(h), w, h);
+    liquid_glass(target, rect, theme);
+    let ty = rect.y + (h - DESKTOP_FONT.glyph_height()) / 2;
+    target.draw_text_with_font(rect.x + 12, ty, text, &SMOOTH_FONT, theme.text);
+}
+
+/// Paint the dock (GFX-050, liquid glass since GFX-114): a floating
+/// capsule of glass over the blurred desk, the tiles' pictures in it and a
+/// divider before the desk's own buttons; the tile under the pointer sits
+/// on a puck of lighter glass, larger, with its name over the dock; running
+/// apps have a glowing light under them, longer for the focused one.
 fn raster_dock(
     target: &mut impl RenderTarget,
     window: &DesktopWindow,
@@ -2226,43 +2550,60 @@ fn raster_dock(
     clipped_rect: RasterRect,
     theme: &Theme,
 ) -> bool {
-    let mut painter = ScissorTarget::new(target, clipped_rect);
-    let glass = RgbaColor::new(
-        theme.surface_raised.r,
-        theme.surface_raised.g,
-        theme.surface_raised.b,
-        GLASS_ALPHA,
-    );
-    painter.blend_rounded_rect(rect, DOCK_RADIUS, glass);
-    painter.draw_rounded_border(rect, DOCK_RADIUS, 1, theme.hairline);
+    // The shadow, the risen icon and its label reach past the capsule.
+    let reach = RasterRect::new(
+        clipped_rect.x.saturating_sub(DOCK_SHADOW_SPREAD as usize),
+        clipped_rect.y.saturating_sub(DOCK_REACH),
+        clipped_rect.width + DOCK_SHADOW_SPREAD as usize * 2,
+        clipped_rect.height + DOCK_REACH + (DOCK_SHADOW_SPREAD + DOCK_SHADOW_DROP) as usize,
+    )
+    .clamped_to(target.width(), target.height());
+    let mut painter = ScissorTarget::new(target, reach);
+    liquid_glass(&mut painter, rect, theme);
+    let mut label: Option<(usize, String)> = None;
     for (index, tab) in window.tabs.iter().enumerate() {
         let Some(tile) = dock_tile_rect(window, index) else {
             break;
         };
-        let fill = if tab.hovered {
-            theme.selection
-        } else {
-            theme.tab_inactive
-        };
-        // A picture is the tile (GFX-094): drawn alone, with a halo
-        // behind it under the pointer.
         let picture = tab
             .picture
             .and_then(|id| theme.pictures.get(id as usize).copied());
+        let centre = tile.x + DOCK_TILE / 2;
+        // A divider before the desk's own buttons: a hairline of light.
+        if tab.divider_before {
+            let x = tile.x - (DOCK_TILE_GAP + DOCK_DIVIDER) / 2;
+            let line = RasterRect::new(x, rect.y + 20, 1, rect.height.saturating_sub(40));
+            painter.blend_rounded_rect(line, 0, RgbaColor::new(255, 255, 255, 70));
+        }
+        if tab.hovered {
+            // Under the pointer: a puck of lighter glass behind the tile,
+            // the icon at its large size, and its name over the dock.
+            let puck = RasterRect::new(tile.x - 6, tile.y - 5, DOCK_TILE + 12, DOCK_TILE + 12);
+            painter.blend_rounded_rect(puck, 20, RgbaColor::new(255, 255, 255, 44));
+            let rim = mix(
+                theme.surface_raised,
+                RgbaColor::new(255, 255, 255, 255),
+                140,
+            );
+            painter.draw_rounded_border(puck, 20, 1, rim);
+            let name = if tab.name.is_empty() {
+                &tab.label
+            } else {
+                &tab.name
+            };
+            label = Some((centre, name.clone()));
+        }
         if let Some(picture) = picture {
-            if tab.hovered {
-                let halo = RasterRect::new(
-                    tile.x.saturating_sub(3),
-                    tile.y.saturating_sub(3),
-                    tile.width + 6,
-                    tile.height + 6,
-                );
-                painter.fill_rounded_rect(halo, DOCK_TILE_RADIUS + 3, theme.selection);
-            }
-            let px = tile.x + DOCK_TILE.saturating_sub(picture.width as usize) / 2;
-            let py = tile.y + DOCK_TILE.saturating_sub(picture.height as usize) / 2;
+            let (pw, ph) = (picture.width as usize, picture.height as usize);
+            let px = centre.saturating_sub(pw / 2);
+            let py = tile.y + DOCK_TILE.saturating_sub(ph) / 2;
             draw_picture(&mut painter, px, py, &picture);
         } else {
+            let fill = if tab.hovered {
+                theme.selection
+            } else {
+                theme.tab_inactive
+            };
             painter.fill_rounded_rect(tile, DOCK_TILE_RADIUS, fill);
             if let Some(icon) = tab.icon {
                 // The icon, two pixels a bit, centred (GFX-084).
@@ -2290,14 +2631,30 @@ fn raster_dock(
                 );
             }
         }
+        // Running: a light under the tile, glowing; the focused app's is
+        // longer; a tucked one's is an outline.
         if tab.active {
-            let dot = RasterRect::new(tile.x + DOCK_TILE / 2 - 3, tile.bottom() + 2, 6, 6);
+            let w = if tab.focused { 38 } else { 22 };
+            let bar = RasterRect::new(centre - w / 2, tile.bottom() + 3, w, 3);
             if tab.tucked {
-                painter.draw_rounded_border(dot, 3, 1, theme.accent);
+                painter.draw_rounded_border(bar, 1, 1, theme.text_muted);
             } else {
-                painter.fill_rounded_rect(dot, 3, theme.accent);
+                let a = theme.accent;
+                for (grow, alpha) in [(4usize, 40u8), (2, 70)] {
+                    let glow = RasterRect::new(
+                        bar.x - grow,
+                        bar.y - grow.min(2),
+                        bar.width + grow * 2,
+                        bar.height + grow.min(2) * 2,
+                    );
+                    painter.blend_rounded_rect(glow, 3, RgbaColor::new(a.r, a.g, a.b, alpha));
+                }
+                painter.fill_rounded_rect(bar, 1, theme.accent);
             }
         }
+    }
+    if let Some((cx, text)) = label {
+        glass_label(&mut painter, cx, rect.y.saturating_sub(8), &text, theme);
     }
     true
 }
@@ -2312,13 +2669,8 @@ fn raster_top_bar(
     theme: &Theme,
 ) -> bool {
     let mut painter = ScissorTarget::new(target, clipped_rect);
-    let glass = RgbaColor::new(
-        theme.surface_raised.r,
-        theme.surface_raised.g,
-        theme.surface_raised.b,
-        GLASS_ALPHA,
-    );
-    painter.blend_rounded_rect(rect, 0, glass);
+    // Frosted glass, the dock's material (GFX-114).
+    frosted(&mut painter, rect, theme);
     if rect.height > 0 {
         painter.draw_hline(rect.x, rect.bottom() - 1, rect.width, theme.hairline);
     }
