@@ -46,6 +46,25 @@ pub fn handles(word: &str) -> bool {
     WORDS.contains(&word)
 }
 
+/// Where the passphrase starts in `line`, if it carries one: `login`'s
+/// and `setpass`'s third word on, `passwd`'s second on (KBD-012). The
+/// Terminal stars it out as it is typed, the transcript never holds it and
+/// the history does not keep the line.
+pub fn secret_from(line: &str) -> Option<usize> {
+    let word = line.split_whitespace().next()?;
+    let skip = match word {
+        "login" | "setpass" => 2,
+        "passwd" => 1,
+        _ => return None,
+    };
+    // The start of each word, in bytes.
+    let mut starts = line
+        .char_indices()
+        .filter(|&(i, c)| c != ' ' && (i == 0 || line.as_bytes()[i - 1] == b' '))
+        .map(|(i, _)| i);
+    starts.nth(skip)
+}
+
 /// The help text for these words.
 pub fn help() -> Vec<String> {
     [

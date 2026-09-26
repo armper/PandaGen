@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use crate::display_mode::DisplayMode;
+use crate::line_edit::{Edit, LineEdit};
 use core::fmt::Write;
 
 #[cfg(not(test))]
@@ -55,6 +56,30 @@ use services_gui_host::{
     GfxSnapshot, HostEvent, HostResponse, HostedComponent, HostedSurface, ListComponent,
     NoticeLevel, ShellNotice,
 };
+
+/// The per-key trace of where input went. Off: it wrote three lines to
+/// the serial port for every keystroke, and would have written a
+/// passphrase's keys there too.
+const ROUTE_TRACE: bool = false;
+
+macro_rules! route_trace {
+    ($serial:expr, $($arg:tt)*) => {
+        if ROUTE_TRACE {
+            let _ = writeln!($serial, $($arg)*);
+        }
+    };
+}
+
+/// The words Tab can finish at the prompt (KBD-012).
+fn command_words() -> Vec<&'static str> {
+    let mut words = vec![
+        "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
+        "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
+        "ticks", "editor", "fault",
+    ];
+    words.extend(crate::access_shell::WORDS);
+    words
+}
 
 /// Component type in the workspace
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -164,10 +189,8 @@ pub struct WorkspaceSession {
     response_channel: ChannelId,
     /// Whether we're in command mode
     in_command_mode: bool,
-    /// Command buffer
-    command_buffer: [u8; COMMAND_MAX],
-    /// Command length
-    command_len: usize,
+    /// The input line, for the prompt and the CLI alike (KBD-012).
+    line: LineEdit,
     /// Output log (fixed-size ring buffer)
     output_lines: [OutputLine; OUTPUT_MAX_LINES],
     output_head: usize,
@@ -182,12 +205,6 @@ pub struct WorkspaceSession {
     command_palette: CommandPalette,
     /// CLI mode active
     cli_active: bool,
-    /// CLI input buffer
-    cli_buffer: [u8; COMMAND_MAX],
-    /// CLI buffer length
-    cli_len: usize,
-    /// CLI cursor position
-    cli_cursor: usize,
     /// Whether the CLI first-run hint has been shown
     cli_hint_shown: bool,
     /// Clear screen requested (CLI/workspace)
@@ -520,8 +537,7 @@ impl WorkspaceSession {
             command_channel,
             response_channel,
             in_command_mode: true,
-            command_buffer: [0; COMMAND_MAX],
-            command_len: 0,
+            line: LineEdit::new(),
             output_lines: [OutputLine::empty(); OUTPUT_MAX_LINES],
             output_head: 0,
             output_count: 0,
@@ -531,9 +547,6 @@ impl WorkspaceSession {
             palette_overlay: PaletteOverlayState::new(),
             command_palette,
             cli_active: false,
-            cli_buffer: [0; COMMAND_MAX],
-            cli_len: 0,
-            cli_cursor: 0,
             cli_hint_shown: false,
             clear_requested: false,
             display_mode: DisplayMode::DEFAULT,
@@ -596,9 +609,7 @@ impl WorkspaceSession {
 
     /// Reset the CLI input buffer
     fn reset_cli_buffer(&mut self) {
-        self.cli_buffer = [0; COMMAND_MAX];
-        self.cli_len = 0;
-        self.cli_cursor = 0;
+        self.line.clear();
     }
 
     /// Process a single byte of input
@@ -608,11 +619,6 @@ impl WorkspaceSession {
         ctx: &mut KernelContext,
         serial: &mut SerialPort,
     ) -> bool {
-        // Bytes above ASCII are the desk's navigation keys (arrows, Delete),
-        // which the text workspace has no use for and must not echo.
-        if byte >= 0x80 {
-            return false;
-        }
         let _pre_editor_row = self.editor.as_ref().map(|editor| editor.cursor().row);
         let _pre_editor_col = self.editor.as_ref().map(|editor| editor.cursor().col);
         #[cfg(feature = "console_vga")]
@@ -620,14 +626,14 @@ impl WorkspaceSession {
         #[cfg(not(feature = "console_vga"))]
         let focused_tile = "Unavailable";
 
-        let _ = writeln!(serial, "route_input:");
-        let _ = writeln!(serial, "  key={{byte={:#x}}}", byte);
-        let _ = writeln!(serial, "  focus_tile={{{:?}}}", focused_tile);
+        route_trace!(serial, "route_input:");
+        route_trace!(serial, "  key={{byte={:#x}}}", byte);
+        route_trace!(serial, "  focus_tile={{{:?}}}", focused_tile);
 
         // 1. Check for global shortcuts BEFORE component routing
         // Ctrl+P (0x10) opens command palette
         if byte == 0x10 && !self.palette_overlay.is_open() {
-            let _ = writeln!(serial, "  action=open_palette");
+            route_trace!(serial, "  action=open_palette");
 
             // Determine current focus target
             let current_focus = if self.active_component == Some(ComponentType::Editor) {
@@ -647,7 +653,7 @@ impl WorkspaceSession {
 
         // 2. If palette is open, route all input to it
         if self.palette_overlay.is_open() {
-            let _ = writeln!(serial, "  action=palette_input");
+            route_trace!(serial, "  action=palette_input");
 
             // Convert byte to KeyEvent
             if let Some(key_event) = byte_to_key_event(byte) {
@@ -659,7 +665,7 @@ impl WorkspaceSession {
 
                 match action {
                     PaletteKeyAction::Close => {
-                        let _ = writeln!(serial, "  palette_action=close");
+                        route_trace!(serial, "  palette_action=close");
                         self.palette_overlay.close();
                         return true;
                     }
@@ -667,24 +673,24 @@ impl WorkspaceSession {
                         return self.run_palette_command(cmd_id, ctx, serial);
                     }
                     PaletteKeyAction::Consumed => {
-                        let _ = writeln!(serial, "  palette_action=consumed");
+                        route_trace!(serial, "  palette_action=consumed");
                         return true;
                     }
                     PaletteKeyAction::None => {
-                        let _ = writeln!(serial, "  palette_action=none");
+                        route_trace!(serial, "  palette_action=none");
                         // Fall through - shouldn't happen but handle gracefully
                         return false;
                     }
                 }
             } else {
-                let _ = writeln!(serial, "  palette_action=unknown_byte");
+                route_trace!(serial, "  palette_action=unknown_byte");
                 return true; // Consume unknown bytes when palette is open
             }
         }
 
         // 2b. If the file picker is open, it owns the keyboard.
         if self.file_picker.is_some() {
-            let _ = writeln!(serial, "  action=picker_input");
+            route_trace!(serial, "  action=picker_input");
             match byte {
                 0x80 | b'k' => self.picker_move(-1),
                 0x81 | b'j' => self.picker_move(1),
@@ -702,7 +708,7 @@ impl WorkspaceSession {
 
         // 2c. A hosted custom component owns the keyboard while open.
         if self.hosted.is_some() {
-            let _ = writeln!(serial, "  action=hosted_input");
+            route_trace!(serial, "  action=hosted_input");
             self.host_event(HostEvent::Key(byte), serial);
             return true;
         }
@@ -712,7 +718,7 @@ impl WorkspaceSession {
         {
             // Editor lives in Top tile. If Bottom is focused, Editor shouldn't get input.
             if self.active_component == Some(ComponentType::Editor) && focused_tile != TileId::Top {
-                let _ = writeln!(serial, "  consumed_by=none (focus mismatch)");
+                route_trace!(serial, "  consumed_by=none (focus mismatch)");
                 return false;
             }
         }
@@ -722,13 +728,13 @@ impl WorkspaceSession {
         #[cfg(not(test))]
         if self.active_component == Some(ComponentType::Editor) {
             if let Some(ref mut editor) = self.editor {
-                let _ = writeln!(
+                route_trace!(
                     serial,
                     "  action=process_byte_start cursor={:?}",
                     editor.cursor()
                 );
                 let should_quit = editor.process_byte(byte);
-                let _ = writeln!(
+                route_trace!(
                     serial,
                     "  action=process_byte_end cursor={:?} dirty={}",
                     editor.cursor(),
@@ -791,108 +797,64 @@ impl WorkspaceSession {
             }
         }
 
-        // 5. If CLI is active, handle CLI input
-        if self.cli_active {
-            let _ = writeln!(serial, "  action=cli_input");
-            match byte {
-                b'\r' | b'\n' => {
-                    // Execute command from CLI buffer
-                    let _ = serial.write_str("\r\n");
-                    // Copy command to temporary buffer to avoid borrow conflict
-                    let mut cmd_buf = [0u8; COMMAND_MAX];
-                    let cmd_len = self.cli_len;
-                    cmd_buf[..cmd_len].copy_from_slice(&self.cli_buffer[..cmd_len]);
-                    let command = core::str::from_utf8(&cmd_buf[..cmd_len])
-                        .unwrap_or("")
-                        .trim();
-                    if !command.is_empty() {
-                        self.run_command_line(command, ctx, serial);
-                    }
-                    self.reset_cli_buffer();
-                    if self.cli_active {
-                        self.show_prompt(serial);
-                    }
-                    return true;
-                }
-                0x1B => {
-                    // Escape key - exit CLI
+        // 5. The prompt, or the CLI: the line editor (KBD-012).
+        route_trace!(serial, "  action=line_input");
+        let words = command_words();
+        match self.line.key(byte, &words) {
+            Edit::Unhandled => {
+                // Escape leaves the CLI.
+                if byte == 0x1B && self.cli_active {
                     let _ = serial.write_str("\r\n");
                     self.set_cli_active(false, serial);
                     self.show_prompt(serial);
                     return true;
                 }
-                0x08 | 0x7F => {
-                    // Backspace
-                    if self.cli_cursor > 0 && self.cli_len > 0 {
-                        // Remove character before cursor
-                        if self.cli_cursor < self.cli_len {
-                            // Cursor not at end - shift remaining chars left
-                            for i in self.cli_cursor..self.cli_len {
-                                self.cli_buffer[i - 1] = self.cli_buffer[i];
-                            }
-                        }
-                        self.cli_len -= 1;
-                        self.cli_cursor -= 1;
-                        let _ = serial.write_str("\x08 \x08");
-                    }
-                    return true;
-                }
-                0x80 => {
-                    // Up arrow - not implemented yet
-                    return true;
-                }
-                0x81 => {
-                    // Down arrow - not implemented yet
-                    return true;
-                }
-                byte if (0x20..0x7F).contains(&byte) => {
-                    // Printable character - insert at cursor
-                    // Check if we have room (need space for the new character)
-                    if self.cli_len < COMMAND_MAX {
-                        if self.cli_cursor < self.cli_len && self.cli_len < COMMAND_MAX {
-                            // Cursor not at end - shift remaining chars right
-                            // We already checked cli_len < COMMAND_MAX, so this is safe
-                            for i in (self.cli_cursor..self.cli_len).rev() {
-                                self.cli_buffer[i + 1] = self.cli_buffer[i];
-                            }
-                        }
-                        self.cli_buffer[self.cli_cursor] = byte;
-                        self.cli_cursor += 1;
-                        self.cli_len += 1;
-                        let _ = serial.write_byte(byte);
-                    }
-                    return true;
-                }
-                _ => return false,
+                false
             }
-        }
-
-        // Otherwise, handle as command input
-        match byte {
-            b'\r' | b'\n' => {
+            Edit::Nothing => true,
+            Edit::Appended(byte) => {
+                // A passphrase echoes as a star.
+                let shown = self.line.shown();
+                let _ = serial.write_byte(shown.as_bytes().last().copied().unwrap_or(byte));
+                true
+            }
+            Edit::Redraw => {
+                let _ = write!(
+                    serial,
+                    "\r\x1b[K{}{}",
+                    self.prompt_prefix(),
+                    self.line.shown()
+                );
+                true
+            }
+            Edit::Choices(words) => {
                 let _ = serial.write_str("\r\n");
-                self.execute_command(ctx, serial);
-                self.command_len = 0;
+                let mut listed = String::new();
+                for word in &words {
+                    listed.push_str(word);
+                    listed.push_str("  ");
+                }
+                self.emit_line(serial, listed.trim_end());
+                let _ = write!(serial, "{}{}", self.prompt_prefix(), self.line.shown());
                 true
             }
-            0x08 | 0x7f => {
-                // Backspace
-                if self.command_len > 0 {
-                    self.command_len -= 1;
-                    let _ = serial.write_str("\x08 \x08");
+            Edit::Submit => {
+                let _ = serial.write_str("\r\n");
+                let command = self.line.take();
+                let command = command.trim();
+                self.line.remember(command);
+                if command.is_empty() {
+                    self.show_prompt(serial);
+                    return true;
+                }
+                let was_cli = self.cli_active;
+                self.run_command_line(command, ctx, serial);
+                // Leaving the CLI said so itself.
+                if !was_cli || self.cli_active {
+                    self.show_prompt(serial);
                 }
                 true
             }
-            byte if (0x20..0x7F).contains(&byte) => {
-                // Printable character
-                if self.command_len < self.command_buffer.len() {
-                    self.command_buffer[self.command_len] = byte;
-                    self.command_len += 1;
-                    let _ = serial.write_byte(byte);
-                }
-                true
-            }
-            _ => false,
         }
     }
 
@@ -947,25 +909,15 @@ impl WorkspaceSession {
     //     let _ = serial.write_str(&render);
     // }
 
-    /// Execute the current command
+    /// Run what is on the line, as if Enter had been pressed.
     fn execute_command(&mut self, ctx: &mut KernelContext, serial: &mut SerialPort) {
-        let command_buf = {
-            let command = core::str::from_utf8(&self.command_buffer[..self.command_len])
-                .unwrap_or("")
-                .trim();
-
-            if command.is_empty() {
-                self.show_prompt(serial);
-                return;
-            }
-
-            let mut buffer = [0u8; COMMAND_MAX];
-            let bytes = command.as_bytes();
-            let len = bytes.len().min(COMMAND_MAX);
-            buffer[..len].copy_from_slice(&bytes[..len]);
-            (buffer, len)
-        };
-        let command = core::str::from_utf8(&command_buf.0[..command_buf.1]).unwrap_or("");
+        let command = self.line.take();
+        let command = command.trim();
+        if command.is_empty() {
+            self.show_prompt(serial);
+            return;
+        }
+        self.line.remember(command);
         self.run_command_line(command, ctx, serial);
         self.show_prompt(serial);
     }
@@ -1072,6 +1024,7 @@ impl WorkspaceSession {
                     self.emit_line(serial, &line);
                 }
                 self.emit_line(serial, "open <what>    - Open editor, CLI, or file picker");
+                self.emit_line(serial, "editor [path]  - Open the text editor");
                 self.emit_line(serial, "list           - List components");
                 self.emit_line(serial, "focus <id>     - Focus component");
                 self.emit_line(serial, "clear | cls    - Clear the screen");
@@ -1095,6 +1048,11 @@ impl WorkspaceSession {
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
+                self.emit_line(serial, "");
+                self.emit_line(
+                    serial,
+                    "Keys: Up/Down history, Left/Right/Home/End move, Tab finishes, Ctrl+U clears",
+                );
                 self.emit_line(serial, "");
                 self.emit_line(serial, "File Commands:");
                 self.emit_line(serial, "ls             - List files");
@@ -1412,29 +1370,19 @@ impl WorkspaceSession {
 
     /// Get a text snapshot of the current workspace state for display
     /// Returns command buffer text directly without heap allocation
-    pub fn get_command_text(&self) -> &[u8] {
-        if self.cli_active {
-            &self.cli_buffer[..self.cli_len]
-        } else {
-            &self.command_buffer[..self.command_len]
-        }
+    ///
+    /// As shown: a passphrase being typed is stars (KBD-012).
+    pub fn get_command_text(&self) -> String {
+        self.line.shown()
     }
 
     fn set_command_text(&mut self, text: &str) {
-        let bytes = text.as_bytes();
-        let len = bytes.len().min(COMMAND_MAX);
-        self.command_buffer[..len].copy_from_slice(&bytes[..len]);
-        self.command_len = len;
+        self.line.set(text);
     }
 
     /// Get the cursor column for the current state
     pub fn get_cursor_col(&self) -> usize {
-        let prefix_len = self.prompt_prefix().len();
-        if self.cli_active {
-            prefix_len + self.cli_cursor
-        } else {
-            prefix_len + self.command_len
-        }
+        self.prompt_prefix().len() + self.line.cursor()
     }
 
     pub fn prompt_prefix(&self) -> &'static str {
@@ -2406,7 +2354,8 @@ impl WorkspaceSession {
         let mut buffer = [0u8; OUTPUT_LINE_MAX];
         let mut len = 0usize;
         len = append_bytes(&mut buffer, len, self.prompt_prefix_bytes());
-        len = append_bytes(&mut buffer, len, cmd);
+        let masked = crate::line_edit::mask(core::str::from_utf8(cmd).unwrap_or(""));
+        len = append_bytes(&mut buffer, len, masked.as_bytes());
         let line = core::str::from_utf8(&buffer[..len]).unwrap_or("WS > ");
         self.emit_line(serial, line);
     }
@@ -2569,8 +2518,8 @@ mod tests {
     fn test_cli_state_initialization() {
         let session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
         assert!(!session.is_cli_active());
-        assert_eq!(session.cli_len, 0);
-        assert_eq!(session.cli_cursor, 0);
+        assert!(session.line.is_empty());
+        assert_eq!(session.line.cursor(), 0);
     }
 
     #[test]
@@ -2582,15 +2531,13 @@ mod tests {
         // Activate CLI
         session.set_cli_active(true, &mut serial);
         assert!(session.is_cli_active());
-        assert_eq!(session.cli_len, 0);
+        assert!(session.line.is_empty());
 
         // Reset buffer
-        session.cli_buffer[0] = b'x';
-        session.cli_len = 1;
-        session.cli_cursor = 1;
+        session.line.set("x");
         session.reset_cli_buffer();
-        assert_eq!(session.cli_len, 0);
-        assert_eq!(session.cli_cursor, 0);
+        assert!(session.line.is_empty());
+        assert_eq!(session.line.cursor(), 0);
     }
 
     #[test]
@@ -2614,18 +2561,19 @@ mod tests {
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
 
         // Set normal command buffer
-        session.command_buffer[0..5].copy_from_slice(b"hello");
-        session.command_len = 5;
-        assert_eq!(session.get_command_text(), b"hello");
+        session.set_command_text("hello");
+        assert_eq!(session.get_command_text(), "hello");
 
         // Activate CLI and set CLI buffer
         let mut serial = crate::serial::SerialPort::new(0x3F8);
         session.set_cli_active(true, &mut serial);
-        session.cli_buffer[0..5].copy_from_slice(b"world");
-        session.cli_len = 5;
-
-        // Should return CLI buffer when CLI is active
-        assert_eq!(session.get_command_text(), b"world");
+        assert_eq!(
+            session.get_command_text(),
+            "",
+            "entering the CLI clears the line"
+        );
+        session.set_command_text("world");
+        assert_eq!(session.get_command_text(), "world");
     }
 
     #[test]
@@ -2633,14 +2581,16 @@ mod tests {
         let mut session = WorkspaceSession::new(ChannelId(0), ChannelId(1));
 
         // Normal mode: cursor at end of command
-        session.command_len = 5;
+        session.set_command_text("hello");
         assert_eq!(session.get_cursor_col(), "WS > ".len() + 5);
 
         // CLI mode: cursor position tracked separately
         let mut serial = crate::serial::SerialPort::new(0x3F8);
         session.set_cli_active(true, &mut serial);
-        session.cli_len = 10;
-        session.cli_cursor = 7;
+        session.set_command_text("0123456789");
+        for _ in 0..3 {
+            session.line.key(crate::notepad::KEY_LEFT, &[]);
+        }
         assert_eq!(session.get_cursor_col(), "CLI> ".len() + 7);
     }
 

@@ -920,6 +920,30 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "KERNEL PANIC".to_string(),
     ];
     shapes.push(Shape::new(&title, &args));
+
+    // The Terminal's line (KBD-012): Up brings `mem` back, Home and a key
+    // make it `xmem`; Tab finishes `whoa`; a passphrase is stars in the
+    // transcript and nowhere in plain.
+    title = "the Terminal: history, a moved caret, Tab, a passphrase in stars".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,m,e,m,ret,sleep:1,up,home,x,ret,sleep:1,w,h,o,a,tab,ret,sleep:1,l,o,g,i,n,spc,a,spc,h,u,n,t,e,r,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_terminal_line".to_string(),
+        "--expect-serial".to_string(),
+        "WS > xmem".to_string(),
+        "--expect-serial".to_string(),
+        "WS > whoami".to_string(),
+        "--expect-serial".to_string(),
+        "WS > login a ******".to_string(),
+        "--forbid-serial".to_string(),
+        "hunter".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
     run_shapes(&root, shapes, began)
 }
 

@@ -196,7 +196,7 @@ impl EditorCore {
             }
 
             // Editing
-            Key::X => {
+            Key::X | Key::Delete => {
                 // The snapshot goes on the stack only if something actually
                 // changed. `delete_char` returns false on an empty line, and
                 // pushing anyway meant holding `x` on a blank line evicted
@@ -296,6 +296,34 @@ impl EditorCore {
             Key::U => self.insert_char_in_insert_mode('u'),
             Key::N => self.insert_char_in_insert_mode('n'),
             Key::Space => self.insert_char_in_insert_mode(' '),
+            // Arrows move without leaving insert mode, as in every editor
+            // since vi; the caret may sit after the last character.
+            Key::Left => {
+                self.move_cursor_left();
+                CoreOutcome::Changed
+            }
+            Key::Right => {
+                self.move_cursor_right();
+                CoreOutcome::Changed
+            }
+            Key::Up => {
+                self.move_cursor_up();
+                CoreOutcome::Changed
+            }
+            Key::Down => {
+                self.move_cursor_down();
+                CoreOutcome::Changed
+            }
+            Key::Delete => {
+                let before = self.buffer_snapshot();
+                if self.buffer.delete_char(self.cursor) {
+                    self.push_undo(before);
+                    self.dirty = true;
+                    CoreOutcome::Changed
+                } else {
+                    CoreOutcome::Continue
+                }
+            }
             Key::Enter => {
                 let before = self.buffer_snapshot();
                 if self.buffer.insert_newline(self.cursor) {
@@ -753,6 +781,35 @@ mod tests {
         // Verify all letters were typed
         assert_eq!(editor.buffer().as_string(), "iahjklxdun");
         assert_eq!(editor.mode(), EditorMode::Insert);
+    }
+
+    #[test]
+    fn test_arrows_move_in_insert_mode_and_delete_deletes() {
+        let mut editor = EditorCore::new();
+        editor.load_content("abc".into());
+        editor.apply_key(Key::I);
+        editor.apply_key(Key::Right);
+        editor.apply_key(Key::Right);
+        editor.apply_key(Key::Right);
+        editor.apply_key(Key::Right);
+        assert_eq!(
+            editor.cursor().col,
+            3,
+            "after the last character, no further"
+        );
+        editor.apply_key(Key::Char('d'));
+        editor.apply_key(Key::Left);
+        editor.apply_key(Key::Left);
+        editor.apply_key(Key::Delete);
+        assert_eq!(editor.buffer().as_string(), "abd");
+        assert_eq!(editor.mode(), EditorMode::Insert);
+        editor.apply_key(Key::Escape);
+        editor.apply_key(Key::Delete);
+        assert_eq!(
+            editor.buffer().as_string(),
+            "ad",
+            "Escape stepped back onto the b"
+        );
     }
 
     #[test]

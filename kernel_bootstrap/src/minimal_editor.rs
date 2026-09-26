@@ -136,9 +136,18 @@ impl MinimalEditor {
         self.status.clear();
 
         // Convert byte to Key
-        let key = match Key::from_ascii(byte) {
-            Some(k) => k,
-            None => return false, // Unknown key, continue editing
+        // The desk's navigation bytes (KBD-012): arrows and Delete move
+        // and edit in every mode, not only hjkl in normal mode.
+        let key = match byte {
+            crate::notepad::KEY_UP => Key::Up,
+            crate::notepad::KEY_DOWN => Key::Down,
+            crate::notepad::KEY_LEFT => Key::Left,
+            crate::notepad::KEY_RIGHT => Key::Right,
+            crate::notepad::KEY_DELETE => Key::Delete,
+            _ => match Key::from_ascii(byte) {
+                Some(k) => k,
+                None => return false, // Unknown key, continue editing
+            },
         };
 
         // Apply key to core

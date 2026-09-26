@@ -34,6 +34,7 @@ mod free_list_heap;
 mod game;
 mod guard;
 mod launcher;
+mod line_edit;
 mod minimal_editor;
 mod notepad;
 mod optimized_render;
@@ -3105,7 +3106,8 @@ fn workspace_loop(
                     let prompt_prefix = workspace.prompt_prefix();
                     let prompt_prefix_bytes = prompt_prefix.as_bytes();
                     let prefix_len = prompt_prefix_bytes.len();
-                    let cmd_bytes = workspace.get_command_text();
+                    let cmd_text = workspace.get_command_text();
+                    let cmd_bytes = cmd_text.as_bytes();
                     let (view_start, cmd_slice, cursor_col) =
                         prompt_view(cmd_bytes, cols, prefix_len);
                     let view_len = cmd_slice.len();
@@ -3350,7 +3352,8 @@ fn workspace_loop(
                     let prompt_prefix = workspace.prompt_prefix();
                     let prompt_prefix_bytes = prompt_prefix.as_bytes();
                     let prefix_len = prompt_prefix_bytes.len();
-                    let cmd_bytes = workspace.get_command_text();
+                    let cmd_text = workspace.get_command_text();
+                    let cmd_bytes = cmd_text.as_bytes();
                     let (view_start, cmd_slice, cursor_col) =
                         prompt_view(cmd_bytes, cols, prefix_len);
                     let view_len = cmd_slice.len();
@@ -4253,8 +4256,10 @@ fn terminal_view(workspace: &workspace::WorkspaceSession, rows: usize) -> desk::
         }
     }
     let mut prompt = String::from(workspace.prompt_prefix());
-    let column = prompt.chars().count() + workspace.get_cursor_col();
-    prompt.push_str(&String::from_utf8_lossy(workspace.get_command_text()));
+    // `get_cursor_col` counts the prompt's own width already; adding it
+    // again put the caret five cells past the text.
+    let column = workspace.get_cursor_col();
+    prompt.push_str(&workspace.get_command_text());
     view.cursor = Some((view.lines.len(), column));
     view.lines.push(prompt);
     view.status = String::from(workspace.status_line());
@@ -4279,7 +4284,7 @@ fn build_desktop_model(
         }
     }
     let mut prompt = String::from(workspace.prompt_prefix());
-    prompt.push_str(&String::from_utf8_lossy(workspace.get_command_text()));
+    prompt.push_str(&workspace.get_command_text());
     model.prompt = prompt;
     model.prompt_cursor = workspace.get_cursor_col();
     model.status = String::from(workspace.status_line());
