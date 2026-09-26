@@ -157,15 +157,33 @@ impl BareMetalEditorIo {
     /// Write a system setting under a dot-name with its own schema
     /// (GFX-059); Files hides such names.
     pub fn write_setting(&mut self, name: &str, content: &str) -> Result<(), EditorIoError> {
+        let name = self.setting_name(name);
         self.fs
-            .write_named(name, content.as_bytes(), self.now, Some(SETTINGS_SCHEMA))?;
+            .write_named(&name, content.as_bytes(), self.now, Some(SETTINGS_SCHEMA))?;
         Ok(())
     }
 
-    /// Read a system setting, or `None` when it was never written.
+    /// Read a setting, or `None` when it was never written. A person's
+    /// own copy first; for the first person, the one from before settings
+    /// were per person.
     pub fn read_setting(&mut self, name: &str) -> Option<String> {
-        let bytes = self.fs.read_file_by_name(name).ok()?;
+        let own = self.setting_name(name);
+        let bytes = match self.fs.read_file_by_name(&own) {
+            Ok(bytes) => bytes,
+            Err(_) if own != name => self.fs.read_file_by_name(name).ok()?,
+            Err(_) => return None,
+        };
         String::from_utf8(bytes).ok()
+    }
+
+    /// Settings are each person's own (FS-006): `.look` is kept as
+    /// `.look.<name>` for whoever is signed in, so two people on one disk
+    /// do not share a look, recents or the Welcome card.
+    fn setting_name(&self, name: &str) -> String {
+        match self.fs.guard.principal_name() {
+            Some(who) if who != "system" => alloc::format!("{name}.{who}"),
+            _ => name.to_string(),
+        }
     }
 
     /// Lines in the person's text files that contain `query`, case-

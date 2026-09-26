@@ -1956,6 +1956,14 @@ pub enum DeskRequest {
     Vitals,
     /// Read the desk's look from disk, then call [`Desk::apply_look`].
     LoadLook,
+    /// Sign `name` in (FS-006), then call [`Desk::signed_in`] or
+    /// [`Desk::sign_in_refused`].
+    SignIn { name: String, passphrase: String },
+    /// Check the signed-in person's passphrase to unlock a rested desk,
+    /// then call [`Desk::unlocked`] or [`Desk::sign_in_refused`].
+    Unlock { passphrase: String },
+    /// Sign the person out, then call [`Desk::signed_out`].
+    SignOut,
 }
 
 /// One row of the palette: what it does and how it is spelled (GFX-053).
@@ -2013,10 +2021,14 @@ pub enum PaletteAction {
     Apps,
     /// Rest: the time alone, until a key or the pointer (GFX-092).
     Rest,
+    /// Lock: rest, and ask for the passphrase to come back (FS-006).
+    Lock,
+    /// Sign out: every card closes, and the desk asks who is here.
+    SignOut,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 42] = [
+    pub const ALL: [PaletteAction; 44] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2059,6 +2071,8 @@ impl PaletteAction {
         PaletteAction::Sketch,
         PaletteAction::Apps,
         PaletteAction::Rest,
+        PaletteAction::Lock,
+        PaletteAction::SignOut,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -2105,6 +2119,8 @@ impl PaletteAction {
             PaletteAction::Sketch => "Sketch: draw with the pointer",
             PaletteAction::Apps => "Apps: every app on the desk",
             PaletteAction::Rest => "Rest: just the time, until you are back",
+            PaletteAction::Lock => "Lock: rest, and ask for the passphrase",
+            PaletteAction::SignOut => "Sign out: close everything, let someone else in",
         }
     }
 
@@ -2152,6 +2168,8 @@ impl PaletteAction {
             PaletteAction::Sketch => "",
             PaletteAction::Apps => "Ctrl+Space twice",
             PaletteAction::Rest => "Ctrl+L",
+            PaletteAction::Lock => "",
+            PaletteAction::SignOut => "",
         }
     }
 
@@ -2493,6 +2511,13 @@ pub struct Desk {
     /// Resting (GFX-092): the desk shows only the time until a key or
     /// the pointer wakes it. `last_input` is the tick of the last one.
     resting: bool,
+    /// The sign-in screen, while the desk asks who is here or waits to be
+    /// unlocked (FS-006). Nothing else is shown or answers while it is up.
+    sign_in: Option<crate::sign_in::SignInView>,
+    /// Who is signed in, for unlocking.
+    person: Option<String>,
+    /// Waking a rested desk asks for the passphrase: the person has one.
+    lock_on_rest: bool,
     last_input: u64,
 }
 
@@ -2544,6 +2569,9 @@ impl Desk {
             overview_since: None,
             pending_sounds: Vec::new(),
             resting: false,
+            sign_in: None,
+            person: None,
+            lock_on_rest: false,
             last_input: 0,
             ctrl_held: false,
         }
@@ -3821,6 +3849,11 @@ impl Desk {
                 self.rest();
                 None
             }
+            PaletteAction::Lock => {
+                self.rest();
+                None
+            }
+            PaletteAction::SignOut => Some(DeskRequest::SignOut),
             PaletteAction::Sketch => {
                 let had = self.windows.iter().any(|w| w.app == DeskApp::Sketch);
                 let id = self.open_or_raise(DeskApp::Sketch);
@@ -4196,9 +4229,33 @@ impl Desk {
         if !deliveries.is_empty() {
             self.last_input = self.motion_clock;
             if self.resting {
-                self.resting = false;
+                self.wake();
                 return (requests, true);
             }
+        }
+        // The sign-in screen (FS-006): a click on a person, the field or
+        // the button; nothing behind it answers.
+        if self.sign_in.is_some() {
+            let palette = crate::widgets::Palette::from_theme(&self.theme());
+            let (w, h) = (self.width as u32, self.height as u32);
+            for delivery in deliveries {
+                let event = match delivery {
+                    Delivery::Pointer { event, .. } | Delivery::Desktop { event } => event,
+                    _ => continue,
+                };
+                if !event.is_press(PointerButton::Primary) {
+                    continue;
+                }
+                let (x, y) = (event.position.x, event.position.y);
+                if let Some(view) = self.sign_in.as_mut() {
+                    if let Some(key) = view.hit(w, h, palette, x, y) {
+                        if let Some(ask) = view.key(key) {
+                            requests.push(Self::ask_request(ask));
+                        }
+                    }
+                }
+            }
+            return (requests, true);
         }
         for delivery in deliveries {
             match delivery {
@@ -4659,6 +4716,104 @@ impl Desk {
 
     /// A key for the focused app. Returns what the kernel must do, if
     /// anything, and whether the screen changed.
+    /// Show the sign-in screen for `people`, `preferred` chosen (FS-006).
+    pub fn show_sign_in(&mut self, people: Vec<String>, preferred: Option<&str>) {
+        self.resting = false;
+        self.person = None;
+        self.sign_in = Some(crate::sign_in::SignInView::sign_in(people, preferred));
+    }
+
+    /// Whether the sign-in screen is up.
+    pub fn signing_in(&self) -> bool {
+        self.sign_in.is_some()
+    }
+
+    /// The sign-in screen, for a test to look at.
+    pub fn sign_in_view(&self) -> Option<&crate::sign_in::SignInView> {
+        self.sign_in.as_ref()
+    }
+
+    /// The kernel signed `name` in: the desk is theirs.
+    pub fn signed_in(&mut self, name: &str) {
+        self.sign_in = None;
+        self.person = Some(name.into());
+        self.last_input = self.motion_clock;
+    }
+
+    /// The passphrase was right: back to the desk as it was.
+    pub fn unlocked(&mut self) {
+        self.sign_in = None;
+        self.last_input = self.motion_clock;
+    }
+
+    /// The kernel said no, and why.
+    pub fn sign_in_refused(&mut self, why: &str) {
+        if let Some(view) = self.sign_in.as_mut() {
+            view.refused(why);
+        }
+    }
+
+    /// The person signed out: a new desk -- no cards, no look -- asking who
+    /// is here.
+    pub fn signed_out(&mut self, people: Vec<String>, preferred: Option<&str>) {
+        let (w, h) = (self.width, self.height);
+        *self = Desk::new(w, h);
+        self.show_sign_in(people, preferred);
+    }
+
+    /// Whether waking a rested desk asks for the passphrase.
+    pub fn set_lock_on_rest(&mut self, on: bool) {
+        self.lock_on_rest = on;
+    }
+
+    /// Wake from rest; with a passphrase to ask for, into the lock.
+    fn wake(&mut self) {
+        self.resting = false;
+        if self.lock_on_rest {
+            if let Some(person) = self.person.clone() {
+                self.sign_in = Some(crate::sign_in::SignInView::unlock(&person));
+            }
+        }
+    }
+
+    fn ask_request(ask: crate::sign_in::Ask) -> DeskRequest {
+        match ask {
+            crate::sign_in::Ask::SignIn { name, passphrase } => {
+                DeskRequest::SignIn { name, passphrase }
+            }
+            crate::sign_in::Ask::Unlock { passphrase } => DeskRequest::Unlock { passphrase },
+        }
+    }
+
+    /// The sign-in screen as a window: the whole screen, veiled.
+    fn sign_in_screen(&self, clock: &str) -> DesktopWindow {
+        let palette = crate::widgets::Palette::from_theme(&self.theme());
+        let (w, h) = (self.width as u32, self.height as u32);
+        let date = self.today.map(|d| d.long());
+        let hover = self.pointer.map(|(x, y)| (x as i32, y as i32));
+        let ops = self
+            .sign_in
+            .as_ref()
+            .map(|v| {
+                v.ui(w, h, clock, date.as_deref(), palette, hover)
+                    .into_ops()
+            })
+            .unwrap_or_default();
+        let frame = ViewFrame::new(
+            self.top_bar_id,
+            ViewKind::StatusLine,
+            0,
+            ViewContent::text_buffer(Vec::new()),
+            0,
+        );
+        DesktopWindow::new(frame, SurfaceRect::new(0, 0, 0, 0))
+            .with_role(DesktopWindowRole::Status)
+            .with_layer(DesktopWindowLayer::System)
+            .with_style(WindowStyle::Veil)
+            .with_pixel_rect(RasterRect::new(0, 0, self.width, self.height))
+            .with_overlay(ops)
+    }
+
     /// Whether the desk is resting (GFX-092).
     pub fn resting(&self) -> bool {
         self.resting
@@ -4729,7 +4884,7 @@ impl Desk {
             self.ctrl_held = true;
             self.last_input = self.motion_clock;
             if self.resting {
-                self.resting = false;
+                self.wake();
                 return (None, true);
             }
             return (None, !was);
@@ -4745,8 +4900,16 @@ impl Desk {
             if byte == crate::notepad::KEY_CTRL_RELEASED {
                 return (None, false);
             }
-            self.resting = false;
+            self.wake();
             return (None, true);
+        }
+        // The sign-in screen takes every key (FS-006).
+        if let Some(view) = self.sign_in.as_mut() {
+            if byte == crate::notepad::KEY_CTRL_RELEASED {
+                return (None, false);
+            }
+            let ask = view.key(byte);
+            return (ask.map(Self::ask_request), true);
         }
         if byte == KEY_CTRL_L {
             self.rest();
@@ -5434,6 +5597,9 @@ impl Desk {
             self.log_notice(now, notice);
         }
         self.last_shell_notices = shell_notices.to_vec();
+        if self.sign_in.is_some() {
+            return alloc::vec![self.sign_in_screen(clock)];
+        }
         if self.resting {
             return alloc::vec![self.rest_screen(clock)];
         }
@@ -8923,6 +9089,85 @@ mod tests {
         );
         assert_eq!(PICTURES[picture_id("bin", 64).unwrap() as usize].width, 64);
         assert_eq!(notice_app("Timer: 1 minute up"), Some(DeskApp::Timer));
+    }
+
+    /// The sign-in screen (FS-006): only it shows and answers; Enter asks
+    /// the kernel; a refusal says why; signing in gives the desk back; a
+    /// rested desk locks when the person has a passphrase; signing out
+    /// closes every card.
+    #[test]
+    fn the_sign_in_screen_asks_who_is_here_and_locks_the_rested_desk() {
+        let mut desk = Desk::new(1280, 800);
+        desk.launch(DeskApp::Notepad);
+        desk.show_sign_in(
+            alloc::vec!["alice".into(), "armando".into()],
+            Some("armando"),
+        );
+        let windows = desk.windows("12:00", true, None);
+        assert_eq!(windows.len(), 1, "only the sign-in screen");
+        assert_eq!(windows[0].style, WindowStyle::Veil);
+        assert_eq!(desk.handle_key(b'p').0, None);
+        desk.handle_key(b'w');
+        let (req, _) = desk.handle_key(b'\n');
+        assert_eq!(
+            req,
+            Some(DeskRequest::SignIn {
+                name: "armando".into(),
+                passphrase: "pw".into()
+            })
+        );
+        desk.sign_in_refused("Wrong name or passphrase");
+        assert_eq!(
+            desk.sign_in_view().unwrap().message.as_deref(),
+            Some("Wrong name or passphrase")
+        );
+        // A click on the Sign in button with nothing typed asks for it.
+        let panel = crate::sign_in::SignInView::panel(1280, 800);
+        let bx = (panel.x + panel.width - 40 - 50) as i32;
+        let by = panel.y as i32 + 44 + crate::sign_in::TILE.1 as i32 + 18 + 20;
+        let mut router = DesktopInputRouter::new();
+        route(&mut desk, &mut router, press(bx, by));
+        route(&mut desk, &mut router, release(bx, by));
+        assert_eq!(
+            desk.sign_in_view().unwrap().message.as_deref(),
+            Some("Type your passphrase")
+        );
+        desk.signed_in("armando");
+        assert!(!desk.signing_in());
+        assert!(desk.windows("12:00", true, None).len() > 1);
+        // Rest, then wake: no passphrase, no lock.
+        desk.handle_key(KEY_CTRL_L);
+        desk.handle_key(b'x');
+        assert!(!desk.signing_in());
+        // With one, waking asks for it.
+        desk.set_lock_on_rest(true);
+        desk.handle_key(KEY_CTRL_L);
+        desk.handle_key(b'x');
+        assert!(desk.signing_in());
+        for b in b"pw" {
+            desk.handle_key(*b);
+        }
+        assert_eq!(
+            desk.handle_key(b'\n').0,
+            Some(DeskRequest::Unlock {
+                passphrase: "pw".into()
+            })
+        );
+        desk.unlocked();
+        assert!(
+            desk.focused_window().is_some(),
+            "the cards are as they were"
+        );
+        // Sign out: the palette asks; the kernel answers with a new desk.
+        assert!(PaletteAction::ALL.contains(&PaletteAction::SignOut));
+        assert_eq!(
+            desk.run_action(PaletteAction::SignOut),
+            Some(DeskRequest::SignOut)
+        );
+        desk.signed_out(alloc::vec!["armando".into()], Some("armando"));
+        assert!(desk.signing_in());
+        desk.signed_in("armando");
+        assert!(desk.focused_window().is_none(), "every card closed");
     }
 
     #[test]

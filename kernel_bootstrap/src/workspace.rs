@@ -2300,7 +2300,9 @@ impl WorkspaceSession {
         }
     }
 
-    fn request_clear(&mut self) {
+    /// Clear the console's transcript -- also when someone signs in or out
+    /// (FS-006), so the next person does not read the last one's.
+    pub fn request_clear(&mut self) {
         self.clear_requested = true;
         self.output_head = 0;
         self.output_count = 0;

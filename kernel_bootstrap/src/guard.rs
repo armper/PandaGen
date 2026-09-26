@@ -33,6 +33,9 @@ pub enum Actor {
     System,
     /// A signed-in person.
     Session(SessionHandle),
+    /// No one: the desk is asking who is here (FS-006). Everything is
+    /// refused until someone signs in.
+    Nobody,
 }
 
 /// What `.authority` holds.
@@ -69,6 +72,9 @@ pub struct BootReport {
     pub console: String,
     /// Documents nobody owned, now the console person's.
     pub adopted: usize,
+    /// The console person has a passphrase: no one is signed in yet, and
+    /// the desk asks who is here (FS-006).
+    pub needs_sign_in: bool,
 }
 
 /// Boot the guard (FS-004): take up `.authority`, or on a disk without
@@ -107,8 +113,16 @@ pub fn boot(
     };
     let adopted = fs.adopt_unowned(who)?;
     fs.save_guard()?;
-    let session = fs.guard.sessions.open(who, now);
-    fs.guard.act_as(Actor::Session(session));
+    // With a passphrase, the person must give it: nobody is signed in
+    // until the desk's sign-in screen has it (FS-006). Without one there
+    // is nothing to ask for, and the console is theirs.
+    let needs_sign_in = fs.guard.accounts.has_passphrase(who);
+    if needs_sign_in {
+        fs.guard.act_as(Actor::Nobody);
+    } else {
+        let session = fs.guard.sessions.open(who, now);
+        fs.guard.act_as(Actor::Session(session));
+    }
     Ok(BootReport {
         first_person,
         console: fs
@@ -118,7 +132,94 @@ pub fn boot(
             .map(|p| p.name.clone())
             .unwrap_or_default(),
         adopted,
+        needs_sign_in,
     })
+}
+
+/// Whether a person is signed in at the console.
+pub fn signed_in(fs: &crate::bare_metal_storage::BareMetalFilesystem) -> bool {
+    fs.guard.principal().is_some_and(|p| p != SYSTEM)
+}
+
+/// Who the sign-in screen offers (FS-006): everyone who has a passphrase.
+pub fn people(fs: &crate::bare_metal_storage::BareMetalFilesystem) -> Vec<String> {
+    fs.guard
+        .authority
+        .principals()
+        .iter()
+        .filter(|p| p.id != SYSTEM && fs.guard.accounts.has_passphrase(p.id))
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// Whether the person signed in has a passphrase -- so a rested desk locks.
+pub fn has_passphrase(fs: &crate::bare_metal_storage::BareMetalFilesystem) -> bool {
+    match fs.guard.principal() {
+        Some(p) if p != SYSTEM => fs.guard.accounts.has_passphrase(p),
+        _ => false,
+    }
+}
+
+/// Sign `name` in with `passphrase`, closing whatever session the console
+/// had (FS-006). The error says why, fit to show.
+pub fn sign_in(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    name: &str,
+    passphrase: &str,
+    now: u64,
+) -> Result<(), String> {
+    let g = &mut fs.guard;
+    g.mark_dirty();
+    match g
+        .sessions
+        .login(&mut g.accounts, &g.authority, name, passphrase, now)
+    {
+        Ok(handle) => {
+            if let Actor::Session(old) = g.actor() {
+                g.sessions.close(old);
+            }
+            g.act_as(Actor::Session(handle));
+            Ok(())
+        }
+        Err(authority::credential::LoginError::Locked { until }) => Err(alloc::format!(
+            "Too many tries: wait {} s",
+            until.saturating_sub(now).max(1)
+        )),
+        Err(_) => Err("Wrong name or passphrase".into()),
+    }
+}
+
+/// Unlock the rested desk: the person signed in gives their passphrase
+/// again. Their session stays as it was.
+pub fn unlock(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    passphrase: &str,
+    now: u64,
+) -> Result<(), String> {
+    let Some(name) = fs.guard.principal_name().map(String::from) else {
+        return Err("No one is signed in".into());
+    };
+    let g = &mut fs.guard;
+    g.mark_dirty();
+    match g
+        .accounts
+        .authenticate(&g.authority, &name, passphrase, now)
+    {
+        Ok(_) => Ok(()),
+        Err(authority::credential::LoginError::Locked { until }) => Err(alloc::format!(
+            "Too many tries: wait {} s",
+            until.saturating_sub(now).max(1)
+        )),
+        Err(_) => Err("Wrong passphrase".into()),
+    }
+}
+
+/// Sign out: close the console's session; nobody is signed in.
+pub fn sign_out(fs: &mut crate::bare_metal_storage::BareMetalFilesystem) {
+    if let Actor::Session(handle) = fs.guard.actor() {
+        fs.guard.sessions.close(handle);
+    }
+    fs.guard.act_as(Actor::Nobody);
 }
 
 pub struct Guard {
@@ -191,6 +292,7 @@ impl Guard {
         match self.actor {
             Actor::System => Some(SYSTEM),
             Actor::Session(handle) => self.sessions.principal(handle),
+            Actor::Nobody => None,
         }
     }
 
@@ -524,7 +626,8 @@ mod tests {
             BootReport {
                 first_person: true,
                 console: "armando".into(),
-                adopted: 1
+                adopted: 1,
+                needs_sign_in: false,
             },
             "welcome.txt"
         );
@@ -544,10 +647,51 @@ mod tests {
             BootReport {
                 first_person: false,
                 console: "armando".into(),
-                adopted: 0
+                adopted: 0,
+                needs_sign_in: false,
             }
         );
         assert_eq!(fs.read_file_by_name("plan").unwrap(), b"mine");
+    }
+
+    /// With a passphrase the next boot signs no one in; the sign-in screen's
+    /// calls do, refuse, unlock and sign out (FS-006).
+    #[test]
+    fn a_passphrase_makes_the_boot_ask_who_is_here() {
+        let mut fs = BareMetalFilesystem::new().unwrap();
+        fs.guard = Guard::for_tests();
+        boot(&mut fs, "armando", 1).unwrap();
+        fs.write_named("plan", b"mine", 2, None).unwrap();
+        let me = fs.guard.principal().unwrap();
+        {
+            let g = &mut fs.guard;
+            g.accounts
+                .set_passphrase(&g.authority, me, me, None, "pass1", [5; 16])
+                .unwrap();
+        }
+        assert!(has_passphrase(&fs));
+        fs.save_guard().unwrap();
+        fs.guard = Guard::for_tests();
+        let report = boot(&mut fs, "armando", 10).unwrap();
+        assert!(report.needs_sign_in);
+        assert!(!signed_in(&fs));
+        assert!(
+            fs.read_file_by_name("plan").is_err(),
+            "nobody reads anything"
+        );
+        assert_eq!(people(&fs), alloc::vec!["armando".to_string()]);
+        assert_eq!(
+            sign_in(&mut fs, "armando", "nope", 11),
+            Err("Wrong name or passphrase".into())
+        );
+        assert!(sign_in(&mut fs, "armando", "pass1", 12).is_ok());
+        assert!(signed_in(&fs));
+        assert_eq!(fs.read_file_by_name("plan").unwrap(), b"mine");
+        assert_eq!(unlock(&mut fs, "nope", 13), Err("Wrong passphrase".into()));
+        assert!(unlock(&mut fs, "pass1", 14).is_ok());
+        sign_out(&mut fs);
+        assert!(!signed_in(&fs));
+        assert!(fs.list_files().unwrap().is_empty());
     }
 
     fn first_owner(fs: &BareMetalFilesystem) -> u32 {

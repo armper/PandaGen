@@ -40,6 +40,7 @@ mod palette_overlay;
 mod present_policy;
 mod render_stats;
 mod rtc;
+mod sign_in;
 mod sketch;
 mod speaker;
 mod tasks;
@@ -1358,6 +1359,11 @@ pub extern "C" fn rust_main() -> ! {
             .map(|d| d.unix_seconds())
             .unwrap_or(0);
         match guard::boot(&mut filesystem, &owner, now) {
+            Ok(report) if report.needs_sign_in => kprintln!(
+                serial,
+                "authority: {} has a passphrase; the desk asks who is here",
+                report.console
+            ),
             Ok(report) => kprintln!(
                 serial,
                 "authority: signed in as {}{}{}",
@@ -2030,6 +2036,11 @@ fn workspace_loop(
                 let now = get_tick_count();
                 if now.saturating_sub(tray_refreshed_at) >= desk::TRAY_EVERY {
                     tray_refreshed_at = now;
+                    // A passphrase set at the shell locks the next rest.
+                    if let Some(fs) = workspace.take_filesystem() {
+                        desk.set_lock_on_rest(guard::has_passphrase(&fs));
+                        workspace.set_filesystem(fs);
+                    }
                     if !desk_requests.contains(&desk::DeskRequest::Vitals) {
                         desk_requests.push(desk::DeskRequest::Vitals);
                     }
@@ -2101,6 +2112,59 @@ fn workspace_loop(
                                     now,
                                 ),
                             }
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::SignIn { name, passphrase } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            fs.set_clock(now_secs);
+                            let result = guard::sign_in(&mut fs, &name, &passphrase, now_secs);
+                            let lock = guard::has_passphrase(&fs);
+                            workspace.set_filesystem(fs);
+                            match result {
+                                Ok(()) => {
+                                    kprintln!(
+                                        serial,
+                                        "authority: {} signed in at the sign-in screen",
+                                        name
+                                    );
+                                    desk.signed_in(&name);
+                                    desk.set_lock_on_rest(lock);
+                                    workspace.request_clear();
+                                    desk_requests.push(desk::DeskRequest::LoadLook);
+                                }
+                                Err(why) => {
+                                    kprintln!(serial, "authority: sign-in refused for {}", name);
+                                    desk.sign_in_refused(&why);
+                                }
+                            }
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::Unlock { passphrase } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            let result = guard::unlock(&mut fs, &passphrase, now_secs);
+                            workspace.set_filesystem(fs);
+                            match result {
+                                Ok(()) => {
+                                    kprintln!(serial, "authority: unlocked");
+                                    desk.unlocked();
+                                }
+                                Err(why) => desk.sign_in_refused(&why),
+                            }
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::SignOut => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            let preferred =
+                                fs.guard.principal_name().map(alloc::string::String::from);
+                            guard::sign_out(&mut fs);
+                            let people = guard::people(&fs);
+                            workspace.set_filesystem(fs);
+                            kprintln!(serial, "authority: signed out");
+                            workspace.request_clear();
+                            desk.signed_out(people, preferred.as_deref());
                             output_dirty = true;
                         }
                     }
@@ -2557,7 +2621,29 @@ fn workspace_loop(
                     let desk = desk.get_or_insert_with(|| desk::Desk::new(w, h));
                     if !look_loaded {
                         look_loaded = true;
-                        desk_requests.push(desk::DeskRequest::LoadLook);
+                        // Who is here (FS-006): with nobody signed in, the
+                        // sign-in screen; the look is theirs, read after.
+                        let who = workspace.take_filesystem().map(|fs| {
+                            let r = (
+                                guard::signed_in(&fs),
+                                guard::people(&fs),
+                                fs.guard.console.clone(),
+                                guard::has_passphrase(&fs),
+                            );
+                            workspace.set_filesystem(fs);
+                            r
+                        });
+                        match who {
+                            Some((false, people, console, _)) => {
+                                desk.show_sign_in(people, console.as_deref());
+                            }
+                            Some((true, _, console, lock)) => {
+                                desk.signed_in(console.as_deref().unwrap_or(""));
+                                desk.set_lock_on_rest(lock);
+                                desk_requests.push(desk::DeskRequest::LoadLook);
+                            }
+                            None => desk_requests.push(desk::DeskRequest::LoadLook),
+                        }
                     }
                     // The desk decides focus; the router mirrors it, so
                     // `apply_focus` below paints the ring where the desk

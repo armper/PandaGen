@@ -897,6 +897,29 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "PandaGen Workspace".to_string(),
     ];
     shapes.push(Shape::new(&title, &args));
+
+    // Signing in (FS-006): it leaves a passphrase on its disk, which is its
+    // own (DEV-001).
+    title = "the desk: a passphrase, sign out, a wrong one, then the right one".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        // The Terminal sets a passphrase; the palette signs out; the
+        // sign-in screen takes a wrong passphrase, then the right one.
+        "sleep:6,ctrl-t,sleep:2,p,a,s,s,w,d,spc,p,a,s,s,1,ret,sleep:1,ctrl-spc,sleep:1,s,i,g,n,spc,o,u,t,ret,sleep:2,x,x,x,x,ret,sleep:2,p,a,s,s,1,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_sign_in".to_string(),
+        "--expect-serial".to_string(),
+        "authority: signed out".to_string(),
+        "--expect-serial".to_string(),
+        "authority: sign-in refused for owner".to_string(),
+        "--expect-serial".to_string(),
+        "authority: owner signed in at the sign-in screen".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
     run_shapes(&root, shapes, began)
 }
 
