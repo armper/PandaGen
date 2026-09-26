@@ -975,6 +975,19 @@ fn ps2_wait_input_clear() -> bool {
     false
 }
 
+/// Light the keyboard's LEDs (KBD-013): command 0xED, then the bits. The
+/// keyboard ACKs each byte through IRQ 1, and the parser drops the ACKs.
+/// The second byte waits in the controller until the keyboard takes it.
+#[cfg(not(test))]
+fn ps2_set_leds(leds: u8) {
+    for byte in [0xED, leds] {
+        if !ps2_wait_input_clear() {
+            return;
+        }
+        unsafe { outb(0x60, byte) };
+    }
+}
+
 #[cfg(not(test))]
 fn ps2_wait_output_full() -> bool {
     const LIMIT: usize = 10000;
@@ -1694,6 +1707,9 @@ fn workspace_loop(
 
         // Process keyboard input
         let mut input_progressed = false;
+        if let Some(leds) = parser_state.take_leds() {
+            ps2_set_leds(leds);
+        }
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
             if let Some(ch) = parser_state.process_scancode(scancode, serial) {
                 if KBD_DEBUG_LOG {
@@ -4551,7 +4567,52 @@ struct Ps2ParserState {
     pending_e0: bool,
     shift_pressed: bool,
     ctrl_pressed: bool,
+    /// Bytes of a Pause sequence (`E1 1D 45 E1 9D C5`) still to swallow:
+    /// its middle bytes are Ctrl and Num Lock's (KBD-013).
+    pending_e1: u8,
+    caps_lock: bool,
+    num_lock: bool,
+    /// The lock keys are held: the keyboard repeats their make codes, and
+    /// a held key toggles once.
+    caps_held: bool,
+    num_held: bool,
+    /// The LEDs no longer show the locks.
+    leds_changed: bool,
 }
+
+/// The letter keys, by row: the scancode of the row's first key, and the
+/// row (KBD-013). They were twenty-six match arms.
+const LETTER_ROWS: [(u8, &[u8]); 3] = [
+    (0x10, b"qwertyuiop"),
+    (0x1E, b"asdfghjkl"),
+    (0x2C, b"zxcvbnm"),
+];
+
+fn letter_of(code: u8) -> Option<u8> {
+    LETTER_ROWS.iter().find_map(|&(first, row)| {
+        code.checked_sub(first)
+            .and_then(|at| row.get(at as usize))
+            .copied()
+    })
+}
+
+/// The keypad's keys, 0x47 to 0x53: the digit Num Lock gives, and the
+/// navigation byte without it (`0` for none).
+const KEYPAD: [(u8, u8); 13] = [
+    (b'7', crate::notepad::KEY_HOME),
+    (b'8', crate::notepad::KEY_UP),
+    (b'9', crate::notepad::KEY_PAGE_UP),
+    (b'-', b'-'),
+    (b'4', crate::notepad::KEY_LEFT),
+    (b'5', 0),
+    (b'6', crate::notepad::KEY_RIGHT),
+    (b'+', b'+'),
+    (b'1', crate::notepad::KEY_END),
+    (b'2', crate::notepad::KEY_DOWN),
+    (b'3', crate::notepad::KEY_PAGE_DOWN),
+    (b'0', 0),
+    (b'.', crate::notepad::KEY_DELETE),
+];
 
 impl Ps2ParserState {
     fn new() -> Self {
@@ -4559,7 +4620,24 @@ impl Ps2ParserState {
             pending_e0: false,
             shift_pressed: false,
             ctrl_pressed: false,
+            pending_e1: 0,
+            caps_lock: false,
+            // On, as most machines start: the keypad types digits.
+            num_lock: true,
+            caps_held: false,
+            num_held: false,
+            // The first loop sets the LEDs to match.
+            leds_changed: true,
         }
+    }
+
+    /// The byte to send after command 0xED, once, when a lock has changed
+    /// since the LEDs were last set: bit 1 Num Lock, bit 2 Caps Lock.
+    fn take_leds(&mut self) -> Option<u8> {
+        if !core::mem::take(&mut self.leds_changed) {
+            return None;
+        }
+        Some((self.num_lock as u8) << 1 | (self.caps_lock as u8) << 2)
     }
 
     /// Process a scancode byte and return ASCII character if available
@@ -4577,6 +4655,23 @@ impl Ps2ParserState {
             );
         }
 
+        // The keyboard's own replies -- ACK, resend, echo, overrun -- are
+        // not keys. Setting the LEDs brings two ACKs back through IRQ 1.
+        if matches!(scancode, 0xFA | 0xFE | 0xEE | 0x00 | 0xFF) {
+            return None;
+        }
+
+        // Pause: E1 1D 45 E1 9D C5, and no break. Swallowed whole, or its
+        // middle bytes would press Ctrl and toggle Num Lock.
+        if scancode == 0xE1 {
+            self.pending_e1 = 2;
+            return None;
+        }
+        if self.pending_e1 > 0 {
+            self.pending_e1 -= 1;
+            return None;
+        }
+
         // E0 prefix handling
         if scancode == 0xE0 {
             self.pending_e0 = true;
@@ -4585,6 +4680,36 @@ impl Ps2ParserState {
 
         let is_break = (scancode & 0x80) != 0;
         let code = scancode & 0x7F;
+
+        // E0 2A / E0 36 are not Shift: a keyboard wraps its grey arrows in
+        // them while Num Lock is on (and Print Screen sends one). Taken as
+        // Shift, every arrow on such a keyboard grew a selection.
+        if self.pending_e0 && (code == 0x2A || code == 0x36) {
+            self.pending_e0 = false;
+            return None;
+        }
+
+        // Caps Lock and Num Lock toggle on the press, once however long the
+        // key is held, and the LEDs follow (KBD-013).
+        if (code == 0x3A || code == 0x45) && !self.pending_e0 {
+            let caps = code == 0x3A;
+            let held = if caps {
+                &mut self.caps_held
+            } else {
+                &mut self.num_held
+            };
+            let first = !is_break && !*held;
+            *held = !is_break;
+            if first {
+                if caps {
+                    self.caps_lock = !self.caps_lock;
+                } else {
+                    self.num_lock = !self.num_lock;
+                }
+                self.leds_changed = true;
+            }
+            return None;
+        }
 
         // Handle shift state
         if code == 0x2A || code == 0x36 {
@@ -4648,6 +4773,10 @@ impl Ps2ParserState {
                 (0x53, _) => Some(crate::notepad::KEY_DELETE),
                 (0x49, _) => Some(crate::notepad::KEY_PAGE_UP),
                 (0x51, _) => Some(crate::notepad::KEY_PAGE_DOWN),
+                // The keypad's Enter and slash (KBD-013); Enter was
+                // dropped, so the keypad could not run a command.
+                (0x1C, _) => Some(b'\n'),
+                (0x35, _) => Some(b'/'),
                 _ => None,
             };
         }
@@ -4700,191 +4829,29 @@ impl Ps2ParserState {
                     b'0' + digit
                 }
             }
-            0x10 => {
-                if self.shift_pressed {
-                    b'Q'
+            // Letters: Shift or Caps Lock, not both, makes a capital. Ctrl+P
+            // is 0x10 by the Ctrl rule below, as it always was.
+            code if letter_of(code).is_some() => {
+                let letter = letter_of(code)?;
+                if self.shift_pressed != self.caps_lock {
+                    letter.to_ascii_uppercase()
                 } else {
-                    b'q'
+                    letter
                 }
             }
-            0x11 => {
-                if self.shift_pressed {
-                    b'W'
+            // The keypad (KBD-013): digits with Num Lock (Shift flips it),
+            // the navigation keys without.
+            0x47..=0x53 => {
+                let (digit, nav) = KEYPAD[(code - 0x47) as usize];
+                if self.num_lock != self.shift_pressed || code == 0x4A || code == 0x4E {
+                    digit
+                } else if nav == 0 {
+                    return None;
                 } else {
-                    b'w'
+                    return Some(nav);
                 }
             }
-            0x12 => {
-                if self.shift_pressed {
-                    b'E'
-                } else {
-                    b'e'
-                }
-            }
-            0x13 => {
-                if self.shift_pressed {
-                    b'R'
-                } else {
-                    b'r'
-                }
-            }
-            0x14 => {
-                if self.shift_pressed {
-                    b'T'
-                } else {
-                    b't'
-                }
-            }
-            0x15 => {
-                if self.shift_pressed {
-                    b'Y'
-                } else {
-                    b'y'
-                }
-            }
-            0x16 => {
-                if self.shift_pressed {
-                    b'U'
-                } else {
-                    b'u'
-                }
-            }
-            0x17 => {
-                if self.shift_pressed {
-                    b'I'
-                } else {
-                    b'i'
-                }
-            }
-            0x18 => {
-                if self.shift_pressed {
-                    b'O'
-                } else {
-                    b'o'
-                }
-            }
-            0x19 => {
-                // P key - handle Ctrl+P specially
-                if self.ctrl_pressed {
-                    return Some(0x10); // Ctrl+P
-                } else if self.shift_pressed {
-                    b'P'
-                } else {
-                    b'p'
-                }
-            }
-            0x1E => {
-                if self.shift_pressed {
-                    b'A'
-                } else {
-                    b'a'
-                }
-            }
-            0x1F => {
-                if self.shift_pressed {
-                    b'S'
-                } else {
-                    b's'
-                }
-            }
-            0x20 => {
-                if self.shift_pressed {
-                    b'D'
-                } else {
-                    b'd'
-                }
-            }
-            0x21 => {
-                if self.shift_pressed {
-                    b'F'
-                } else {
-                    b'f'
-                }
-            }
-            0x22 => {
-                if self.shift_pressed {
-                    b'G'
-                } else {
-                    b'g'
-                }
-            }
-            0x23 => {
-                if self.shift_pressed {
-                    b'H'
-                } else {
-                    b'h'
-                }
-            }
-            0x24 => {
-                if self.shift_pressed {
-                    b'J'
-                } else {
-                    b'j'
-                }
-            }
-            0x25 => {
-                if self.shift_pressed {
-                    b'K'
-                } else {
-                    b'k'
-                }
-            }
-            0x26 => {
-                if self.shift_pressed {
-                    b'L'
-                } else {
-                    b'l'
-                }
-            }
-            0x2C => {
-                if self.shift_pressed {
-                    b'Z'
-                } else {
-                    b'z'
-                }
-            }
-            0x2D => {
-                if self.shift_pressed {
-                    b'X'
-                } else {
-                    b'x'
-                }
-            }
-            0x2E => {
-                if self.shift_pressed {
-                    b'C'
-                } else {
-                    b'c'
-                }
-            }
-            0x2F => {
-                if self.shift_pressed {
-                    b'V'
-                } else {
-                    b'v'
-                }
-            }
-            0x30 => {
-                if self.shift_pressed {
-                    b'B'
-                } else {
-                    b'b'
-                }
-            }
-            0x31 => {
-                if self.shift_pressed {
-                    b'N'
-                } else {
-                    b'n'
-                }
-            }
-            0x32 => {
-                if self.shift_pressed {
-                    b'M'
-                } else {
-                    b'm'
-                }
-            }
+            0x37 => b'*',
             0x39 => {
                 // Ctrl+Space opens the desk's palette; a private byte, like
                 // the arrows.
@@ -5008,6 +4975,107 @@ mod keyboard_scancode_tests {
         fn write_str(&mut self, _s: &str) -> fmt::Result {
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_caps_lock_toggles_once_and_shift_undoes_it() {
+        let mut parser = Ps2ParserState::new();
+        let mut w = DummyWriter;
+        assert_eq!(parser.take_leds(), Some(0b010), "Num Lock on at boot");
+        assert_eq!(parser.take_leds(), None);
+        // Caps Lock held: the keyboard repeats the make code.
+        for code in [0x3A, 0x3A, 0x3A, 0xBA] {
+            assert_eq!(parser.process_scancode(code, &mut w), None);
+        }
+        assert_eq!(parser.take_leds(), Some(0b110));
+        assert_eq!(parser.process_scancode(0x1E, &mut w), Some(b'A'));
+        assert_eq!(
+            parser.process_scancode(0x02, &mut w),
+            Some(b'1'),
+            "digits keep"
+        );
+        parser.process_scancode(0x2A, &mut w);
+        assert_eq!(parser.process_scancode(0x1E, &mut w), Some(b'a'));
+        parser.process_scancode(0xAA, &mut w);
+        // Ctrl+letter is still the control byte.
+        parser.process_scancode(0x1D, &mut w);
+        assert_eq!(parser.process_scancode(0x19, &mut w), Some(0x10));
+        assert_eq!(parser.process_scancode(0x1F, &mut w), Some(0x13));
+        parser.process_scancode(0x9D, &mut w);
+        parser.process_scancode(0x3A, &mut w);
+        parser.process_scancode(0xBA, &mut w);
+        assert_eq!(parser.process_scancode(0x1E, &mut w), Some(b'a'));
+        // The ACKs the LED command brings back are not keys.
+        assert_eq!(parser.process_scancode(0xFA, &mut w), None);
+    }
+
+    #[test]
+    fn test_every_letter_key_is_its_letter() {
+        let mut parser = Ps2ParserState::new();
+        let mut w = DummyWriter;
+        let codes = [
+            0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31,
+            0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+        ];
+        let typed: std::vec::Vec<u8> = codes
+            .iter()
+            .map(|&c| parser.process_scancode(c, &mut w).unwrap())
+            .collect();
+        assert_eq!(typed, b"abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn test_keypad_digits_with_num_lock_and_arrows_without() {
+        let mut parser = Ps2ParserState::new();
+        let mut w = DummyWriter;
+        assert_eq!(parser.process_scancode(0x47, &mut w), Some(b'7'));
+        assert_eq!(parser.process_scancode(0x53, &mut w), Some(b'.'));
+        assert_eq!(parser.process_scancode(0x37, &mut w), Some(b'*'));
+        assert_eq!(parser.process_scancode(0x4E, &mut w), Some(b'+'));
+        // Keypad Enter and slash.
+        parser.process_scancode(0xE0, &mut w);
+        assert_eq!(parser.process_scancode(0x1C, &mut w), Some(b'\n'));
+        parser.process_scancode(0xE0, &mut w);
+        assert_eq!(parser.process_scancode(0x35, &mut w), Some(b'/'));
+        // Num Lock off: the keypad navigates.
+        parser.process_scancode(0x45, &mut w);
+        parser.process_scancode(0xC5, &mut w);
+        assert_eq!(parser.take_leds().map(|l| l & 0b010), Some(0));
+        assert_eq!(
+            parser.process_scancode(0x48, &mut w),
+            Some(crate::notepad::KEY_UP)
+        );
+        assert_eq!(parser.process_scancode(0x4C, &mut w), None, "5 is nothing");
+        assert_eq!(parser.process_scancode(0x4A, &mut w), Some(b'-'));
+    }
+
+    #[test]
+    fn test_fake_shifts_and_pause_are_not_keys() {
+        let mut parser = Ps2ParserState::new();
+        let mut w = DummyWriter;
+        // A grey arrow with Num Lock on: E0 2A E0 48 E0 C8 E0 AA.
+        for code in [0xE0, 0x2A, 0xE0] {
+            assert_eq!(parser.process_scancode(code, &mut w), None);
+        }
+        assert_eq!(
+            parser.process_scancode(0x48, &mut w),
+            Some(crate::notepad::KEY_UP)
+        );
+        for code in [0xE0, 0xC8, 0xE0, 0xAA] {
+            assert_eq!(parser.process_scancode(code, &mut w), None);
+        }
+        assert_eq!(
+            parser.process_scancode(0x1E, &mut w),
+            Some(b'a'),
+            "no Shift left"
+        );
+        // Pause: no Ctrl, no Num Lock toggle.
+        parser.take_leds();
+        for code in [0xE1, 0x1D, 0x45, 0xE1, 0x9D, 0xC5] {
+            assert_eq!(parser.process_scancode(code, &mut w), None);
+        }
+        assert_eq!(parser.take_leds(), None);
+        assert_eq!(parser.process_scancode(0x1E, &mut w), Some(b'a'));
     }
 
     #[test]
