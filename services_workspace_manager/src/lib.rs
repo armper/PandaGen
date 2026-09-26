@@ -1517,7 +1517,7 @@ impl WorkspaceManager {
 
         if let Some(budget) = config.budget {
             identity = identity.with_budget(budget);
-        } else if let Some(inherited) = self.workspace_identity.budget.clone() {
+        } else if let Some(inherited) = self.workspace_identity.budget {
             // A component that names no budget is unmetered, so under a
             // metered workspace it inherits rather than escaping.
             identity = identity.with_budget(inherited);
@@ -4589,7 +4589,6 @@ mod tests {
             .unwrap()
             .identity
             .budget
-            .clone()
             .expect("and must be metered, not unmetered");
         assert_eq!(budget.cpu_ticks, Some(CpuTicks::new(100)));
     }
@@ -5033,7 +5032,7 @@ mod tests {
         let (message, actions) = err.actionable_message();
 
         assert!(message.contains("No components"));
-        assert!(actions.len() > 0);
+        assert!(!actions.is_empty());
         assert!(actions.iter().any(|a| a.contains("open")));
     }
 

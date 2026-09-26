@@ -4,7 +4,7 @@
 //! tests stay deterministic and fast. Each property runs a few hundred
 //! random cases.
 
-use graphics_rasterizer::{RasterRect, RenderTarget, RgbaBuffer};
+use graphics_rasterizer::{RasterRect, RgbaBuffer};
 use services_gui_host::{
     diff_scenes, Compositor, DesktopCursor, DesktopScene, DesktopWindow, DesktopWindowRole,
     SurfaceRect, SurfaceSize, Theme, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,

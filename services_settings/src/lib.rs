@@ -421,9 +421,9 @@ mod tests {
 
     #[test]
     fn test_setting_value_float() {
-        let val = SettingValue::Float(3.14);
+        let val = SettingValue::Float(2.5);
         assert!(val.is_float());
-        assert_eq!(val.as_float(), Some(3.14));
+        assert_eq!(val.as_float(), Some(2.5));
     }
 
     #[test]

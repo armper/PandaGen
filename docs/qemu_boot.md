@@ -122,7 +122,7 @@ The editor will open in the QEMU window.
 ### Limitations in Bare-Metal Mode
 
 - **Backend-Dependent Persistence**: Boot storage now probes for `virtio-blk-mmio` and falls back to `ramdisk`.
-- **Current Default QEMU Path**: `cargo xtask qemu` attaches `virtio-blk-pci`; without PCI probing in the kernel, storage typically falls back to RAM and is not reboot-persistent.
+- **Current Default QEMU Path**: `cargo xtask qemu` attaches `virtio-blk-pci`, which the kernel finds by PCI probing (Phases 252-253) and uses for the filesystem, so documents, settings and the desk layout survive a reboot. The gauntlet checks this on every run by booting twice on one disk (Phase 421). Storage falls back to RAM only when no block device is found.
 - **VGA Text Mode**: 80x25 character display, no syntax highlighting.
 - **PS/2 Keyboard Only**: USB keyboards may not work depending on BIOS/UEFI compatibility layer.
 

@@ -2514,8 +2514,8 @@ impl Palette {
             PaletteAction::ALL
                 .iter()
                 .copied()
-                .filter(|action| !(action.needs_notepad() && !has_notepad))
-                .filter(|action| !(action.needs_window() && !has_window))
+                .filter(|action| has_notepad || !action.needs_notepad())
+                .filter(|action| has_window || !action.needs_window())
                 .filter(|action| fits(action.label()))
                 .map(PaletteRow::Action),
         );
@@ -3035,7 +3035,7 @@ impl Desk {
             clock: clock.to_string(),
             up: Self::uptime(v.uptime_ticks),
             memory: (v.heap_total_kib > 0)
-                .then(|| (v.heap_used_kib / 1024, v.heap_total_kib / 1024)),
+                .then_some((v.heap_used_kib / 1024, v.heap_total_kib / 1024)),
             cpus_online: v.cpus_online,
             cpus_total: v.cpus_total,
             files: v.files,
@@ -3512,7 +3512,7 @@ impl Desk {
         let strip = self.space_strip();
         let strip_col = services_gui_host::top_bar_centre_column(self.width, strip.chars().count());
         let counts = self.space_counts();
-        for index in 0..SPACES {
+        for (index, &count) in counts.iter().enumerate().take(SPACES) {
             let digit_x = ((strip_col + index * 6 + 1) * GLYPH_WIDTH) as u32;
             if index == self.space {
                 ops.push(DrawOp::Text {
@@ -3531,7 +3531,7 @@ impl Desk {
                     },
                     color: rgb(theme.accent),
                 });
-            } else if counts[index] > 0 {
+            } else if count > 0 {
                 ops.push(DrawOp::RoundedFill {
                     rect: PixelRect {
                         x: digit_x + 2,
@@ -3618,7 +3618,7 @@ impl Desk {
         }
         // The same right-alignment the compositor paints with: a 12px
         // margin, then the text; the indicator is its first word.
-        let clock: String = core::iter::repeat('0').take(clock_len).collect();
+        let clock: String = core::iter::repeat_n('0', clock_len).collect();
         let total = self.bar_right(&clock).chars().count();
         let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH) / GLYPH_WIDTH;
         let indicator = alloc::format!("{} new", self.unseen_notices)
@@ -3630,7 +3630,7 @@ impl Desk {
     /// Whether top-bar text cell `column` is on the clock, the last
     /// `clock_len` cells of the right-hand text.
     fn clock_at_column(&self, column: usize, clock_len: usize) -> bool {
-        let clock: String = core::iter::repeat('0').take(clock_len).collect();
+        let clock: String = core::iter::repeat_n('0', clock_len).collect();
         let total = self.bar_right(&clock).chars().count();
         let start = self.width.saturating_sub(12 + total * GLYPH_WIDTH) / GLYPH_WIDTH;
         (start + total - clock_len..start + total).contains(&column)
@@ -4132,7 +4132,7 @@ impl Desk {
                 let path = self
                     .focused_window()
                     .and_then(|w| w.notepad())
-                    .and_then(|n| n.path().map(String::from));
+                    .and_then(|n| n.path());
                 match path {
                     Some(path) => self.open_sharing(&path),
                     None => None,
@@ -4543,12 +4543,12 @@ impl Desk {
         }
         for delivery in deliveries {
             match delivery {
-                Delivery::FocusChanged { current, .. } => {
-                    if let Some(id) = current {
-                        if self.window(*id).is_some() {
-                            self.raise(*id);
-                            changed = true;
-                        }
+                Delivery::FocusChanged {
+                    current: Some(id), ..
+                } => {
+                    if self.window(*id).is_some() {
+                        self.raise(*id);
+                        changed = true;
                     }
                 }
                 Delivery::Leave { target } if *target == self.dock_id => {
@@ -5963,7 +5963,7 @@ impl Desk {
             (NotepadEffect::Open { path }, Ok(None)) => {
                 (NoticeLevel::Warning, alloc::format!("Not found: {path}"))
             }
-            (_, Err(err)) => (NoticeLevel::Error, alloc::format!("{err}")),
+            (_, Err(err)) => (NoticeLevel::Error, err.to_string()),
             _ => (NoticeLevel::Info, String::new()),
         };
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
@@ -8145,7 +8145,7 @@ mod tests {
         // Click the clock.
         let mut router = DesktopInputRouter::new();
         let start = (1280 - 12 - 5 * 8) / 8;
-        let x = (start * 8 + 4) as i32;
+        let x = start * 8 + 4;
         route(&mut desk, &mut router, press(x, 14));
         route(&mut desk, &mut router, release(x, 14));
         let id = desk.focused_window().map(|w| w.id).expect("Now opened");
@@ -8330,9 +8330,11 @@ mod tests {
         assert_eq!(format_size(12), "12 B");
         assert_eq!(FileEntry::named("x").kind_label(), "File");
 
-        let mut files = FilesView::default();
-        files.entries = alloc::vec![entry];
-        files.loaded = true;
+        let mut files = FilesView {
+            entries: alloc::vec![entry],
+            loaded: true,
+            ..FilesView::default()
+        };
         let footer = files.footer();
         assert!(
             footer.contains("Text") && footer.contains("#work"),
@@ -8999,7 +9001,7 @@ mod tests {
             _ => panic!(),
         }
         let (cw, _) = Desk::canvas_size(desk.window(id).unwrap().bounds);
-        let undo_x = (ox as u32 + cw as u32 - 16 - 64 - 32) as i32;
+        let undo_x = (ox as u32 + cw - 16 - 64 - 32) as i32;
         route(&mut desk, &mut router, press(undo_x, (oy + 20) as i32));
         route(&mut desk, &mut router, release(undo_x, (oy + 20) as i32));
         match &desk.window(id).unwrap().state {

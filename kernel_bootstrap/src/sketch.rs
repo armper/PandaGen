@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use crate::widgets::{ButtonKind, Palette, Ui};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use view_types::{Color, DrawOp, PixelRect};
 

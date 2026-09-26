@@ -515,7 +515,7 @@ fn random_sequences_three_tasks() {
             let op = match rng.below(12) {
                 0 => Op::Spawn(t),
                 1 | 2 => Op::SetRt(t, rng.below(4) as usize),
-                3 | 4 | 5 => Op::Dequeue,
+                3..=5 => Op::Dequeue,
                 6 | 7 => Op::Tick(1 + rng.below(3)),
                 8 => Op::Preempt,
                 9 => Op::Block(t, 1 + rng.below(3)),

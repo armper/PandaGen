@@ -8,6 +8,7 @@
 
 use crate::paging::{PageTableFlags, VirtAddr};
 
+#[cfg(test)]
 const ENTRIES: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const PRESENT: u64 = PageTableFlags::PRESENT;

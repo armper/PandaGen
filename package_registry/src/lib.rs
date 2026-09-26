@@ -183,11 +183,13 @@ mod tests {
     #[test]
     fn test_resolve_registry() {
         let mut index = RegistryIndex::default();
-        index.add(PackageEntry {
-            name: "demo".to_string(),
-            version: "0.1.0".to_string(),
-            source_digest: "abc".to_string(),
-        });
+        index
+            .add(PackageEntry {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                source_digest: "abc".to_string(),
+            })
+            .unwrap();
 
         let resolver = RegistryResolver::new(index);
         let plan = BuildPlan {

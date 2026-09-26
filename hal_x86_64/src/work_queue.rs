@@ -349,7 +349,7 @@ mod tests {
         }
         for id in ids {
             let r = q.wait(id, 1).unwrap();
-            assert_eq!(r.value, id as u64 * 2);
+            assert_eq!(r.value, id * 2);
             assert!(r.cpu < 4);
         }
         assert_eq!(q.pending(), 0);

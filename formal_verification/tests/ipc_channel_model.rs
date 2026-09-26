@@ -329,7 +329,7 @@ fn random_sequences_two_channels_three_tasks() {
                     ][rng.below(3) as usize],
                 ),
                 2 => Op::Revoke(ch, t),
-                3 | 4 | 5 | 6 => Op::Send(ch, who),
+                3..=6 => Op::Send(ch, who),
                 _ => Op::Recv(ch, who),
             };
             h.step(op);

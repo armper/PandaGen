@@ -34,8 +34,8 @@ impl EditorSnapshot {
         hasher.update([self.mode as u8]);
 
         // Hash cursor
-        hasher.update(&self.cursor.row.to_le_bytes());
-        hasher.update(&self.cursor.col.to_le_bytes());
+        hasher.update(self.cursor.row.to_le_bytes());
+        hasher.update(self.cursor.col.to_le_bytes());
 
         // Hash buffer
         for line in &self.buffer_lines {
@@ -53,8 +53,8 @@ impl EditorSnapshot {
         hasher.update(self.search_query.as_bytes());
 
         // Hash undo/redo depth
-        hasher.update(&self.undo_depth.to_le_bytes());
-        hasher.update(&self.redo_depth.to_le_bytes());
+        hasher.update(self.undo_depth.to_le_bytes());
+        hasher.update(self.redo_depth.to_le_bytes());
 
         let result = hasher.finalize();
         let bytes: [u8; 8] = result[..8].try_into().unwrap();

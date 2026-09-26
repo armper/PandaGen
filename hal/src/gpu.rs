@@ -137,13 +137,13 @@ mod tests {
             width: 2,
             height: 2,
         };
-        gpu.upload_rgba(rect, &vec![0; 16]).unwrap();
+        gpu.upload_rgba(rect, &[0; 16]).unwrap();
         gpu.flush(rect).unwrap();
         assert_eq!(gpu.uploads, vec![(rect, 16)]);
         assert_eq!(gpu.flushes, vec![rect]);
 
         assert_eq!(
-            gpu.upload_rgba(rect, &vec![0; 15]),
+            gpu.upload_rgba(rect, &[0; 15]),
             Err(GpuError::LengthMismatch {
                 expected: 16,
                 actual: 15
@@ -156,7 +156,7 @@ mod tests {
             height: 1,
         };
         assert_eq!(
-            gpu.upload_rgba(outside, &vec![0; 8]),
+            gpu.upload_rgba(outside, &[0; 8]),
             Err(GpuError::OutOfBounds)
         );
         assert_eq!(gpu.flush(outside), Err(GpuError::OutOfBounds));
@@ -170,7 +170,7 @@ mod tests {
 
         gpu.fail_next = true;
         assert_eq!(
-            gpu.upload_rgba(rect, &vec![0; 16]),
+            gpu.upload_rgba(rect, &[0; 16]),
             Err(GpuError::DeviceFailure)
         );
         assert_eq!(gpu.uploads.len(), 1, "failed upload not recorded");

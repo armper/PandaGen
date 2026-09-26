@@ -482,19 +482,6 @@ impl EditorCore {
         }
     }
 
-    fn save_undo_snapshot(&mut self) {
-        let snapshot = self.buffer_snapshot();
-        self.undo_stack.push(snapshot);
-        // Clear redo stack on new edit
-        self.redo_stack.clear();
-
-        // Limit stack size
-        const MAX_UNDO_STACK: usize = 100;
-        if self.undo_stack.len() > MAX_UNDO_STACK {
-            self.undo_stack.remove(0);
-        }
-    }
-
     fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.undo_stack.pop() {
             // Save current state to redo

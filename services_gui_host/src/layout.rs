@@ -258,8 +258,7 @@ pub fn distribute(total: usize, gap: usize, lengths: impl Iterator<Item = Length
     }
     let gaps = gap.saturating_mul(count - 1);
     let mut remaining = total.saturating_sub(gaps);
-    let mut sizes = Vec::with_capacity(count);
-    sizes.resize(count, 0);
+    let mut sizes = alloc::vec![0; count];
 
     for (index, length) in lengths.iter().enumerate() {
         if let Length::Fixed(size) = length {

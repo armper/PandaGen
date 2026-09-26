@@ -588,7 +588,7 @@ impl Tcp {
             if conn.state == State::Closed {
                 continue;
             }
-            if skip.iter().any(|peer| *peer == Some(conn.peer)) {
+            if skip.contains(&Some(conn.peer)) {
                 continue;
             }
             // An unacknowledged SYN|ACK is in flight too: without this a lost
@@ -1047,10 +1047,12 @@ mod tests {
             tcp.connection(index).is_none(),
             "a peer that hung up must not hold a slot for the full idle timeout"
         );
-        assert!(
-            CLOSING_TIMEOUT_TICKS < IDLE_TIMEOUT_TICKS,
-            "the point of this test is that the two differ"
-        );
+        const {
+            assert!(
+                CLOSING_TIMEOUT_TICKS < IDLE_TIMEOUT_TICKS,
+                "the point of this test is that the two differ"
+            );
+        }
     }
 
     #[test]

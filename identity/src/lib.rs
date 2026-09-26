@@ -659,7 +659,7 @@ mod tests {
         );
 
         // And once it has inherited, it does.
-        let child = child.with_budget(parent.budget.clone().unwrap());
+        let child = child.with_budget(parent.budget.unwrap());
         assert!(child.budget_inherits_from(&parent));
     }
 

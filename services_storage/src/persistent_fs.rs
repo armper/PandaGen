@@ -456,7 +456,7 @@ mod tests {
         let fs = PersistentFilesystem::format(disk, "root").unwrap();
 
         let root = fs.root_dir_id();
-        assert!(root.to_string().len() > 0);
+        assert!(!root.to_string().is_empty());
     }
 
     #[test]

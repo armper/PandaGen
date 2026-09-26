@@ -1132,18 +1132,16 @@ mod tests {
         // The current TrustDomainPolicy only denies spawn and cross-domain delegation
         // For this test to work, we'd need a custom policy. Let's test with what we have.
 
-        // Since TrustDomainPolicy allows pipelines, this should not be denied
-        // Let's create a custom test policy for this
-        if let Err(err) = result {
-            match err {
-                services_pipeline_executor::ExecutorError::PolicyDenied { .. } => {
-                    // This would be the deny case
-                }
-                _ => {
-                    // Other errors are fine - policy didn't deny
-                }
-            }
-        }
+        // Since TrustDomainPolicy allows pipelines, this is not denied. It
+        // may fail for other reasons; this test only asked about policy, and
+        // used to assert nothing at all.
+        assert!(
+            !matches!(
+                result,
+                Err(services_pipeline_executor::ExecutorError::PolicyDenied { .. })
+            ),
+            "TrustDomainPolicy does not deny pipelines: {result:?}"
+        );
     }
 
     #[test]

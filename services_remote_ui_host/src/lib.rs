@@ -210,6 +210,8 @@ impl<K: KernelApi> SnapshotSink for IpcSnapshotSink<K> {
 /// the two frame kinds apart.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// One record at a time is built and written; the size gap costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum JsonLineRecord {
     Snapshot(RemoteSnapshotFrame),
     Desktop(RemoteDesktopFrame),

@@ -339,7 +339,7 @@ impl SceneReplay {
     pub fn step(&mut self) -> Option<Result<DesktopScene, DecodeError>> {
         let update = self.updates.get(self.position)?;
         self.position += 1;
-        Some(self.decoder.apply(update).map(|scene| scene.clone()))
+        Some(self.decoder.apply(update).cloned())
     }
 
     /// Replay everything from the start, collecting each reconstructed scene.

@@ -140,7 +140,7 @@ pub unsafe fn load(gdt: &'static Gdt) {
         data = in(reg) KERNEL_DATA_SELECTOR as u64,
         tss = in(reg) TSS_SELECTOR as u64,
         tmp = out(reg) _,
-        options(nostack)
+        // Not `nostack`: the far return pushes and pops.
     );
 }
 

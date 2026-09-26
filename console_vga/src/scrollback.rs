@@ -89,8 +89,12 @@ pub struct VgaScrollback {
     cols: usize,
     /// Height of visible viewport in rows
     viewport_rows: usize,
-    /// Ring buffer of lines
+    /// The lines, oldest first, from `start` on. Lines before `start`
+    /// have been dropped and are freed in bulk: dropping one line at a
+    /// time with `remove(0)` shifted every line kept, on every line pushed
+    /// once the buffer was full.
     lines: Vec<VgaLine>,
+    start: usize,
     /// Current viewport position (0 = bottom, showing most recent lines)
     viewport_offset: usize,
 }
@@ -109,6 +113,7 @@ impl VgaScrollback {
             cols,
             viewport_rows,
             lines: Vec::new(),
+            start: 0,
             viewport_offset: 0,
         }
     }
@@ -125,7 +130,7 @@ impl VgaScrollback {
 
     /// Get the total number of lines stored
     pub fn total_lines(&self) -> usize {
-        self.lines.len()
+        self.live().len()
     }
 
     /// Get the current viewport offset from the bottom
@@ -141,8 +146,14 @@ impl VgaScrollback {
         self.lines.push(line);
 
         // Remove old lines if we exceed max
-        while self.lines.len() > self.max_lines {
-            self.lines.remove(0);
+        if self.live().len() > self.max_lines {
+            self.start += 1;
+            // Free the dropped lines once they are as many as those kept:
+            // one shift per `max_lines` pushes.
+            if self.start >= self.max_lines.max(1) {
+                self.lines.drain(..self.start);
+                self.start = 0;
+            }
         }
 
         // Reset viewport to bottom when new content is added
@@ -208,8 +219,8 @@ impl VgaScrollback {
 
     /// Get maximum possible scroll up distance
     fn max_scroll_up(&self) -> usize {
-        if self.lines.len() > self.viewport_rows {
-            self.lines.len() - self.viewport_rows
+        if self.live().len() > self.viewport_rows {
+            self.live().len() - self.viewport_rows
         } else {
             0
         }
@@ -219,7 +230,7 @@ impl VgaScrollback {
     ///
     /// Returns a slice of lines that should be displayed
     pub fn visible_lines(&self) -> &[VgaLine] {
-        let total = self.lines.len();
+        let total = self.live().len();
         if total == 0 {
             return &[];
         }
@@ -228,12 +239,18 @@ impl VgaScrollback {
         let end = total - self.viewport_offset;
         let start = end.saturating_sub(self.viewport_rows);
 
-        &self.lines[start..end]
+        &self.live()[start..end]
+    }
+
+    /// The lines kept.
+    fn live(&self) -> &[VgaLine] {
+        &self.lines[self.start..]
     }
 
     /// Clear all content
     pub fn clear(&mut self) {
         self.lines.clear();
+        self.start = 0;
         self.viewport_offset = 0;
     }
 

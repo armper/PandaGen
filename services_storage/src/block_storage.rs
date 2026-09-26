@@ -136,6 +136,7 @@ struct CommitRecord {
 
 impl CommitRecord {
     /// Create a new commit record with computed checksum
+    #[cfg(test)]
     fn new(
         transaction_id: TransactionId,
         sequence: u64,
@@ -144,6 +145,7 @@ impl CommitRecord {
         Self::with_releases(transaction_id, sequence, allocations, Vec::new())
     }
 
+    #[cfg(test)]
     fn with_releases(
         transaction_id: TransactionId,
         sequence: u64,
@@ -847,7 +849,7 @@ impl<D: BlockDevice> BlockStorage<D> {
     /// folded into the reserved region.
     fn checkpoint_due(&self) -> bool {
         let interval = (self.superblock.commit_log_blocks / 2).max(1);
-        self.superblock.commit_sequence % interval == 0
+        self.superblock.commit_sequence.is_multiple_of(interval)
     }
 
     /// Write superblock to disk
@@ -1416,7 +1418,7 @@ mod tests {
 
         // Fail on commit record block to simulate crash before commit marker
         let next_seq = storage.superblock.commit_sequence + 1;
-        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let log_slot = next_seq % storage.superblock.commit_log_blocks;
         let commit_block_idx = storage.superblock.commit_log_start + log_slot;
         storage
             .device
@@ -1465,7 +1467,7 @@ mod tests {
         // A commit that dies on its record: the data blocks are already
         // written, and nothing will ever say they are in use.
         let next_seq = storage.superblock.commit_sequence + 1;
-        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let log_slot = next_seq % storage.superblock.commit_log_blocks;
         let record_block = storage.superblock.commit_log_start + log_slot;
         storage
             .device
@@ -1726,7 +1728,7 @@ mod tests {
         let mut storage = BlockStorage::format(failing).unwrap();
 
         let next_seq = storage.superblock.commit_sequence + 1;
-        let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+        let log_slot = next_seq % storage.superblock.commit_log_blocks;
         let record_block = storage.superblock.commit_log_start + log_slot;
         storage
             .device
@@ -1782,7 +1784,7 @@ mod tests {
             // Fail the commit record itself, so nothing lands and the
             // rollback path is the one under test.
             let next_seq = storage.superblock.commit_sequence + 1;
-            let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+            let log_slot = next_seq % storage.superblock.commit_log_blocks;
             let record_block = storage.superblock.commit_log_start + log_slot;
             storage
                 .device
@@ -1927,7 +1929,7 @@ mod tests {
 
         for attempt in 0..3 {
             let next_seq = storage.superblock.commit_sequence + 1;
-            let log_slot = (next_seq % storage.superblock.commit_log_blocks) as u64;
+            let log_slot = next_seq % storage.superblock.commit_log_blocks;
             let record_block = storage.superblock.commit_log_start + log_slot;
             storage
                 .device

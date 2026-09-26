@@ -62,14 +62,25 @@ pub const RASTER_CELL_WIDTH: usize = DESKTOP_FONT.advance_x();
 pub const RASTER_CELL_HEIGHT: usize = DESKTOP_FONT.glyph_height() + 2;
 const RASTER_BORDER_THICKNESS: usize = 1;
 
+// The default theme's colours by their old names: drawing takes them
+// from the `Theme` now, and only the tests still say them.
+#[cfg(test)]
 const DESKTOP_BACKGROUND_COLOR: RgbaColor = Theme::DEFAULT.background;
+#[cfg(test)]
 const POINTER_FILL_COLOR: RgbaColor = Theme::DEFAULT.pointer_fill;
+#[cfg(test)]
 const POINTER_OUTLINE_COLOR: RgbaColor = Theme::DEFAULT.pointer_outline;
+#[cfg(test)]
 const WINDOW_FILL_COLOR: RgbaColor = Theme::DEFAULT.surface;
+#[cfg(test)]
 const FOCUSED_BORDER_COLOR: RgbaColor = Theme::DEFAULT.border_focused;
+#[cfg(test)]
 const UNFOCUSED_BORDER_COLOR: RgbaColor = Theme::DEFAULT.border_unfocused;
+#[cfg(test)]
 const TEXT_COLOR: RgbaColor = Theme::DEFAULT.text;
+#[cfg(test)]
 const CURSOR_COLOR: RgbaColor = Theme::DEFAULT.caret;
+
 /// Corner radius of tab boxes in the title strip.
 const TAB_RADIUS: usize = 3;
 
@@ -2276,7 +2287,7 @@ fn isqrt(n: u64) -> u64 {
         return n;
     }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + n / x) / 2;

@@ -21,6 +21,9 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
 const VIRTIO_BLK_S_OK: u8 = 0;
+/// What a device that did not negotiate FLUSH answers one with; only the
+/// test device says it, since this driver always negotiates FLUSH.
+#[cfg(test)]
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 /// The device has a writeback cache and honours FLUSH.
 ///

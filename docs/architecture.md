@@ -4868,7 +4868,9 @@ runtime.run()?;
 
 ### Limitations and Future Work
 
-**Current Limitations**:
+**Limitations at the time** (Phase 20; later phases closed most of them --
+the keyboard HAL became a real PS/2 driver in Phase 21, scrollback came in
+Phase 79, and the console got history and a movable caret in Phase 417):
 - HAL mode is stub (not fully implemented)
 - Host control mode requires manual toggle
 - No scrolling or viewport management

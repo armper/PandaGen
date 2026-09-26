@@ -2238,7 +2238,7 @@ fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::
     // left in dist/ for the client. The kernel refuses to open its remote
     // ports without one, so an image built from this repository is not
     // controllable by anyone who merely has the repository.
-    let token = provision_remote_token(&root)?;
+    let token = provision_remote_token(root)?;
     let limine_conf = root.join("boot/limine.conf");
     let limine_cfg = root.join("boot/limine.cfg");
     let conf_text = fs::read_to_string(&limine_conf)?;

@@ -1833,7 +1833,7 @@ impl SimulatedKernel {
                 // always unbounded and the check below could never fail:
                 // dead code guarding the one thing it was written to stop.
                 if metadata.budget.is_none() {
-                    if let Some(inherited) = parent_identity.budget.clone() {
+                    if let Some(inherited) = parent_identity.budget {
                         metadata = metadata.with_budget(inherited);
                     }
                 }
@@ -2840,7 +2840,7 @@ mod tests {
         let cap: Cap<()> = Cap::new(77);
 
         kernel
-            .grant_capability_with_lease(task, cap.clone(), Duration::from_millis(10))
+            .grant_capability_with_lease(task, cap, Duration::from_millis(10))
             .unwrap();
 
         assert!(kernel.is_capability_valid(cap.id(), task));
@@ -2863,7 +2863,7 @@ mod tests {
             .task_id;
         let cap: Cap<()> = Cap::new(88);
 
-        kernel.grant_capability(task, cap.clone()).unwrap();
+        kernel.grant_capability(task, cap).unwrap();
         assert!(kernel.is_capability_valid(cap.id(), task));
 
         kernel
@@ -3535,7 +3535,7 @@ mod tests {
         // Set budget for task1
         if let Some(exec_id) = kernel.get_task_identity(task1_handle.task_id) {
             if let Some(identity) = kernel.get_identity_mut(exec_id) {
-                identity.budget = Some(budget.clone());
+                identity.budget = Some(budget);
             }
         }
 
@@ -4445,7 +4445,7 @@ mod tests {
 #[cfg(test)]
 mod spawn_capability_tests {
     use super::*;
-    use kernel_api::{KernelApiV0, TaskDescriptor};
+    use kernel_api::TaskDescriptor;
 
     #[test]
     fn a_task_spawned_with_a_capability_actually_holds_it() {

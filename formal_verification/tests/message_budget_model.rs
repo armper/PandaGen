@@ -342,7 +342,7 @@ fn random_sequences_two_channels_three_tasks() {
             let t = rng.below(3) as usize;
             let op = match rng.below(10) {
                 0 => Op::SetBudget(t, 1 + rng.below(6)),
-                1 | 2 | 3 | 4 | 5 => Op::Send(ch, t),
+                1..=5 => Op::Send(ch, t),
                 _ => Op::Recv(ch, t),
             };
             h.step(op);

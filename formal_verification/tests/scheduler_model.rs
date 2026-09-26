@@ -418,7 +418,7 @@ fn random_sequences_four_tasks() {
             let t = rng.below(4) as usize;
             let op = match rng.below(12) {
                 0 | 1 => Op::Spawn(t),
-                2 | 3 | 4 => Op::Dequeue,
+                2..=4 => Op::Dequeue,
                 5 | 6 => Op::Tick(1 + rng.below(4)),
                 7 => Op::Preempt,
                 8 => Op::Block(t, 1 + rng.below(3)),

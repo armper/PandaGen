@@ -746,11 +746,7 @@ impl WorkspaceSession {
                     if let (Some(pre_row), Some(pre_col)) = (_pre_editor_row, _pre_editor_col) {
                         let new_row = editor.cursor().row;
                         let new_col = editor.cursor().col;
-                        let line_delta = if new_row > pre_row {
-                            new_row - pre_row
-                        } else {
-                            pre_row - new_row
-                        };
+                        let line_delta = new_row.abs_diff(pre_row);
                         let cursor_moved = new_row != pre_row || new_col != pre_col;
                         let is_editing =
                             matches!(editor.mode(), EditorMode::Insert | EditorMode::Command);
@@ -1660,7 +1656,7 @@ impl WorkspaceSession {
 
         // Close palette after execution
         self.palette_overlay.close();
-        return true;
+        true
     }
 
     /// Store the latest telemetry snapshot (called by the loop each frame).

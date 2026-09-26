@@ -459,7 +459,7 @@ pub(crate) fn launch_command_by_token(token: &str) -> Option<&'static LaunchComm
 pub(crate) fn helper_command_by_alias(parts: &[&str]) -> Option<&'static HelperCommandSpec> {
     HELPER_COMMAND_SPECS
         .iter()
-        .find(|spec| spec.aliases.iter().any(|alias_parts| *alias_parts == parts))
+        .find(|spec| spec.aliases.contains(&parts))
 }
 
 pub(crate) fn helper_command_by_open_token(token: &str) -> Option<&'static HelperCommandSpec> {

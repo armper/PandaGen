@@ -698,7 +698,7 @@ fn the_dock_divides_names_the_hovered_tile_and_lengthens_the_focused_light() {
     // light in the middle of its room.
     let third = start + 2 * (64 + DOCK_TILE_GAP) + DOCK_DIVIDER;
     let hit = Compositor::new()
-        .hit_test(&[dock.clone()], third + 4, 330)
+        .hit_test(std::slice::from_ref(&dock), third + 4, 330)
         .unwrap();
     assert_eq!(hit.region, HitRegion::DockTile { index: 2 });
     let line_x = third - (DOCK_TILE_GAP + DOCK_DIVIDER) / 2;

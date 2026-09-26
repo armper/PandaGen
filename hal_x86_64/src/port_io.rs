@@ -437,15 +437,13 @@ mod tests {
 
     #[test]
     fn test_real_port_io_creation() {
-        let io = RealPortIo::new();
         // Should create without panicking
-        drop(io);
+        let _io = RealPortIo::new();
     }
 
     #[test]
     fn test_real_port_io_default() {
-        let io = RealPortIo::default();
-        drop(io);
+        let _io = RealPortIo;
     }
 
     // Note: We can't test actual port I/O operations without hardware

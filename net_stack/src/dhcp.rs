@@ -571,7 +571,9 @@ mod hostile_server_tests {
             u32::MAX.clamp(MIN_LEASE_SECONDS, MAX_LEASE_SECONDS),
             MAX_LEASE_SECONDS
         );
-        assert!(MIN_LEASE_SECONDS >= 60, "half a lease must be many seconds");
-        assert!(DEFAULT_LEASE_SECONDS >= MIN_LEASE_SECONDS);
+        const {
+            assert!(MIN_LEASE_SECONDS >= 60, "half a lease must be many seconds");
+            assert!(DEFAULT_LEASE_SECONDS >= MIN_LEASE_SECONDS);
+        }
     }
 }

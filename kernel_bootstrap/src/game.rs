@@ -136,7 +136,11 @@ impl Game {
             return;
         }
         let pick = (self.next_random() % free.len() as u64) as usize;
-        let value = if self.next_random() % 10 == 0 { 4 } else { 2 };
+        let value = if self.next_random().is_multiple_of(10) {
+            4
+        } else {
+            2
+        };
         let (r, c) = free[pick];
         self.cells[r][c] = value;
     }

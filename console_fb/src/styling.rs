@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_default_pandagen_banner() {
         let banner = Banner::default_pandagen();
-        assert!(banner.lines().len() > 0);
+        assert!(!banner.lines().is_empty());
         assert!(banner.lines()[0].contains("═"));
     }
 

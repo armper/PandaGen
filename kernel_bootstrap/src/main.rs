@@ -38,7 +38,6 @@ mod line_edit;
 mod minimal_editor;
 mod notepad;
 mod optimized_render;
-mod output;
 mod palette_overlay;
 mod present_policy;
 mod render_stats;
@@ -927,7 +926,9 @@ fn interrupts_enabled() -> bool {
 fn read_idtr() -> IdtPointer {
     let mut idtr = IdtPointer { limit: 0, base: 0 };
     unsafe {
-        asm!("sidt [{}]", in(reg) &mut idtr, options(nomem, nostack, preserves_flags));
+        // `sidt` writes `idtr`: not `nomem`, which let the compiler assume
+        // the zeros it was made with were still there.
+        asm!("sidt [{}]", in(reg) &mut idtr, options(nostack, preserves_flags));
     }
     idtr
 }
@@ -1504,6 +1505,11 @@ fn workspace_loop(
     // Remote IPC over UDP: calls arrive on the network, run through the
     // command service, and answer on this channel.
     let remote_channel = kernel.create_channel().ok();
+    // Polled only on the machine itself, not under host tests.
+    #[cfg_attr(
+        not(all(not(test), target_os = "none")),
+        allow(unused_variables, unused_mut)
+    )]
     let mut remote_server = RemoteCommandServer::new(remote_channel);
 
     // GFX-039: pipeline stages reply on their own channel.
@@ -1781,15 +1787,13 @@ fn workspace_loop(
                 }
 
                 // Check if palette is now open (for debugging/logging)
-                if workspace.is_palette_open() {
-                    if KBD_DEBUG_LOG {
-                        kprintln!(
-                            serial,
-                            "palette: OPEN query='{}' results={}",
-                            workspace.palette_overlay().query(),
-                            workspace.palette_overlay().result_count()
-                        );
-                    }
+                if workspace.is_palette_open() && KBD_DEBUG_LOG {
+                    kprintln!(
+                        serial,
+                        "palette: OPEN query='{}' results={}",
+                        workspace.palette_overlay().query(),
+                        workspace.palette_overlay().result_count()
+                    );
                 }
             }
         }
@@ -1817,8 +1821,8 @@ fn workspace_loop(
         );
 
         // Try to receive response
-        if let Some(message) = ctx.try_recv(workspace_response) {
-            if let KernelMessage::CommandResponse(response) = message {
+        if let Some(KernelMessage::CommandResponse(response)) = ctx.try_recv(workspace_response) {
+            {
                 match response.status {
                     CommandStatus::Ok => {
                         if let Some(output) = response.output_str() {
@@ -1926,15 +1930,11 @@ fn workspace_loop(
                                 match routed.kind {
                                     input_types::PointerEventKind::Move { .. } => {
                                         if let Some(index) = result {
-                                            if workspace.palette_hover_result(index) {
-                                                input_dirty = true;
-                                            }
+                                            workspace.palette_hover_result(index);
                                         }
                                     }
                                     input_types::PointerEventKind::Wheel { dy, .. } => {
-                                        if workspace.palette_scroll(dy) {
-                                            input_dirty = true;
-                                        }
+                                        workspace.palette_scroll(dy);
                                     }
                                     _ if primary_press => {
                                         if let Some(index) = result {
@@ -1942,7 +1942,6 @@ fn workspace_loop(
                                             if workspace
                                                 .palette_click_result(index, &mut ctx, serial)
                                             {
-                                                input_dirty = true;
                                                 output_dirty = true;
                                             }
                                         }
@@ -1966,7 +1965,6 @@ fn workspace_loop(
                                 };
                                 if let Some(event) = event {
                                     if workspace.host_event(event, serial) {
-                                        input_dirty = true;
                                         output_dirty = true;
                                     }
                                 }
@@ -1981,20 +1979,15 @@ fn workspace_loop(
                                 match routed.kind {
                                     input_types::PointerEventKind::Move { .. } => {
                                         if let Some(index) = entry {
-                                            if workspace.picker_hover(index) {
-                                                input_dirty = true;
-                                            }
+                                            workspace.picker_hover(index);
                                         }
                                     }
                                     input_types::PointerEventKind::Wheel { dy, .. } => {
-                                        if workspace.picker_scroll(dy) {
-                                            input_dirty = true;
-                                        }
+                                        workspace.picker_scroll(dy);
                                     }
                                     _ if primary_press => {
                                         if let Some(index) = entry {
                                             if workspace.picker_click(index, serial) {
-                                                input_dirty = true;
                                                 output_dirty = true;
                                             }
                                         }
@@ -2013,18 +2006,14 @@ fn workspace_loop(
                                 {
                                     let visible =
                                         renderer.layout().main_content_rows().saturating_sub(1);
-                                    if workspace.scroll_view(dy, visible) {
-                                        input_dirty = true;
-                                    }
+                                    workspace.scroll_view(dy, visible);
                                     continue;
                                 }
                             }
 
                             if primary_press && workspace.is_palette_open() {
                                 // Clicking anywhere else dismisses the palette.
-                                if workspace.palette_dismiss() {
-                                    input_dirty = true;
-                                }
+                                workspace.palette_dismiss();
                                 continue;
                             }
 
@@ -2048,7 +2037,9 @@ fn workspace_loop(
                             input_router.capture().is_some(),
                         );
                     }
-                    // The cursor is a desktop surface: moving it is a redraw.
+                    // The cursor is a desktop surface: moving it is a redraw
+                    // -- so every pointer event above is one, and none of
+                    // them marks it itself.
                     input_dirty = true;
                 }
             }
@@ -2089,7 +2080,7 @@ fn workspace_loop(
 
         // Serve what the desk asked for (GFX-053).
         if !desk_requests.is_empty() {
-            let pending: alloc::vec::Vec<desk::DeskRequest> = desk_requests.drain(..).collect();
+            let pending: alloc::vec::Vec<desk::DeskRequest> = core::mem::take(&mut desk_requests);
             let now = get_tick_count();
             // What writes are stamped with (GFX-056): the RTC's date, or 0.
             let now_secs = rtc::read_clock(&mut rtc_port)
@@ -2699,13 +2690,10 @@ fn workspace_loop(
         // Update display if needed
         if display_mode.is_graphics() && fb_console.is_some() {
             if input_dirty || output_dirty || clear_terminal {
-                let (width, height) = {
-                    let info = fb_console
-                        .as_ref()
-                        .expect("framebuffer checked above")
-                        .info();
-                    (info.width, info.height)
-                };
+                let (width, height) = fb_console
+                    .as_ref()
+                    .map(|fb| (fb.info().width, fb.info().height))
+                    .unwrap_or_default();
                 if desktop_renderer.is_none() {
                     desktop_renderer = desktop_frame::DesktopFrameRenderer::try_new(width, height);
                 }
@@ -2815,7 +2803,7 @@ fn workspace_loop(
             let mut rendered_editor = false;
             {
                 use crate::display_sink::{DisplaySink, VgaDisplaySink};
-                let mut vga_sink_storage: Option<VgaDisplaySink> = None;
+                let mut vga_sink_storage: Option<VgaDisplaySink>;
                 let mut sink: Option<&mut dyn DisplaySink> = None;
 
                 // Through the shadow, like every other text surface. The
@@ -2832,7 +2820,7 @@ fn workspace_loop(
                 } else if let Some(ref mut fb) = fb_console {
                     sink = Some(*fb);
                 } else if let Some(ref mut vga) = vga_console {
-                    vga_sink_storage = Some(VgaDisplaySink::new(*vga));
+                    vga_sink_storage = Some(VgaDisplaySink::new(vga));
                     sink = vga_sink_storage.as_mut().map(|s| s as &mut dyn DisplaySink);
                 }
 
@@ -2899,7 +2887,6 @@ fn workspace_loop(
                                 }
                             }
                         }
-                        input_dirty = false;
                         output_dirty = false;
                         #[cfg(debug_assertions)]
                         {
@@ -3215,7 +3202,6 @@ fn workspace_loop(
                             &mut last_palette_result_count,
                             &mut last_palette_selection,
                         );
-                        input_dirty = false;
                     }
 
                     vga.blit_from_cells(&vga_backbuffer);
@@ -3299,8 +3285,6 @@ fn workspace_loop(
                             for row in 0..rows {
                                 clear_fb_line(fb_target, row, cols, bg, fg);
                             }
-                            last_output_rows = 0;
-                            last_output_seq = 0;
                         }
                         if can_scroll {
                             // Scroll up and draw only new bottom lines
@@ -3463,7 +3447,6 @@ fn workspace_loop(
                             &mut last_palette_result_count,
                             &mut last_palette_selection,
                         );
-                        input_dirty = false;
                     }
 
                     if fb_shadow.is_some() {
@@ -3480,90 +3463,6 @@ fn workspace_loop(
         if !kernel_progressed && !input_progressed && !present_pacer.is_pending() {
             idle_pause();
         }
-    }
-}
-
-/// Simple editor state for keyboard demo
-#[cfg(not(test))]
-struct EditorState {
-    buffer: [u8; 1024],
-    len: usize,
-    cursor: usize,
-    pending_e0: bool,
-}
-
-#[cfg(not(test))]
-impl EditorState {
-    fn new() -> Self {
-        Self {
-            buffer: [0; 1024],
-            len: 0,
-            cursor: 0,
-            pending_e0: false,
-        }
-    }
-
-    fn insert_char(&mut self, ch: u8) {
-        if self.len < self.buffer.len() {
-            // Shift text right if needed
-            if self.cursor < self.len {
-                for i in (self.cursor..self.len).rev() {
-                    self.buffer[i + 1] = self.buffer[i];
-                }
-            }
-            self.buffer[self.cursor] = ch;
-            self.len += 1;
-            self.cursor += 1;
-        }
-    }
-
-    fn delete_char(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            for i in self.cursor..self.len - 1 {
-                self.buffer[i] = self.buffer[i + 1];
-            }
-            if self.len > 0 {
-                self.len -= 1;
-            }
-        }
-    }
-
-    fn get_text(&self) -> &[u8] {
-        &self.buffer[..self.len]
-    }
-}
-
-/// Main editor loop with keyboard input
-#[cfg(not(test))]
-fn editor_loop(serial: &mut serial::SerialPort, _kernel: &mut Kernel) -> ! {
-    let mut editor = EditorState::new();
-    let mut last_render = 0u64;
-    let mut parser_state = Ps2ParserState::new();
-
-    loop {
-        // Drain keyboard queue and process scancodes
-        let mut events_processed = 0;
-        while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
-            if let Some(ch) = parser_state.process_scancode(scancode, serial) {
-                if ch == 0x08 {
-                    // Backspace
-                    editor.delete_char();
-                } else {
-                    editor.insert_char(ch);
-                }
-                events_processed += 1;
-            }
-        }
-
-        // Render on change (rate-limited to every 10 ticks = 100ms)
-        let current_tick = get_tick_count();
-        if events_processed > 0 && current_tick >= last_render + 10 {
-            render_editor(serial, &editor);
-            last_render = current_tick;
-        }
-
-        idle_pause();
     }
 }
 
@@ -4479,115 +4378,6 @@ fn is_typing_byte(byte: u8) -> bool {
             | b'!'
             | b'?'
     )
-}
-
-/// Renders editor state to serial using structured view output
-///
-/// Phase 60: This now uses the unified output model instead of direct printing.
-/// The editor state is converted to structured views before rendering.
-///
-/// # Safety
-///
-/// This function uses `static mut OUTPUT` which is safe in the current single-task
-/// bare-metal kernel_bootstrap context. Only one execution path calls this function
-/// sequentially. Future multi-tasking kernel would need either:
-/// - Per-task rendering contexts, or
-/// - Mutex/spinlock around OUTPUT access, or
-/// - Message-passing to a dedicated rendering task
-#[cfg(not(test))]
-fn render_editor(serial: &mut serial::SerialPort, editor: &EditorState) {
-    // Static output handler for revision tracking
-    // SAFETY: Single-task bare-metal kernel; no concurrent access possible.
-    // This is documented architectural constraint, not an oversight.
-    static mut OUTPUT: output::BareMetalOutput = output::BareMetalOutput::new();
-
-    // Convert editor buffer to text lines (simple line splitting)
-    // For now, just show as single line for simplicity
-    let text = editor.get_text();
-    let text_str = core::str::from_utf8(text).unwrap_or("<invalid utf8>");
-    let lines: [&str; 1] = [text_str];
-
-    // Cursor position (for now, just show line 0)
-    let cursor_line = Some(0);
-    let cursor_col = Some(editor.cursor);
-
-    let mut status_buf: [u8; 64] = [0; 64];
-    let status = {
-        let mut cursor_pos = 0usize;
-        // Manually format the status string
-        let prefix = b"Cursor: ";
-        for &b in prefix {
-            if cursor_pos < status_buf.len() {
-                status_buf[cursor_pos] = b;
-                cursor_pos += 1;
-            }
-        }
-        // Simple number formatting for cursor
-        let mut cursor_val = editor.cursor;
-        let mut digits = [0u8; 20];
-        let mut digit_count = 0;
-        if cursor_val == 0 {
-            digits[0] = b'0';
-            digit_count = 1;
-        } else {
-            while cursor_val > 0 && digit_count < 20 {
-                digits[digit_count] = b'0' + (cursor_val % 10) as u8;
-                cursor_val /= 10;
-                digit_count += 1;
-            }
-        }
-        // Reverse and copy digits
-        for i in 0..digit_count {
-            if cursor_pos < status_buf.len() {
-                status_buf[cursor_pos] = digits[digit_count - 1 - i];
-                cursor_pos += 1;
-            }
-        }
-        let mid = b" | Length: ";
-        for &b in mid {
-            if cursor_pos < status_buf.len() {
-                status_buf[cursor_pos] = b;
-                cursor_pos += 1;
-            }
-        }
-        // Format length
-        let mut len_val = editor.len;
-        let mut len_digits = [0u8; 20];
-        let mut len_digit_count = 0;
-        if len_val == 0 {
-            len_digits[0] = b'0';
-            len_digit_count = 1;
-        } else {
-            while len_val > 0 && len_digit_count < 20 {
-                len_digits[len_digit_count] = b'0' + (len_val % 10) as u8;
-                len_val /= 10;
-                len_digit_count += 1;
-            }
-        }
-        for i in 0..len_digit_count {
-            if cursor_pos < status_buf.len() {
-                status_buf[cursor_pos] = len_digits[len_digit_count - 1 - i];
-                cursor_pos += 1;
-            }
-        }
-        core::str::from_utf8(&status_buf[..cursor_pos]).unwrap_or("status error")
-    };
-
-    // Revision counter starts at 0; first render will be revision 1
-    static REVISION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let revision = REVISION.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-
-    // Render using the unified output model
-    unsafe {
-        OUTPUT.render_to_serial(
-            serial,
-            &lines,
-            cursor_line,
-            cursor_col,
-            Some(status),
-            revision,
-        );
-    }
 }
 
 /// PS/2 scancode parser state for translating to ASCII
@@ -5627,7 +5417,7 @@ impl RemoteCallers {
         let list = text
             .split_ascii_whitespace()
             .filter_map(|token| token.strip_prefix("remote_callers="))
-            .last()?;
+            .next_back()?;
         let mut callers = Self::ANY;
         for name in list.split(',').filter(|n| !n.is_empty()).take(4) {
             callers.names[callers.len] = RemoteToken::from_str(name);
@@ -5677,12 +5467,11 @@ impl RemoteToken {
         let text = core::str::from_utf8(cmdline).ok()?;
         text.split_ascii_whitespace()
             .filter_map(|token| token.strip_prefix("remote_token="))
-            .filter(|value| {
+            .rfind(|value| {
                 !value.is_empty()
                     && !value.contains('@')
                     && *value != remote_ipc::DEFAULT_REMOTE_TOKEN
             })
-            .last()
             .map(Self::from_str)
     }
 }
@@ -5815,7 +5604,7 @@ fn ap_idle_loop(lapic_id: u32) -> ! {
                 let mut serial = serial::SerialPort::new(serial::COM1);
                 // SAFETY: KERNEL_READY guarantees initialisation; the kernel
                 // is shared and internally locked.
-                let kernel = unsafe { &*KERNEL_STORAGE.as_ptr() };
+                let kernel = unsafe { &*(*core::ptr::addr_of!(KERNEL_STORAGE)).as_ptr() };
                 let progressed = kernel.run_once(&mut serial);
                 let spent = hal_x86_64::rdtsc().saturating_sub(started);
                 AP_KERNEL_POLLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -6940,6 +6729,8 @@ impl CommandService {
             cmd if cmd.starts_with("fault") => {
                 // Deliberate CPU exceptions for testing the handlers.
                 let kind = cmd.split_whitespace().nth(1).unwrap_or("");
+                #[cfg(test)]
+                let _ = kind;
                 #[cfg(not(test))]
                 match kind {
                     "pf" => unsafe {
@@ -7699,7 +7490,7 @@ mod tests {
     fn test_frame_allocator_excludes_reserved() {
         let mut allocator = FrameAllocator::new();
         allocator.add_range(0x1000, 0x9000);
-        allocator.add_reserved_range(0x3000, 0x2000);
+        assert!(allocator.add_reserved_range(0x3000, 0x2000));
         allocator.reset_cursor();
 
         let a = allocator.allocate_frame().unwrap();
@@ -7749,7 +7540,7 @@ mod tests {
         let mut allocator = FrameAllocator::new();
         allocator.add_range(0x10_0000, 0x10_0000);
         // A kernel image whose length is not a whole number of pages.
-        allocator.add_reserved_range(0x10_0000, 0x2800);
+        assert!(allocator.add_reserved_range(0x10_0000, 0x2800));
         allocator.reset_cursor();
 
         let frame = allocator.allocate_frame().unwrap();
@@ -7767,7 +7558,7 @@ mod tests {
         // heap straight on top of it.
         let mut allocator = FrameAllocator::new();
         allocator.add_range(0x10_0000, 0x10_0000);
-        allocator.add_reserved_range(0x10_0800, 0x400);
+        assert!(allocator.add_reserved_range(0x10_0800, 0x400));
         assert_eq!(
             allocator.reserved_range_count(),
             1,
@@ -8025,10 +7816,17 @@ pub mod serial {
     }
 }
 
-// Compiler intrinsics required for no_std bare-metal
+// Compiler intrinsics required for no_std bare-metal. `unsafe`: each takes
+// raw pointers and trusts them for `n` bytes, as C's do; the compiler's own
+// calls meet that.
+/// C's `memset`: fills `n` bytes at `dest`.
+///
+/// # Safety
+///
+/// Every pointer must be valid for `n` bytes.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
     unsafe {
         let c = c as u8;
         for i in 0..n {
@@ -8038,9 +7836,14 @@ pub extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
     dest
 }
 
+/// C's `memcpy`: copies `n` bytes; the ranges must not overlap.
+///
+/// # Safety
+///
+/// Every pointer must be valid for `n` bytes.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe {
         for i in 0..n {
             *dest.add(i) = *src.add(i);
@@ -8049,9 +7852,14 @@ pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     dest
 }
 
+/// C's `memmove`: copies `n` bytes; the ranges may overlap.
+///
+/// # Safety
+///
+/// Every pointer must be valid for `n` bytes.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe {
         if dest < src as *mut u8 {
             // Forward copy
@@ -8068,9 +7876,14 @@ pub extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     dest
 }
 
+/// C's `memcmp`: compares `n` bytes.
+///
+/// # Safety
+///
+/// Every pointer must be valid for `n` bytes.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     unsafe {
         for i in 0..n {
             let a = *s1.add(i);

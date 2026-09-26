@@ -987,10 +987,8 @@ fn rounded_row_span(rect: RasterRect, radius: usize, row: usize) -> Option<(usiz
     let from_bottom = rect.height - 1 - row;
     let dy = if from_top < radius {
         radius - from_top
-    } else if from_bottom < radius {
-        radius - from_bottom
     } else {
-        0
+        radius.saturating_sub(from_bottom)
     };
     // Horizontal inset such that (inset, dy) lies on the quarter circle. Using
     // (radius - 0.5) keeps the outline visually round at small radii.
@@ -2194,7 +2192,7 @@ mod tests {
                 let b = (next() % 60) as i64 - 10;
                 let c = (next() % 60) as i64 - 10;
                 let d = (next() % 60) as i64 - 10;
-                let mut draw = |t: &mut dyn RenderTarget| match ops {
+                let draw = |t: &mut dyn RenderTarget| match ops {
                     0 => t.fill_rect(
                         RasterRect::new(a.max(0) as usize, b.max(0) as usize, 30, 30),
                         ACCENT,

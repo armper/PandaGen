@@ -12,10 +12,14 @@ use core::sync::atomic::AtomicU64;
 #[cfg(debug_assertions)]
 use core::sync::atomic::Ordering;
 
+// The counters are compiled out of release builds, and with them every
+// reader and writer of these.
 /// Global render statistics (atomic for interrupt safety)
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 static RENDER_STATS: RenderStatsGlobal = RenderStatsGlobal::new();
 
 /// Atomic counters for render statistics
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 struct RenderStatsGlobal {
     /// Total pixel writes this frame
     pixel_writes: AtomicU64,
@@ -46,6 +50,7 @@ struct RenderStatsGlobal {
 }
 
 impl RenderStatsGlobal {
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     const fn new() -> Self {
         Self {
             pixel_writes: AtomicU64::new(0),

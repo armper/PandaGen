@@ -179,6 +179,7 @@ pub struct FrameRenderStats {
 pub struct FrameRenderStats;
 
 impl FrameRenderStats {
+    #[cfg(debug_assertions)]
     const PIXELS_PER_CELL: usize = 8 * 16;
 
     #[inline]

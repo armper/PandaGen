@@ -248,7 +248,7 @@ fn every_free_order_coalesces_fully() {
         }
         permutations(k - 1, order, out);
         for i in 0..k - 1 {
-            if k % 2 == 0 {
+            if k.is_multiple_of(2) {
                 order.swap(i, k - 1);
             } else {
                 order.swap(0, k - 1);

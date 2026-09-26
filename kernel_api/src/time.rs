@@ -253,7 +253,7 @@ mod overflow_tests {
             "the deadline is already in the past"
         );
         assert!(
-            !(deadline < now),
+            (deadline >= now),
             "an overflowed deadline fires immediately, for ever"
         );
     }

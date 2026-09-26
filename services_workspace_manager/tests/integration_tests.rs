@@ -637,7 +637,7 @@ fn test_error_tracking_in_history() {
     let history = workspace.recent_history();
     let errors = history.get_recent_errors();
 
-    assert!(errors.len() > 0);
+    assert!(!errors.is_empty());
 }
 
 #[test]
@@ -654,7 +654,7 @@ fn test_command_palette_accessible() {
     let palette = workspace.command_palette();
     let commands = palette.list_commands();
 
-    assert!(commands.len() > 0);
+    assert!(!commands.is_empty());
     // Should have some key commands
     assert!(commands.iter().any(|c| c.id.as_str() == "open_editor"));
     assert!(commands.iter().any(|c| c.id.as_str() == "list"));

@@ -207,7 +207,7 @@ mod tests {
         let commands = registry.filter_commands("workspace");
 
         // Should return workspace-related commands
-        assert!(commands.len() > 0);
+        assert!(!commands.is_empty());
     }
 
     #[test]

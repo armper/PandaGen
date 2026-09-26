@@ -52,8 +52,8 @@ impl HelpCategory {
         for topic in HELP_TOPIC_SPECS {
             if let Some(primary_alias) = topic.aliases.first() {
                 content.push_str(&format!(
-                    "- {}  — {}\n",
-                    format!("help {}", primary_alias),
+                    "- help {}  — {}\n",
+                    primary_alias,
                     topic_description(topic.topic)
                 ));
             }

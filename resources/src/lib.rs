@@ -1149,27 +1149,27 @@ mod inheritance_tests {
         for widen in [
             ResourceBudget {
                 cpu_ticks: None,
-                ..full.clone()
+                ..full
             },
             ResourceBudget {
                 memory_units: None,
-                ..full.clone()
+                ..full
             },
             ResourceBudget {
                 message_count: None,
-                ..full.clone()
+                ..full
             },
             ResourceBudget {
                 packet_count: None,
-                ..full.clone()
+                ..full
             },
             ResourceBudget {
                 storage_ops: None,
-                ..full.clone()
+                ..full
             },
             ResourceBudget {
                 pipeline_stages: None,
-                ..full.clone()
+                ..full
             },
         ] {
             assert!(

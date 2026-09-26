@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn test_generate_suggestions_empty_input() {
         let suggestions = generate_suggestions("");
-        assert!(suggestions.len() > 0);
+        assert!(!suggestions.is_empty());
         assert!(suggestions.iter().any(|s| s.pattern.contains("open")));
         assert!(suggestions.iter().any(|s| s.pattern.contains("list")));
     }

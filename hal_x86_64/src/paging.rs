@@ -60,7 +60,7 @@ impl PhysAddr {
 
     /// Checks if the address is page-aligned
     pub const fn is_aligned(self) -> bool {
-        self.0 % PAGE_SIZE as u64 == 0
+        self.0.is_multiple_of(PAGE_SIZE as u64)
     }
 }
 
@@ -88,7 +88,7 @@ impl VirtAddr {
 
     /// Checks if the address is page-aligned
     pub const fn is_aligned(self) -> bool {
-        self.0 % PAGE_SIZE as u64 == 0
+        self.0.is_multiple_of(PAGE_SIZE as u64)
     }
 
     /// Checks if this is a kernel address (higher half)
@@ -332,10 +332,62 @@ impl PageTableManager {
         AddressSpaceHandle::new(pml4_phys)
     }
 
-    /// Maps a virtual page to a physical page
+    /// The table under `table`'s entry `index`, made if there is none.
     ///
-    /// This is a simplified implementation for testing.
-    /// Real implementation would walk page tables and allocate intermediate levels.
+    /// A user page needs USER on every level above its leaf -- the CPU
+    /// checks each one -- so a user mapping adds it to entries it passes
+    /// through that a kernel mapping made without it.
+    fn next_table(&mut self, table: u64, index: usize, user: bool) -> Result<u64, &'static str> {
+        let entry = *self
+            .tables
+            .get(&table)
+            .ok_or("Invalid address space handle")?
+            .entry(index);
+        if let Some(child) = entry.phys_addr() {
+            if entry.flags().contains(PageTableFlags::HUGE) {
+                return Err("A huge page is mapped over this address");
+            }
+            if user && !entry.flags().contains(PageTableFlags::USER) {
+                let flags = entry.flags().with_flag(PageTableFlags::USER);
+                if let Some(t) = self.tables.get_mut(&table) {
+                    t.entry_mut(index).set(child, flags);
+                }
+            }
+            return Ok(child.as_u64());
+        }
+        let child = self.alloc_page();
+        self.tables.insert(child.as_u64(), PageTable::new());
+        let mut flags =
+            PageTableFlags::from_bits(PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+        if user {
+            flags = flags.with_flag(PageTableFlags::USER);
+        }
+        if let Some(t) = self.tables.get_mut(&table) {
+            t.entry_mut(index).set(child, flags);
+        }
+        Ok(child.as_u64())
+    }
+
+    /// The page table holding `virt`'s leaf entry, if the walk down to it
+    /// exists. Allocates nothing.
+    fn leaf_table(&self, handle: AddressSpaceHandle, virt: VirtAddr) -> Option<u64> {
+        let mut table = handle.pml4_phys.as_u64();
+        for index in [virt.pml4_index(), virt.pdpt_index(), virt.pd_index()] {
+            let entry = *self.tables.get(&table)?.entry(index);
+            if entry.flags().contains(PageTableFlags::HUGE) {
+                return None;
+            }
+            table = entry.phys_addr()?.as_u64();
+        }
+        Some(table)
+    }
+
+    /// Maps a virtual page to a physical page.
+    ///
+    /// Walks PML4, PDPT and PD, making the tables it needs, and writes the
+    /// leaf. This used to check alignment and the handle and write
+    /// nothing: every "mapping" succeeded and none existed. Mapping a page
+    /// that is already mapped is refused rather than silently replaced.
     pub fn map_page(
         &mut self,
         handle: AddressSpaceHandle,
@@ -346,25 +398,28 @@ impl PageTableManager {
         if !virt.is_aligned() || !phys.is_aligned() {
             return Err("Addresses must be page-aligned");
         }
-
-        // In a real implementation, we would:
-        // 1. Walk the page table hierarchy (PML4 -> PDPT -> PD -> PT)
-        // 2. Allocate intermediate tables as needed
-        // 3. Set the final PT entry
-
-        // For now, just record the mapping in a simplified way
-        let _pml4 = self
+        let pml4 = handle.pml4_phys.as_u64();
+        if !self.tables.contains_key(&pml4) {
+            return Err("Invalid address space handle");
+        }
+        let user = perms.user;
+        let pdpt = self.next_table(pml4, virt.pml4_index(), user)?;
+        let pd = self.next_table(pdpt, virt.pdpt_index(), user)?;
+        let pt = self.next_table(pd, virt.pd_index(), user)?;
+        let leaf = self
             .tables
-            .get_mut(&handle.pml4_phys.as_u64())
-            .ok_or("Invalid address space handle")?;
-
-        // Simplified: just verify the mapping would be valid
-        // Real implementation would actually set page table entries
-
+            .get_mut(&pt)
+            .ok_or("Invalid address space handle")?
+            .entry_mut(virt.pt_index());
+        if !leaf.is_unused() {
+            return Err("Page already mapped");
+        }
+        leaf.set(phys, perms.to_flags());
         Ok(())
     }
 
-    /// Unmaps a virtual page
+    /// Unmaps a virtual page. Unmapping a page that is not mapped is an
+    /// error: the caller's idea of the address space is wrong.
     pub fn unmap_page(
         &mut self,
         handle: AddressSpaceHandle,
@@ -373,16 +428,35 @@ impl PageTableManager {
         if !virt.is_aligned() {
             return Err("Address must be page-aligned");
         }
-
-        let _pml4 = self
+        if !self.tables.contains_key(&handle.pml4_phys.as_u64()) {
+            return Err("Invalid address space handle");
+        }
+        let pt = self.leaf_table(handle, virt).ok_or("Page not mapped")?;
+        let leaf = self
             .tables
-            .get_mut(&handle.pml4_phys.as_u64())
-            .ok_or("Invalid address space handle")?;
-
-        // Simplified: just verify the unmapping would be valid
-        // Real implementation would clear page table entries
-
+            .get_mut(&pt)
+            .ok_or("Page not mapped")?
+            .entry_mut(virt.pt_index());
+        if leaf.is_unused() {
+            return Err("Page not mapped");
+        }
+        leaf.clear();
         Ok(())
+    }
+
+    /// Where `virt` goes, and with what flags: the walk the MMU would do.
+    pub fn translate(
+        &self,
+        handle: AddressSpaceHandle,
+        virt: VirtAddr,
+    ) -> Option<(PhysAddr, PageTableFlags)> {
+        let pt = self.leaf_table(handle, virt)?;
+        let leaf = *self.tables.get(&pt)?.entry(virt.pt_index());
+        let base = leaf.phys_addr()?;
+        Some((
+            PhysAddr::new(base.as_u64() + virt.page_offset() as u64),
+            leaf.flags(),
+        ))
     }
 
     /// Returns the number of allocated tables (for testing)
@@ -663,7 +737,81 @@ mod tests {
         let handle = manager.create_address_space();
 
         let virt = VirtAddr::new(0x1000);
-        let result = manager.unmap_page(handle, virt);
-        assert!(result.is_ok());
+        assert_eq!(manager.unmap_page(handle, virt), Err("Page not mapped"));
+        manager
+            .map_page(handle, virt, PhysAddr::new(0x5000), Permissions::user_rw())
+            .unwrap();
+        assert!(manager.unmap_page(handle, virt).is_ok());
+        assert_eq!(manager.translate(handle, virt), None);
+        assert_eq!(manager.unmap_page(handle, virt), Err("Page not mapped"));
+    }
+
+    #[test]
+    fn test_map_page_writes_a_walk_the_mmu_can_follow() {
+        let mut manager = PageTableManager::new();
+        let handle = manager.create_address_space();
+        let virt = VirtAddr::new(0x0000_7F12_3456_7000);
+        manager
+            .map_page(
+                handle,
+                virt,
+                PhysAddr::new(0xABC000),
+                Permissions::user_ro(),
+            )
+            .unwrap();
+        // PML4 + PDPT + PD + PT.
+        assert_eq!(manager.table_count(), 4);
+        let (phys, flags) = manager
+            .translate(handle, VirtAddr::new(0x0000_7F12_3456_7123))
+            .unwrap();
+        assert_eq!(phys, PhysAddr::new(0xABC123));
+        assert!(flags.contains(PageTableFlags::PRESENT) && flags.contains(PageTableFlags::USER));
+        assert!(!flags.contains(PageTableFlags::WRITABLE));
+        // Its neighbour shares the tables and is not mapped.
+        assert_eq!(
+            manager.translate(handle, VirtAddr::new(0x0000_7F12_3456_8000)),
+            None
+        );
+        manager
+            .map_page(
+                handle,
+                VirtAddr::new(0x0000_7F12_3456_8000),
+                PhysAddr::new(0xABD000),
+                Permissions::user_rw(),
+            )
+            .unwrap();
+        assert_eq!(manager.table_count(), 4, "no new tables for a neighbour");
+        // Mapped twice: refused, not replaced.
+        assert_eq!(
+            manager.map_page(handle, virt, PhysAddr::new(0x1000), Permissions::user_rw()),
+            Err("Page already mapped")
+        );
+        // Another address space sees none of it.
+        let other = manager.create_address_space();
+        assert_eq!(manager.translate(other, virt), None);
+    }
+
+    #[test]
+    fn test_a_user_page_under_kernel_tables_makes_the_path_user() {
+        let mut manager = PageTableManager::new();
+        let handle = manager.create_address_space();
+        manager
+            .map_page(
+                handle,
+                VirtAddr::new(0x40_0000),
+                PhysAddr::new(0x9000),
+                Permissions::kernel_rw(),
+            )
+            .unwrap();
+        manager
+            .map_page(
+                handle,
+                VirtAddr::new(0x40_1000),
+                PhysAddr::new(0xA000),
+                Permissions::user_ro(),
+            )
+            .unwrap();
+        let pml4 = manager.tables.get(&handle.pml4_phys.as_u64()).unwrap();
+        assert!(pml4.entry(0).flags().contains(PageTableFlags::USER));
     }
 }

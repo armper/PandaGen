@@ -92,7 +92,7 @@ fn the_kernels_resource_audit_log_is_bounded() {
             .expect("the budget is effectively unlimited");
     }
     assert!(
-        kernel.resource_audit().len() > 0,
+        !kernel.resource_audit().is_empty(),
         "nothing was recorded, so this test cannot see the bound"
     );
     let len = kernel.resource_audit().len();

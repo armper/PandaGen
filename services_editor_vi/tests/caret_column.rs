@@ -27,7 +27,7 @@ fn the_published_caret_column_counts_characters() {
         .unwrap();
 
     let mut editor = Editor::new();
-    editor.set_view_handles(main.clone(), status);
+    editor.set_view_handles(main, status);
     editor.load_document(
         "héllo".to_string(),
         DocumentHandle::new(ObjectId::new(), VersionId::new(), None, false),
