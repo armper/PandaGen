@@ -47,6 +47,29 @@ pub struct DirectoryEntry {
     /// Earlier contents of this name, newest first, bounded by the writer.
     #[serde(default)]
     pub versions: Vec<VersionRecord>,
+    /// The document's stable id (FS-003): given once, kept through saves
+    /// and renames -- what grants name. 0 until one is given.
+    #[serde(default)]
+    pub doc_id: u64,
+    /// Who owns it, by principal number; [`NOBODY`] until adopted.
+    #[serde(default = "nobody")]
+    pub owner: u32,
+    /// How sensitive it is: 0 public, 1 internal, 2 confidential, 3
+    /// secret.
+    #[serde(default = "internal")]
+    pub label: u8,
+}
+
+/// The owner of an entry no one owns yet: written by the system before
+/// anyone existed, or on a disk from before owners (FS-003).
+pub const NOBODY: u32 = u32::MAX;
+
+fn nobody() -> u32 {
+    NOBODY
+}
+
+fn internal() -> u8 {
+    1
 }
 
 /// One earlier content of a name (GFX-057).
@@ -70,6 +93,9 @@ impl DirectoryEntry {
             tags: Vec::new(),
             trashed: false,
             versions: Vec::new(),
+            doc_id: 0,
+            owner: NOBODY,
+            label: internal(),
         }
     }
 }

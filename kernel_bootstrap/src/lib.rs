@@ -36,6 +36,7 @@ pub mod widgets;
 // Storage modules (available in both test and non-test)
 pub mod bare_metal_editor_io;
 pub mod bare_metal_storage;
+pub mod guard;
 
 // Workspace platform adapter (test-only for now until no_std dependencies resolved)
 #[cfg(test)]

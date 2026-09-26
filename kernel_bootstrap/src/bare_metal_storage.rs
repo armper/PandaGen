@@ -193,6 +193,12 @@ pub const MAX_VERSIONS: usize = 5;
 
 pub struct BareMetalFilesystem {
     pub(crate) fs: PersistentFilesystem<StorageBackend>,
+    /// Who may do what here, and who the filesystem is acting for
+    /// (FS-003): every public call below asks it first.
+    pub guard: crate::guard::Guard,
+    /// The filesystem's clock -- seconds since the epoch, from the RTC --
+    /// as last given: what expiries and history windows are measured in.
+    clock: u64,
     root_id: ObjectId,
     backend_kind: StorageBackendKind,
     /// Whether that backend has a writeback cache FLUSH must reach.
@@ -235,11 +241,231 @@ impl BareMetalFilesystem {
 
         Ok(Self {
             fs,
+            guard: crate::guard::Guard::new(),
+            clock: 0,
             root_id,
             backend_kind,
             backend_flushes,
             freshly_formatted,
         })
+    }
+
+    /// Set the clock decisions are made at (seconds since the epoch).
+    pub fn set_clock(&mut self, now: u64) {
+        if now > 0 {
+            self.clock = now;
+        }
+    }
+
+    pub fn clock(&self) -> u64 {
+        self.clock
+    }
+
+    fn denied(reason: String) -> TransactionError {
+        TransactionError::Denied(reason)
+    }
+
+    fn not_found() -> TransactionError {
+        TransactionError::ObjectNotFound("File not found".into())
+    }
+
+    /// The entry called `name`, if there is one.
+    fn entry(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<services_storage::persistent_fs::DirectoryEntry>, TransactionError> {
+        Ok(self
+            .fs
+            .read_directory(self.root_id)?
+            .get_entry(name)
+            .cloned())
+    }
+
+    /// The entry called `name`, which the actor may see; one they may not
+    /// see is not there, as far as they can tell.
+    fn visible_entry(
+        &mut self,
+        name: &str,
+    ) -> Result<services_storage::persistent_fs::DirectoryEntry, TransactionError> {
+        let entry = self.entry(name)?.ok_or_else(Self::not_found)?;
+        if !self.guard.visible(&entry, self.clock) {
+            return Err(Self::not_found());
+        }
+        Ok(entry)
+    }
+
+    /// The next document id: one past the highest given.
+    fn next_doc_id(&mut self) -> Result<u64, TransactionError> {
+        let dir = self.fs.read_directory(self.root_id)?;
+        Ok(dir.entries.values().map(|e| e.doc_id).max().unwrap_or(0) + 1)
+    }
+
+    /// Give every entry nobody owns to `owner`, with a document id (FS-003):
+    /// what the system wrote before anyone existed, or a disk from before
+    /// owners. `.authority` stays the system's. The system only.
+    pub fn adopt_unowned(
+        &mut self,
+        owner: authority::PrincipalId,
+    ) -> Result<usize, TransactionError> {
+        if self.guard.principal() != Some(authority::SYSTEM) {
+            return Err(Self::denied("only the system adopts".into()));
+        }
+        let dir = self.fs.read_directory(self.root_id)?;
+        let names: Vec<String> = dir
+            .entries
+            .values()
+            .filter(|e| e.owner == services_storage::persistent_fs::NOBODY || e.doc_id == 0)
+            .map(|e| e.name.clone())
+            .collect();
+        let mut next = self.next_doc_id()?;
+        let now = self.clock;
+        for name in &names {
+            let system = name == crate::guard::AUTHORITY_FILE;
+            let id = next;
+            self.fs.update_entry(self.root_id, name, now, |e| {
+                if e.doc_id == 0 {
+                    e.doc_id = id;
+                }
+                if system {
+                    e.owner = authority::SYSTEM.0;
+                    e.label = authority::Label::Secret as u8;
+                } else if e.owner == services_storage::persistent_fs::NOBODY {
+                    e.owner = owner.0;
+                }
+            })?;
+            next += 1;
+        }
+        Ok(names.len())
+    }
+
+    /// Relabel `name` (FS-003): its owner, within their clearance.
+    pub fn relabel(&mut self, name: &str, label: authority::Label) -> Result<(), TransactionError> {
+        let entry = self.visible_entry(name)?;
+        let who = self
+            .guard
+            .principal()
+            .ok_or_else(|| Self::denied("no session".into()))?;
+        self.guard
+            .authority
+            .may_relabel(who, &crate::guard::doc_ref(&entry), label)
+            .map_err(|e| Self::denied(alloc::format!("{e}")))?;
+        let now = self.clock;
+        self.fs
+            .update_entry(self.root_id, name, now, |e| e.label = label as u8)?;
+        self.guard.mark_dirty();
+        Ok(())
+    }
+
+    /// Share `name` with the person called `to` (FS-003): a grant derived
+    /// from what the actor holds, on the terms given.
+    pub fn share(
+        &mut self,
+        name: &str,
+        to: &str,
+        terms: authority::Terms,
+    ) -> Result<authority::GrantId, TransactionError> {
+        let entry = self.visible_entry(name)?;
+        let who = self
+            .guard
+            .principal()
+            .ok_or_else(|| Self::denied("no session".into()))?;
+        let holder = self
+            .guard
+            .authority
+            .principal_named(to)
+            .map(|p| p.id)
+            .ok_or_else(|| Self::denied(alloc::format!("no one called {to}")))?;
+        let now = self.clock;
+        let id = self
+            .guard
+            .authority
+            .share(who, &crate::guard::doc_ref(&entry), holder, terms, now)
+            .map_err(|e| Self::denied(alloc::format!("{e}")))?;
+        self.guard.mark_dirty();
+        Ok(id)
+    }
+
+    /// Revoke grant `id` on `name`, and what was derived from it.
+    pub fn revoke(
+        &mut self,
+        name: &str,
+        id: authority::GrantId,
+    ) -> Result<usize, TransactionError> {
+        let entry = self.visible_entry(name)?;
+        let who = self
+            .guard
+            .principal()
+            .ok_or_else(|| Self::denied("no session".into()))?;
+        let n = self
+            .guard
+            .authority
+            .revoke(who, &crate::guard::doc_ref(&entry), id)
+            .map_err(|e| Self::denied(alloc::format!("{e}")))?;
+        self.guard.mark_dirty();
+        Ok(n)
+    }
+
+    /// The grants on `name`, for its owner and anyone who may share it.
+    pub fn grants_on(&mut self, name: &str) -> Result<Vec<authority::Grant>, TransactionError> {
+        let entry = self.visible_entry(name)?;
+        let held = self.guard.held(&entry, self.clock);
+        if !held.contains(authority::Rights::SHARE) {
+            return Err(Self::denied(alloc::format!(
+                "share on {name}: holds only {held}"
+            )));
+        }
+        Ok(self
+            .guard
+            .authority
+            .grants_on(authority::DocId(entry.doc_id))
+            .cloned()
+            .collect())
+    }
+
+    /// Keep the guard's state in `.authority`, as the system, whoever is
+    /// acting (FS-003).
+    pub fn save_guard(&mut self) -> Result<(), TransactionError> {
+        let json = serde_json::to_vec(&self.guard.state())
+            .map_err(|e| TransactionError::StorageError(alloc::format!("{e}")))?;
+        let actor = self.guard.actor();
+        self.guard.act_as(crate::guard::Actor::System);
+        let now = self.clock;
+        let result = self.write_named(
+            crate::guard::AUTHORITY_FILE,
+            &json,
+            now,
+            Some("settings/authority"),
+        );
+        self.guard.act_as(actor);
+        result?;
+        self.guard.take_dirty();
+        Ok(())
+    }
+
+    /// Take up what `.authority` holds, if the disk has one. `Ok(false)`
+    /// when it has none (a new disk).
+    pub fn load_guard(&mut self) -> Result<bool, TransactionError> {
+        let Some(entry) = self.entry(crate::guard::AUTHORITY_FILE)? else {
+            return Ok(false);
+        };
+        let bytes = self.fs.read_file(entry.object_id)?;
+        let state: crate::guard::GuardState = serde_json::from_slice(&bytes)
+            .map_err(|e| TransactionError::StorageError(alloc::format!("{e}")))?;
+        self.guard.restore(state);
+        Ok(true)
+    }
+
+    /// The entry called `name` as the authority sees it, for sharing and
+    /// for the Access views: `None` when the actor may not see it.
+    pub fn document(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<services_storage::persistent_fs::DirectoryEntry>, TransactionError> {
+        match self.visible_entry(name) {
+            Ok(e) => Ok(Some(e)),
+            Err(TransactionError::ObjectNotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn was_freshly_formatted(&self) -> bool {
@@ -325,11 +551,34 @@ impl BareMetalFilesystem {
         schema: Option<&str>,
     ) -> Result<ObjectId, TransactionError> {
         self.assert_boot_cpu();
+        self.set_clock(now);
         let previous = self
             .fs
             .read_directory(self.root_id)?
             .get_entry(name)
             .cloned();
+        // A closed session writes nothing (FS-003).
+        if self.guard.principal().is_none() {
+            return Err(Self::denied("no session".into()));
+        }
+        // Writing over a document takes WRITE on it; one the actor cannot
+        // see is someone else's, and its name is taken.
+        if let Some(old) = &previous {
+            if !self.guard.visible(old, now)
+                && !self.guard.held(old, now).contains(authority::Rights::WRITE)
+            {
+                return Err(Self::denied(alloc::format!(
+                    "{name} belongs to someone else"
+                )));
+            }
+            self.guard
+                .decide(old, authority::Rights::WRITE, now)
+                .map_err(Self::denied)?;
+        }
+        let new_doc = match &previous {
+            Some(_) => None,
+            None => Some(self.next_doc_id()?),
+        };
         let file_id = self.fs.write_file(content)?;
         let mut entry = services_storage::persistent_fs::DirectoryEntry::new(
             name.into(),
@@ -339,7 +588,20 @@ impl BareMetalFilesystem {
         entry.modified_at = now;
         entry.size = content.len() as u64;
         entry.schema = schema.map(String::from);
+        // A new document is the actor's; `.authority` is always the
+        // system's, and secret.
+        if let Some(id) = new_doc {
+            entry.doc_id = id;
+            entry.owner = self.guard.owner_of_new();
+        }
+        if name == crate::guard::AUTHORITY_FILE {
+            entry.owner = authority::SYSTEM.0;
+            entry.label = authority::Label::Secret as u8;
+        }
         if let Some(old) = previous {
+            entry.doc_id = old.doc_id;
+            entry.owner = old.owner;
+            entry.label = old.label;
             if entry.schema.is_none() {
                 entry.schema = old.schema.clone();
             }
@@ -376,7 +638,33 @@ impl BareMetalFilesystem {
         change: impl FnOnce(&mut services_storage::persistent_fs::DirectoryEntry),
     ) -> Result<bool, TransactionError> {
         self.assert_boot_cpu();
-        self.fs.update_entry(self.root_id, name, now, change)
+        self.set_clock(now);
+        let Some(entry) = self.entry(name)? else {
+            return Ok(false);
+        };
+        if !self.guard.visible(&entry, now) {
+            return Ok(false);
+        }
+        // Try the change on a copy to see what it touches: tags and the
+        // like take TAG, the bin takes DELETE (FS-003).
+        let mut after = entry.clone();
+        change(&mut after);
+        let right = if after.trashed != entry.trashed {
+            authority::Rights::DELETE
+        } else {
+            authority::Rights::TAG
+        };
+        self.guard
+            .decide(&entry, right, now)
+            .map_err(Self::denied)?;
+        let (doc_id, owner, label) = (entry.doc_id, entry.owner, entry.label);
+        self.fs.update_entry(self.root_id, name, now, |e| {
+            *e = after;
+            // Who owns it and how it is labelled are not a tag.
+            e.doc_id = doc_id;
+            e.owner = owner;
+            e.label = label;
+        })
     }
 
     /// The kept versions of `name`, newest first: when each was current
@@ -386,34 +674,69 @@ impl BareMetalFilesystem {
         name: &str,
     ) -> Result<Vec<services_storage::persistent_fs::VersionRecord>, TransactionError> {
         self.assert_boot_cpu();
-        let dir = self.fs.read_directory(self.root_id)?;
-        let entry = dir
-            .get_entry(name)
-            .ok_or_else(|| TransactionError::StorageError("File not found".into()))?;
-        Ok(entry.versions.clone())
+        let entry = self.visible_entry(name)?;
+        let now = self.clock;
+        self.guard
+            .decide(&entry, authority::Rights::HISTORY, now)
+            .map_err(Self::denied)?;
+        Ok(self.versions_within_reach(&entry))
+    }
+
+    /// The versions of `entry` the actor's grants reach back to (FS-003).
+    fn versions_within_reach(
+        &self,
+        entry: &services_storage::persistent_fs::DirectoryEntry,
+    ) -> Vec<services_storage::persistent_fs::VersionRecord> {
+        let Some(who) = self.guard.principal() else {
+            return Vec::new();
+        };
+        let doc = crate::guard::doc_ref(entry);
+        entry
+            .versions
+            .iter()
+            .filter(|v| {
+                self.guard
+                    .authority
+                    .check_version(who, &doc, v.modified_at, self.clock)
+                    .allowed
+            })
+            .cloned()
+            .collect()
     }
 
     /// An earlier content of `name`: 0 is the newest kept version.
+    ///
+    /// Takes `HISTORY` on the document, reaching back to when the version
+    /// was saved (FS-003); `index` counts the versions the actor can
+    /// reach, not the ones kept.
     pub fn read_version(&mut self, name: &str, index: usize) -> Result<Vec<u8>, TransactionError> {
         self.assert_boot_cpu();
-        let dir = self.fs.read_directory(self.root_id)?;
-        let entry = dir
-            .get_entry(name)
-            .ok_or_else(|| TransactionError::StorageError("File not found".into()))?;
-        let version = entry
-            .versions
+        let entry = self.visible_entry(name)?;
+        let now = self.clock;
+        self.guard
+            .decide(&entry, authority::Rights::HISTORY, now)
+            .map_err(Self::denied)?;
+        let version = self
+            .versions_within_reach(&entry)
             .get(index)
+            .cloned()
             .ok_or_else(|| TransactionError::StorageError("No such version".into()))?;
+        self.guard
+            .decide_version(&entry, version.modified_at, now)
+            .map_err(Self::denied)?;
         self.fs.read_file(version.object_id)
     }
 
     /// Read a file by name
+    ///
+    /// Takes `READ` (FS-003).
     pub fn read_file_by_name(&mut self, name: &str) -> Result<Vec<u8>, TransactionError> {
         self.assert_boot_cpu();
-        let dir = self.fs.read_directory(self.root_id)?;
-        let entry = dir
-            .get_entry(name)
-            .ok_or_else(|| TransactionError::StorageError("File not found".into()))?;
+        let entry = self.visible_entry(name)?;
+        let now = self.clock;
+        self.guard
+            .decide(&entry, authority::Rights::READ, now)
+            .map_err(Self::denied)?;
         self.fs.read_file(entry.object_id)
     }
 
@@ -438,8 +761,13 @@ impl BareMetalFilesystem {
     /// List files in root directory
     pub fn list_files(&mut self) -> Result<Vec<String>, TransactionError> {
         self.assert_boot_cpu();
+        let now = self.clock;
         let entries = self.fs.list(self.root_id)?;
-        Ok(entries.into_iter().map(|(name, _)| name).collect())
+        Ok(entries
+            .into_iter()
+            .filter(|(_, e)| self.guard.visible(e, now))
+            .map(|(name, _)| name)
+            .collect())
     }
 
     /// The root directory's entries with what is known about each (GFX-056):
@@ -447,9 +775,16 @@ impl BareMetalFilesystem {
     /// for entries written before sizes were recorded.
     pub fn list_entries(&mut self) -> Result<Vec<crate::desk::FileEntry>, TransactionError> {
         self.assert_boot_cpu();
+        let now = self.clock;
         let entries = self.fs.list(self.root_id)?;
         let mut out = Vec::with_capacity(entries.len());
-        for (name, entry) in entries {
+        // Only what the actor may see (FS-003), each with its owner, label
+        // and what the actor holds on it.
+        for (name, entry) in entries
+            .into_iter()
+            .filter(|(_, e)| self.guard.visible(e, now))
+        {
+            let held = self.guard.held(&entry, now);
             let size = if entry.size > 0 {
                 entry.size
             } else {
@@ -471,6 +806,9 @@ impl BareMetalFilesystem {
                 tags: entry.tags.clone(),
                 trashed: entry.trashed,
                 versions: entry.versions.len(),
+                owner: self.guard.name_of(entry.owner),
+                label: crate::guard::label_of(&entry).name(),
+                held: held.0,
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -483,8 +821,25 @@ impl BareMetalFilesystem {
     }
 
     /// `delete_file`, stamping the directory with `now`.
+    ///
+    /// Takes `DELETE` (FS-003); the document's grants go with it.
     pub fn delete_file_at(&mut self, name: &str, now: u64) -> Result<(), TransactionError> {
         self.assert_boot_cpu();
+        self.set_clock(now);
+        let Some(current) = self.entry(name)? else {
+            return Ok(());
+        };
+        if !self.guard.visible(&current, now) {
+            return Ok(());
+        }
+        self.guard
+            .decide(&current, authority::Rights::DELETE, now)
+            .map_err(Self::denied)?;
+        if current.doc_id != 0 {
+            self.guard
+                .authority
+                .forget(authority::DocId(current.doc_id));
+        }
         if let Some(entry) = self.fs.unlink(name, self.root_id, now)? {
             // Deleting used to remove the name and keep the blocks. The
             // kept versions go with it.
@@ -496,23 +851,13 @@ impl BareMetalFilesystem {
         Ok(())
     }
 
-    /// Read file by object ID
-    pub fn read_file(&mut self, object_id: ObjectId) -> Result<Vec<u8>, TransactionError> {
+    /// Read an object by its storage id, unchecked -- for tests only
+    /// (FS-003): a document is reached by name, through the guard; an id is
+    /// how the storage below finds it, not a way in.
+    #[cfg(test)]
+    pub(crate) fn read_file(&mut self, object_id: ObjectId) -> Result<Vec<u8>, TransactionError> {
         self.assert_boot_cpu();
         self.fs.read_file(object_id)
-    }
-
-    /// Write file by object ID (creates new version)
-    pub fn write_file(
-        &mut self,
-        _object_id: ObjectId,
-        content: &[u8],
-    ) -> Result<ObjectId, TransactionError> {
-        self.assert_boot_cpu();
-        // For now, we need to replace the file entirely
-        // In a full implementation, we'd update the version
-        let file_id = self.fs.write_file(content)?;
-        Ok(file_id)
     }
 }
 

@@ -44,6 +44,9 @@ pub enum TransactionError {
 
     /// Storage error (I/O, block device, etc.)
     StorageError(String),
+
+    /// Refused: the one acting may not do this (FS-003); the text says why.
+    Denied(String),
 }
 
 impl core::fmt::Display for TransactionError {
@@ -54,6 +57,7 @@ impl core::fmt::Display for TransactionError {
             TransactionError::AlreadyFinalized => write!(f, "Transaction already finalized"),
             TransactionError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
             TransactionError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            TransactionError::Denied(msg) => write!(f, "Denied: {}", msg),
         }
     }
 }

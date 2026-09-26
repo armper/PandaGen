@@ -1362,6 +1362,12 @@ pub struct FileEntry {
     pub trashed: bool,
     /// How many earlier contents are kept.
     pub versions: usize,
+    /// Who owns it, by name (FS-003).
+    pub owner: String,
+    /// Its sensitivity label: "public", "internal", "confidential", "secret".
+    pub label: &'static str,
+    /// What the one looking holds on it, as `authority::Rights` bits.
+    pub held: u8,
 }
 
 impl FileEntry {
@@ -7595,6 +7601,7 @@ mod tests {
             tags: alloc::vec!["work".to_string()],
             trashed: false,
             versions: 2,
+            ..FileEntry::default()
         };
         let line = FilesView::line(&entry, 90);
         assert!(line.starts_with("notes"), "{line}");

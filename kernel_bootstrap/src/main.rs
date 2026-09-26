@@ -29,6 +29,7 @@ mod display_sink;
 mod framebuffer;
 mod free_list_heap;
 mod game;
+mod guard;
 mod launcher;
 mod minimal_editor;
 mod notepad;

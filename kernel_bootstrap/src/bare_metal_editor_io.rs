@@ -64,7 +64,8 @@ impl BareMetalEditorIo {
     }
 
     /// `new`, with the time writes are stamped with (GFX-056).
-    pub fn with_clock(fs: BareMetalFilesystem, now: u64) -> Self {
+    pub fn with_clock(mut fs: BareMetalFilesystem, now: u64) -> Self {
+        fs.set_clock(now);
         Self { fs, now }
     }
 
