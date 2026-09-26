@@ -2659,7 +2659,7 @@ mod tests {
 /// and a count of salts made, hashed. Not a cryptographic generator, but a
 /// salt only has to be unlikely to repeat.
 #[cfg(not(test))]
-fn fresh_salt() -> [u8; 16] {
+pub(crate) fn fresh_salt() -> [u8; 16] {
     use core::sync::atomic::{AtomicU64, Ordering};
     static MADE: AtomicU64 = AtomicU64::new(0);
     let n = MADE.fetch_add(1, Ordering::Relaxed);

@@ -16,6 +16,7 @@ extern crate std;
 #[cfg(not(test))]
 extern crate alloc;
 
+mod access_card;
 mod access_shell;
 mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
@@ -2166,6 +2167,27 @@ fn workspace_loop(
                             kprintln!(serial, "authority: signed out");
                             workspace.request_clear();
                             desk.signed_out(people, preferred.as_deref());
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::LoadAccess { id } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            let info = guard::access_info(&mut fs);
+                            workspace.set_filesystem(fs);
+                            desk.access_loaded(id, info, None);
+                            output_dirty = true;
+                        }
+                    }
+                    desk::DeskRequest::AccessDo { id, act } => {
+                        if let Some(mut fs) = workspace.take_filesystem() {
+                            fs.set_clock(now_secs);
+                            let result = guard::access_act(&mut fs, act, workspace::fresh_salt());
+                            let info = guard::access_info(&mut fs);
+                            workspace.set_filesystem(fs);
+                            let message = match result {
+                                Ok(m) | Err(m) => m,
+                            };
+                            desk.access_loaded(id, info, Some(message));
                             output_dirty = true;
                         }
                     }

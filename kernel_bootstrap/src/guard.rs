@@ -322,6 +322,141 @@ pub fn relabel_doc(
         .map_err(said)
 }
 
+/// What the Access card shows (FS-008): everyone, their clearance and
+/// whether they can sign in; the roles the one acting owns or is in.
+pub fn access_info(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+) -> Result<crate::access_card::AccessInfo, String> {
+    let who = fs
+        .guard
+        .principal()
+        .ok_or_else(|| String::from("Not signed in"))?;
+    let me = fs.guard.name_of(who.0);
+    let console = fs.guard.console.clone();
+    let admin = console.as_deref() == Some(me.as_str());
+    let people = fs
+        .guard
+        .authority
+        .principals()
+        .iter()
+        .filter(|p| p.id != SYSTEM)
+        .map(|p| crate::access_card::PersonLine {
+            name: p.name.clone(),
+            clearance: p.clearance as u8,
+            passphrase: fs.guard.accounts.has_passphrase(p.id),
+            admin: console.as_deref() == Some(p.name.as_str()),
+        })
+        .collect();
+    let docs = fs.document_index().unwrap_or_default();
+    let roles = fs
+        .guard
+        .authority
+        .roles()
+        .iter()
+        .filter(|r| r.owner == who || r.members.contains(&who))
+        .map(|r| crate::access_card::RoleLine {
+            name: r.name.clone(),
+            rights: r.rights.0,
+            scope: crate::access_card::scope_words(&r.scope, |d| {
+                docs.iter()
+                    .find(|(id, _, _)| *id == d)
+                    .map(|(_, n, _)| n.clone())
+                    .unwrap_or_else(|| alloc::format!("doc {d}"))
+            }),
+            members: r.members.iter().map(|m| fs.guard.name_of(m.0)).collect(),
+            mine: r.owner == who,
+        })
+        .collect();
+    Ok(crate::access_card::AccessInfo {
+        me,
+        admin,
+        people,
+        roles,
+    })
+}
+
+/// Do what the Access card asked (FS-008); what happened, in words. Adding
+/// people and setting clearances are the administrator's; roles are their
+/// owner's.
+pub fn access_act(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    act: crate::access_card::AccessAct,
+    salt: [u8; 16],
+) -> Result<String, String> {
+    use crate::access_card::{level_name, AccessAct};
+    let who = fs
+        .guard
+        .principal()
+        .ok_or_else(|| String::from("Not signed in"))?;
+    let admin = fs.guard.console.as_deref() == Some(fs.guard.name_of(who.0).as_str());
+    let label = |l: u8| {
+        Label::ALL
+            .get(l as usize)
+            .copied()
+            .unwrap_or(Label::Internal)
+    };
+    let g = &mut fs.guard;
+    g.mark_dirty();
+    match act {
+        AccessAct::AddPerson {
+            name,
+            passphrase,
+            clearance,
+        } => {
+            if !admin {
+                return Err("Only the administrator adds people".into());
+            }
+            let id = g
+                .authority
+                .add_principal(&name, authority::PrincipalKind::Person, label(clearance))
+                .map_err(|e| alloc::format!("{e}"))?;
+            g.accounts
+                .set_passphrase(&g.authority, SYSTEM, id, None, &passphrase, salt)
+                .map_err(|e| alloc::format!("{e}"))?;
+            Ok(alloc::format!("Added {name}: they can sign in now"))
+        }
+        AccessAct::SetClearance { name, clearance } => {
+            if !admin {
+                return Err("Only the administrator sets clearances".into());
+            }
+            let id = g
+                .authority
+                .principal_named(&name)
+                .map(|p| p.id)
+                .ok_or_else(|| alloc::format!("No one called {name}"))?;
+            g.authority
+                .set_clearance(SYSTEM, id, label(clearance))
+                .map_err(|e| alloc::format!("{e}"))?;
+            Ok(alloc::format!(
+                "{name} is cleared for {}",
+                level_name(clearance)
+            ))
+        }
+        AccessAct::Join { role, person } => {
+            let p = g
+                .authority
+                .principal_named(&person)
+                .map(|p| p.id)
+                .ok_or_else(|| alloc::format!("No one called {person}"))?;
+            g.authority
+                .join(who, &role, p)
+                .map(|_| alloc::format!("{person} is in {role}"))
+                .map_err(|e| alloc::format!("{e}"))
+        }
+        AccessAct::Leave { role, person } => {
+            let p = g
+                .authority
+                .principal_named(&person)
+                .map(|p| p.id)
+                .ok_or_else(|| alloc::format!("No one called {person}"))?;
+            g.authority
+                .leave(who, &role, p)
+                .map(|_| alloc::format!("{person} left {role}"))
+                .map_err(|e| alloc::format!("{e}"))
+        }
+    }
+}
+
 /// Sign out: close the console's session; nobody is signed in.
 pub fn sign_out(fs: &mut crate::bare_metal_storage::BareMetalFilesystem) {
     if let Actor::Session(handle) = fs.guard.actor() {
@@ -789,6 +924,90 @@ mod tests {
         assert_eq!(revoke_doc(fs, "plan", id).unwrap(), "Revoked");
         assert!(!sharing_info(fs, "plan").unwrap().grants[0].live);
         assert!(sharing_info(fs, "nothing").is_err());
+    }
+
+    /// The Access card's calls (FS-008): the administrator adds someone who
+    /// can then sign in, and sets a clearance; roles by their owner.
+    #[test]
+    fn the_access_card_adds_people_and_moves_them_between_roles() {
+        use crate::access_card::AccessAct;
+        let mut fs = BareMetalFilesystem::new().unwrap();
+        fs.guard = Guard::for_tests();
+        boot(&mut fs, "admin", 1).unwrap();
+        let info = access_info(&mut fs).unwrap();
+        assert!(info.admin && info.people.len() == 1);
+        let added = access_act(
+            &mut fs,
+            AccessAct::AddPerson {
+                name: "bea".into(),
+                passphrase: "bea-pass".into(),
+                clearance: 1,
+            },
+            [9; 16],
+        )
+        .unwrap();
+        assert!(added.starts_with("Added bea"));
+        assert_eq!(
+            access_act(
+                &mut fs,
+                AccessAct::SetClearance {
+                    name: "bea".into(),
+                    clearance: 2
+                },
+                [0; 16]
+            )
+            .unwrap(),
+            "bea is cleared for confidential"
+        );
+        let me = fs.guard.principal().unwrap();
+        fs.guard
+            .authority
+            .add_role(
+                me,
+                "workers",
+                Rights::READ,
+                authority::Scope::Tag("work".into()),
+            )
+            .unwrap();
+        assert!(access_act(
+            &mut fs,
+            AccessAct::Join {
+                role: "workers".into(),
+                person: "bea".into()
+            },
+            [0; 16]
+        )
+        .is_ok());
+        let info = access_info(&mut fs).unwrap();
+        assert_eq!(info.roles[0].members, alloc::vec!["bea".to_string()]);
+        assert_eq!(info.roles[0].scope, "#work");
+        assert!(info
+            .people
+            .iter()
+            .any(|p| p.name == "bea" && p.passphrase && p.clearance == 2));
+        // Bea signs in; she sees the role she is in, and cannot add anyone.
+        assert!(sign_in(&mut fs, "bea", "bea-pass", 5).is_ok());
+        let hers = access_info(&mut fs).unwrap();
+        assert!(!hers.admin && !hers.roles[0].mine);
+        assert!(access_act(
+            &mut fs,
+            AccessAct::AddPerson {
+                name: "eve".into(),
+                passphrase: "eve-pass".into(),
+                clearance: 3
+            },
+            [0; 16]
+        )
+        .is_err());
+        assert!(access_act(
+            &mut fs,
+            AccessAct::Leave {
+                role: "workers".into(),
+                person: "bea".into()
+            },
+            [0; 16]
+        )
+        .is_err());
     }
 
     /// With a passphrase the next boot signs no one in; the sign-in screen's
