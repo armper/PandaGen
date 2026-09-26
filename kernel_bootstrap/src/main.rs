@@ -4957,6 +4957,11 @@ impl Ps2ParserState {
         // would send it. Ctrl+P was the one letter special-cased above and
         // it stays 0x10 either way; this gives Ctrl+S, Ctrl+Z, Ctrl+N,
         // Ctrl+O and Ctrl+W to the desk's apps without a table per app.
+        if self.ctrl_pressed && self.shift_pressed && ascii.eq_ignore_ascii_case(&b'z') {
+            // Redo (KBD-014): Ctrl+Z with Shift, which the control byte
+            // cannot tell apart.
+            return Some(crate::notepad::KEY_CTRL_SHIFT_Z);
+        }
         if self.ctrl_pressed && ascii.is_ascii_alphabetic() {
             return Some(ascii.to_ascii_lowercase() & 0x1f);
         }

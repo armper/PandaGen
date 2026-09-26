@@ -1314,6 +1314,7 @@ impl DeskWindow {
             ],
             AppState::Notepad(notepad) if notepad.prompt_open() == Some("find") => alloc::vec![
                 ("Next".to_string(), b'\n'),
+                ("Back".to_string(), crate::notepad::KEY_UP),
                 ("Close".to_string(), crate::notepad::ESC),
             ],
             AppState::Notepad(notepad) if notepad.prompt_open() == Some("replace") => alloc::vec![
@@ -2049,6 +2050,8 @@ pub enum PaletteAction {
     Tuck,
     TextConsole,
     SelectAll,
+    Undo,
+    Redo,
     Copy,
     Cut,
     Paste,
@@ -2100,7 +2103,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 47] = [
+    pub const ALL: [PaletteAction; 49] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2115,6 +2118,8 @@ impl PaletteAction {
         PaletteAction::Tuck,
         PaletteAction::TextConsole,
         PaletteAction::SelectAll,
+        PaletteAction::Undo,
+        PaletteAction::Redo,
         PaletteAction::Copy,
         PaletteAction::Cut,
         PaletteAction::Paste,
@@ -2166,6 +2171,8 @@ impl PaletteAction {
             PaletteAction::Tuck => "Tuck into the dock",
             PaletteAction::TextConsole => "Switch to the text console",
             PaletteAction::SelectAll => "Select all",
+            PaletteAction::Undo => "Undo",
+            PaletteAction::Redo => "Redo",
             PaletteAction::Copy => "Copy",
             PaletteAction::Cut => "Cut",
             PaletteAction::Paste => "Paste",
@@ -2218,6 +2225,8 @@ impl PaletteAction {
             PaletteAction::Tuck => "drag onto the dock",
             PaletteAction::TextConsole => "",
             PaletteAction::SelectAll => "Ctrl+A",
+            PaletteAction::Undo => "Ctrl+Z",
+            PaletteAction::Redo => "Ctrl+Shift+Z",
             PaletteAction::Copy => "Ctrl+C",
             PaletteAction::Cut => "Ctrl+X",
             PaletteAction::Paste => "Ctrl+V",
@@ -2262,6 +2271,8 @@ impl PaletteAction {
                 | PaletteAction::SaveAs
                 | PaletteAction::Open
                 | PaletteAction::SelectAll
+                | PaletteAction::Undo
+                | PaletteAction::Redo
                 | PaletteAction::Copy
                 | PaletteAction::Cut
                 | PaletteAction::Paste
@@ -3889,6 +3900,8 @@ impl Desk {
             PaletteAction::SaveAs => self.forward_to_notepad(crate::notepad::CTRL_SHIFT_S),
             PaletteAction::Open => self.forward_to_notepad(crate::notepad::CTRL_O),
             PaletteAction::SelectAll => self.forward_to_notepad(crate::notepad::CTRL_A),
+            PaletteAction::Undo => self.forward_to_notepad(crate::notepad::CTRL_Z),
+            PaletteAction::Redo => self.forward_to_notepad(crate::notepad::KEY_CTRL_SHIFT_Z),
             PaletteAction::Copy => self.forward_to_notepad(crate::notepad::CTRL_C),
             PaletteAction::Cut => self.forward_to_notepad(crate::notepad::CTRL_X),
             PaletteAction::Paste => self.forward_to_notepad(crate::notepad::CTRL_V),
@@ -7442,6 +7455,7 @@ mod tests {
         let id = desk.launch(DeskApp::Notepad);
         desk.handle_key(crate::notepad::CTRL_F);
         assert_eq!(desk.window(id).unwrap().actions()[0].0, "Next");
+        assert_eq!(desk.window(id).unwrap().actions()[1].0, "Back");
         desk.handle_key(crate::notepad::ESC);
         desk.handle_key(crate::notepad::CTRL_O);
         assert_eq!(desk.window(id).unwrap().actions()[0].0, "Cancel");

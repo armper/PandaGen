@@ -20,6 +20,8 @@
 //! | `0x80..=0x83` | arrows: up, down, left, right            |
 //! | `0x84`        | delete                                   |
 //! | `0x1A` Ctrl+Z | undo                                     |
+//! | `0xA2` Ctrl+Shift+Z | redo                               |
+//! | Ctrl+F        | find (any case unless the query has one; Up goes back) |
 //! | `0x13` Ctrl+S | save (asks for a name the first time)    |
 //! | `0x0F` Ctrl+O | open by name                             |
 //! | `0x0E` Ctrl+N | new document                             |
@@ -88,6 +90,8 @@ pub const CTRL_SHIFT_S: u8 = 0x87;
 pub const CTRL_T: u8 = 0x14;
 pub const CTRL_W: u8 = 0x17;
 pub const CTRL_Z: u8 = 0x1A;
+/// Ctrl+Shift+Z: redo (KBD-014). Ctrl+Y was already the history browser.
+pub const KEY_CTRL_SHIFT_Z: u8 = 0xA2;
 pub const ESC: u8 = 0x1B;
 pub const BACKSPACE: u8 = 0x08;
 
@@ -162,6 +166,8 @@ enum Prompt {
 pub struct Document {
     buffer: TextBuffer,
     undo: Vec<(TextBuffer, Position)>,
+    /// What Ctrl+Z took back, for Ctrl+Shift+Z; a new edit forgets it.
+    redo: Vec<(TextBuffer, Position)>,
     dirty: bool,
     path: Option<String>,
     /// An edit landed since the last `autosave_due` call.
@@ -175,6 +181,7 @@ impl Document {
         Self {
             buffer: TextBuffer::from_string(content.to_string()),
             undo: Vec::new(),
+            redo: Vec::new(),
             dirty: false,
             path,
             edited: false,
@@ -805,13 +812,43 @@ impl Notepad {
             };
             let hit = if step == count {
                 // Back on the starting line, before where we began.
-                line[..from.col.min(line.len())].find(query)
+                find_in(&line[..floor_boundary(&line, from.col)], query, 0)
             } else {
-                line[start_at..].find(query).map(|i| i + start_at)
+                find_in(&line, query, start_at)
             };
             if let Some(col) = hit {
                 self.anchor = Some(Position::new(row, col));
                 self.cursor = Position::new(row, col + query.len());
+                self.scrolled_away = false;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find the `query` before the selection's start (or the caret),
+    /// wrapping round; select it (KBD-014).
+    fn find_prev(&mut self, query: &str) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        let from = self.selection().map(|(s, _)| s).unwrap_or(self.cursor);
+        let count = self.line_count();
+        for step in 0..=count {
+            let row = (from.row + count - step % count) % count;
+            let line = self.line(row);
+            let hit = if step == 0 {
+                rfind_in(&line, query, from.col)
+            } else if step == count {
+                // Back on the starting line, after where we began.
+                rfind_in(&line, query, usize::MAX).filter(|&c| c > from.col)
+            } else {
+                rfind_in(&line, query, usize::MAX)
+            };
+            if let Some(col) = hit {
+                let end = col + matched_len(&line, query, col);
+                self.anchor = Some(Position::new(row, col));
+                self.cursor = Position::new(row, end);
                 self.scrolled_away = false;
                 return true;
             }
@@ -841,7 +878,7 @@ impl Notepad {
         if find.is_empty() || self.history.is_some() {
             return;
         }
-        if self.selected_text().as_deref() == Some(find) {
+        if self.selected_text().is_some_and(|t| same_text(&t, find)) {
             let before = self.snapshot();
             self.delete_selection();
             self.insert_text(with);
@@ -860,12 +897,12 @@ impl Notepad {
             return 0;
         }
         let content = self.content();
-        let count = content.matches(find).count();
+        let (replaced, count) = replace_in(&content, find, with);
         if count == 0 {
             return 0;
         }
         let before = self.snapshot();
-        self.doc_mut().buffer = TextBuffer::from_string(content.replace(find, with));
+        self.doc_mut().buffer = TextBuffer::from_string(replaced);
         self.anchor = None;
         self.clamp_cursor();
         self.push_undo(before);
@@ -876,7 +913,7 @@ impl Notepad {
         if query.is_empty() {
             return 0;
         }
-        self.lines().iter().map(|l| l.matches(query).count()).sum()
+        self.lines().iter().map(|l| count_in(l, query)).sum()
     }
 
     /// The names a prompt completes against.
@@ -1002,7 +1039,9 @@ impl Notepad {
                     (false, 0) => "   no matches".to_string(),
                     (false, n) => alloc::format!("   {n} found"),
                 };
-                return alloc::format!("Find: {query}_{found}   (Enter next, Esc closes)");
+                return alloc::format!(
+                    "Find: {query}_{found}   (Enter or Down next, Up back, Esc closes)"
+                );
             }
             Some(Prompt::SaveAs(name)) | Some(Prompt::Open(name)) => {
                 let verb = if matches!(self.prompt, Some(Prompt::SaveAs(_))) {
@@ -1343,21 +1382,34 @@ impl Notepad {
                 }
                 NotepadEffect::Close
             }
-            CTRL_Z => {
-                let undone = self.doc_mut().undo.pop();
-                if let Some((buffer, cursor)) = undone {
-                    {
-                        let mut doc = self.doc_mut();
-                        doc.buffer = buffer;
+            CTRL_Z | KEY_CTRL_SHIFT_Z => {
+                let redo = byte == KEY_CTRL_SHIFT_Z;
+                let now = self.snapshot();
+                let restored = {
+                    let mut doc = self.doc_mut();
+                    let taken = if redo { doc.redo.pop() } else { doc.undo.pop() };
+                    if let Some((buffer, _)) = &taken {
+                        // What is there now goes on the other stack.
+                        if redo {
+                            doc.undo.push(now);
+                        } else {
+                            doc.redo.push(now);
+                        }
+                        doc.buffer = buffer.clone();
                         doc.dirty = true;
                     }
-                    self.cursor = cursor;
-                    self.anchor = None;
-                    NotepadEffect::Redraw
-                } else {
-                    self.status = "Nothing to undo".to_string();
-                    NotepadEffect::Redraw
+                    taken.map(|(_, cursor)| cursor)
+                };
+                match restored {
+                    Some(cursor) => {
+                        self.cursor = cursor;
+                        self.anchor = None;
+                        self.clamp_cursor();
+                    }
+                    None if redo => self.status = "Nothing to redo".to_string(),
+                    None => self.status = "Nothing to undo".to_string(),
                 }
+                NotepadEffect::Redraw
             }
             KEY_UP => self.move_vertical(-1),
             KEY_DOWN => self.move_vertical(1),
@@ -1516,8 +1568,14 @@ impl Notepad {
                     self.prompt = None;
                     return NotepadEffect::Redraw;
                 }
-                b'\n' | b'\r' => {
+                b'\n' | b'\r' | KEY_DOWN => {
                     if !self.find_next(&query) && !query.is_empty() {
+                        self.status = "No matches".to_string();
+                    }
+                    NotepadEffect::Redraw
+                }
+                KEY_UP => {
+                    if !self.find_prev(&query) && !query.is_empty() {
                         self.status = "No matches".to_string();
                     }
                     NotepadEffect::Redraw
@@ -1535,21 +1593,11 @@ impl Notepad {
                     if let Some((start, _)) = self.selection() {
                         self.cursor = start;
                         self.anchor = None;
-                        // Search from one before, so the same place can
-                        // match the longer query.
-                        if self.cursor.col > 0 {
-                            self.cursor.col -= 1;
-                        } else if self.cursor.row > 0 {
-                            self.cursor.row -= 1;
-                            self.cursor.col = self.line_length(self.cursor.row);
-                        } else {
-                            // Line 0, column 0: the search starts after the
-                            // caret, so step to the very end and wrap.
-                            let last = self.line_count() - 1;
-                            self.cursor = Position::new(last, self.line_length(last));
-                        }
                     }
-                    if !self.find_next(&query) {
+                    // From the caret itself: the first letter of a Find
+                    // used to skip a match sitting right at the caret, as
+                    // at the top of a freshly opened document.
+                    if !self.find_from_here(&query) {
                         (self.cursor, self.anchor) = saved;
                     }
                     NotepadEffect::Redraw
@@ -1641,11 +1689,91 @@ impl Notepad {
         if doc.undo.len() > MAX_UNDO {
             doc.undo.remove(0);
         }
+        // A new edit is a new branch: what was undone is gone.
+        doc.redo.clear();
         doc.dirty = true;
         doc.edited = true;
         drop(doc);
         self.close_armed = false;
     }
+}
+
+/// Smart case (KBD-014): a query with no capitals matches any case, one
+/// with a capital matches exactly. `find` was case-sensitive only, so
+/// looking for "todo" missed every "TODO".
+fn folds(query: &str) -> bool {
+    !query.chars().any(char::is_uppercase)
+}
+
+/// Where `query` starts in `hay`, at or after byte `from`.
+/// ASCII case folding keeps every byte where it was, so offsets in the
+/// folded line are offsets in the line.
+fn find_in(hay: &str, query: &str, from: usize) -> Option<usize> {
+    let from = ceil_boundary(hay, from.min(hay.len()));
+    if folds(query) {
+        hay[from..]
+            .to_ascii_lowercase()
+            .find(query)
+            .map(|i| i + from)
+    } else {
+        hay[from..].find(query).map(|i| i + from)
+    }
+}
+
+/// The last place `query` starts in `hay` before byte `before`.
+fn rfind_in(hay: &str, query: &str, before: usize) -> Option<usize> {
+    let mut last = None;
+    let mut at = 0;
+    while let Some(i) = find_in(hay, query, at) {
+        if i >= before {
+            break;
+        }
+        last = Some(i);
+        at = ceil_boundary(hay, i + 1);
+    }
+    last
+}
+
+/// How long the match of `query` at `col` is, in `line`'s bytes: the
+/// query's length, since folding is ASCII only.
+fn matched_len(_line: &str, query: &str, _col: usize) -> usize {
+    query.len()
+}
+
+fn count_in(hay: &str, query: &str) -> usize {
+    if folds(query) {
+        hay.to_ascii_lowercase().matches(query).count()
+    } else {
+        hay.matches(query).count()
+    }
+}
+
+/// Whether `text` is a match for `query`.
+fn same_text(text: &str, query: &str) -> bool {
+    if folds(query) {
+        text.to_ascii_lowercase() == query
+    } else {
+        text == query
+    }
+}
+
+/// `hay` with every match of `query` replaced by `with`, and how many.
+fn replace_in(hay: &str, query: &str, with: &str) -> (String, usize) {
+    if !folds(query) {
+        return (hay.replace(query, with), hay.matches(query).count());
+    }
+    let folded = hay.to_ascii_lowercase();
+    let mut out = String::with_capacity(hay.len());
+    let mut last = 0;
+    let mut count = 0;
+    for (at, _) in folded.match_indices(query) {
+        out.push_str(&hay[last..at]);
+        out.push_str(with);
+        last = at + query.len();
+        count += 1;
+    }
+    out.push_str(&hay[last..]);
+    (out, count)
 }
 
 /// The largest character boundary at or before `col` -- E3's lesson.
@@ -1712,6 +1840,82 @@ mod tests {
         assert!(
             matches!(pad.handle_byte(CTRL_S), NotepadEffect::Save { path, .. } if path == "a.txt")
         );
+    }
+
+    #[test]
+    fn redo_brings_back_what_undo_took_and_a_new_edit_forgets_it() {
+        let mut pad = Notepad::new();
+        type_str(&mut pad, "abc");
+        pad.handle_byte(CTRL_Z);
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "a");
+        assert_eq!(pad.handle_byte(KEY_CTRL_SHIFT_Z), NotepadEffect::Redraw);
+        assert_eq!(pad.content(), "ab");
+        pad.handle_byte(KEY_CTRL_SHIFT_Z);
+        assert_eq!(pad.content(), "abc");
+        pad.handle_byte(KEY_CTRL_SHIFT_Z);
+        assert!(pad.footer().contains("Nothing to redo"), "{}", pad.footer());
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "ab");
+        // Undo after redo still walks back.
+        pad.handle_byte(CTRL_Z);
+        assert_eq!(pad.content(), "a");
+        type_str(&mut pad, "x");
+        pad.handle_byte(KEY_CTRL_SHIFT_Z);
+        assert_eq!(pad.content(), "ax", "the new edit forgot the undone ones");
+    }
+
+    #[test]
+    fn find_is_smart_case_and_goes_back_with_up() {
+        let mut pad = Notepad::new();
+        pad.load(None, "TODO one\nnothing\ntodo two\nToDo three");
+        pad.handle_byte(CTRL_F);
+        type_str(&mut pad, "todo");
+        assert!(pad.footer().contains("3 found"), "{}", pad.footer());
+        assert_eq!(pad.selected_text().as_deref(), Some("TODO"));
+        pad.handle_byte(b'\n');
+        assert_eq!(pad.cursor().row, 2);
+        pad.handle_byte(KEY_DOWN);
+        assert_eq!(pad.cursor().row, 3);
+        pad.handle_byte(KEY_UP);
+        assert_eq!(pad.cursor().row, 2);
+        pad.handle_byte(KEY_UP);
+        assert_eq!(pad.cursor().row, 0);
+        pad.handle_byte(KEY_UP);
+        assert_eq!(pad.cursor().row, 3, "wraps round to the last");
+        // A capital makes it exact.
+        pad.handle_byte(ESC);
+        pad.handle_byte(KEY_HOME);
+        pad.handle_byte(CTRL_F);
+        type_str(&mut pad, "ToDo");
+        assert!(pad.footer().contains("1 found"), "{}", pad.footer());
+    }
+
+    #[test]
+    fn find_back_on_one_line_takes_the_earlier_match() {
+        let mut pad = Notepad::new();
+        pad.load(None, "ab ab ab");
+        pad.handle_byte(CTRL_F);
+        type_str(&mut pad, "ab");
+        pad.handle_byte(b'\n');
+        pad.handle_byte(b'\n');
+        assert_eq!(pad.cursor().col, 8, "the third");
+        pad.handle_byte(KEY_UP);
+        assert_eq!(pad.cursor().col, 5, "the second");
+    }
+
+    #[test]
+    fn replace_all_is_smart_case_too() {
+        assert_eq!(
+            replace_in("Cat cat CAT", "cat", "dog"),
+            ("dog dog dog".into(), 3)
+        );
+        assert_eq!(
+            replace_in("Cat cat CAT", "Cat", "dog"),
+            ("dog cat CAT".into(), 1)
+        );
+        assert_eq!(rfind_in("ab ab", "ab", 3), Some(0));
+        assert_eq!(rfind_in("héllo hé", "hé", usize::MAX), Some(7));
     }
 
     #[test]
@@ -1913,14 +2117,19 @@ mod tests {
         assert_eq!(pad.handle_byte(CTRL_F), NotepadEffect::Redraw);
         assert!(pad.footer().starts_with("Find: _"), "{}", pad.footer());
         type_str(&mut pad, "ca");
-        // Incremental: from the caret at (0,0), the first "ca" after it is
-        // on line 1.
+        // Incremental, from the caret itself: the "ca" at (0,0). This
+        // used to skip it and land on line 1 (KBD-014).
         assert_eq!(
             pad.selection(),
-            Some((Position::new(1, 4), Position::new(1, 6)))
+            Some((Position::new(0, 0), Position::new(0, 2)))
         );
         assert!(pad.footer().contains("3 found"), "{}", pad.footer());
         type_str(&mut pad, "t");
+        assert_eq!(
+            pad.selection(),
+            Some((Position::new(0, 0), Position::new(0, 3)))
+        );
+        pad.handle_byte(b'\n');
         assert_eq!(
             pad.selection(),
             Some((Position::new(1, 4), Position::new(1, 7)))
