@@ -1750,6 +1750,12 @@ fn workspace_loop(
                 input_progressed = if desk_took_it {
                     output_dirty = true;
                     true
+                } else if display_mode.is_desk() && desk.is_some() {
+                    // A key the focused card had no use for goes nowhere.
+                    // It used to fall through to the console under the
+                    // desk: letters typed at a Calculator became a command
+                    // line, and Enter ran it ("Unknown command: hi").
+                    false
                 } else {
                     workspace.process_input(ch, &mut ctx, serial)
                 };
@@ -2271,9 +2277,20 @@ fn workspace_loop(
                             let welcomed = io
                                 .read_setting(bare_metal_editor_io::WELCOMED_FILE)
                                 .is_some();
+                            let layout = io.read_setting(bare_metal_editor_io::LAYOUT_FILE);
                             workspace.set_filesystem(io.into_filesystem());
                             desk.apply_look(text.as_deref());
                             desk.apply_recent(recent.as_deref());
+                            // The cards as they were left (DESK-020).
+                            let before = desk.window_count();
+                            desk_requests.extend(desk.apply_layout(layout.as_deref()));
+                            if layout.is_some() {
+                                kprintln!(
+                                    serial,
+                                    "desk: layout restored, {} cards",
+                                    desk.window_count() - before
+                                );
+                            }
                             if !welcomed {
                                 // The first boot of this disk (GFX-065).
                                 desk.show_welcome();
@@ -2344,6 +2361,17 @@ fn workspace_loop(
                             let mut io =
                                 bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
                             let _ = io.write_setting(bare_metal_editor_io::WELCOMED_FILE, "yes\n");
+                            workspace.set_filesystem(io.into_filesystem());
+                        }
+                    }
+                    desk::DeskRequest::SaveLayout { text } => {
+                        if let Some(fs) = workspace.take_filesystem() {
+                            let mut io =
+                                bare_metal_editor_io::BareMetalEditorIo::with_clock(fs, now_secs);
+                            let saved = io.write_setting(bare_metal_editor_io::LAYOUT_FILE, &text);
+                            if saved.is_ok() {
+                                kprintln!(serial, "desk: layout saved");
+                            }
                             workspace.set_filesystem(io.into_filesystem());
                         }
                     }

@@ -392,6 +392,28 @@ pub enum DeskApp {
     Audit,
 }
 
+/// The cards a reboot brings back (DESK-020). Not the Welcome card, the
+/// Apps grid, or the cards about one document's sharing and the machine's
+/// people, which are opened for a moment and a purpose.
+pub const RESTORABLE: [DeskApp; 13] = [
+    DeskApp::Notepad,
+    DeskApp::Files,
+    DeskApp::Terminal,
+    DeskApp::Look,
+    DeskApp::Notices,
+    DeskApp::Now,
+    DeskApp::Shortcuts,
+    DeskApp::Calculator,
+    DeskApp::Calendar,
+    DeskApp::Timer,
+    DeskApp::Tiles,
+    DeskApp::Tasks,
+    DeskApp::Sketch,
+];
+
+/// How long the layout holds still before it is written, in ticks.
+pub const LAYOUT_SETTLE_TICKS: u64 = 200;
+
 impl DeskApp {
     pub const ALL: [DeskApp; 10] = [
         DeskApp::Notepad,
@@ -1982,6 +2004,9 @@ pub enum DeskRequest {
     /// Write the recently used files to disk (GFX-060); read back with
     /// the look.
     SaveRecent { text: String },
+    /// Write the desk's layout -- which cards are open, where, on which
+    /// space -- to disk (DESK-020); read back with the look.
+    SaveLayout { text: String },
     /// Find lines containing `query` in the person's text files, then call
     /// [`Desk::search_results`] (GFX-061).
     SearchFiles { query: String },
@@ -2545,6 +2570,16 @@ pub struct Desk {
     /// The Welcome card was closed this session; the kernel writes
     /// `.welcomed` and never shows it again (GFX-065).
     welcome_dismissed: bool,
+    /// The layout was read from disk (or there was none): from then on it
+    /// is kept as it changes (DESK-020). Never before, or the empty desk
+    /// of a fresh boot would be written over the one to bring back.
+    layout_loaded: bool,
+    /// The layout as last written...
+    layout_saved: String,
+    /// ...as last looked at, and when that last changed.
+    layout_seen: String,
+    layout_changed_at: u64,
+    layout_checked_at: u64,
     /// Notepads whose pending save is an autosave: no notice when it lands.
     quiet_saves: Vec<ViewId>,
     /// The space on screen (GFX-067).
@@ -2636,6 +2671,11 @@ impl Desk {
             look_preview: None,
             recent: Vec::new(),
             welcome_dismissed: false,
+            layout_loaded: false,
+            layout_saved: String::new(),
+            layout_seen: String::new(),
+            layout_changed_at: 0,
+            layout_checked_at: 0,
             quiet_saves: Vec::new(),
             space: 0,
             overview: None,
@@ -2833,6 +2873,110 @@ impl Desk {
     }
 
     /// The kernel read the recent-files list (GFX-060): one name a line.
+    /// The cards on the desk as text to keep (DESK-020): the space on
+    /// screen, then a line per card from the bottom up -- its app, space,
+    /// bounds, whether it is tucked, and the document it shows. An
+    /// untitled Notepad has nothing to reopen and is left out.
+    pub fn layout_text(&self) -> String {
+        let mut text = alloc::format!("space {}\n", self.space);
+        let mut cards: Vec<&DeskWindow> = self
+            .windows
+            .iter()
+            .filter(|w| RESTORABLE.contains(&w.app))
+            .collect();
+        cards.sort_by_key(|w| w.z);
+        for w in cards {
+            let doc = w.notepad().and_then(|n| n.path()).unwrap_or_default();
+            if w.app == DeskApp::Notepad && doc.is_empty() {
+                continue;
+            }
+            let b = w.bounds;
+            text.push_str(&alloc::format!(
+                "card {} {} {} {} {} {} {} {}\n",
+                w.app.name(),
+                w.space,
+                b.x,
+                b.y,
+                b.width,
+                b.height,
+                w.tucked as u8,
+                doc
+            ));
+        }
+        text
+    }
+
+    /// Open the cards a [`Desk::layout_text`] lists (DESK-020), where they
+    /// were, and say what they need read. Once per desk: signing in again
+    /// makes a new desk. Cards are fitted to this screen, which may not be
+    /// the one they were left on.
+    pub fn apply_layout(&mut self, text: Option<&str>) -> Vec<DeskRequest> {
+        let mut requests = Vec::new();
+        if self.layout_loaded {
+            return requests;
+        }
+        self.layout_loaded = true;
+        let Some(text) = text else {
+            return requests;
+        };
+        self.layout_saved = text.to_string();
+        let area = self.work_area();
+        let mut space = None;
+        for line in text.lines() {
+            let mut parts = line.splitn(10, ' ');
+            match parts.next() {
+                Some("space") => space = parts.next().and_then(|s| s.trim().parse::<usize>().ok()),
+                Some("card") => {
+                    let Some(app) = parts
+                        .next()
+                        .and_then(|name| RESTORABLE.iter().copied().find(|a| a.name() == name))
+                    else {
+                        continue;
+                    };
+                    let nums: Vec<usize> = parts
+                        .by_ref()
+                        .take(6)
+                        .filter_map(|p| p.parse().ok())
+                        .collect();
+                    if nums.len() != 6 {
+                        continue;
+                    }
+                    let doc = parts.next().unwrap_or("").trim().to_string();
+                    if app == DeskApp::Notepad && doc.is_empty() {
+                        continue;
+                    }
+                    let id = self.launch(app);
+                    let w = nums[3].min(area.width).max(160.min(area.width));
+                    let h = nums[4].min(area.height).max(120.min(area.height));
+                    let x = nums[1].min(area.right().saturating_sub(w)).max(area.x);
+                    let y = nums[2].min(area.bottom().saturating_sub(h)).max(area.y);
+                    let bounds = RasterRect::new(x, y, w, h);
+                    if let Some(window) = self.window_mut(id) {
+                        window.bounds = bounds;
+                        window.space = nums[0].min(SPACES - 1);
+                        window.tucked = nums[5] == 1;
+                    }
+                    self.motions.retain(|m| m.id != id);
+                    self.animate_to(id, rise_from(bounds));
+                    if app == DeskApp::Notepad {
+                        requests.push(DeskRequest::Io {
+                            id,
+                            effect: NotepadEffect::Open { path: doc },
+                        });
+                    } else if let Some(request) = app.launch_request(id) {
+                        requests.push(request);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(space) = space {
+            self.space = space.min(SPACES - 1);
+        }
+        self.focus = self.topmost_on_stage();
+        requests
+    }
+
     pub fn apply_recent(&mut self, text: Option<&str>) {
         if let Some(text) = text {
             self.recent = text
@@ -3048,6 +3192,25 @@ impl Desk {
         if self.welcome_dismissed {
             self.welcome_dismissed = false;
             requests.push(DeskRequest::Welcomed);
+        }
+        // The layout, kept as it changes (DESK-020): looked at twice a
+        // second and written once it has held still for two, so a card
+        // being dragged is not written at every stop on the way.
+        if self.layout_loaded
+            && self.sign_in.is_none()
+            && now.saturating_sub(self.layout_checked_at) >= 50
+        {
+            self.layout_checked_at = now;
+            let text = self.layout_text();
+            if text != self.layout_seen {
+                self.layout_seen = text;
+                self.layout_changed_at = now;
+            } else if text != self.layout_saved
+                && now.saturating_sub(self.layout_changed_at) >= LAYOUT_SETTLE_TICKS
+            {
+                self.layout_saved = text.clone();
+                requests.push(DeskRequest::SaveLayout { text });
+            }
         }
         for window in &mut self.windows {
             if let AppState::Notepad(notepad) = &mut window.state {
@@ -5221,8 +5384,14 @@ impl Desk {
             }
             return (None, false);
         };
+        // Ctrl+N is a new Notepad from any card that does not use it
+        // itself: the Notepad (new document) and Files (new file) do. It
+        // was the Terminal's alone, so from a Calculator it did nothing.
         if byte == crate::notepad::CTRL_N
-            && self.window(id).map(|w| w.app) == Some(DeskApp::Terminal)
+            && !matches!(
+                self.window(id).map(|w| w.app),
+                Some(DeskApp::Notepad) | Some(DeskApp::Files)
+            )
         {
             self.launch(DeskApp::Notepad);
             return (None, true);
@@ -6635,6 +6804,104 @@ mod tests {
     /// The first build answered the launch shortcuts only with nothing
     /// focused, so with a Notepad open Ctrl+T fell into the Notepad and did
     /// nothing. Launching is global; Ctrl+N is the Notepad's own inside one.
+    #[test]
+    fn the_layout_is_kept_and_comes_back_where_it_was() {
+        let mut desk = Desk::new(1280, 800);
+        desk.apply_layout(None);
+        let files = desk.launch(DeskApp::Files);
+        let calc = desk.launch(DeskApp::Calculator);
+        desk.launch(DeskApp::Notepad);
+        let named = desk.launch(DeskApp::Notepad);
+        desk.window_mut(named)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(Some("plans".into()), "hi");
+        desk.launch(DeskApp::Launcher);
+        desk.window_mut(calc).unwrap().bounds = RasterRect::new(100, 120, 400, 300);
+        desk.window_mut(files).unwrap().space = 2;
+        let text = desk.layout_text();
+        assert_eq!(
+            text.lines().count(),
+            4,
+            "space, Files, Calculator, plans:\n{text}"
+        );
+        assert!(
+            text.contains("card Calculator 0 100 120 400 300 0 \n"),
+            "{text}"
+        );
+        assert!(text.contains(" plans\n"), "{text}");
+
+        let mut fresh = Desk::new(1280, 800);
+        let requests = fresh.apply_layout(Some(&text));
+        assert!(requests
+            .iter()
+            .any(|r| matches!(r, DeskRequest::ListFiles { .. })));
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            DeskRequest::Io { effect: NotepadEffect::Open { path }, .. } if path == "plans"
+        )));
+        // The Notepad has not read its document yet: the kernel will.
+        let reopened = fresh
+            .windows
+            .iter()
+            .find(|w| w.app == DeskApp::Notepad)
+            .map(|w| w.id)
+            .unwrap();
+        fresh
+            .window_mut(reopened)
+            .unwrap()
+            .notepad_mut()
+            .unwrap()
+            .load(Some("plans".into()), "hi");
+        assert_eq!(fresh.layout_text(), text);
+        assert!(fresh.apply_layout(Some(&text)).is_empty(), "once per desk");
+    }
+
+    #[test]
+    fn a_layout_from_a_bigger_screen_is_fitted_and_nonsense_is_skipped() {
+        let mut desk = Desk::new(800, 600);
+        desk.apply_layout(Some(
+            "space 9\ncard Timer 7 2000 1500 5000 4000 0 \ncard Welcome 0 1 1 1 1 0 \ncard Nope 0 1 1 1 1 0 \ncard Tiles 0 x 1 1 1 0 \n",
+        ));
+        assert_eq!(desk.windows.len(), 1);
+        let w = &desk.windows[0];
+        let area = desk.work_area();
+        assert!(w.bounds.right() <= area.right() && w.bounds.bottom() <= area.bottom());
+        assert_eq!(w.space, SPACES - 1);
+        assert_eq!(desk.space(), SPACES - 1);
+    }
+
+    #[test]
+    fn the_layout_is_written_once_it_holds_still() {
+        let mut desk = Desk::new(1280, 800);
+        let saves = |d: &mut Desk, now: u64| {
+            d.tick(now)
+                .into_iter()
+                .filter(|r| matches!(r, DeskRequest::SaveLayout { .. }))
+                .count()
+        };
+        desk.launch(DeskApp::Calculator);
+        assert_eq!(saves(&mut desk, 1_000), 0, "not before the layout was read");
+        desk.apply_layout(None);
+        assert_eq!(saves(&mut desk, 1_100), 0, "just seen");
+        assert_eq!(saves(&mut desk, 1_200), 0, "still settling");
+        assert_eq!(saves(&mut desk, 1_100 + LAYOUT_SETTLE_TICKS), 1);
+        assert_eq!(saves(&mut desk, 2_000), 0, "unchanged: not again");
+    }
+
+    #[test]
+    fn ctrl_n_from_a_card_that_does_not_use_it_opens_a_notepad() {
+        let mut desk = Desk::new(1280, 800);
+        desk.launch(DeskApp::Calculator);
+        assert!(desk.handle_key(crate::notepad::CTRL_N).1);
+        assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Notepad));
+        // Files keeps it: a new file.
+        desk.launch(DeskApp::Files);
+        desk.handle_key(crate::notepad::CTRL_N);
+        assert_eq!(desk.focused_window().map(|w| w.app), Some(DeskApp::Files));
+    }
+
     #[test]
     fn launch_shortcuts_work_whatever_is_focused() {
         let mut desk = Desk::new(1280, 800);

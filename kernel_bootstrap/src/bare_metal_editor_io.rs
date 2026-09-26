@@ -19,6 +19,8 @@ pub const LOOK_FILE: &str = ".look";
 pub const RECENT_FILE: &str = ".recent";
 /// Present once the Welcome card has been closed (GFX-065).
 pub const WELCOMED_FILE: &str = ".welcomed";
+/// The desk's layout: the open cards and where they are (DESK-020).
+pub const LAYOUT_FILE: &str = ".desk";
 
 /// Editor I/O error
 #[derive(Debug)]

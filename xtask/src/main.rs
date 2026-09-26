@@ -947,6 +947,36 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "KERNEL PANIC".to_string(),
     ];
     shapes.push(Shape::new(&title, &args));
+
+    // A reboot (DESK-020): the cards come back, and so does the document
+    // one of them shows -- the first check that anything survives a
+    // restart of the machine.
+    title = "the desk after a reboot: its cards and their document come back".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,c,a,l,c,ret,sleep:2,ctrl-n,sleep:1,h,i,ctrl-s,sleep:1,p,l,a,n,ret,sleep:5".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_reboot_1".to_string(),
+        "--expect-serial".to_string(),
+        "desk: layout saved".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    let again = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:8".to_string(),
+        "--out".to_string(),
+        "dist/qemu_desk_reboot_2".to_string(),
+        "--expect-serial".to_string(),
+        "desk: layout restored, 2 cards".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args).then(&again));
     run_shapes(&root, shapes, began)
 }
 
@@ -2544,6 +2574,9 @@ fn run(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
 struct Shape {
     title: String,
     args: Vec<String>,
+    /// A second boot on the same disk, after the first passes: what a
+    /// reboot keeps (DESK-020).
+    then: Option<Vec<String>>,
 }
 
 impl Shape {
@@ -2551,7 +2584,14 @@ impl Shape {
         Self {
             title: title.to_string(),
             args: args.to_vec(),
+            then: None,
         }
+    }
+
+    /// Boot again on the disk the first boot left, with `args`.
+    fn then(mut self, args: &[String]) -> Self {
+        self.then = Some(args.to_vec());
+        self
     }
 }
 
@@ -2619,27 +2659,27 @@ fn run_shapes(
                 let _ = fs::remove_file(&disk);
                 let made = fs::File::create(&disk).and_then(|f| f.set_len(blank_len));
                 // Its own ports.
-                let mut args = shape.args.clone();
-                if let Some(at) = args.iter().position(|a| a == "--port-base") {
-                    if let Some(value) = args.get_mut(at + 1) {
-                        *value = base.to_string();
+                let own_ports = |mut args: Vec<String>| {
+                    if let Some(at) = args.iter().position(|a| a == "--port-base") {
+                        if let Some(value) = args.get_mut(at + 1) {
+                            *value = base.to_string();
+                        }
                     }
-                }
+                    args
+                };
+                let args = own_ports(shape.args.clone());
                 let out_name = args
                     .iter()
                     .position(|a| a == "--out")
                     .and_then(|at| args.get(at + 1).cloned())
                     .unwrap_or_else(|| format!("dist/gauntlet_{index}"));
                 let started = std::time::Instant::now();
-                let run = match made {
-                    Ok(()) => Command::new(exe)
-                        .current_dir(root)
-                        .arg("qemu-script")
-                        .args(&args)
-                        .output(),
-                    Err(e) => Err(e),
-                };
-                let (ok, text) = match run {
+                let boot = |args: &[String]| match Command::new(exe)
+                    .current_dir(root)
+                    .arg("qemu-script")
+                    .args(args)
+                    .output()
+                {
                     Ok(o) => {
                         let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
                         text.push_str(&String::from_utf8_lossy(&o.stderr));
@@ -2647,6 +2687,19 @@ fn run_shapes(
                     }
                     Err(e) => (false, format!("could not run qemu-script: {e}")),
                 };
+                let (mut ok, mut text) = match made {
+                    Ok(()) => boot(&args),
+                    Err(e) => (false, format!("could not make the disk: {e}")),
+                };
+                // The reboot: the same disk, not a blank one.
+                if ok {
+                    if let Some(then) = shape.then.clone() {
+                        let (again_ok, again) = boot(&own_ports(then));
+                        ok = again_ok;
+                        text.push_str("\n---- after the reboot ----\n");
+                        text.push_str(&again);
+                    }
+                }
                 let _ = fs::write(root.join(format!("{out_name}.gauntlet.log")), &text);
                 println!(
                     "   [{:>2}/{total}] {} {} ({:.0}s)",
