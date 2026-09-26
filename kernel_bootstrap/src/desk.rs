@@ -745,6 +745,11 @@ pub const NOW_SIZE: (usize, usize) = (440, 300);
 pub const SHORTCUTS_SIZE: (usize, usize) = (560, 520);
 /// How often the Now card asks the kernel for fresh vitals, in ticks.
 pub const VITALS_EVERY: u64 = 100;
+/// The rest screen's clock (GFX-111): its scale, and its distance from the
+/// screen's bottom-left corner.
+pub const REST_CLOCK_SCALE: u8 = 7;
+pub const REST_MARGIN: u32 = 64;
+
 /// How many cells the top bar keeps for its memory meter (GFX-088).
 pub const METER_CELLS: usize = 6;
 /// How often the kernel refreshes the tray's numbers, in ticks.
@@ -4581,33 +4586,31 @@ impl Desk {
         self.sketching = None;
     }
 
-    /// The rest screen (GFX-092): the whole screen, the time eight times
-    /// the font, the date under it, how to wake at the foot.
+    /// The rest screen (GFX-092): the whole screen under the veil. The
+    /// time, seven times the font, and the date under it sit in the
+    /// bottom-left corner (GFX-111), clear of whatever a picture wallpaper
+    /// puts in its middle; how to wake is along the foot.
     fn rest_screen(&self, clock: &str) -> DesktopWindow {
-        use crate::widgets::{rect, text_width, Palette, Ui};
+        use crate::widgets::{Palette, Ui};
         let palette = Palette::from_theme(&self.theme());
         let mut ui = Ui::new(palette, None);
-        let (w, h) = (self.width as u32, self.height as u32);
-        let clock_h = 16 * 8;
-        let top = (h / 2).saturating_sub(clock_h + 20) as i32;
-        let clock_w = text_width(clock, 8);
-        ui.text(
-            ((w - clock_w.min(w)) / 2) as i32,
-            top,
-            clock,
-            palette.text,
-            8,
-        );
+        let (w, h) = (self.width as i32, self.height as i32);
+        let margin = REST_MARGIN as i32;
+        let clock_h = 16 * REST_CLOCK_SCALE as i32;
+        let date_h = 32;
+        let clock_y = h - margin - date_h - 12 - clock_h;
+        ui.text(margin, clock_y, clock, palette.text, REST_CLOCK_SCALE);
         if let Some(today) = self.today {
-            ui.text_centered(
-                &rect(0, top + clock_h as i32 + 24, w, 32),
+            ui.text(
+                margin + 6,
+                clock_y + clock_h + 12,
                 &today.long(),
                 palette.muted,
                 2,
             );
         }
         ui.text_centered(
-            &rect(0, h as i32 - 64, w, 16),
+            &crate::widgets::rect(0, h - 40, w as u32, 16),
             "A key or the pointer wakes the desk",
             palette.muted,
             1,
@@ -8528,7 +8531,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(texts[0], ("12:34".to_string(), 8));
+        assert_eq!(texts[0], ("12:34".to_string(), REST_CLOCK_SCALE));
+        // In the bottom-left corner (GFX-111).
+        assert!(matches!(
+            &screen[0].overlay[0],
+            view_types::DrawOp::Text { x, y, .. }
+                if *x == REST_MARGIN && *y > 800 / 2
+        ));
         assert_eq!(texts[1], ("Thursday 24 September 2026".to_string(), 2));
         // The key that wakes is not typed.
         desk.handle_key(b'b');
