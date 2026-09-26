@@ -508,6 +508,15 @@ impl SimulatedKernel {
     /// Returns a mutable reference to the syscall gate
     ///
     /// Phase 61: Provides mutable access to syscall gate for testing.
+    /// The task running under execution identity `execution` (SEC-021):
+    /// the trap needs it to know whose capabilities a grant may move.
+    pub fn task_of_execution(&self, execution: ExecutionId) -> Option<TaskId> {
+        self.task_to_identity
+            .iter()
+            .find(|(_, id)| **id == execution)
+            .map(|(task, _)| *task)
+    }
+
     pub fn syscall_gate_mut(&mut self) -> &mut syscall_gate::SyscallGate {
         &mut self.syscall_gate
     }

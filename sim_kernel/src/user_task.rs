@@ -150,20 +150,95 @@ pub fn default_trap(
             }
             result
         }
-        other => {
-            // Other syscalls not yet implemented in default_trap
-            let syscall_name = format!("{:?}", other);
-            kernel.syscall_gate_mut().record_rejected(
-                caller,
-                syscall_name.clone(),
-                "Not supported in default_trap".to_string(),
-                timestamp_nanos,
-            );
-            Err(KernelError::InsufficientAuthority(format!(
-                "Syscall {} not supported in default_trap",
-                syscall_name
-            )))
+        // A grant is the granter's: it moves a capability the calling task
+        // holds to `task`, through the kernel's delegation check (SEC-021).
+        Syscall::Grant { task, capability } => {
+            kernel
+                .syscall_gate_mut()
+                .record_invoked(caller, "Grant".to_string(), timestamp_nanos);
+            let result = match kernel.task_of_execution(caller) {
+                Some(from) => kernel
+                    .delegate_capability(capability.id(), from, task)
+                    .map(|_| SyscallResult::Ok),
+                None => Err(KernelError::InsufficientAuthority(
+                    "Grant: the caller is not a task".to_string(),
+                )),
+            };
+            record(kernel, caller, "Grant", &result, timestamp_nanos);
+            result
         }
+        // Memory: the kernel's own address-space operations, which check the
+        // caller's capabilities themselves.
+        memory @ (Syscall::CreateAddressSpace
+        | Syscall::AllocateRegion { .. }
+        | Syscall::AccessRegion { .. }) => {
+            use crate::syscall_gate::MemoryOps;
+            let name = syscall_name_of(&memory);
+            kernel
+                .syscall_gate_mut()
+                .record_invoked(caller, name.to_string(), timestamp_nanos);
+            let result = match memory {
+                Syscall::CreateAddressSpace => kernel
+                    .create_address_space_op(caller)
+                    .map(SyscallResult::AddressSpaceCap),
+                Syscall::AllocateRegion {
+                    space_cap,
+                    size_bytes,
+                    permissions,
+                    backing,
+                } => kernel
+                    .allocate_region_op(&space_cap, size_bytes, permissions, backing, caller)
+                    .map(SyscallResult::MemoryRegionCap),
+                Syscall::AccessRegion {
+                    region_cap,
+                    access_type,
+                } => kernel
+                    .access_region_op(&region_cap, access_type, caller)
+                    .map(|_| SyscallResult::Ok),
+                _ => unreachable!("matched above"),
+            }
+            .map_err(|e| KernelError::InsufficientAuthority(alloc_format(&e)));
+            record(kernel, caller, name, &result, timestamp_nanos);
+            result
+        }
+        // The rest: the gate's own dispatch. This arm used to refuse them
+        // all as "not supported in default_trap".
+        other => {
+            let name = syscall_name_of(&other);
+            kernel
+                .syscall_gate_mut()
+                .record_invoked(caller, name.to_string(), timestamp_nanos);
+            let result = crate::syscall_gate::dispatch(kernel, other);
+            record(kernel, caller, name, &result, timestamp_nanos);
+            result
+        }
+    }
+}
+
+fn alloc_format(e: &impl core::fmt::Debug) -> String {
+    format!("{e:?}")
+}
+
+/// Write a syscall's outcome to the gate's audit log.
+fn record(
+    kernel: &mut crate::SimulatedKernel,
+    caller: ExecutionId,
+    name: &str,
+    result: &Result<SyscallResult, KernelError>,
+    timestamp_nanos: u64,
+) {
+    match result {
+        Ok(_) => {
+            kernel
+                .syscall_gate_mut()
+                .record_completed(caller, name.to_string(), timestamp_nanos)
+        }
+        Err(err) => kernel.syscall_gate_mut().record_rejected(
+            caller,
+            name.to_string(),
+            format!("{err:?}"),
+            timestamp_nanos,
+        ),
     }
 }
 
@@ -220,6 +295,87 @@ mod tests {
     use super::*;
     use ipc::{MessagePayload, SchemaVersion};
     use kernel_api::KernelApi;
+
+    #[test]
+    fn test_trap_answers_every_syscall_not_three() {
+        let mut kernel = crate::SimulatedKernel::new();
+        let ctx = kernel
+            .spawn_user_task("user".to_string(), 256, 256)
+            .unwrap();
+        assert!(matches!(
+            ctx.syscall(&mut kernel, Syscall::Now),
+            Ok(SyscallResult::Instant(_))
+        ));
+        assert!(ctx.syscall(&mut kernel, Syscall::Yield).is_ok());
+        let space = match ctx.syscall(&mut kernel, Syscall::CreateAddressSpace) {
+            Ok(SyscallResult::AddressSpaceCap(cap)) => cap,
+            other => panic!("{other:?}"),
+        };
+        let region = ctx.syscall(
+            &mut kernel,
+            Syscall::AllocateRegion {
+                space_cap: space,
+                size_bytes: 4096,
+                permissions: core_types::MemoryPerms::read_only(),
+                backing: core_types::MemoryBacking::Anonymous,
+            },
+        );
+        let region = match region {
+            Ok(SyscallResult::MemoryRegionCap(cap)) => cap,
+            other => panic!("{other:?}"),
+        };
+        let write = ctx.syscall(
+            &mut kernel,
+            Syscall::AccessRegion {
+                region_cap: region,
+                access_type: core_types::MemoryAccessType::Write,
+            },
+        );
+        assert!(write.is_err(), "a read-only region refuses a write");
+    }
+
+    #[test]
+    fn test_a_task_grants_only_what_it_holds() {
+        use kernel_api::TaskDescriptor;
+        let mut kernel = crate::SimulatedKernel::new();
+        let ctx = kernel
+            .spawn_user_task("granter".to_string(), 256, 256)
+            .unwrap();
+        let other = kernel
+            .spawn_task(TaskDescriptor::new("other".to_string()))
+            .unwrap()
+            .task_id;
+        // A capability nobody gave it: refused, where it used to be minted.
+        let forged = core_types::Cap::<()>::new(0xF0_4CED);
+        let refused = ctx.syscall(
+            &mut kernel,
+            Syscall::Grant {
+                task: other,
+                capability: forged,
+            },
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        // One it holds: moved.
+        let held = || core_types::Cap::<()>::new(0x401D);
+        kernel.grant_capability(ctx.task_id, held()).unwrap();
+        let moved = ctx.syscall(
+            &mut kernel,
+            Syscall::Grant {
+                task: other,
+                capability: held(),
+            },
+        );
+        assert!(moved.is_ok(), "{moved:?}");
+        // And it is gone from the granter: granting it again fails.
+        let again = ctx.syscall(
+            &mut kernel,
+            Syscall::Grant {
+                task: other,
+                capability: held(),
+            },
+        );
+        assert!(again.is_err(), "{again:?}");
+    }
 
     #[test]
     fn test_user_task_context_stacks() {

@@ -12,6 +12,63 @@ use ipc::{ChannelId, MessageEnvelope};
 use kernel_api::{Duration, KernelApi, KernelError, TaskDescriptor, TaskHandle};
 use serde::{Deserialize, Serialize};
 
+/// Carry out one syscall against `kernel`, after the gate has let it
+/// through and before it records the outcome. Shared by
+/// [`SyscallGate::execute`] and `user_task::default_trap` (SEC-021), which
+/// used to answer only three syscalls and refuse the rest.
+pub fn dispatch(
+    kernel: &mut dyn KernelApi,
+    syscall: Syscall,
+) -> Result<SyscallResult, KernelError> {
+    match syscall {
+        Syscall::SpawnTask { descriptor } => {
+            kernel.spawn_task(descriptor).map(SyscallResult::TaskHandle)
+        }
+        Syscall::CreateChannel => kernel.create_channel().map(SyscallResult::ChannelId),
+        Syscall::Send { channel, message } => kernel
+            .send_message(channel, message)
+            .map(|_| SyscallResult::Ok),
+        Syscall::Recv { channel } => kernel
+            .receive_message(channel, None)
+            .map(SyscallResult::Message),
+        Syscall::Sleep { duration } => kernel.sleep(duration).map(|_| SyscallResult::Ok),
+        Syscall::Now => Ok(SyscallResult::Instant(kernel.now())),
+        Syscall::Yield => {
+            // Yield is a hint to the scheduler, always succeeds
+            Ok(SyscallResult::Ok)
+        }
+        // A grant moves a capability the caller holds, and `KernelApi`
+        // cannot say who the caller is: `grant_capability` mints, and
+        // any task could have minted itself anything (SEC-021). Only
+        // the kernel's trap, which knows the caller's task and the
+        // capability table, may grant.
+        Syscall::Grant { .. } => Err(KernelError::InsufficientAuthority(
+            "Grant must come through the kernel's trap, which checks the granter holds it"
+                .to_string(),
+        )),
+        Syscall::RegisterService {
+            service_id,
+            channel,
+        } => kernel
+            .register_service(service_id, channel)
+            .map(|_| SyscallResult::Ok),
+        Syscall::LookupService { service_id } => kernel
+            .lookup_service(service_id)
+            .map(SyscallResult::ChannelId),
+        // Memory needs the kernel's address spaces, which `KernelApi` does
+        // not reach: the trap and `execute_with_memory` carry these.
+        Syscall::CreateAddressSpace => Err(KernelError::InsufficientAuthority(
+            "CreateAddressSpace requires SimulatedKernel access".to_string(),
+        )),
+        Syscall::AllocateRegion { .. } => Err(KernelError::InsufficientAuthority(
+            "AllocateRegion requires SimulatedKernel access".to_string(),
+        )),
+        Syscall::AccessRegion { .. } => Err(KernelError::InsufficientAuthority(
+            "AccessRegion requires SimulatedKernel access".to_string(),
+        )),
+    }
+}
+
 /// Complete syscall set for user tasks.
 /// This is the ONLY interface between user space and kernel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,50 +317,7 @@ impl SyscallGate {
             return Err(err);
         }
 
-        // Execute the syscall
-        let result = match syscall {
-            Syscall::SpawnTask { descriptor } => {
-                kernel.spawn_task(descriptor).map(SyscallResult::TaskHandle)
-            }
-            Syscall::CreateChannel => kernel.create_channel().map(SyscallResult::ChannelId),
-            Syscall::Send { channel, message } => kernel
-                .send_message(channel, message)
-                .map(|_| SyscallResult::Ok),
-            Syscall::Recv { channel } => kernel
-                .receive_message(channel, None)
-                .map(SyscallResult::Message),
-            Syscall::Sleep { duration } => kernel.sleep(duration).map(|_| SyscallResult::Ok),
-            Syscall::Now => Ok(SyscallResult::Instant(kernel.now())),
-            Syscall::Yield => {
-                // Yield is a hint to the scheduler, always succeeds
-                Ok(SyscallResult::Ok)
-            }
-            Syscall::Grant { task, capability } => kernel
-                .grant_capability(task, capability)
-                .map(|_| SyscallResult::Ok),
-            Syscall::RegisterService {
-                service_id,
-                channel,
-            } => kernel
-                .register_service(service_id, channel)
-                .map(|_| SyscallResult::Ok),
-            Syscall::LookupService { service_id } => kernel
-                .lookup_service(service_id)
-                .map(SyscallResult::ChannelId),
-            Syscall::CreateAddressSpace => {
-                // Memory operations need to be routed through SimulatedKernel
-                // For now, return an error indicating this needs special handling
-                Err(KernelError::InsufficientAuthority(
-                    "CreateAddressSpace requires SimulatedKernel access".to_string(),
-                ))
-            }
-            Syscall::AllocateRegion { .. } => Err(KernelError::InsufficientAuthority(
-                "AllocateRegion requires SimulatedKernel access".to_string(),
-            )),
-            Syscall::AccessRegion { .. } => Err(KernelError::InsufficientAuthority(
-                "AccessRegion requires SimulatedKernel access".to_string(),
-            )),
-        };
+        let result = dispatch(kernel, syscall);
 
         // Record completion or rejection
         match &result {

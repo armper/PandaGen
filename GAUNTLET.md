@@ -442,8 +442,12 @@ work; see that commit for which.
   there is still no signature and no root of trust, and nothing in the
   workspace calls it: the shipped image has no boot chain. Real verified
   boot needs a key and a signing step in the build.
-- The kernel does not check *who* is granting a capability; any holder of a
-  `&mut SimulatedKernel` may grant.
+- ~~The kernel does not check *who* is granting a capability~~ -- a task's
+  `Grant` syscall now moves only a capability the calling task holds,
+  through `delegate_capability` (Phase 420, SEC-021); the gate's
+  `KernelApi`-only `execute` refuses `Grant`, since it cannot know the
+  caller. Kernel code holding `&mut SimulatedKernel` still mints with
+  `grant_capability`, which is the kernel's to do.
 
 **Round 4 was closed with** thirty-one findings, Phases 307-316. Its three
 critics were the regression critic on this loop's own work, the HTTP and
