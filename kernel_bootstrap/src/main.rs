@@ -5149,6 +5149,20 @@ fn boot_info(serial: &mut serial::SerialPort) -> BootInfo {
                     info.framebuffer_height = height;
                     info.framebuffer_pitch = pitch;
                     info.framebuffer_bpp = bpp;
+                    info.framebuffer_shifts = (
+                        fb.red_mask_shift(),
+                        fb.green_mask_shift(),
+                        fb.blue_mask_shift(),
+                    );
+                    if info.framebuffer_shifts != (16, 8, 0) {
+                        kprintln!(
+                            serial,
+                            "framebuffer: colour shifts r{} g{} b{}",
+                            info.framebuffer_shifts.0,
+                            info.framebuffer_shifts.1,
+                            info.framebuffer_shifts.2
+                        );
+                    }
                     kprintln!(
                         serial,
                         "framebuffer: {}x{} @ 0x{:x} ({} bpp)",
@@ -5898,6 +5912,8 @@ struct BootInfo {
     framebuffer_height: u64,
     framebuffer_pitch: u64,
     framebuffer_bpp: u16,
+    /// Where red, green and blue start in a pixel (FB-001).
+    framebuffer_shifts: (u8, u8, u8),
     /// Display mode requested on the kernel command line (`display=...`).
     display_mode: Option<display_mode::DisplayMode>,
 }
@@ -5916,6 +5932,7 @@ impl BootInfo {
             framebuffer_height: 0,
             framebuffer_pitch: 0,
             framebuffer_bpp: 0,
+            framebuffer_shifts: (16, 8, 0),
             display_mode: None,
         }
     }

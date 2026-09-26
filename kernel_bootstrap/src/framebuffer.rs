@@ -19,13 +19,17 @@ const FONT_HEIGHT: usize = 16;
 pub enum PixelFormat {
     /// 32-bit RGB (0xXXRRGGBB) - most common format
     Rgb32,
+    /// 32-bit with red in the low byte (0xXXBBGGRR), as some firmware sets
+    /// a framebuffer up (FB-001). Drawn as `Rgb32`, it swapped red and
+    /// blue on every pixel.
+    Bgr32,
 }
 
 impl PixelFormat {
     /// Returns the number of bytes per pixel
     pub const fn bytes_per_pixel(&self) -> usize {
         match self {
-            PixelFormat::Rgb32 => 4,
+            PixelFormat::Rgb32 | PixelFormat::Bgr32 => 4,
         }
     }
 
@@ -33,6 +37,18 @@ impl PixelFormat {
     pub fn to_bytes(self, r: u8, g: u8, b: u8) -> [u8; 4] {
         match self {
             PixelFormat::Rgb32 => [b, g, r, 0],
+            PixelFormat::Bgr32 => [r, g, b, 0],
+        }
+    }
+
+    /// The format a framebuffer's depth and colour shifts describe, if
+    /// this renderer can draw it (FB-001). The shifts are where red, green
+    /// and blue start in a pixel, as the bootloader reports them.
+    pub const fn from_shifts(bpp: u16, shifts: (u8, u8, u8)) -> Option<Self> {
+        match (bpp, shifts) {
+            (32, (16, 8, 0)) => Some(PixelFormat::Rgb32),
+            (32, (0, 8, 16)) => Some(PixelFormat::Bgr32),
+            _ => None,
         }
     }
 }
@@ -394,10 +410,10 @@ impl BareMetalFramebuffer {
         // and `cols()` would be computed as though pixels were four bytes
         // wide, so the screen came up illegible with no diagnostic. Refusing
         // here falls back cleanly to the VGA text console, which is readable.
-        let format = PixelFormat::Rgb32;
-        if boot_info.framebuffer_bpp as usize != format.bytes_per_pixel() * 8 {
-            return None;
-        }
+        // So is a colour order other than the two 32-bit ones: drawing
+        // one as the other swaps red and blue on every pixel (FB-001).
+        let format =
+            PixelFormat::from_shifts(boot_info.framebuffer_bpp, boot_info.framebuffer_shifts)?;
         // A pitch that is not a whole number of pixels would truncate
         // `stride_pixels` and skew every row.
         if boot_info.framebuffer_pitch as usize % format.bytes_per_pixel() != 0 {
@@ -1234,7 +1250,19 @@ fn split_bands(
 /// `band.src` must cover rows `y0..y1` at `src_stride_pixels`, and
 /// `band.dst` rows `y0..y1` at `dst_stride_bytes`, for the whole call.
 pub unsafe fn convert_rgba_rows(band: &PresentBand) {
-    let PixelFormat::Rgb32 = band.format;
+    // The format is chosen once per band, so the per-pixel loop keeps its
+    // constant shifts.
+    match band.format {
+        PixelFormat::Rgb32 => convert_rows::<16, 0>(band),
+        PixelFormat::Bgr32 => convert_rows::<0, 16>(band),
+    }
+}
+
+/// `convert_rgba_rows` for red at bit `RED` and blue at bit `BLUE`.
+///
+/// # Safety
+/// As `convert_rgba_rows`.
+unsafe fn convert_rows<const RED: u32, const BLUE: u32>(band: &PresentBand) {
     for y in band.y0..band.y1 {
         let src_row = band.src.add(y * band.src_stride_pixels * 4);
         let dst_row = band.dst.add(y * band.dst_stride_bytes) as *mut u32;
@@ -1243,7 +1271,7 @@ pub unsafe fn convert_rgba_rows(band: &PresentBand) {
             let r = *px as u32;
             let g = *px.add(1) as u32;
             let b = *px.add(2) as u32;
-            core::ptr::write_volatile(dst_row.add(x), (r << 16) | (g << 8) | b);
+            core::ptr::write_volatile(dst_row.add(x), (r << RED) | (g << 8) | (b << BLUE));
         }
     }
 }
@@ -1333,6 +1361,48 @@ mod tests {
         boot.framebuffer_pitch = pitch;
         boot.framebuffer_bpp = bpp;
         boot
+    }
+
+    #[test]
+    fn red_in_the_low_byte_is_drawn_as_such_and_other_orders_are_refused() {
+        assert_eq!(
+            PixelFormat::from_shifts(32, (16, 8, 0)),
+            Some(PixelFormat::Rgb32)
+        );
+        assert_eq!(
+            PixelFormat::from_shifts(32, (0, 8, 16)),
+            Some(PixelFormat::Bgr32)
+        );
+        assert_eq!(PixelFormat::from_shifts(32, (24, 16, 8)), None);
+        assert_eq!(PixelFormat::from_shifts(24, (16, 8, 0)), None);
+        assert_eq!(PixelFormat::Bgr32.to_bytes(1, 2, 3), [1, 2, 3, 0]);
+
+        let mut pixels = [0u8; 16 * 4 * 4];
+        let mut boot = boot_info_with(32, 16 * 4, &mut pixels);
+        boot.framebuffer_shifts = (0, 8, 16);
+        let fb = unsafe { BareMetalFramebuffer::from_boot_info(&boot) }.unwrap();
+        assert_eq!(fb.info().format, PixelFormat::Bgr32);
+        boot.framebuffer_shifts = (8, 16, 24);
+        assert!(unsafe { BareMetalFramebuffer::from_boot_info(&boot) }.is_none());
+
+        // A present writes red where red goes.
+        let (width, height) = (3usize, 2usize);
+        let src: alloc::vec::Vec<u8> = (0..width * height)
+            .flat_map(|_| [200, 100, 50, 255])
+            .collect();
+        let mut dst = alloc::vec![0u8; width * height * 4];
+        let band = PresentBand {
+            src: src.as_ptr(),
+            src_stride_pixels: width,
+            dst: dst.as_mut_ptr(),
+            dst_stride_bytes: width * 4,
+            width,
+            y0: 0,
+            y1: height,
+            format: PixelFormat::Bgr32,
+        };
+        unsafe { convert_rgba_rows(&band) };
+        assert_eq!(&dst[..4], &[200, 100, 50, 0]);
     }
 
     #[test]
