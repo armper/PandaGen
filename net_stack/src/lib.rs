@@ -5,6 +5,7 @@
 //! caller-provided buffer so the kernel can DMA it directly.
 
 pub mod dhcp;
+pub mod dns;
 pub mod http;
 pub mod tcp;
 pub mod wire;

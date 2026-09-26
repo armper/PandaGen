@@ -1,4 +1,5 @@
-//! Minimal server-side HTTP/1.1: request parsing and response headers.
+//! Minimal HTTP/1.1: the server's request parsing and response headers,
+//! and the client's URL, request, response head and chunked body (NET-032).
 //!
 //! No allocation. The caller owns every buffer, so this runs unchanged in
 //! the kernel. The parser is deliberately strict about framing (the part
@@ -248,6 +249,202 @@ pub fn write_headers(
     Some(n)
 }
 
+// ---- The client side (NET-032): a request out, a response read back. ----
+
+/// An `http://` URL's parts. `https` is refused: there is no TLS here, and
+/// quietly speaking plain HTTP to a TLS port would only ever fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Url<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    /// Path and query, starting with `/`.
+    pub path: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlError {
+    /// `https://` or another scheme.
+    NotHttp,
+    /// No host, a bad port, or characters that do not belong.
+    Malformed,
+}
+
+/// Parse `http://host[:port][/path]`; a bare `host/path` is taken as
+/// `http://` too, since that is how people type it.
+pub fn parse_url(url: &str) -> Result<Url<'_>, UrlError> {
+    let rest = match url.split_once("://") {
+        Some(("http", rest)) | Some(("HTTP", rest)) => rest,
+        Some(_) => return Err(UrlError::NotHttp),
+        None => url,
+    };
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(at) if rest.as_bytes()[at] == b'/' => (&rest[..at], &rest[at..]),
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, "/"),
+    };
+    // A path that starts with `?` still needs its slash; the caller writes
+    // what we return, so the one case is handled where it is written.
+    if authority.contains('@') {
+        // user:pass@host -- not something to send in the clear by accident.
+        return Err(UrlError::Malformed);
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().map_err(|_| UrlError::Malformed)?),
+        None => (authority, 80),
+    };
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !host_ok || port == 0 || path.bytes().any(|b| b <= b' ' || b == 0x7F) {
+        return Err(UrlError::Malformed);
+    }
+    Ok(Url { host, port, path })
+}
+
+/// Write the GET request for `url` into `out`; returns its length. The
+/// connection is asked to close after the response, which is how the
+/// response's end is known when it declares no length.
+pub fn write_request(url: &Url<'_>, out: &mut [u8]) -> Option<usize> {
+    let mut w = Writer { out, len: 0 };
+    w.put(b"GET ")?;
+    if url.path.starts_with('?') {
+        w.put(b"/")?;
+    }
+    w.put(url.path.as_bytes())?;
+    w.put(b" HTTP/1.1\r\nHost: ")?;
+    w.put(url.host.as_bytes())?;
+    if url.port != 80 {
+        w.put(b":")?;
+        let mut digits = [0u8; 5];
+        let mut n = url.port;
+        let mut i = digits.len();
+        while n > 0 {
+            i -= 1;
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        w.put(&digits[i..])?;
+    }
+    w.put(b"\r\nUser-Agent: PandaGen\r\nAccept: */*\r\nConnection: close\r\n\r\n")?;
+    Some(w.len)
+}
+
+struct Writer<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl Writer<'_> {
+    fn put(&mut self, bytes: &[u8]) -> Option<()> {
+        let end = self.len.checked_add(bytes.len())?;
+        self.out.get_mut(self.len..end)?.copy_from_slice(bytes);
+        self.len = end;
+        Some(())
+    }
+}
+
+/// A response's head, as far as a client needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Response<'a> {
+    pub status: u16,
+    pub reason: &'a str,
+    /// Bytes of head, including the blank line.
+    pub head_len: usize,
+    /// The declared body length, if any.
+    pub content_length: Option<usize>,
+    /// The body is chunked: decode it with `dechunk`.
+    pub chunked: bool,
+    /// Where a redirect points, if one does.
+    pub location: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseParse<'a> {
+    Incomplete,
+    Complete(Response<'a>),
+    Malformed,
+}
+
+/// Parse a response head from the start of `buf`.
+pub fn parse_response(buf: &[u8]) -> ResponseParse<'_> {
+    let Some(head_len) = head_end(buf) else {
+        return ResponseParse::Incomplete;
+    };
+    let Ok(text) = core::str::from_utf8(&buf[..head_len]) else {
+        return ResponseParse::Malformed;
+    };
+    let mut lines = text.split('\n').map(|l| l.trim_end_matches('\r'));
+    let status_line = lines.next().unwrap_or("");
+    let mut parts = status_line.splitn(3, ' ');
+    let version = parts.next().unwrap_or("");
+    let status = parts.next().and_then(|s| s.parse::<u16>().ok());
+    let reason = parts.next().unwrap_or("");
+    let Some(status) = status.filter(|s| (100..=999).contains(s)) else {
+        return ResponseParse::Malformed;
+    };
+    if !version.starts_with("HTTP/1.") {
+        return ResponseParse::Malformed;
+    }
+    let mut response = Response {
+        status,
+        reason,
+        head_len,
+        content_length: None,
+        chunked: false,
+        location: None,
+    };
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            match value.parse::<usize>() {
+                Ok(n) => response.content_length = Some(n),
+                Err(_) => return ResponseParse::Malformed,
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            response.chunked = value
+                .rsplit(',')
+                .next()
+                .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
+        } else if name.eq_ignore_ascii_case("location") {
+            response.location = Some(value);
+        }
+    }
+    ResponseParse::Complete(response)
+}
+
+/// Decode a chunked body (everything after the head) into `out`. `Some`
+/// with the decoded length once the last chunk has arrived; `None` while
+/// it has not, or if the framing is broken or `out` is too small.
+pub fn dechunk(body: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut at = 0;
+    let mut written = 0;
+    loop {
+        let line_end = body[at..].iter().position(|&b| b == b'\n')? + at;
+        let line = core::str::from_utf8(&body[at..line_end]).ok()?;
+        // Chunk extensions (`;name=value`) are allowed and ignored.
+        let size_text = line.trim_end_matches('\r').split(';').next()?.trim();
+        let size = usize::from_str_radix(size_text, 16).ok()?;
+        at = line_end + 1;
+        if size == 0 {
+            return Some(written);
+        }
+        let data = body.get(at..at.checked_add(size)?)?;
+        out.get_mut(written..written + size)?.copy_from_slice(data);
+        written += size;
+        at += size;
+        // The chunk's own CRLF.
+        match body.get(at..) {
+            Some([b'\r', b'\n', ..]) => at += 2,
+            Some([b'\n', ..]) => at += 1,
+            _ => return None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +632,117 @@ mod framing_tests {
             assert_eq!(request.target, "/health");
             assert_eq!(request.head_len, raw.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+
+    #[test]
+    fn urls_are_parsed_as_people_type_them() {
+        assert_eq!(
+            parse_url("http://10.0.2.2:8080/a?b=1"),
+            Ok(Url {
+                host: "10.0.2.2",
+                port: 8080,
+                path: "/a?b=1"
+            })
+        );
+        assert_eq!(
+            parse_url("example.com"),
+            Ok(Url {
+                host: "example.com",
+                port: 80,
+                path: "/"
+            })
+        );
+        assert_eq!(
+            parse_url("http://example.com?q"),
+            Ok(Url {
+                host: "example.com",
+                port: 80,
+                path: "?q"
+            })
+        );
+        assert_eq!(parse_url("https://example.com/"), Err(UrlError::NotHttp));
+        assert_eq!(parse_url("http://:80/"), Err(UrlError::Malformed));
+        assert_eq!(
+            parse_url("http://a:b@example.com/"),
+            Err(UrlError::Malformed)
+        );
+        assert_eq!(
+            parse_url("http://example.com:99999/"),
+            Err(UrlError::Malformed)
+        );
+        assert_eq!(parse_url("http://exa mple.com/"), Err(UrlError::Malformed));
+        assert_eq!(
+            parse_url("http://example.com/a b"),
+            Err(UrlError::Malformed)
+        );
+    }
+
+    #[test]
+    fn the_request_names_the_host_and_asks_to_close() {
+        let mut out = [0u8; 256];
+        let url = parse_url("http://example.com:8080?x").unwrap();
+        let n = write_request(&url, &mut out).unwrap();
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(
+            text.starts_with("GET /?x HTTP/1.1\r\nHost: example.com:8080\r\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("Connection: close\r\n\r\n"));
+        let url = parse_url("example.com/index.html").unwrap();
+        let n = write_request(&url, &mut out).unwrap();
+        assert!(core::str::from_utf8(&out[..n])
+            .unwrap()
+            .contains("Host: example.com\r\n"));
+        assert_eq!(write_request(&url, &mut out[..10]), None);
+    }
+
+    #[test]
+    fn a_response_head_gives_status_length_chunking_and_redirects() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello";
+        match parse_response(raw) {
+            ResponseParse::Complete(r) => {
+                assert_eq!((r.status, r.reason), (200, "OK"));
+                assert_eq!(r.content_length, Some(5));
+                assert!(!r.chunked);
+                assert_eq!(&raw[r.head_len..], b"hello");
+            }
+            other => panic!("{other:?}"),
+        }
+        let raw = b"HTTP/1.1 301 Moved\r\nLocation: http://example.org/\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+        match parse_response(raw) {
+            ResponseParse::Complete(r) => {
+                assert_eq!(r.location, Some("http://example.org/"));
+                assert!(r.chunked);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\n"),
+            ResponseParse::Incomplete
+        );
+        assert_eq!(
+            parse_response(b"SSH-2.0-x\r\n\r\n"),
+            ResponseParse::Malformed
+        );
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n"),
+            ResponseParse::Malformed
+        );
+    }
+
+    #[test]
+    fn a_chunked_body_is_decoded_once_it_is_all_there() {
+        let body = b"4\r\nWiki\r\n6;ext=1\r\npedia \r\nE\r\nin \r\n\r\nchunks.\r\n0\r\n\r\n";
+        let mut out = [0u8; 64];
+        let n = dechunk(body, &mut out).unwrap();
+        assert_eq!(&out[..n], b"Wikipedia in \r\n\r\nchunks.");
+        assert_eq!(dechunk(&body[..20], &mut out), None, "not all there");
+        assert_eq!(dechunk(body, &mut out[..8]), None, "no room");
+        assert_eq!(dechunk(b"zz\r\n", &mut out), None, "not hex");
     }
 }

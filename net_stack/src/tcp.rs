@@ -1,9 +1,10 @@
-//! Minimal TCP for a server that talks to a handful of peers at a time.
+//! Minimal TCP for a machine that talks to a handful of peers at a time.
 //!
-//! Passive open only, in-order receive (out-of-order segments are dropped
+//! Passive open for its servers and active open (`connect`) for its own
+//! requests (NET-030), in-order receive (out-of-order segments are dropped
 //! and re-acknowledged), one outstanding send segment with a fixed
 //! retransmission timeout, and both close directions. Enough for line
-//! protocols from standard tools; not a general-purpose stack.
+//! protocols and HTTP; not a general-purpose stack.
 
 use crate::wire::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
 use crate::Ipv4;
@@ -16,6 +17,11 @@ pub const MAX_CONNECTIONS: usize = 8;
 pub const MAX_PER_PORT: usize = MAX_CONNECTIONS - 2;
 /// Listen ports served at once.
 pub const MAX_LISTEN_PORTS: usize = 4;
+/// Connections this machine may open itself at once. The rest of the table
+/// stays for its servers, so a runaway client cannot take them offline.
+pub const MAX_OUTBOUND: usize = 2;
+/// First ephemeral port for connections we open (RFC 6335's dynamic range).
+pub const EPHEMERAL_FIRST: u16 = 49152;
 /// Backstop for a half-open connection (100 Hz ticks). Retransmission
 /// normally abandons it first, after `MAX_RETRIES` attempts one `RTO_TICKS`
 /// apart; this only catches a connection the retransmit path somehow misses.
@@ -38,6 +44,8 @@ pub const MAX_RETRIES: u8 = 5;
 pub enum State {
     Closed,
     Listen,
+    /// We sent a SYN and wait for the SYN|ACK (active open, NET-030).
+    SynSent,
     SynReceived,
     Established,
     CloseWait,
@@ -102,6 +110,14 @@ pub struct Connection {
     fin_sent: bool,
     /// Peer sent a FIN that the application has not seen yet.
     peer_closed: bool,
+    /// We opened this connection (`connect`), rather than accepting it.
+    pub outbound: bool,
+    /// Our SYN has not been sent yet: `poll` sends it first thing.
+    syn_unsent: bool,
+    /// The application read from a buffer that had (nearly) closed our
+    /// window: the peer must be told it has room again, or a sender
+    /// waiting on a zero window waits forever.
+    window_update: bool,
 }
 
 impl Connection {
@@ -126,6 +142,9 @@ impl Connection {
             fin_pending: false,
             fin_sent: false,
             peer_closed: false,
+            outbound: false,
+            syn_unsent: false,
+            window_update: false,
         }
     }
 
@@ -143,6 +162,11 @@ impl Connection {
     /// inspect what has arrived before deciding to take it.
     pub fn peek(&self) -> &[u8] {
         &self.rx[..self.rx_len]
+    }
+
+    /// Whether the handshake is done and data may be written.
+    pub fn is_established(&self) -> bool {
+        matches!(self.state, State::Established | State::CloseWait)
     }
 
     /// Room left in the send buffer.
@@ -179,6 +203,10 @@ pub struct Tcp {
     /// `poll_skipping` call. A peer whose hardware address the caller cannot
     /// resolve must not hold up every other connection's output.
     skip_peers: [Option<Ipv4>; MAX_CONNECTIONS],
+    /// The next ephemeral port to try.
+    next_port: u16,
+    /// Connections opened with `connect`.
+    pub opened: u64,
 }
 
 fn seq_le(a: u32, b: u32) -> bool {
@@ -205,7 +233,63 @@ impl Tcp {
             refused: 0,
             reaped: 0,
             skip_peers: [None; MAX_CONNECTIONS],
+            next_port: EPHEMERAL_FIRST,
+            opened: 0,
         }
+    }
+
+    /// Open a connection to `peer:peer_port` (NET-030): a SYN goes out on
+    /// the next `poll`, and the connection is `Established` once the
+    /// SYN|ACK arrives -- `receive` reports it then. `None` when this
+    /// machine already has `MAX_OUTBOUND` connections of its own open, or
+    /// the table is full.
+    pub fn connect(&mut self, peer: Ipv4, peer_port: u16) -> Option<usize> {
+        let outbound = self
+            .conns
+            .iter()
+            .filter(|c| c.state != State::Closed && c.outbound)
+            .count();
+        if outbound >= MAX_OUTBOUND {
+            return None;
+        }
+        let index = self.conns.iter().position(|c| c.state == State::Closed)?;
+        let local_port = self.ephemeral_port(peer, peer_port)?;
+        let iss = self.next_iss;
+        self.next_iss = self
+            .next_iss
+            .wrapping_add(64_000)
+            .wrapping_add(self.now as u32);
+        let conn = &mut self.conns[index];
+        *conn = Connection::closed();
+        conn.state = State::SynSent;
+        conn.outbound = true;
+        conn.syn_unsent = true;
+        conn.peer = peer;
+        conn.peer_port = peer_port;
+        conn.local_port = local_port;
+        conn.snd_una = iss;
+        conn.snd_nxt = iss.wrapping_add(1);
+        conn.last_send_tick = self.now;
+        conn.last_activity = self.now;
+        self.opened += 1;
+        Some(index)
+    }
+
+    /// A local port no connection to this peer and no listener uses.
+    fn ephemeral_port(&mut self, peer: Ipv4, peer_port: u16) -> Option<u16> {
+        let span = u16::MAX - EPHEMERAL_FIRST + 1;
+        for _ in 0..span {
+            let port = self.next_port;
+            self.next_port = if port == u16::MAX {
+                EPHEMERAL_FIRST
+            } else {
+                port + 1
+            };
+            if !self.is_listening(port) && self.find(peer, peer_port, port).is_none() {
+                return Some(port);
+            }
+        }
+        None
     }
 
     /// Accept connections on `port`. Returns false when there is no free
@@ -269,7 +353,7 @@ impl Tcp {
         for conn in self.conns.iter_mut() {
             let limit = match conn.state {
                 State::Closed => continue,
-                State::SynReceived => SYN_TIMEOUT_TICKS,
+                State::SynReceived | State::SynSent => SYN_TIMEOUT_TICKS,
                 State::Established => IDLE_TIMEOUT_TICKS,
                 // CloseWait means the peer is gone and nothing further will
                 // ever arrive; only our own side is still open. Holding a
@@ -381,6 +465,20 @@ impl Tcp {
         Some(index)
     }
 
+    fn syn_of(conn: &Connection) -> Outgoing {
+        Outgoing {
+            peer: conn.peer,
+            peer_port: conn.peer_port,
+            local_port: conn.local_port,
+            seq: conn.snd_una,
+            ack: 0,
+            flags: TCP_SYN,
+            window: conn.window(),
+            payload: (0, 0),
+            mss: Some(MSS),
+        }
+    }
+
     fn ack_of(conn: &Connection) -> Outgoing {
         Outgoing {
             peer: conn.peer,
@@ -397,6 +495,29 @@ impl Tcp {
 
     fn receive_on(&mut self, index: usize, seg: Segment<'_>) -> Option<usize> {
         let conn = &mut self.conns[index];
+        // Our SYN is out: only its answer counts (RFC 9293 3.10.7.3).
+        if conn.state == State::SynSent {
+            let acks_syn = seg.flags & TCP_ACK != 0 && seg.ack == conn.snd_nxt;
+            if seg.flags & TCP_RST != 0 {
+                // Refused -- but only a reset that answers our SYN; any
+                // other is a guess at the port and is ignored.
+                if acks_syn {
+                    conn.state = State::Closed;
+                    return Some(index);
+                }
+                return None;
+            }
+            if seg.flags & TCP_SYN != 0 && acks_syn {
+                conn.rcv_nxt = seg.seq.wrapping_add(1);
+                conn.snd_una = seg.ack;
+                conn.snd_wnd = seg.window;
+                conn.state = State::Established;
+                conn.retries = 0;
+                self.reply = Some(Self::ack_of(conn));
+                return Some(index);
+            }
+            return None;
+        }
         if seg.flags & TCP_RST != 0 {
             conn.state = State::Closed;
             return Some(index);
@@ -546,10 +667,17 @@ impl Tcp {
     /// Read up to `out.len()` bytes of received data.
     pub fn read(&mut self, index: usize, out: &mut [u8]) -> usize {
         let conn = &mut self.conns[index];
+        let before = conn.window();
         let n = conn.rx_len.min(out.len());
         out[..n].copy_from_slice(&conn.rx[..n]);
         conn.rx.copy_within(n..conn.rx_len, 0);
         conn.rx_len -= n;
+        // The window was too small for a full segment and now is not: say
+        // so. Nothing else would -- an ACK only goes out when data arrives,
+        // and a peer facing a closed window sends none.
+        if (before as usize) < MSS as usize && conn.window() as usize >= MSS as usize {
+            conn.window_update = true;
+        }
         n
     }
 
@@ -570,7 +698,7 @@ impl Tcp {
         let conn = &mut self.conns[index];
         if matches!(conn.state, State::Established | State::CloseWait) {
             conn.fin_pending = true;
-        } else if conn.state == State::SynReceived {
+        } else if matches!(conn.state, State::SynReceived | State::SynSent) {
             conn.state = State::Closed;
         }
     }
@@ -591,10 +719,19 @@ impl Tcp {
             if skip.contains(&Some(conn.peer)) {
                 continue;
             }
+            // Our own SYN, the first time (NET-030).
+            if conn.syn_unsent {
+                conn.syn_unsent = false;
+                conn.last_send_tick = self.now;
+                self.segments_out += 1;
+                return Some(Self::syn_of(conn));
+            }
             // An unacknowledged SYN|ACK is in flight too: without this a lost
             // handshake reply is never resent and the slot is held forever.
             let syn_pending = conn.state == State::SynReceived;
+            let syn_sent = conn.state == State::SynSent;
             let in_flight = syn_pending
+                || syn_sent
                 || conn.tx_unacked > 0
                 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
             // Retransmit what is in flight after the timeout.
@@ -608,6 +745,9 @@ impl Tcp {
                 conn.last_send_tick = self.now;
                 self.retransmits += 1;
                 self.segments_out += 1;
+                if syn_sent {
+                    return Some(Self::syn_of(conn));
+                }
                 if syn_pending {
                     return Some(Outgoing {
                         peer: conn.peer,
@@ -662,6 +802,12 @@ impl Tcp {
                     mss: None,
                 });
             }
+            // The window reopened after a read (see `read`).
+            if conn.window_update {
+                conn.window_update = false;
+                self.segments_out += 1;
+                return Some(Self::ack_of(conn));
+            }
             // FIN once everything is acknowledged.
             if conn.fin_pending && !conn.fin_sent && unsent == 0 {
                 conn.fin_sent = true;
@@ -699,7 +845,10 @@ impl Tcp {
         if conn.state == State::Closed {
             return false;
         }
-        let syn_pending = conn.state == State::SynReceived;
+        if conn.syn_unsent {
+            return true;
+        }
+        let syn_pending = matches!(conn.state, State::SynReceived | State::SynSent);
         let in_flight =
             syn_pending || conn.tx_unacked > 0 || (conn.fin_sent && conn.snd_una != conn.snd_nxt);
         if in_flight {
@@ -709,7 +858,7 @@ impl Tcp {
         if unsent > 0 && matches!(conn.state, State::Established | State::CloseWait) {
             return unsent.min(MSS as usize).min(conn.snd_wnd as usize) > 0;
         }
-        conn.fin_pending && !conn.fin_sent && unsent == 0
+        conn.window_update || (conn.fin_pending && !conn.fin_sent && unsent == 0)
     }
 
     /// Payload bytes for an `Outgoing` produced by `poll`.
@@ -1162,5 +1311,177 @@ mod tests {
         let room = tcp.connection(index).unwrap().writable();
         assert_eq!(tcp.write(index, &[1u8; BUFFER_BYTES]), room);
         assert_eq!(tcp.connection(index).unwrap().writable(), 0);
+    }
+
+    // ---- active open (NET-030) ----
+
+    const SERVER: Ipv4 = [10, 0, 2, 2];
+
+    fn from_server(local_port: u16, seq: u32, ack: u32, flags: u8, payload: &[u8]) -> Segment<'_> {
+        Segment {
+            src: SERVER,
+            src_port: 80,
+            dst_port: local_port,
+            seq,
+            ack,
+            flags,
+            window: 4096,
+            payload,
+        }
+    }
+
+    /// Connect, and answer the SYN: the connection index, its port and our ISS.
+    fn connected(tcp: &mut Tcp) -> (usize, u16, u32) {
+        let conn = tcp.connect(SERVER, 80).expect("room to connect");
+        let syn = tcp.poll().expect("the SYN goes out");
+        assert_eq!(syn.flags, TCP_SYN);
+        assert_eq!(syn.mss, Some(MSS));
+        let port = syn.local_port;
+        assert!(port >= EPHEMERAL_FIRST);
+        assert_eq!(
+            tcp.receive(from_server(
+                port,
+                9000,
+                syn.seq.wrapping_add(1),
+                TCP_SYN | TCP_ACK,
+                &[]
+            )),
+            Some(conn)
+        );
+        assert!(tcp.connection(conn).unwrap().is_established());
+        let ack = tcp.take_reply().expect("the handshake's last ACK");
+        assert_eq!((ack.flags, ack.ack), (TCP_ACK, 9001));
+        (conn, port, syn.seq)
+    }
+
+    #[test]
+    fn connect_handshakes_sends_receives_and_closes() {
+        let mut tcp = Tcp::new();
+        let (conn, port, iss) = connected(&mut tcp);
+        assert_eq!(tcp.write(conn, b"GET / HTTP/1.1\r\n\r\n"), 18);
+        let data = tcp.poll().expect("the request");
+        assert_eq!(data.seq, iss.wrapping_add(1));
+        assert_eq!(tcp.payload(conn, data.payload), b"GET / HTTP/1.1\r\n\r\n");
+        // The answer, and the server hangs up.
+        tcp.receive(from_server(
+            port,
+            9001,
+            iss.wrapping_add(19),
+            TCP_ACK | TCP_PSH,
+            b"HTTP/1.1 200 OK\r\n",
+        ));
+        tcp.receive(from_server(
+            port,
+            9018,
+            iss.wrapping_add(19),
+            TCP_ACK | TCP_FIN,
+            &[],
+        ));
+        let mut buf = [0u8; 64];
+        let n = tcp.read(conn, &mut buf);
+        assert_eq!(&buf[..n], b"HTTP/1.1 200 OK\r\n");
+        assert!(tcp.connection(conn).unwrap().peer_closed());
+        tcp.close(conn);
+        let _ = tcp.take_reply();
+        let fin = tcp.poll().expect("our FIN");
+        assert!(fin.flags & TCP_FIN != 0);
+        tcp.receive(from_server(
+            port,
+            9019,
+            fin.seq.wrapping_add(1),
+            TCP_ACK,
+            &[],
+        ));
+        assert!(tcp.connection(conn).is_none(), "closed");
+    }
+
+    #[test]
+    fn a_refused_connect_closes_and_a_stray_reset_does_not() {
+        let mut tcp = Tcp::new();
+        let conn = tcp.connect(SERVER, 80).unwrap();
+        let syn = tcp.poll().unwrap();
+        // A reset that does not answer our SYN is a guess: ignored.
+        assert_eq!(
+            tcp.receive(from_server(
+                syn.local_port,
+                0,
+                12345,
+                TCP_RST | TCP_ACK,
+                &[]
+            )),
+            None
+        );
+        assert!(tcp.connection(conn).is_some());
+        // The real refusal.
+        tcp.receive(from_server(
+            syn.local_port,
+            0,
+            syn.seq.wrapping_add(1),
+            TCP_RST | TCP_ACK,
+            &[],
+        ));
+        assert!(tcp.connection(conn).is_none());
+    }
+
+    #[test]
+    fn a_lost_syn_is_resent_and_given_up_on() {
+        let mut tcp = Tcp::new();
+        let conn = tcp.connect(SERVER, 80).unwrap();
+        tcp.poll().unwrap();
+        assert_eq!(tcp.poll(), None, "not yet");
+        for round in 1..=MAX_RETRIES as u64 {
+            tcp.set_now(round * RTO_TICKS);
+            let again = tcp.poll().expect("the SYN again");
+            assert_eq!(again.flags, TCP_SYN);
+        }
+        tcp.set_now((MAX_RETRIES as u64 + 1) * RTO_TICKS);
+        assert_eq!(tcp.poll(), None);
+        assert!(tcp.connection(conn).is_none(), "given up");
+    }
+
+    #[test]
+    fn outbound_connections_are_bounded_and_get_their_own_ports() {
+        let mut tcp = Tcp::new();
+        let a = tcp.connect(SERVER, 80).unwrap();
+        let b = tcp.connect(SERVER, 80).unwrap();
+        assert_ne!(
+            tcp.connection(a).unwrap().local_port,
+            tcp.connection(b).unwrap().local_port
+        );
+        assert_eq!(tcp.connect(SERVER, 80), None, "MAX_OUTBOUND");
+        // The servers keep their room.
+        tcp.listen(PORT);
+        let mut accepted = 0;
+        for i in 0..MAX_PER_PORT as u16 {
+            if tcp
+                .receive(seg_from(40000 + i, 1, 0, TCP_SYN, &[]))
+                .is_some()
+            {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, MAX_PER_PORT);
+    }
+
+    #[test]
+    fn reading_a_full_buffer_tells_the_peer_the_window_is_open() {
+        let mut tcp = Tcp::new();
+        let (conn, port, iss) = connected(&mut tcp);
+        let chunk = [b'x'; 1024];
+        let mut seq = 9001u32;
+        for _ in 0..BUFFER_BYTES / 1024 {
+            tcp.receive(from_server(port, seq, iss.wrapping_add(1), TCP_ACK, &chunk));
+            seq = seq.wrapping_add(1024);
+        }
+        let full = tcp.take_reply().unwrap();
+        assert_eq!(full.window, 0, "the buffer is full");
+        assert_eq!(tcp.poll(), None);
+        let mut out = [0u8; BUFFER_BYTES];
+        assert_eq!(tcp.read(conn, &mut out), BUFFER_BYTES);
+        let update = tcp.poll().expect("a window update");
+        assert_eq!(update.flags, TCP_ACK);
+        assert_eq!(update.window as usize, BUFFER_BYTES);
+        assert_eq!(update.ack, seq);
+        assert_eq!(tcp.poll(), None, "once");
     }
 }
