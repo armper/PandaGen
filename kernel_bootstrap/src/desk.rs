@@ -2087,6 +2087,7 @@ pub enum PaletteAction {
     History,
     /// This document in a second card, side by side (GFX-074).
     Split,
+    LineNumbers,
     /// Go to space 1..4 (GFX-067).
     Space(usize),
     /// Move the focused card to space 1..4.
@@ -2128,7 +2129,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 49] = [
+    pub const ALL: [PaletteAction; 50] = [
         PaletteAction::NewNotepad,
         PaletteAction::NewTerminal,
         PaletteAction::OpenFiles,
@@ -2153,6 +2154,7 @@ impl PaletteAction {
         PaletteAction::ToggleTheme,
         PaletteAction::History,
         PaletteAction::Split,
+        PaletteAction::LineNumbers,
         PaletteAction::Space(0),
         PaletteAction::Space(1),
         PaletteAction::Space(2),
@@ -2206,6 +2208,7 @@ impl PaletteAction {
             PaletteAction::ToggleTheme => "Look: themes and accents",
             PaletteAction::History => "Earlier versions of this document",
             PaletteAction::Split => "Split: this document in a second card",
+            PaletteAction::LineNumbers => "Line numbers: show or hide them",
             PaletteAction::Space(0) => "Go to space 1",
             PaletteAction::Space(1) => "Go to space 2",
             PaletteAction::Space(2) => "Go to space 3",
@@ -2260,6 +2263,7 @@ impl PaletteAction {
             PaletteAction::ToggleTheme => "",
             PaletteAction::History => "Ctrl+Y",
             PaletteAction::Split => "Ctrl+D",
+            PaletteAction::LineNumbers => "",
             PaletteAction::Space(0) => "Ctrl+1",
             PaletteAction::Space(1) => "Ctrl+2",
             PaletteAction::Space(2) => "Ctrl+3",
@@ -2305,6 +2309,7 @@ impl PaletteAction {
                 | PaletteAction::Replace
                 | PaletteAction::History
                 | PaletteAction::Split
+                | PaletteAction::LineNumbers
         )
     }
 
@@ -4071,6 +4076,9 @@ impl Desk {
             PaletteAction::Find => self.forward_to_notepad(crate::notepad::CTRL_F),
             PaletteAction::Replace => self.forward_to_notepad(crate::notepad::CTRL_R),
             PaletteAction::History => self.forward_to_notepad(crate::notepad::CTRL_Y),
+            PaletteAction::LineNumbers => {
+                self.forward_to_notepad(crate::notepad::TOGGLE_LINE_NUMBERS)
+            }
             PaletteAction::Split => {
                 if let Some(id) = self.focus {
                     self.split(id);
@@ -6114,6 +6122,20 @@ impl Desk {
                         / GLYPH_WIDTH;
                     notepad.set_wrap(columns.saturating_sub(1));
                     let lines = notepad.viewport_lines(rows);
+                    // A hairline between the line numbers and the text
+                    // (ED-020), down the gutter's trailing space.
+                    let gutter = notepad.gutter();
+                    if gutter > 0 {
+                        let pitch = services_gui_host::CARD_LINE_HEIGHT as i32;
+                        let x = ((gutter - 1) * GLYPH_WIDTH + GLYPH_WIDTH / 2) as i32;
+                        overlay.push(view_types::DrawOp::Line {
+                            x0: x,
+                            y0: 2,
+                            x1: x,
+                            y1: rows as i32 * pitch - 2,
+                            color: palette.hairline,
+                        });
+                    }
                     let cursor = notepad.viewport_cursor();
                     selection = notepad.viewport_selection(rows);
                     styles = notepad.viewport_styles(rows);

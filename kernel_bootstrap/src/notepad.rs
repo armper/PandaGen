@@ -92,6 +92,8 @@ pub const CTRL_W: u8 = 0x17;
 pub const CTRL_Z: u8 = 0x1A;
 /// Ctrl+Shift+Z: redo (KBD-014). Ctrl+Y was already the history browser.
 pub const KEY_CTRL_SHIFT_Z: u8 = 0xA2;
+/// Not a key the parser produces: the palette's "Line numbers" row.
+pub const TOGGLE_LINE_NUMBERS: u8 = 0xA3;
 pub const ESC: u8 = 0x1B;
 pub const BACKSPACE: u8 = 0x08;
 
@@ -226,6 +228,8 @@ pub struct Notepad {
     /// Lines longer than this many characters wrap onto the next visual
     /// row (GFX-064); 0 means no wrapping. Set by the card from its width.
     wrap: usize,
+    /// Line numbers down the left (ED-020): this card's choice.
+    line_numbers: bool,
     /// Names on the filesystem, for the prompt's completions.
     file_names: Vec<String>,
     /// The wheel moved the view off the caret; cleared by the next edit or
@@ -255,6 +259,7 @@ impl Notepad {
             history: None,
             pending_find: None,
             wrap: 0,
+            line_numbers: false,
         }
     }
 
@@ -334,21 +339,47 @@ impl Notepad {
         self.wrap = columns;
     }
 
+    /// Whether this card shows line numbers.
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
+    }
+
+    /// The gutter's width in columns: the widest number and a space, or
+    /// nothing with line numbers off. Every column the card reports or is
+    /// given -- the caret, the selection, a click -- counts it.
+    pub fn gutter(&self) -> usize {
+        if !self.line_numbers {
+            return 0;
+        }
+        let mut digits = 1;
+        let mut n = self.line_count();
+        while n >= 10 {
+            n /= 10;
+            digits += 1;
+        }
+        digits.max(2) + 1
+    }
+
     /// The visual rows: `(document row, first byte, end byte)` of each
     /// segment, in order. A line breaks after the last space that fits,
     /// or hard when a word is longer than the card.
     fn visual_rows(&self) -> Vec<(usize, usize, usize)> {
         let mut rows = Vec::new();
         let lines = self.lines();
+        // The gutter takes its columns from the text's.
+        let wrap = match self.wrap {
+            0 => 0,
+            columns => columns.saturating_sub(self.gutter()).max(1),
+        };
         for (row, line) in lines.iter().enumerate() {
-            if self.wrap == 0 {
+            if wrap == 0 {
                 rows.push((row, 0, line.len()));
                 continue;
             }
             let chars: Vec<(usize, char)> = line.char_indices().collect();
             let mut start = 0; // index into chars
-            while chars.len() - start > self.wrap {
-                let limit = start + self.wrap;
+            while chars.len() - start > wrap {
+                let limit = start + wrap;
                 let break_at = (start + 1..=limit)
                     .rev()
                     .find(|i| chars[*i - 1].1 == ' ')
@@ -570,6 +601,15 @@ impl Notepad {
     /// break shows as one cell past the line's end, so an empty selected
     /// line is still visibly selected.
     pub fn viewport_selection(&self, rows: usize) -> Vec<(usize, usize, usize)> {
+        let gutter = self.gutter();
+        self.text_selection(rows)
+            .into_iter()
+            .map(|(line, start, end)| (line, start + gutter, end + gutter))
+            .collect()
+    }
+
+    /// `viewport_selection` in the text's own columns.
+    fn text_selection(&self, rows: usize) -> Vec<(usize, usize, usize)> {
         // While browsing history the fill marks what differs from the
         // document (GFX-070): every visual row whose line is not in it.
         if self.history.is_some() {
@@ -1109,11 +1149,20 @@ impl Notepad {
         self.clamp_cursor();
         self.keep_cursor_visible(rows);
         let visual = self.visual_rows();
+        let gutter = self.gutter();
         visual
             .iter()
             .skip(self.scroll)
             .take(rows)
-            .map(|(row, start, end)| self.line(*row)[*start..*end].to_string())
+            .map(|(row, start, end)| {
+                let text = &self.line(*row)[*start..*end];
+                match gutter {
+                    0 => text.to_string(),
+                    // A wrapped line's later segments have no number.
+                    _ if *start > 0 => alloc::format!("{:w$}{text}", "", w = gutter),
+                    _ => alloc::format!("{:>w$} {text}", row + 1, w = gutter - 1),
+                }
+            })
             .collect()
     }
 
@@ -1126,7 +1175,7 @@ impl Notepad {
         let col = self.cursor.col.clamp(start, line.len());
         Some((
             index.checked_sub(self.scroll)?,
-            line[start..col].chars().count(),
+            self.gutter() + line[start..col].chars().count(),
         ))
     }
 
@@ -1134,6 +1183,8 @@ impl Notepad {
     /// the viewport in visual rows and `column` counts characters, so both
     /// are mapped back to the document (GFX-052, GFX-064).
     pub fn place_cursor(&mut self, view_line: usize, column: usize) {
+        // A click in the gutter is the start of the line.
+        let column = column.saturating_sub(self.gutter());
         let visual = self.visual_rows();
         let index = (self.scroll + view_line).min(visual.len().saturating_sub(1));
         let Some((row, start, end)) = visual.get(index).copied() else {
@@ -1231,6 +1282,10 @@ impl Notepad {
         self.clamp_cursor();
         if !(0x20..=0x7E).contains(&byte) {
             self.doc_mut().typing_at = None;
+        }
+        if byte == TOGGLE_LINE_NUMBERS {
+            self.line_numbers = !self.line_numbers;
+            return NotepadEffect::Redraw;
         }
         if byte == CTRL_Y {
             let path = self.doc().path.clone();
@@ -1875,6 +1930,39 @@ mod tests {
         assert!(
             matches!(pad.handle_byte(CTRL_S), NotepadEffect::Save { path, .. } if path == "a.txt")
         );
+    }
+
+    #[test]
+    fn line_numbers_take_a_gutter_that_the_caret_selection_and_clicks_count() {
+        let mut pad = Notepad::new();
+        pad.load(None, "alpha\nbeta gamma delta");
+        assert_eq!(pad.gutter(), 0);
+        pad.handle_byte(TOGGLE_LINE_NUMBERS);
+        assert!(pad.line_numbers());
+        assert_eq!(pad.gutter(), 3, "two digits and a space, at least");
+        pad.set_wrap(14);
+        let lines = pad.viewport_lines(10);
+        // Eleven columns of text after the gutter: line 2 wraps, unnumbered.
+        assert_eq!(lines, [" 1 alpha", " 2 beta gamma ", "   delta"]);
+        // A click lands on the text, not the gutter.
+        pad.place_cursor(1, 3 + 5);
+        assert_eq!(pad.cursor(), Position::new(1, 5));
+        assert_eq!(pad.viewport_cursor(), Some((1, 8)));
+        pad.place_cursor(0, 1);
+        assert_eq!(
+            pad.cursor(),
+            Position::new(0, 0),
+            "in the gutter: the line's start"
+        );
+        // The selection is drawn over the text.
+        pad.handle_byte(KEY_SHIFT_RIGHT);
+        assert_eq!(pad.viewport_selection(10), [(0, 3, 4)]);
+        // A hundred lines widen it.
+        let long: String = (0..120).map(|i| alloc::format!("{i}\n")).collect();
+        pad.load(None, &long);
+        assert_eq!(pad.gutter(), 4);
+        pad.handle_byte(TOGGLE_LINE_NUMBERS);
+        assert_eq!(pad.gutter(), 0);
     }
 
     #[test]
