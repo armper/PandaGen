@@ -1344,6 +1344,38 @@ pub extern "C" fn rust_main() -> ! {
         );
     }
 
+    // Who is here (FS-004): take up `.authority`, or make the disk's first
+    // person -- `owner=<name>` on the command line -- and sign the console
+    // in as them. Everything after this acts for that person.
+    {
+        let owner = EXECUTABLE_CMDLINE_REQUEST
+            .get_response()
+            .and_then(|c| core::str::from_utf8(c.cmdline().to_bytes()).ok())
+            .map(guard::owner_name)
+            .unwrap_or_else(|| guard::DEFAULT_OWNER.into());
+        let now = rtc::read_clock(&mut hal_x86_64::RealPortIo::new())
+            .map(|d| d.unix_seconds())
+            .unwrap_or(0);
+        match guard::boot(&mut filesystem, &owner, now) {
+            Ok(report) => kprintln!(
+                serial,
+                "authority: signed in as {}{}{}",
+                report.console,
+                if report.first_person {
+                    " (the disk's first person)"
+                } else {
+                    ""
+                },
+                if report.adopted > 0 {
+                    " -- adopted unowned documents"
+                } else {
+                    ""
+                }
+            ),
+            Err(e) => kprintln!(serial, "authority: could not boot the guard: {:?}", e),
+        }
+    }
+
     workspace_loop(
         &mut serial,
         kernel,
@@ -1522,6 +1554,8 @@ fn workspace_loop(
     let mut rtc_port = hal_x86_64::RealPortIo::new();
     // When the tray's numbers were last asked for (GFX-088).
     let mut tray_refreshed_at: u64 = 0;
+    // When the guard's state was last kept (FS-004).
+    let mut guard_saved_at: u64 = 0;
     // The speaker (GFX-087): what the desk says out loud, polled by tick.
     let mut speaker = speaker::Speaker::new(hal_x86_64::RealPortIo::new());
     // What the desk asked the kernel for this iteration: file operations,
@@ -2003,6 +2037,17 @@ fn workspace_loop(
         }
         // The speaker plays what was queued, note by note (GFX-087).
         speaker.poll(get_tick_count());
+        // The guard keeps itself: grants, the audit log, every few seconds
+        // when they changed (FS-004).
+        if get_tick_count().saturating_sub(guard_saved_at) >= guard::SAVE_EVERY {
+            guard_saved_at = get_tick_count();
+            if let Some(mut fs) = workspace.take_filesystem() {
+                if fs.guard.is_dirty() {
+                    let _ = fs.save_guard();
+                }
+                workspace.set_filesystem(fs);
+            }
+        }
 
         // Serve what the desk asked for (GFX-053).
         if !desk_requests.is_empty() {

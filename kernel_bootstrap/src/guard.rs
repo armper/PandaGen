@@ -23,6 +23,8 @@ use services_storage::persistent_fs::DirectoryEntry;
 
 /// Where the guard keeps what it knows.
 pub const AUTHORITY_FILE: &str = ".authority";
+/// How often, in ticks, the kernel keeps a changed guard (FS-004).
+pub const SAVE_EVERY: u64 = 500;
 
 /// Who the filesystem is acting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +40,93 @@ pub enum Actor {
 pub struct GuardState {
     pub authority: Authority,
     pub accounts: Accounts,
+    /// Who the console signs in as at boot (FS-004): the machine's first
+    /// person, until the desk asks who is there.
+    #[serde(default)]
+    pub console: Option<String>,
+}
+
+/// The first person on a new disk is called `owner=<name>` from the
+/// kernel command line, or "owner" (FS-004).
+pub const DEFAULT_OWNER: &str = "owner";
+
+/// The first person's name from the kernel command line.
+pub fn owner_name(cmdline: &str) -> String {
+    cmdline
+        .split_ascii_whitespace()
+        .filter_map(|t| t.strip_prefix("owner="))
+        .rfind(|n| authority::valid_name(n))
+        .unwrap_or(DEFAULT_OWNER)
+        .into()
+}
+
+/// What booting the guard did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootReport {
+    /// This disk had no `.authority`: its first person was made.
+    pub first_person: bool,
+    /// Who the console is signed in as.
+    pub console: String,
+    /// Documents nobody owned, now the console person's.
+    pub adopted: usize,
+}
+
+/// Boot the guard (FS-004): take up `.authority`, or on a disk without
+/// one make its first person, called `owner`, cleared for everything; give
+/// that person whatever nobody owns (the example files, a disk from before
+/// owners); keep it all; and sign the console in as them.
+pub fn boot(
+    fs: &mut crate::bare_metal_storage::BareMetalFilesystem,
+    owner: &str,
+    now: u64,
+) -> Result<BootReport, services_storage::TransactionError> {
+    fs.set_clock(now);
+    fs.guard.act_as(Actor::System);
+    let loaded = fs.load_guard()?;
+    let console = fs
+        .guard
+        .console
+        .clone()
+        .filter(|name| fs.guard.authority.principal_named(name).is_some());
+    let (who, first_person) = match console {
+        Some(name) if loaded => (fs.guard.authority.principal_named(&name).unwrap().id, false),
+        _ => {
+            let id = match fs.guard.authority.principal_named(owner) {
+                Some(p) => p.id,
+                None => fs
+                    .guard
+                    .authority
+                    .add_principal(owner, authority::PrincipalKind::Person, Label::Secret)
+                    .map_err(|e| {
+                        services_storage::TransactionError::StorageError(alloc::format!("{e}"))
+                    })?,
+            };
+            fs.guard.console = Some(owner.into());
+            (id, true)
+        }
+    };
+    let adopted = fs.adopt_unowned(who)?;
+    fs.save_guard()?;
+    let session = fs.guard.sessions.open(who, now);
+    fs.guard.act_as(Actor::Session(session));
+    Ok(BootReport {
+        first_person,
+        console: fs
+            .guard
+            .authority
+            .principal(who)
+            .map(|p| p.name.clone())
+            .unwrap_or_default(),
+        adopted,
+    })
 }
 
 pub struct Guard {
     pub authority: Authority,
     pub accounts: Accounts,
     pub sessions: Sessions,
+    /// Who the console signs in as at boot.
+    pub console: Option<String>,
     actor: Actor,
     /// Something to save has changed since the last save.
     dirty: bool,
@@ -79,6 +162,7 @@ impl Guard {
             authority: Authority::new(),
             accounts: Accounts::new(),
             sessions: Sessions::new(),
+            console: None,
             actor: Actor::System,
             dirty: false,
         }
@@ -134,6 +218,7 @@ impl Guard {
         GuardState {
             authority: self.authority.clone(),
             accounts: self.accounts.clone(),
+            console: self.console.clone(),
         }
     }
 
@@ -141,6 +226,7 @@ impl Guard {
     pub fn restore(&mut self, state: GuardState) {
         self.authority = state.authority;
         self.accounts = state.accounts;
+        self.console = state.console;
         self.dirty = false;
     }
 
@@ -421,6 +507,51 @@ mod tests {
         not_there(fs.read_file_by_name("plan"));
         denied(fs.write_named("new", b"x", 2, None));
         assert_eq!(fs.guard.principal(), None);
+    }
+
+    #[test]
+    fn the_first_boot_makes_a_person_and_later_boots_sign_them_back_in() {
+        assert_eq!(owner_name("display=desk owner=armando x=1"), "armando");
+        assert_eq!(owner_name("owner=no/slash"), DEFAULT_OWNER);
+        assert_eq!(owner_name(""), DEFAULT_OWNER);
+        let mut fs = BareMetalFilesystem::new().unwrap();
+        fs.guard = Guard::for_tests();
+        // The kernel seeds a file as the system, before anyone exists.
+        fs.write_named("welcome.txt", b"hi", 1, None).unwrap();
+        let first = boot(&mut fs, "armando", 10).unwrap();
+        assert_eq!(
+            first,
+            BootReport {
+                first_person: true,
+                console: "armando".into(),
+                adopted: 1
+            },
+            "welcome.txt"
+        );
+        assert_eq!(fs.guard.principal_name(), Some("armando"));
+        assert_eq!(fs.read_file_by_name("welcome.txt").unwrap(), b"hi");
+        fs.write_named("plan", b"mine", 11, None).unwrap();
+        assert_eq!(
+            fs.document("plan").unwrap().unwrap().owner,
+            first_owner(&fs)
+        );
+        // Next boot: the same person, from `.authority`, whatever the
+        // command line now says.
+        fs.guard = Guard::for_tests();
+        let again = boot(&mut fs, "someone-else", 20).unwrap();
+        assert_eq!(
+            again,
+            BootReport {
+                first_person: false,
+                console: "armando".into(),
+                adopted: 0
+            }
+        );
+        assert_eq!(fs.read_file_by_name("plan").unwrap(), b"mine");
+    }
+
+    fn first_owner(fs: &BareMetalFilesystem) -> u32 {
+        fs.guard.authority.principal_named("armando").unwrap().id.0
     }
 
     /// What the system wrote before anyone existed is nobody's until
