@@ -40,6 +40,8 @@ mod notepad;
 mod optimized_render;
 mod palette_overlay;
 mod present_policy;
+#[cfg(all(not(test), target_os = "none"))]
+mod random;
 mod render_stats;
 mod rtc;
 mod sharing;
@@ -1267,6 +1269,27 @@ pub extern "C" fn rust_main() -> ! {
         );
     }
 
+    // Random numbers before anything needs one (SEC-030): salts, DNS ids,
+    // TCP's sequence numbers, TLS keys.
+    {
+        let now = rtc::read_clock(&mut hal_x86_64::RealPortIo::new())
+            .map(|d| d.unix_seconds())
+            .unwrap_or(0);
+        let mut personal = [0u8; 16];
+        personal[..8].copy_from_slice(&now.to_le_bytes());
+        personal[8..].copy_from_slice(b"PandaGen");
+        let hardware = random::seed(&personal);
+        kprintln!(
+            serial,
+            "entropy: seeded from {}",
+            if hardware {
+                "the CPU's generator and timing jitter"
+            } else {
+                "timing jitter (the CPU has no RDSEED or RDRAND)"
+            }
+        );
+    }
+
     // Initialize filesystem with example files
     kprintln!(serial, "Initializing filesystem...");
     let storage_boot = bare_metal_storage::StorageBootInfo {
@@ -1730,6 +1753,8 @@ fn workspace_loop(
             ps2_set_leds(leds);
         }
         while let Some(scancode) = KEYBOARD_EVENT_QUEUE.pop() {
+            #[cfg(all(not(test), target_os = "none"))]
+            random::stir(scancode as u64);
             if let Some(ch) = parser_state.process_scancode(scancode, serial) {
                 if KBD_DEBUG_LOG {
                     if ch.is_ascii_graphic() || ch == b' ' {
@@ -1937,6 +1962,8 @@ fn workspace_loop(
 
         // Drain PS/2 mouse bytes into packets, then into pointer events.
         while let Some(byte) = MOUSE_EVENT_QUEUE.pop() {
+            #[cfg(all(not(test), target_os = "none"))]
+            random::stir(byte as u64 | 0x100);
             let Some(packet) = mouse_parser.feed(byte) else {
                 continue;
             };

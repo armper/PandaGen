@@ -253,6 +253,7 @@ impl NetStack {
             let _ = iface.tcp_listen(TCP_COMMAND_PORT);
         }
         let _ = iface.tcp_listen(HTTP_PORT);
+        iface.tcp_mut().set_iss_source(crate::random::u32);
         Some(Self {
             device,
             iface,
@@ -568,6 +569,7 @@ impl NetStack {
             let Some(len) = self.device.poll_receive(&mut self.rx_frame) else {
                 break;
             };
+            crate::random::stir(len as u64);
             match self
                 .iface
                 .receive(&self.rx_frame[..len], &mut self.tx_frame)
@@ -1902,7 +1904,10 @@ impl NetStack {
                 let (server, server_port) =
                     server.unwrap_or((self.dns.unwrap_or(QEMU_DNS), net_stack::dns::PORT));
                 // An id no one watching the wire could guess at a glance.
-                let id = (now as u16 ^ (now >> 16) as u16 ^ 0x5047).wrapping_mul(40503);
+                // A random id (SEC-030): a guessable one lets anyone on the
+                // path answer first with an address of their choosing.
+                let _ = now;
+                let id = crate::random::u16();
                 fetch.stage = FetchStage::Resolving {
                     server,
                     server_port,

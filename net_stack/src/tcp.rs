@@ -208,6 +208,11 @@ pub struct Tcp {
     skip_peers: [Option<Ipv4>; MAX_CONNECTIONS],
     /// The next ephemeral port to try.
     next_port: u16,
+    /// Where initial sequence numbers come from (SEC-030): a random source
+    /// when the kernel gives one. Without it they count up from 0x1000,
+    /// and anyone who has seen one connection can guess the next -- the
+    /// oldest trick for injecting into or resetting a TCP stream.
+    iss_source: Option<fn() -> u32>,
     /// Connections opened with `connect`.
     pub opened: u64,
 }
@@ -238,7 +243,25 @@ impl Tcp {
             skip_peers: [None; MAX_CONNECTIONS],
             next_port: EPHEMERAL_FIRST,
             opened: 0,
+            iss_source: None,
         }
+    }
+
+    /// Take initial sequence numbers from `source` (SEC-030).
+    pub fn set_iss_source(&mut self, source: fn() -> u32) {
+        self.iss_source = Some(source);
+    }
+
+    fn next_iss(&mut self) -> u32 {
+        if let Some(source) = self.iss_source {
+            return source();
+        }
+        let iss = self.next_iss;
+        self.next_iss = self
+            .next_iss
+            .wrapping_add(64_000)
+            .wrapping_add(self.now as u32);
+        iss
     }
 
     /// Open a connection to `peer:peer_port` (NET-030): a SYN goes out on
@@ -257,11 +280,7 @@ impl Tcp {
         }
         let index = self.conns.iter().position(|c| c.state == State::Closed)?;
         let local_port = self.ephemeral_port(peer, peer_port)?;
-        let iss = self.next_iss;
-        self.next_iss = self
-            .next_iss
-            .wrapping_add(64_000)
-            .wrapping_add(self.now as u32);
+        let iss = self.next_iss();
         let conn = &mut self.conns[index];
         *conn = Connection::closed();
         conn.state = State::SynSent;
@@ -437,11 +456,7 @@ impl Tcp {
             return None;
         }
         let index = self.conns.iter().position(|c| c.state == State::Closed)?;
-        let iss = self.next_iss;
-        self.next_iss = self
-            .next_iss
-            .wrapping_add(64_000)
-            .wrapping_add(self.now as u32);
+        let iss = self.next_iss();
         let conn = &mut self.conns[index];
         *conn = Connection::closed();
         conn.state = State::SynReceived;
@@ -1505,5 +1520,19 @@ mod tests {
         assert_eq!(update.window as usize, BUFFER_BYTES);
         assert_eq!(update.ack, seq);
         assert_eq!(tcp.poll(), None, "once");
+    }
+
+    #[test]
+    fn initial_sequence_numbers_come_from_the_source_given() {
+        fn fixed() -> u32 {
+            0xDEAD_BEEF
+        }
+        let mut tcp = Tcp::new();
+        tcp.set_iss_source(fixed);
+        tcp.connect(SERVER, 80).unwrap();
+        assert_eq!(tcp.poll().unwrap().seq, 0xDEAD_BEEF);
+        tcp.listen(PORT);
+        tcp.receive(seg(1000, 0, TCP_SYN, &[]));
+        assert_eq!(tcp.take_reply().unwrap().seq, 0xDEAD_BEEF);
     }
 }

@@ -19,6 +19,7 @@ hal = { path = "../hal", features = ["alloc"] }
 hal_x86_64 = { path = "../hal_x86_64" }
 net_stack = { workspace = true }
 remote_ipc = { workspace = true }
+entropy = { workspace = true }
 ipc = { workspace = true }
 serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
 # Who may do what to a document (FS-001..003).

@@ -931,7 +931,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
-        "sleep:6,ctrl-t,sleep:2,m,e,m,ret,sleep:1,up,home,x,ret,sleep:1,w,h,o,a,tab,ret,sleep:1,l,o,g,i,n,spc,a,spc,h,u,n,t,e,r,ret,sleep:1,caps_lock,m,e,m,caps_lock,kp_enter,sleep:2".to_string(),
+        "sleep:6,ctrl-t,sleep:2,m,e,m,ret,sleep:1,up,home,x,ret,sleep:1,w,h,o,a,tab,ret,sleep:1,l,o,g,i,n,spc,a,spc,h,u,n,t,e,r,ret,sleep:1,caps_lock,m,e,m,caps_lock,kp_enter,sleep:1,r,a,n,d,o,m,ret,sleep:2".to_string(),
         "--out".to_string(),
         "dist/qemu_terminal_line".to_string(),
         "--expect-serial".to_string(),
@@ -943,6 +943,12 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         // Caps Lock, and the keypad's Enter (KBD-013).
         "--expect-serial".to_string(),
         "WS > MEM".to_string(),
+        // The machine's generator is seeded at boot and answers (SEC-030).
+        "--expect-serial".to_string(),
+        "entropy: seeded from".to_string(),
+        "--expect-serial".to_string(),
+        // Its count includes what the shape's `login` drew for salts.
+        "bytes given, reseeded".to_string(),
         "--forbid-serial".to_string(),
         "hunter".to_string(),
         "--forbid-serial".to_string(),

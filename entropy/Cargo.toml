@@ -1,0 +1,9 @@
+[package]
+name = "entropy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+remote_ipc = { workspace = true }

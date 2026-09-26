@@ -75,7 +75,7 @@ fn command_words() -> Vec<&'static str> {
     let mut words = vec![
         "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
         "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
-        "ticks", "editor", "fault", "fetch", "resolve",
+        "ticks", "editor", "fault", "fetch", "resolve", "random",
     ];
     words.extend(crate::access_shell::WORDS);
     words
@@ -1023,6 +1023,39 @@ impl WorkspaceSession {
             return;
         }
 
+        // The machine's generator (SEC-030): bytes, and how it has done.
+        if cmd == "random" {
+            self.emit_command_line(serial, command.as_bytes());
+            let n = parts
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(32)
+                .clamp(1, 64);
+            #[cfg(all(not(test), target_os = "none"))]
+            {
+                let mut bytes = [0u8; 64];
+                crate::random::fill(&mut bytes[..n]);
+                let hex: String = bytes[..n].iter().map(|b| format!("{b:02x}")).collect();
+                self.emit_line(serial, &hex);
+                if let Some((generated, reseeds, hardware)) = crate::random::stats() {
+                    self.emit_line(
+                        serial,
+                        &format!(
+                            "random: {generated} bytes given, reseeded {reseeds} times, seeded {}",
+                            if hardware {
+                                "with the CPU's generator"
+                            } else {
+                                "from timing alone"
+                            }
+                        ),
+                    );
+                }
+            }
+            #[cfg(not(all(not(test), target_os = "none")))]
+            self.emit_line(serial, &format!("random: {n} bytes need the machine"));
+            return;
+        }
+
         if cmd == "smp" {
             self.emit_command_line(serial, command.as_bytes());
             self.delegate_to_command_service(ctx, serial, command);
@@ -1097,6 +1130,10 @@ impl WorkspaceSession {
                 self.emit_line(
                     serial,
                     "resolve <name> [server[:port]] - Look a name up (DNS)",
+                );
+                self.emit_line(
+                    serial,
+                    "random [bytes]  - Random bytes from the machine's generator",
                 );
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
@@ -2528,6 +2565,38 @@ fn append_bytes(buffer: &mut [u8], mut len: usize, bytes: &[u8]) -> usize {
     len
 }
 
+/// Sixteen bytes for a passphrase's salt (FS-005): the time-stamp counter
+/// and a count of salts made, hashed. Not a cryptographic generator, but a
+/// salt only has to be unlikely to repeat.
+#[cfg(not(test))]
+pub(crate) fn fresh_salt() -> [u8; 16] {
+    // From the machine's generator (SEC-030).
+    #[cfg(all(not(test), target_os = "none"))]
+    {
+        let mut salt = [0u8; 16];
+        crate::random::fill(&mut salt);
+        salt
+    }
+    #[cfg(not(all(not(test), target_os = "none")))]
+    fresh_salt_from_the_clock()
+}
+
+#[cfg(not(all(not(test), target_os = "none")))]
+fn fresh_salt_from_the_clock() -> [u8; 16] {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let n = MADE.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: RDTSC reads a counter; it has no side effects.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut seed = [0u8; 16];
+    seed[..8].copy_from_slice(&tsc.to_le_bytes());
+    seed[8..].copy_from_slice(&n.to_le_bytes());
+    let digest = remote_ipc::sha256::digest(&seed);
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&digest[..16]);
+    salt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2693,23 +2762,4 @@ mod tests {
         session.set_cli_active(true, &mut serial);
         assert!(session.status_line().starts_with("CLI:"));
     }
-}
-
-/// Sixteen bytes for a passphrase's salt (FS-005): the time-stamp counter
-/// and a count of salts made, hashed. Not a cryptographic generator, but a
-/// salt only has to be unlikely to repeat.
-#[cfg(not(test))]
-pub(crate) fn fresh_salt() -> [u8; 16] {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static MADE: AtomicU64 = AtomicU64::new(0);
-    let n = MADE.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: RDTSC reads a counter; it has no side effects.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let mut seed = [0u8; 16];
-    seed[..8].copy_from_slice(&tsc.to_le_bytes());
-    seed[8..].copy_from_slice(&n.to_le_bytes());
-    let digest = remote_ipc::sha256::digest(&seed);
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&digest[..16]);
-    salt
 }

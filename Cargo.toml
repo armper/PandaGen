@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "graphics_rasterizer",
     "net_stack",
+    "entropy",
     "kernel_bootstrap",
     "core_types",
     "ipc",
@@ -93,6 +94,7 @@ strip = "debuginfo"
 # Core crates
 graphics_rasterizer = { path = "graphics_rasterizer" }
 net_stack = { path = "net_stack" }
+entropy = { path = "entropy" }
 core_types = { path = "core_types" }
 ipc = { path = "ipc" }
 kernel_api = { path = "kernel_api" }
