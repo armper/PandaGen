@@ -742,7 +742,7 @@ pub const CALCULATOR_SIZE: (usize, usize) = (300, 460);
 /// The Now card (GFX-072).
 pub const NOW_SIZE: (usize, usize) = (440, 300);
 /// The shortcut sheet (GFX-072).
-pub const SHORTCUTS_SIZE: (usize, usize) = (560, 520);
+pub const SHORTCUTS_SIZE: (usize, usize) = (640, 520);
 /// How often the Now card asks the kernel for fresh vitals, in ticks.
 pub const VITALS_EVERY: u64 = 100;
 /// The rest screen's clock (GFX-111): its scale, and its distance from the
@@ -883,6 +883,72 @@ pub fn now_ui(
         ui.text(cell.x as i32 + 12, cell.y as i32 + 36, label, p.muted, 1);
     }
     ui
+}
+
+/// Where the sheet's keys start, in cells (GFX-112): after a description
+/// of up to 40 cells -- the longest palette label is 39 -- and a space,
+/// so every row's keys line up and their caps land on keys.
+pub const SHORTCUT_KEY_COLUMN: usize = 41;
+
+/// Whether `word` names a key (GFX-112): a modifier, a named key, one
+/// letter or digit, or a run of them like `1..4`. The words between keys
+/// -- "or", "drag", "onto the dock" -- are not.
+pub fn is_key_name(word: &str) -> bool {
+    const NAMED: [&str; 16] = [
+        "Ctrl", "Shift", "Alt", "Space", "Tab", "Left", "Right", "Up", "Down", "Esc", "Enter",
+        "Delete", "Home", "End", "PgUp", "PgDn",
+    ];
+    NAMED.contains(&word)
+        || word.chars().count() == 1
+        || (word.contains("..") && word.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// A keycap round every key name on each row from `column` on (GFX-112):
+/// a hairline rounded box three pixels outside the word's cells. The
+/// sheet spaces its `+` (`spaced_keys`), so the caps have room.
+pub const KEYCAP_PAD: u32 = 3;
+
+/// `Ctrl+Shift+N` as `Ctrl + Shift + N`, for the sheet's keycaps.
+pub fn spaced_keys(keys: &str) -> String {
+    keys.replace('+', " + ")
+}
+
+pub fn keycaps(
+    lines: &[String],
+    column: usize,
+    pitch: u32,
+    color: view_types::Color,
+) -> Vec<view_types::DrawOp> {
+    let mut ops = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = column;
+        while i < chars.len() {
+            if !(chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if is_key_name(&word) {
+                ops.push(view_types::DrawOp::RoundedBorder {
+                    rect: view_types::PixelRect {
+                        x: (start * GLYPH_WIDTH) as u32 - KEYCAP_PAD,
+                        y: row as u32 * pitch,
+                        width: ((i - start) * GLYPH_WIDTH) as u32 + 2 * KEYCAP_PAD,
+                        height: 18,
+                    },
+                    radius: 4,
+                    thickness: 1,
+                    color,
+                });
+            }
+        }
+    }
+    ops
 }
 
 /// The desk's own keys, for the sheet: the ones no palette row carries.
@@ -2713,15 +2779,22 @@ impl Desk {
     fn shortcut_lines() -> Vec<String> {
         let mut lines: Vec<String> = DESK_KEYS
             .iter()
-            .map(|(what, key)| alloc::format!("{what:<34} {key}"))
+            .map(|(what, key)| {
+                alloc::format!(
+                    "{what:<w$} {}",
+                    spaced_keys(key),
+                    w = SHORTCUT_KEY_COLUMN - 1
+                )
+            })
             .collect();
         lines.push(String::new());
         for action in PaletteAction::ALL.iter() {
             if !action.shortcut().is_empty() {
                 lines.push(alloc::format!(
-                    "{:<34} {}",
+                    "{:<w$} {}",
                     action.label(),
-                    action.shortcut()
+                    spaced_keys(action.shortcut()),
+                    w = SHORTCUT_KEY_COLUMN - 1
                 ));
             }
         }
@@ -5613,6 +5686,9 @@ impl Desk {
                     } else {
                         "Every key the desk answers; the palette lists the rest".to_string()
                     };
+                    let pitch = services_gui_host::CARD_LINE_HEIGHT as u32;
+                    let visible: Vec<String> = shown.iter().take(rows).cloned().collect();
+                    overlay.extend(keycaps(&visible, SHORTCUT_KEY_COLUMN, pitch, palette.muted));
                     (shown, "Shortcuts".to_string(), footer, None)
                 }
                 AppState::Notices => {
@@ -7389,6 +7465,36 @@ mod tests {
         desk.handle_key(b'k');
         let (sheet_id, sheet_app) = desk.focused_window().map(|w| (w.id, w.app)).unwrap();
         assert_eq!(sheet_app, DeskApp::Shortcuts);
+        // Keycaps (GFX-112): Ctrl and W are keys, "drag" and "onto" not.
+        assert!(is_key_name("Ctrl") && is_key_name("W") && is_key_name("1..4"));
+        assert!(!is_key_name("drag") && !is_key_name("onto") && !is_key_name("or"));
+        let caps = keycaps(
+            &[alloc::format!(
+                "{:<40} {}, or drag",
+                "Move",
+                spaced_keys("Ctrl+Shift+1..4")
+            )],
+            SHORTCUT_KEY_COLUMN,
+            20,
+            view_types::Color::rgb(1, 2, 3),
+        );
+        let xs: Vec<u32> = caps
+            .iter()
+            .map(|op| match op {
+                view_types::DrawOp::RoundedBorder { rect, .. } => rect.x,
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(xs, alloc::vec![41 * 8 - 3, 48 * 8 - 3, 56 * 8 - 3]);
+        // Every row's keys start in the key column.
+        for line in Desk::shortcut_lines().iter().filter(|l| !l.is_empty()) {
+            assert_eq!(
+                line.chars().nth(SHORTCUT_KEY_COLUMN - 1),
+                Some(' '),
+                "{line}"
+            );
+            assert_ne!(line.chars().nth(SHORTCUT_KEY_COLUMN), Some(' '), "{line}");
+        }
         let windows = desk.windows("", true, None);
         let card = windows
             .iter()
@@ -7401,11 +7507,11 @@ mod tests {
         assert!(rows[0].contains("type on the desk"), "{rows:?}");
         assert!(
             rows.iter()
-                .any(|r| r.starts_with("Save") && r.ends_with("Ctrl+S")),
+                .any(|r| r.starts_with("Save") && r.ends_with("Ctrl + S")),
             "{rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains("Ctrl+Shift+1..4")),
+            rows.iter().any(|r| r.contains("Ctrl + Shift + 1..4")),
             "{rows:?}"
         );
         // The sheet scrolls: Down moves the first row on; PageUp comes back.
