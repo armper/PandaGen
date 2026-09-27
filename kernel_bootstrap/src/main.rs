@@ -40,6 +40,8 @@ mod notepad;
 mod optimized_render;
 mod palette_overlay;
 mod present_policy;
+#[cfg(not(test))]
+mod programs;
 #[cfg(all(not(test), target_os = "none"))]
 mod random;
 mod render_stats;
@@ -49,6 +51,7 @@ mod sharing;
 mod sign_in;
 mod sketch;
 mod speaker;
+mod syscall_abi;
 mod tasks;
 #[cfg(not(test))]
 mod threads;
@@ -218,11 +221,20 @@ fn exception_name(vector: u64) -> &'static str {
 /// Print a fatal exception and stop this CPU. Nothing is recoverable yet.
 #[cfg(not(test))]
 #[no_mangle]
-extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
+extern "C" fn exception_handler(frame_ptr: *const ExceptionFrame) -> u64 {
     // SAFETY: the stub passes a pointer to the frame it just built.
-    let frame = unsafe { &*frame };
+    let frame = unsafe { &*frame_ptr };
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+    // A program broke a rule (PROC-002): it ends; the machine goes on.
+    if frame.cs & 3 == 3 && frame.vector != 8 {
+        let address = if frame.vector == 14 { cr2 } else { 0 };
+        if let Some(next) =
+            threads::on_user_fault(frame_ptr as u64, frame.vector, address, frame.rip)
+        {
+            return next;
+        }
+    }
     let mut serial = serial::UnlockedSerial(serial::SerialPort::new(serial::COM1));
     let cpu = LAPIC.get().map(|apic| apic.id());
     let _ = writeln!(
@@ -292,6 +304,8 @@ const PRESSURE_HYSTERESIS_SAMPLES: u32 = 3;
 
 #[cfg(not(test))]
 const IDT_PRESENT_INTERRUPT_GATE: u8 = 0x8E; // Present, DPL=0, interrupt gate
+#[cfg(not(test))]
+const IDT_PRESENT_USER_INTERRUPT_GATE: u8 = 0xEE; // Present, DPL=3, interrupt gate
 
 #[cfg(all(not(test), target_os = "none"))]
 global_asm!(
@@ -323,6 +337,7 @@ irq_timer_entry:
     mov rsp, rax
 
     # Restore all registers in reverse order
+resume_thread:
     pop r15
     pop r14
     pop r13
@@ -339,6 +354,30 @@ irq_timer_entry:
     pop rcx
     pop rax
     iretq
+
+.global irq_syscall_entry
+irq_syscall_entry:
+    # A program's system call (int 0x80, PROC-003): saved as the timer's
+    # entry saves; the answer is written into the saved rax.
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    call syscall_irq_handler
+    mov rsp, rax
+    jmp resume_thread
 
 .global irq_yield_entry
 irq_yield_entry:
@@ -542,9 +581,10 @@ exception_common:
     mov rdi, rsp
     and rsp, -16
     call exception_handler
-1:
-    hlt
-    jmp 1b
+    # It returns only for a fault in a program (PROC-002), which has
+    # ended: resume the thread it chose, saved as the timer saves.
+    mov rsp, rax
+    jmp resume_thread
 
 .global irq_lapic_timer_entry
 irq_lapic_timer_entry:
@@ -583,10 +623,103 @@ irq_lapic_timer_entry:
 "#
 );
 
+// The built-in programs (PROC-002): machine code for ring 3, kept as
+// bytes in read-only data and copied into a program's own pages at
+// 0x400000 by `programs::run`. Position-independent (data is reached
+// relative to rip), since the kernel's link address is not where they
+// run. Calls: rax = number, rdi/rsi/rdx = arguments (`syscall_abi`).
+#[cfg(all(not(test), target_os = "none"))]
+global_asm!(
+    r#"
+.pushsection .rodata.user_programs, "a"
+
+.global user_hello_start
+user_hello_start:
+    mov r12, 3
+user_hello_again:
+    mov eax, 3
+    xor edi, edi
+    lea rsi, [rip + user_hello_msg]
+    mov edx, 48 # the length of user_hello_msg
+    int 0x80
+    mov eax, 2
+    mov edi, 200
+    int 0x80
+    dec r12
+    jnz user_hello_again
+    # A handle it was never given.
+    mov eax, 3
+    mov edi, 7
+    lea rsi, [rip + user_hello_msg]
+    mov edx, 5
+    int 0x80
+    cmp rax, -2
+    jne user_hello_pointer
+    mov eax, 3
+    xor edi, edi
+    lea rsi, [rip + user_hello_no_handle]
+    mov edx, 64 # the length of user_hello_no_handle
+    int 0x80
+user_hello_pointer:
+    # The kernel's memory, offered as its own.
+    mov eax, 3
+    xor edi, edi
+    movabs rsi, 0xffff800000100000
+    mov edx, 16
+    int 0x80
+    cmp rax, -3
+    jne user_hello_exit
+    mov eax, 3
+    xor edi, edi
+    lea rsi, [rip + user_hello_no_pointer]
+    mov edx, 57 # the length of user_hello_no_pointer
+    int 0x80
+user_hello_exit:
+    mov eax, 0
+    xor edi, edi
+    int 0x80
+user_hello_msg:
+    .ascii "hello from ring 3, in an address space of my own"
+user_hello_msg_end:
+user_hello_no_handle:
+    .ascii "handle 7: there is no such thing -- only what I was given exists"
+user_hello_no_handle_end:
+user_hello_no_pointer:
+    .ascii "the kernel's memory as my buffer: refused, it is not mine"
+user_hello_no_pointer_end:
+.global user_hello_end
+user_hello_end:
+
+.global user_crash_start
+user_crash_start:
+    movabs rax, 0xffff800000100000
+    mov qword ptr [rax], 1
+    jmp user_crash_start
+.global user_crash_end
+user_crash_end:
+
+.global user_rogue_start
+user_rogue_start:
+    cli
+    jmp user_rogue_start
+.global user_rogue_end
+user_rogue_end:
+
+.global user_hog_start
+user_hog_start:
+    jmp user_hog_start
+.global user_hog_end
+user_hog_end:
+
+.popsection
+"#
+);
+
 #[cfg(not(test))]
 extern "C" {
     fn irq_timer_entry();
     fn irq_yield_entry();
+    fn irq_syscall_entry();
     fn irq_keyboard_entry();
     fn irq_mouse_entry();
     fn irq_ipi_entry();
@@ -735,6 +868,27 @@ extern "C" fn timer_irq_handler(rsp: u64) -> u64 {
     threads::on_interrupt(rsp, now, true)
 }
 
+/// A program's system call (PROC-003).
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn syscall_irq_handler(rsp: u64) -> u64 {
+    threads::on_syscall(rsp)
+}
+
+/// The stack the CPU switches to when a program is interrupted or calls
+/// (PROC-002): the TSS's `rsp0`, on the boot CPU, which alone runs them.
+#[cfg(all(not(test), target_os = "none"))]
+fn set_kernel_entry_stack(top: u64) {
+    // SAFETY: the boot CPU's TSS, written only here, with interrupts off;
+    // the CPU reads it only on a privilege change.
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSSS[0]);
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*tss).rsp[0]), top);
+    }
+}
+#[cfg(all(not(test), not(target_os = "none")))]
+fn set_kernel_entry_stack(_top: u64) {}
+
 /// A thread yielded (PROC-001): someone else's turn, if anyone's ready.
 #[cfg(not(test))]
 #[no_mangle]
@@ -821,6 +975,10 @@ fn install_idt() {
         // Set up timer interrupt (IRQ 0 = vector 32)
         IDT[32].set_handler(irq_timer_entry, code_segment);
         IDT[threads::YIELD_VECTOR as usize].set_handler(irq_yield_entry, code_segment);
+        // Programs may call this one gate from ring 3 (PROC-003); every
+        // other vector refuses them with a general-protection fault.
+        IDT[syscall_abi::SYSCALL_VECTOR as usize].set_handler(irq_syscall_entry, code_segment);
+        IDT[syscall_abi::SYSCALL_VECTOR as usize].flags = IDT_PRESENT_USER_INTERRUPT_GATE;
 
         // Set up keyboard interrupt (IRQ 1 = vector 33)
         IDT[33].set_handler(irq_keyboard_entry, code_segment);
@@ -1280,6 +1438,12 @@ pub extern "C" fn rust_main() -> ! {
             heap,
         )
     };
+
+    // Programs (PROC-002) share the kernel's half of this address space.
+    #[cfg(all(not(test), target_os = "none"))]
+    if let Some(hhdm) = kernel.boot.hhdm_offset {
+        threads::init(hhdm);
+    }
 
     // Phase 78: Boot with display console for QEMU window UI
     kprintln!(serial, "\r\n=== PandaGen Workspace ===");
@@ -1921,7 +2085,26 @@ fn workspace_loop(
         // left for the Terminal printed.
         #[cfg(all(not(test), target_os = "none"))]
         {
-            threads::reap();
+            threads::reap(|space| {
+                if let (Some(hhdm), Some(frames)) =
+                    (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut())
+                {
+                    space.free(&mut programs::Owned::new(hhdm, frames));
+                }
+            });
+            // `run` (PROC-002): a program in an address space of its own.
+            if let Some(name) = workspace.take_program_request() {
+                let started = match (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut()) {
+                    (Some(hhdm), Some(frames)) => programs::run(&name, hhdm, frames),
+                    _ => Err(alloc::string::String::from("run: no memory for programs")),
+                };
+                let line = match started {
+                    Ok(id) => alloc::format!("run: {name} is thread {id}, in ring 3"),
+                    Err(why) => why,
+                };
+                workspace.emit_thread_line(serial, &line);
+                output_dirty = true;
+            }
             for line in threads::take_notes() {
                 workspace.emit_thread_line(serial, &line);
                 output_dirty = true;

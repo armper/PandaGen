@@ -3,18 +3,31 @@
 //! The kernel installs its own GDT (instead of keeping the bootloader's)
 //! so every CPU can load a TSS with a dedicated interrupt stack for
 //! double faults. Descriptor encoding is host-tested bit for bit.
+//!
+//! Programs run in ring 3 (PROC-002), so there are user code and data
+//! segments too, with descriptor privilege 3. Their order -- data before
+//! code -- is the one `sysret` would expect, should system calls move to
+//! it from `int 0x80`.
 
 /// Kernel code selector in [`Gdt`].
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 /// Kernel data selector in [`Gdt`].
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
+/// User data selector in [`Gdt`], with requested privilege 3.
+pub const USER_DATA_SELECTOR: u16 = 0x18 | 3;
+/// User code selector in [`Gdt`], with requested privilege 3.
+pub const USER_CODE_SELECTOR: u16 = 0x20 | 3;
 /// TSS selector in [`Gdt`] (a 16-byte system descriptor).
-pub const TSS_SELECTOR: u16 = 0x18;
+pub const TSS_SELECTOR: u16 = 0x28;
 
 /// 64-bit code segment: present, DPL 0, code, readable, long mode.
 pub const KERNEL_CODE_DESCRIPTOR: u64 = 0x00AF_9A00_0000_FFFF;
 /// Data segment: present, DPL 0, data, writable.
 pub const KERNEL_DATA_DESCRIPTOR: u64 = 0x00CF_9200_0000_FFFF;
+/// Data segment: present, DPL 3, data, writable.
+pub const USER_DATA_DESCRIPTOR: u64 = 0x00CF_F200_0000_FFFF;
+/// 64-bit code segment: present, DPL 3, code, readable, long mode.
+pub const USER_CODE_DESCRIPTOR: u64 = 0x00AF_FA00_0000_FFFF;
 
 /// 64-bit task state segment.
 #[repr(C, packed(4))]
@@ -65,35 +78,44 @@ pub const fn tss_descriptor(base: u64, limit: u32) -> [u64; 2] {
     [low, high]
 }
 
-/// A five-entry GDT: null, kernel code, kernel data, TSS (two slots).
+/// A seven-entry GDT: null, kernel code, kernel data, user data, user
+/// code, TSS (two slots).
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Gdt {
-    entries: [u64; 5],
+    entries: [u64; 7],
 }
 
 impl Gdt {
     pub const fn new() -> Self {
         Self {
-            entries: [0, KERNEL_CODE_DESCRIPTOR, KERNEL_DATA_DESCRIPTOR, 0, 0],
+            entries: [
+                0,
+                KERNEL_CODE_DESCRIPTOR,
+                KERNEL_DATA_DESCRIPTOR,
+                USER_DATA_DESCRIPTOR,
+                USER_CODE_DESCRIPTOR,
+                0,
+                0,
+            ],
         }
     }
 
     /// Point the TSS descriptor at `tss`.
     pub fn set_tss(&mut self, tss: *const Tss) {
         let [low, high] = tss_descriptor(tss as u64, core::mem::size_of::<Tss>() as u32 - 1);
-        self.entries[3] = low;
-        self.entries[4] = high;
+        self.entries[5] = low;
+        self.entries[6] = high;
     }
 
-    pub fn entries(&self) -> &[u64; 5] {
+    pub fn entries(&self) -> &[u64; 7] {
         &self.entries
     }
 
     /// Descriptor-table register value for `lgdt`.
     pub fn pointer(&self) -> DescriptorTablePointer {
         DescriptorTablePointer {
-            limit: (core::mem::size_of::<[u64; 5]>() - 1) as u16,
+            limit: (core::mem::size_of::<[u64; 7]>() - 1) as u16,
             base: self.entries.as_ptr() as u64,
         }
     }
@@ -155,7 +177,23 @@ mod tests {
         assert_eq!(gdt.entries()[1], 0x00AF_9A00_0000_FFFF);
         assert_eq!(gdt.entries()[2], 0x00CF_9200_0000_FFFF);
         let limit = gdt.pointer().limit;
-        assert_eq!(limit, 39);
+        assert_eq!(limit, 55);
+    }
+
+    #[test]
+    fn user_segments_are_privilege_3_and_match_their_selectors() {
+        let gdt = Gdt::new();
+        let dpl = |d: u64| (d >> 45) & 3;
+        let data = gdt.entries()[(USER_DATA_SELECTOR >> 3) as usize];
+        let code = gdt.entries()[(USER_CODE_SELECTOR >> 3) as usize];
+        assert_eq!((dpl(data), dpl(code)), (3, 3));
+        assert_eq!((USER_DATA_SELECTOR & 3, USER_CODE_SELECTOR & 3), (3, 3));
+        assert_ne!(code & (1 << 53), 0, "long-mode code");
+        assert_ne!(code & (1 << 43), 0, "executable");
+        assert_eq!(data & (1 << 43), 0, "data");
+        // Only the privilege differs from the kernel's.
+        assert_eq!(code & !(3 << 45), KERNEL_CODE_DESCRIPTOR);
+        assert_eq!(data & !(3 << 45), KERNEL_DATA_DESCRIPTOR);
     }
 
     #[test]
@@ -175,8 +213,8 @@ mod tests {
         let mut gdt = Gdt::new();
         gdt.set_tss(&tss);
         let [low, high] = tss_descriptor(&tss as *const Tss as u64, 103);
-        assert_eq!(gdt.entries()[3], low);
-        assert_eq!(gdt.entries()[4], high);
+        assert_eq!(gdt.entries()[(TSS_SELECTOR >> 3) as usize], low);
+        assert_eq!(gdt.entries()[(TSS_SELECTOR >> 3) as usize + 1], high);
         assert_eq!(core::mem::size_of::<Tss>(), 104);
         let iomap = tss.iomap_base;
         assert_eq!(iomap, 104);

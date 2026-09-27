@@ -106,6 +106,20 @@ impl Scheduler {
         self.current
     }
 
+    /// The running thread's name.
+    pub fn running_name(&self) -> &'static str {
+        self.slots[self.current].map_or("", |t| t.name)
+    }
+
+    /// Where slot `slot`'s thread stopped, if it is one and not the one
+    /// running (whose stack pointer is live, not saved).
+    pub fn saved_rsp(&self, slot: usize) -> Option<u64> {
+        if slot == self.current {
+            return None;
+        }
+        self.slots.get(slot).copied().flatten().map(|t| t.rsp)
+    }
+
     /// Whether any thread but the running one could run.
     pub fn others_ready(&self, now: u64) -> bool {
         self.slots.iter().enumerate().any(|(i, t)| {
@@ -266,6 +280,37 @@ pub fn initial_frame(stack: &mut [u64], base: u64, entry: u64, arg: u64, cs: u64
     base + regs as u64 * 8
 }
 
+/// Lay out a program's first frame (PROC-002) at the top of its kernel
+/// stack: fifteen zeroed registers and an interrupt frame whose `iretq`
+/// drops to ring 3 -- code segment `cs`, stack segment `ss`, at `entry`,
+/// with its stack at `user_rsp` and interrupts on. Returns the stack
+/// pointer to hand the entry, and the stack's top: where the CPU puts
+/// the frame when the program is interrupted (the TSS's `rsp0`), 16-byte
+/// aligned. The kernel stack is empty whenever the program is in ring 3,
+/// so its top is always the right place to start.
+pub fn user_frame(
+    stack: &mut [u64],
+    base: u64,
+    entry: u64,
+    user_rsp: u64,
+    cs: u64,
+    ss: u64,
+) -> (u64, u64) {
+    let mut top = stack.len();
+    if !(base + top as u64 * 8).is_multiple_of(16) {
+        top -= 1;
+    }
+    let frame = top - 5;
+    stack[frame] = entry;
+    stack[frame + 1] = cs;
+    stack[frame + 2] = 0x202; // interrupts on
+    stack[frame + 3] = user_rsp;
+    stack[frame + 4] = ss;
+    let regs = frame - 15;
+    stack[regs..frame].fill(0);
+    (base + regs as u64 * 8, base + top as u64 * 8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +414,37 @@ mod tests {
             // The frame sits wholly below the thread's first stack word.
             assert!(rsp + 20 * 8 <= entry_rsp);
         }
+    }
+
+    #[test]
+    fn a_program_starts_in_ring_3_with_an_empty_kernel_stack() {
+        for base in [0x20_0000u64, 0x20_0008] {
+            let mut stack = [0xFFu64; 64];
+            let (rsp, top) = user_frame(&mut stack, base, 0x40_0000, 0x80_0000, 0x23, 0x1B);
+            assert_eq!(top % 16, 0);
+            assert!(top <= base + 64 * 8);
+            // Registers, then the frame, then nothing: the frame ends at
+            // the top, so the stack is empty once it is popped.
+            assert_eq!(rsp + 20 * 8, top);
+            let at = |addr: u64| ((addr - base) / 8) as usize;
+            let regs = at(rsp);
+            assert!(stack[regs..regs + 15].iter().all(|&w| w == 0));
+            assert_eq!(
+                &stack[regs + 15..regs + 20],
+                &[0x40_0000, 0x23, 0x202, 0x80_0000, 0x1B]
+            );
+        }
+    }
+
+    #[test]
+    fn the_running_threads_stack_is_live_not_saved() {
+        let mut s = Scheduler::new();
+        let (a, _) = s.add("a", 0xA000).unwrap();
+        assert_eq!(s.saved_rsp(a), Some(0xA000));
+        assert_eq!(s.saved_rsp(0), None);
+        s.switch(1, 0x1000, true);
+        assert_eq!((s.saved_rsp(0), s.saved_rsp(a)), (Some(0x1000), None));
+        assert_eq!(s.running_name(), "a");
     }
 
     #[test]

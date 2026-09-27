@@ -31,13 +31,17 @@ pub mod spin;
 pub mod tick;
 pub mod timer;
 pub mod tsc;
+pub mod user_space;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod virtio_pci;
 pub mod work_queue;
 
-pub use gdt::{Gdt, Tss, KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, TSS_SELECTOR};
+pub use gdt::{
+    Gdt, Tss, KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, TSS_SELECTOR, USER_CODE_SELECTOR,
+    USER_DATA_SELECTOR,
+};
 pub use idt::{Idt, IdtError};
 pub use interrupts::{AckStrategy, InterruptDispatcher, IrqLine};
 pub use keyboard::X86Ps2Keyboard;

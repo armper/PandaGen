@@ -987,6 +987,45 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     ];
     shapes.push(Shape::new(&title, &args));
 
+    // Programs (PROC-002): code in ring 3, in address spaces of its own.
+    // One says hello and is refused a handle and a pointer it was not
+    // given; one writes to the kernel's memory, one turns interrupts off,
+    // and the kernel ends each; one loops until `stop` -- and the desk
+    // carries on through all of it.
+    title = "programs: ring 3, refused handles, faults end only the program".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,u,n,spc,h,e,l,l,o,ret,sleep:3,r,u,n,spc,c,r,a,s,h,ret,sleep:1,r,u,n,spc,r,o,g,u,e,ret,sleep:1,r,u,n,spc,h,o,g,ret,sleep:1,t,h,r,e,a,d,s,ret,sleep:1,s,t,o,p,spc,4,ret,sleep:2,m,e,m,ret,sleep:1".to_string(),
+        "--out".to_string(),
+        "dist/qemu_programs".to_string(),
+        "--expect-serial".to_string(),
+        "hello: hello from ring 3, in an address space of my own".to_string(),
+        "--expect-serial".to_string(),
+        "hello: handle 7: there is no such thing".to_string(),
+        "--expect-serial".to_string(),
+        "hello: the kernel's memory as my buffer: refused".to_string(),
+        "--expect-serial".to_string(),
+        "hello: exited with 0".to_string(),
+        "--expect-serial".to_string(),
+        "crash: ended by the kernel: it touched 0xffff800000100000".to_string(),
+        "--expect-serial".to_string(),
+        "rogue: ended by the kernel: it did what a program may not".to_string(),
+        "--expect-serial".to_string(),
+        "a program in 40 KiB of its own".to_string(),
+        "--expect-serial".to_string(),
+        "hog: stopped".to_string(),
+        // The desk still answers afterwards.
+        "--expect-serial".to_string(),
+        "heap: used=".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
     // A reboot (DESK-020): the cards come back, and so does the document
     // one of them shows -- the first check that anything survives a
     // restart of the machine.

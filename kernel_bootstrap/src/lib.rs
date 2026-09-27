@@ -31,6 +31,7 @@ pub mod rtc;
 pub mod sched;
 pub mod sketch;
 pub mod speaker;
+pub mod syscall_abi;
 pub mod tasks;
 pub mod timer;
 pub mod web;

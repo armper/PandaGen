@@ -262,9 +262,12 @@ pure table tested under `cargo test`; the stacks, frames and interrupt
 masking are `kernel_bootstrap/src/threads.rs`. The desk's loop is thread
 0, and yields when it is idle. Nothing is allocated or locked with
 interrupts masked: a preempted thread may hold the heap's lock, and
-waiting for it with the timer off would wait forever. Everything still
-runs in ring 0 in one address space; isolating programs from each other
-is the next step.
+waiting for it with the timer off would wait forever. Since Phase 435 a
+thread can be a *program*: it runs in ring 3 in an address space of its
+own (`hal_x86_64::user_space`; the kernel's half shared but not USER),
+reaches the kernel only through `int 0x80` (`kernel_bootstrap/src/
+syscall_abi.rs`), names everything outside itself by handles in its own
+capability table, and is ended -- alone -- when it faults.
 
 ### 7. Virtual Memory and Address Spaces (Phase 24)
 

@@ -76,7 +76,7 @@ fn command_words() -> Vec<&'static str> {
         "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
         "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
         "ticks", "editor", "fault", "fetch", "resolve", "random", "threads", "spin", "stop",
-        "after",
+        "after", "run", "programs",
     ];
     words.extend(crate::access_shell::WORDS);
     words
@@ -255,6 +255,8 @@ pub struct WorkspaceSession {
     gfx_reset_requested: bool,
     /// A `fetch` or `resolve` for the loop to hand the network (NET-033).
     net_request: Option<NetRequest>,
+    /// A program `run` asked for (PROC-002), for the loop to start.
+    program_request: Option<String>,
 }
 
 /// `fetch <url>`, `resolve <name> [server]`, or the same after `net`:
@@ -605,6 +607,7 @@ impl WorkspaceSession {
             gfx_snapshot: None,
             gfx_reset_requested: false,
             net_request: None,
+            program_request: None,
         }
     }
 
@@ -1026,6 +1029,24 @@ impl WorkspaceSession {
 
         // Threads (PROC-001): the table, a busy one to watch, and asking
         // one to stop.
+        // Programs (PROC-002): `run` starts one in ring 3; `programs`
+        // lists what there is to run.
+        if cmd == "run" || cmd == "programs" {
+            self.emit_command_line(serial, command.as_bytes());
+            match (cmd, parts.next()) {
+                ("run", Some(name)) => self.program_request = Some(String::from(name)),
+                ("run", None) => self.emit_line(serial, "Usage: run <program> (see `programs`)"),
+                _ =>
+                {
+                    #[cfg(not(test))]
+                    for (name, what) in crate::programs::CATALOG {
+                        self.emit_line(serial, &format!("  {name:<8} {what}"));
+                    }
+                }
+            }
+            return;
+        }
+
         if matches!(cmd, "threads" | "spin" | "stop" | "after") {
             self.emit_command_line(serial, command.as_bytes());
             let arg = parts.next().and_then(|n| n.parse::<u64>().ok());
@@ -1204,6 +1225,8 @@ impl WorkspaceSession {
                 );
                 self.emit_line(serial, "after <secs> [words] - The words, that much later");
                 self.emit_line(serial, "stop <id>      - Ask a thread to stop");
+                self.emit_line(serial, "run <program>  - Start a program in ring 3");
+                self.emit_line(serial, "programs       - The programs there are to run");
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
@@ -1687,6 +1710,11 @@ impl WorkspaceSession {
         );
         let line = core::str::from_utf8(&buffer[..cursor]).unwrap_or("Routing: ?");
         self.emit_line(serial, line);
+    }
+
+    /// Take the program `run` asked for.
+    pub fn take_program_request(&mut self) -> Option<String> {
+        self.program_request.take()
     }
 
     /// Take the `fetch` or `resolve` the Terminal asked for.
