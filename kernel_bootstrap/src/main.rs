@@ -24,7 +24,6 @@ mod bare_metal_editor_io;
 mod bare_metal_net;
 mod bare_metal_storage;
 
-mod calendar;
 mod desk;
 mod desktop_frame;
 mod display_mode;
@@ -2180,6 +2179,59 @@ fn workspace_loop(
                     }
                     output_dirty = true;
                 }
+                // Programs' documents (PROC-009): lists answered from the
+                // filesystem, only the names their patterns name; opens
+                // handed to the desk; and after a save, every holder is
+                // sent its list again.
+                let mut requests = threads::take_document_requests();
+                if desk.take_documents_changed() {
+                    for (id, pattern) in threads::document_holders() {
+                        requests.push(threads::DocumentRequest {
+                            id,
+                            pattern,
+                            open: None,
+                        });
+                    }
+                }
+                if !requests.is_empty() {
+                    let names: alloc::vec::Vec<alloc::string::String> =
+                        match workspace.take_filesystem() {
+                            Some(fs) => {
+                                let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                                let entries = io.list_entries().unwrap_or_default();
+                                workspace.set_filesystem(io.into_filesystem());
+                                entries.into_iter().map(|e| e.name).collect()
+                            }
+                            None => alloc::vec::Vec::new(),
+                        };
+                    for request in requests {
+                        match request.open {
+                            None => {
+                                let mut listed = alloc::string::String::new();
+                                let mut count = 0;
+                                for name in names.iter().filter(|n| request.pattern.matches(n)) {
+                                    listed.push_str(name);
+                                    listed.push('\n');
+                                    count += 1;
+                                }
+                                kprintln!(
+                                    serial,
+                                    "documents: thread {} has {count} named {}",
+                                    request.id,
+                                    request.pattern.as_str()
+                                );
+                                threads::post_message(request.id, listed.into_bytes());
+                            }
+                            Some(name) => {
+                                let exists = names.iter().any(|n| *n == name);
+                                if let Some(follow) = desk.open_document(&name, exists) {
+                                    desk_requests.push(follow);
+                                }
+                                output_dirty = true;
+                            }
+                        }
+                    }
+                }
                 // A program's notice (PROC-008): said like the desk's own.
                 for text in threads::take_notices() {
                     desk.program_notice(&text, get_tick_count());
@@ -3266,7 +3318,12 @@ fn workspace_loop(
                         None => alloc::format!("up {}:{:02}", now / 6000, (now / 100) % 60),
                     };
                     // The Calendar marks today (GFX-076).
-                    desk.set_today(today.map(|d| calendar::Date::new(d.year, d.month, d.day)));
+                    desk.set_today(today.map(|d| calendar_core::Date::new(d.year, d.month, d.day)));
+                    // And for programs (PROC-009): `date`.
+                    #[cfg(all(not(test), target_os = "none"))]
+                    if let Some(d) = today {
+                        threads::set_date(d.year, d.month, d.day);
+                    }
                     let terminal = desk
                         .terminal_rows()
                         .map(|rows| terminal_view(&workspace, rows));

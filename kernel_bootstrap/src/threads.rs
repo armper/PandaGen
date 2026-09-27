@@ -115,6 +115,66 @@ static YIELDS: AtomicU32 = AtomicU32::new(0);
 /// Threads found to have run off their stacks, since boot.
 static OVERRUNS: AtomicU32 = AtomicU32::new(0);
 
+/// Today, for `date` (PROC-009): `y << 16 | m << 8 | d`, 0 while the
+/// clock is unknown. The desk's loop sets it; a system call only reads.
+static TODAY: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_date(year: u16, month: u8, day: u8) {
+    TODAY.store(
+        (year as u32) << 16 | (month as u32) << 8 | day as u32,
+        Ordering::Relaxed,
+    );
+}
+
+/// Something a program asked of its documents (PROC-009), for the
+/// desk's loop, which has the filesystem, to do.
+#[derive(Debug, Clone)]
+pub struct DocumentRequest {
+    pub id: u32,
+    pub pattern: program_image::Pattern,
+    /// `Some(name)`: open it in a Notepad; `None`: list the names.
+    pub open: Option<String>,
+}
+
+static DOC_REQUESTS: hal_x86_64::SpinLock<Vec<DocumentRequest>> =
+    hal_x86_64::SpinLock::new(Vec::new());
+
+/// The document requests made since last asked.
+pub fn take_document_requests() -> Vec<DocumentRequest> {
+    match DOC_REQUESTS.try_lock() {
+        Some(mut r) if !r.is_empty() => core::mem::take(&mut *r),
+        _ => Vec::new(),
+    }
+}
+
+/// Messages waiting for programs, oldest first (PROC-009).
+static MESSAGES: hal_x86_64::SpinLock<Vec<(u32, Vec<u8>)>> = hal_x86_64::SpinLock::new(Vec::new());
+/// Longest message.
+pub const MESSAGE_MAX: usize = 8192;
+
+/// A message for program `id`; its card hears `Event::Message`.
+pub fn post_message(id: u32, mut bytes: Vec<u8>) {
+    bytes.truncate(MESSAGE_MAX);
+    MESSAGES.lock().push((id, bytes));
+    post_event(id, app_protocol::Event::Message.encode());
+}
+
+/// The programs that hold documents, with their patterns: after a save,
+/// each is sent its list again.
+pub fn document_holders() -> Vec<(u32, program_image::Pattern)> {
+    let mut found: [Option<(u32, program_image::Pattern)>; MAX_THREADS] = [None; MAX_THREADS];
+    with_table(|t| {
+        for (slot, program) in t.programs.iter().enumerate() {
+            if let Some(program) = program {
+                if let Some(p) = program.handles.documents() {
+                    found[slot] = Some((program.id, p));
+                }
+            }
+        }
+    });
+    found.into_iter().flatten().collect()
+}
+
 /// What programs asked the desk to say as notices (PROC-008).
 static NOTICES: hal_x86_64::SpinLock<Vec<String>> = hal_x86_64::SpinLock::new(Vec::new());
 
@@ -726,6 +786,113 @@ pub fn on_syscall(rsp: u64) -> u64 {
             let next = t.sched.switch(now, rsp, false);
             enter(t, t.sched.current());
             next
+        }
+        Call::Date => {
+            set_rax(TODAY.load(Ordering::Relaxed) as u64);
+            rsp
+        }
+        Call::List { handle } => {
+            let program = t.programs[current].as_ref().expect("checked above");
+            let pattern = match program.handles.check_documents(handle) {
+                Ok(p) => p,
+                Err(e) => {
+                    set_rax(e.to_rax());
+                    return rsp;
+                }
+            };
+            let id = program.id;
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            DOC_REQUESTS.lock().push(DocumentRequest {
+                id,
+                pattern,
+                open: None,
+            });
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            set_rax(0);
+            rsp
+        }
+        Call::Open { handle, ptr, len } => {
+            let program = t.programs[current].as_ref().expect("checked above");
+            let pattern = match program.handles.check_documents(handle) {
+                Ok(p) => p,
+                Err(e) => {
+                    set_rax(e.to_rax());
+                    return rsp;
+                }
+            };
+            if len > 64 {
+                set_rax(Error::TooBig.to_rax());
+                return rsp;
+            }
+            let mut name = [0u8; 64];
+            let len = len as usize;
+            let memory = crate::programs::Direct::new(t.hhdm);
+            if !program.space.read_into(&memory, ptr, &mut name[..len]) {
+                set_rax(Error::BadPointer.to_rax());
+                return rsp;
+            }
+            // Only a name its pattern names: the handle reaches no other.
+            let Some(name) = core::str::from_utf8(&name[..len])
+                .ok()
+                .filter(|n| pattern.matches(n))
+            else {
+                set_rax(Error::NotAllowed.to_rax());
+                return rsp;
+            };
+            let id = program.id;
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            DOC_REQUESTS.lock().push(DocumentRequest {
+                id,
+                pattern,
+                open: Some(String::from(name)),
+            });
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            set_rax(0);
+            rsp
+        }
+        Call::Receive { ptr, len } => {
+            let id = t.programs[current].as_ref().expect("checked above").id;
+            // Taking it from the queue may free memory: interrupts on.
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            let taken = {
+                let mut messages = MESSAGES.lock();
+                match messages.iter().position(|(of, _)| *of == id) {
+                    None => Ok(None),
+                    Some(at) if messages[at].1.len() as u64 > len => Err(messages[at].1.len()),
+                    Some(at) => Ok(Some(messages.remove(at).1)),
+                }
+            };
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            let message = match taken {
+                Ok(None) => {
+                    set_rax(0);
+                    return rsp;
+                }
+                Err(_) => {
+                    set_rax(Error::TooBig.to_rax());
+                    return rsp;
+                }
+                Ok(Some(message)) => message,
+            };
+            // SAFETY: interrupts are off again, on the boot CPU.
+            let t = unsafe { &mut *TABLE.0.get() };
+            let hhdm = t.hhdm;
+            let program = t.programs[current].as_mut().expect("checked above");
+            let mut memory = crate::programs::Direct::new(hhdm);
+            let written = program.space.write(&mut memory, ptr, &message);
+            set_rax(if written {
+                message.len() as u64
+            } else {
+                Error::BadPointer.to_rax()
+            });
+            // Freeing it takes the heap: interrupts on.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            drop(message);
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            rsp
         }
         Call::Random { ptr, len } => {
             if len > SEND_MAX as u64 {

@@ -215,6 +215,13 @@ impl ProgramCard {
                     key,
                     label,
                 } => ui.button(pixels(*area), label, *key, button_kind(*kind)),
+                OwnedOp::Hit { area, key } => {
+                    let area = pixels(*area);
+                    if ui.hovered(&area) {
+                        ui.outline(area, palette.text, 6, 1);
+                    }
+                    ui.hit_area(area, *key);
+                }
                 OwnedOp::TextCentered {
                     area,
                     role,

@@ -50,32 +50,117 @@ pub const WRITE: u8 = 1;
 /// A piece may be run.
 pub const EXECUTE: u8 = 2;
 
-/// Capabilities a program can ask for, by number.
+/// Which documents a program may reach (PROC-009), by name: `#` is a
+/// digit, `?` any one character, `*` any run of characters (even none),
+/// anything else itself. The Calendar asks for `####-##-##`: the notes
+/// named by a day, and nothing else a person keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Pattern {
+    bytes: [u8; PATTERN_MAX],
+    len: u8,
+}
+
+/// Longest pattern.
+pub const PATTERN_MAX: usize = 32;
+
+impl core::fmt::Debug for Pattern {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Pattern({:?})", self.as_str())
+    }
+}
+
+impl Pattern {
+    /// A pattern written into a program's source, checked at build time
+    /// (a bad one does not compile).
+    pub const fn from_static(text: &'static str) -> Pattern {
+        let b = text.as_bytes();
+        assert!(
+            !b.is_empty() && b.len() <= PATTERN_MAX,
+            "a pattern of 1 to 32 bytes"
+        );
+        let mut bytes = [0u8; PATTERN_MAX];
+        let mut i = 0;
+        while i < b.len() {
+            assert!(b[i] > b' ' && b[i] < 0x7F, "printable ASCII");
+            bytes[i] = b[i];
+            i += 1;
+        }
+        Pattern {
+            bytes,
+            len: b.len() as u8,
+        }
+    }
+
+    /// A pattern, if it is printable ASCII and short enough; `*` alone
+    /// (every document) is allowed, but a person sees it asked for.
+    pub fn new(text: &str) -> Option<Pattern> {
+        if text.is_empty()
+            || text.len() > PATTERN_MAX
+            || !text.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return None;
+        }
+        let mut bytes = [0u8; PATTERN_MAX];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Some(Pattern {
+            bytes,
+            len: text.len() as u8,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+
+    /// Whether document `name` is one this pattern names.
+    pub fn matches(&self, name: &str) -> bool {
+        fn go(p: &[u8], n: &[u8]) -> bool {
+            match (p.first(), n.first()) {
+                (None, None) => true,
+                (Some(b'*'), _) => go(&p[1..], n) || (!n.is_empty() && go(p, &n[1..])),
+                (None, Some(_)) | (Some(_), None) => false,
+                (Some(b'#'), Some(c)) => c.is_ascii_digit() && go(&p[1..], &n[1..]),
+                (Some(b'?'), Some(_)) => go(&p[1..], &n[1..]),
+                (Some(a), Some(b)) => a == b && go(&p[1..], &n[1..]),
+            }
+        }
+        go(self.as_str().as_bytes(), name.as_bytes())
+    }
+}
+
+/// Capabilities a program can ask for. In an image each is a number,
+/// and for documents the pattern after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
 pub enum Ask {
     /// Lines to the Terminal that started it.
-    Console = 1,
+    Console,
     /// A card on the desk that the program draws (`app_protocol`).
-    Card = 2,
+    Card,
     /// Notices on the desk, with a chime (PROC-008): a timer that is up.
-    Notices = 3,
+    Notices,
+    /// The documents whose names match (PROC-009): their names, and
+    /// having one opened in a Notepad -- not their contents.
+    Documents(Pattern),
 }
 
 impl Ask {
-    pub fn from_u16(n: u16) -> Option<Ask> {
-        match n {
-            1 => Some(Ask::Console),
-            2 => Some(Ask::Card),
-            3 => Some(Ask::Notices),
-            _ => None,
+    /// Its number in an image.
+    pub fn code(self) -> u16 {
+        match self {
+            Ask::Console => 1,
+            Ask::Card => 2,
+            Ask::Notices => 3,
+            Ask::Documents(_) => 4,
         }
     }
-    pub fn name(self) -> &'static str {
+
+    /// What it is, as `programs` says it.
+    pub fn describe(self) -> String {
         match self {
-            Ask::Console => "console",
-            Ask::Card => "a card",
-            Ask::Notices => "notices",
+            Ask::Console => "console".into(),
+            Ask::Card => "a card".into(),
+            Ask::Notices => "notices".into(),
+            Ask::Documents(p) => alloc::format!("documents named {}", p.as_str()),
         }
     }
 }
@@ -195,7 +280,11 @@ impl Image {
         out.extend_from_slice(self.name.as_bytes());
         out.extend_from_slice(&(self.asks.len() as u16).to_le_bytes());
         for ask in &self.asks {
-            out.extend_from_slice(&(*ask as u16).to_le_bytes());
+            out.extend_from_slice(&ask.code().to_le_bytes());
+            if let Ask::Documents(pattern) = ask {
+                out.push(pattern.as_str().len() as u8);
+                out.extend_from_slice(pattern.as_str().as_bytes());
+            }
         }
         out.extend_from_slice(&(self.pieces.len() as u16).to_le_bytes());
         for piece in &self.pieces {
@@ -229,7 +318,18 @@ impl Image {
         let mut asks = Vec::with_capacity(asks_n);
         for _ in 0..asks_n {
             let n = r.u16()?;
-            asks.push(Ask::from_u16(n).ok_or(ImageError::UnknownAsk(n))?);
+            asks.push(match n {
+                1 => Ask::Console,
+                2 => Ask::Card,
+                3 => Ask::Notices,
+                4 => {
+                    let len = r.u8()? as usize;
+                    let text = core::str::from_utf8(r.take(len)?)
+                        .map_err(|_| ImageError::UnknownAsk(n))?;
+                    Ask::Documents(Pattern::new(text).ok_or(ImageError::UnknownAsk(n))?)
+                }
+                _ => return Err(ImageError::UnknownAsk(n)),
+            });
         }
         let pieces_n = r.u16()? as usize;
         if pieces_n > MAX_PIECES {
@@ -402,6 +502,28 @@ mod tests {
         let bytes = image.to_bytes();
         assert_eq!(Image::parse(&bytes), Ok(image.clone()));
         assert_eq!(image.memory(), 0x2000 + 0x3000);
+    }
+
+    #[test]
+    fn documents_are_asked_for_by_a_pattern_that_travels_with_the_image() {
+        let days = Pattern::from_static("####-##-##");
+        assert!(days.matches("2026-09-27"));
+        assert!(!days.matches("2026-9-27"));
+        assert!(!days.matches("2026-09-27.txt"));
+        assert!(!days.matches("memo"));
+        let any = Pattern::new("*.txt").unwrap();
+        assert!(any.matches("a.txt") && any.matches(".txt") && !any.matches("a.txt~"));
+        assert!(
+            Pattern::new("?b*").unwrap().matches("ab")
+                && Pattern::new("?b*").unwrap().matches("xbyz")
+        );
+        assert_eq!(Pattern::new(""), None);
+        assert_eq!(Pattern::new("has space"), None);
+        let mut image = hello();
+        image.asks.push(Ask::Documents(days));
+        let back = Image::parse(&image.to_bytes()).unwrap();
+        assert_eq!(back.asks, image.asks);
+        assert_eq!(back.asks[1].describe(), "documents named ####-##-##");
     }
 
     #[test]

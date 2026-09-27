@@ -11,7 +11,6 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod calendar;
 pub mod desk;
 pub mod desktop_frame;
 pub mod display_mode;

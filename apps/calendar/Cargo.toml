@@ -1,0 +1,20 @@
+[package]
+name = "calendar"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The dock's Calendar, as a program: a month, and a note for any day"
+
+# Its own workspace: programs are built for the machine, not the host.
+[workspace]
+
+[dependencies]
+pandagen_app = { path = "../../pandagen_app", features = ["heap"] }
+calendar_core = { path = "../../calendar_core" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+
+[profile.dev]
+panic = "abort"

@@ -169,7 +169,7 @@ pub fn catalog() -> Vec<String> {
     for (name, bytes) in IMAGES.lock().iter() {
         out.push(match Image::parse(bytes) {
             Ok(image) => {
-                let asks: Vec<&str> = image.asks.iter().map(|a| a.name()).collect();
+                let asks: Vec<String> = image.asks.iter().map(|a| a.describe()).collect();
                 alloc::format!(
                     "  {name:<8} an image: {} KiB, asks for {}",
                     image.memory() / 1024,
@@ -322,6 +322,7 @@ pub fn run(
             Ask::Console => handles.grant(Capability::Console),
             Ask::Card => handles.grant(Capability::Card),
             Ask::Notices => handles.grant(Capability::Notices),
+            Ask::Documents(pattern) => handles.grant(Capability::Documents(*pattern)),
         };
     }
     let wants_card = image.asks.contains(&Ask::Card);

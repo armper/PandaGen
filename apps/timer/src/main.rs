@@ -50,7 +50,7 @@ fn main(_nothing: Console) -> u64 {
                 TimerEffect::None => continue,
             },
             Some(Event::Closed) => return 0,
-            None => {}
+            Some(_) | None => {}
         }
         if w == 0 || h == 0 {
             continue;

@@ -28,6 +28,7 @@ fn main(_nothing: Console) -> u64 {
             }
             Event::Key(_) => {}
             Event::Closed => return 0,
+            _ => {}
         }
     }
 }

@@ -39,6 +39,59 @@ pub mod call {
     pub const POLL: u64 = 7;
     pub const WAIT: u64 = 8;
     pub const RANDOM: u64 = 9;
+    pub const DATE: u64 = 10;
+    pub const LIST: u64 = 11;
+    pub const OPEN: u64 = 12;
+    pub const RECEIVE: u64 = 13;
+}
+
+/// Today, as `(year, month, day)`, when the machine's clock is set.
+pub fn date() -> Option<(u16, u8, u8)> {
+    let packed = check(syscall(call::DATE, 0, 0, 0)).ok()?;
+    if packed == 0 {
+        return None;
+    }
+    Some(((packed >> 16) as u16, (packed >> 8) as u8, packed as u8))
+}
+
+/// The next message waiting for the program, into `buffer` (PROC-009):
+/// its length, `Ok(0)` when there is none, `Err(TooBig)` -- the message
+/// kept -- when `buffer` is too small for it. `Event::Message` says one
+/// has come.
+pub fn receive(buffer: &mut [u8]) -> Result<usize, Error> {
+    check(syscall(
+        call::RECEIVE,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Documents named by a pattern (PROC-009), when the program asked for
+/// them: their names, and having one opened in a Notepad for the person.
+/// Their contents are not the program's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Documents(pub Handle);
+
+impl Documents {
+    /// Ask for their names; they come as a message, one per line. They
+    /// come again, unasked, whenever a document is saved.
+    pub fn list(&self) -> Result<(), Error> {
+        check(syscall(call::LIST, (self.0).0, 0, 0)).map(|_| ())
+    }
+
+    /// Have document `name` opened in a Notepad (made empty if there is
+    /// none). A name the pattern does not name is `NotAllowed`.
+    pub fn open(&self, name: &str) -> Result<(), Error> {
+        check(syscall(
+            call::OPEN,
+            (self.0).0,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        ))
+        .map(|_| ())
+    }
 }
 
 /// Fill `bytes` from the machine's generator (at most 256 at a time).

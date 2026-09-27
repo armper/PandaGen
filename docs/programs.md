@@ -53,6 +53,15 @@ A panic sends `panicked: ...` to the console and exits with 101.
   desk's notices centre, with a chime.
 - **`random_bytes` / `random_u64`**: bytes from the machine's generator.
   Any program may ask: it reveals nothing and reaches nothing.
+- **`date()`**: today, when the machine's clock is set.
+- **Documents** (`Ask::Documents(Pattern::from_static("####-##-##"))`):
+  the documents whose names match a pattern (`#` a digit, `?` any
+  character, `*` any run), and only those. `Documents::list()` asks for
+  their names, which arrive as a message (`Event::Message`, then
+  `receive`), and again, unasked, after any save. `Documents::open(name)`
+  has one opened in a Notepad for the person, made empty if it isn't
+  there yet. A program never reads or writes a document itself; the
+  Calendar is the example.
 
 ## A card on the desk
 
@@ -92,7 +101,7 @@ why.
 
 ## Dock apps that are programs
 
-The Calculator, the Timer and Tiles are programs (`apps/calculator`,
+The Calculator, the Timer, Tiles and the Calendar are programs (`apps/calculator`,
 `apps/timer`, `apps/tiles`, with everything testable in the host-tested
 `calculator_core`, `timer_core` and `tiles_core`). The Calculator and
 Tiles ask for exactly one capability, their card; the Timer asks for its

@@ -176,6 +176,12 @@ pub enum Op<'a> {
         scale: u8,
         text: &'a str,
     },
+    /// A place that stands for `key` without looking like a button: a
+    /// calendar's day. The desk outlines it under the pointer.
+    Hit {
+        area: Area,
+        key: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +351,11 @@ impl<'b> ViewWriter<'b> {
                 self.bytes(&[scale]);
                 self.text(text);
             }
+            Op::Hit { area, key } => {
+                self.bytes(&[8]);
+                self.area(area);
+                self.bytes(&[key]);
+            }
         }
         self.ops += 1;
         self
@@ -361,8 +372,10 @@ impl<'b> ViewWriter<'b> {
     }
 }
 
-/// Something that happened to a program's card.
+/// Something that happened to a program's card. More kinds may come: a
+/// program ignores what it does not know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// A key: typed, or a button that stands for it clicked.
     Key(u8),
@@ -370,6 +383,9 @@ pub enum Event {
     Size { w: u16, h: u16 },
     /// The card was closed; the program ends next.
     Closed,
+    /// A message is waiting for the program (PROC-009): an answer to
+    /// something it asked, taken with `receive`.
+    Message,
 }
 
 impl Event {
@@ -386,6 +402,7 @@ impl Event {
                 b[4..6].copy_from_slice(&h.to_le_bytes());
             }
             Event::Closed => b[0] = 3,
+            Event::Message => b[0] = 4,
         }
         b
     }
@@ -398,6 +415,7 @@ impl Event {
                 h: u16::from_le_bytes([b[4], b[5]]),
             },
             3 => Event::Closed,
+            4 => Event::Message,
             _ => return None,
         })
     }
@@ -457,6 +475,10 @@ pub enum OwnedOp {
         role: Role,
         scale: u8,
         text: alloc::string::String,
+    },
+    Hit {
+        area: Area,
+        key: u8,
     },
 }
 
@@ -611,6 +633,10 @@ impl View {
                     scale: r.scale()?,
                     text: r.text()?,
                 },
+                8 => OwnedOp::Hit {
+                    area: area(&mut r)?,
+                    key: r.u8()?,
+                },
                 other => return Err(ViewError::BadOp(other)),
             };
             ops.push(op);
@@ -656,6 +682,7 @@ mod tests {
             Event::Key(b'x'),
             Event::Size { w: 640, h: 480 },
             Event::Closed,
+            Event::Message,
         ] {
             assert_eq!(Event::decode(&e.encode()), Some(e));
         }

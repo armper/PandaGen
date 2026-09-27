@@ -234,12 +234,12 @@ pub const OVERVIEW_CARD: (usize, usize) = (280, 150);
 pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
-use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::launcher::{LauncherEffect, LauncherView};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
 pub use crate::speaker::Sound;
 use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
+use calendar_core::Date;
 
 pub const TOP_BAR_HEIGHT: usize = 28;
 pub const DOCK_HEIGHT: usize = 84;
@@ -746,6 +746,7 @@ impl DeskApp {
             DeskApp::Calculator => Some("calculator"),
             DeskApp::Timer => Some("timer"),
             DeskApp::Tiles => Some("tiles"),
+            DeskApp::Calendar => Some("calendar"),
             _ => None,
         }
     }
@@ -1447,9 +1448,6 @@ impl DeskWindow {
             // A program draws its own controls (PROC-005) -- the
             // Calculator is one (PROC-006).
             AppState::Program(_) => Vec::new(),
-            AppState::Calendar(_) => {
-                alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
-            }
             AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
                 ("Add".to_string(), b'\n'),
                 ("Cancel".to_string(), crate::notepad::ESC),
@@ -1553,7 +1551,7 @@ impl FileEntry {
 /// the Sketch's, and anything else a page of the Notepad's -- which is
 /// where Enter on it opens it.
 pub fn document_app(name: &str) -> DeskApp {
-    if crate::calendar::Date::parse(name).is_some() {
+    if Date::parse(name).is_some() {
         DeskApp::Calendar
     } else if name == crate::tasks::TASKS_FILE {
         DeskApp::Tasks
@@ -1931,7 +1929,6 @@ pub enum AppState {
     Now,
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
-    Calendar(CalendarView),
     Tasks(TasksView),
     Sketch(SketchView),
     Launcher(LauncherView),
@@ -2841,11 +2838,6 @@ impl Desk {
             return;
         }
         self.today = today;
-        for window in &mut self.windows {
-            if let AppState::Calendar(calendar) = &mut window.state {
-                calendar.set_today(today);
-            }
-        }
     }
 
     /// Where screen pixel `(px, py)` falls in card `id`'s canvas -- the
@@ -2928,9 +2920,6 @@ impl Desk {
         }
         if let Some(notepad) = self.window_mut(id).and_then(|w| w.notepad_mut()) {
             notepad.set_file_names(names.clone());
-        }
-        if let Some(AppState::Calendar(calendar)) = self.window_mut(id).map(|w| &mut w.state) {
-            calendar.set_file_names(&names);
         }
     }
 
@@ -3260,14 +3249,6 @@ impl Desk {
             requests.push(DeskRequest::Repaint);
         }
         // A save may have made a day's note: the Calendars list again.
-        if self.notes_stale {
-            self.notes_stale = false;
-            for window in &self.windows {
-                if matches!(window.state, AppState::Calendar(_)) {
-                    requests.push(DeskRequest::ListFiles { id: window.id });
-                }
-            }
-        }
         // A Now card asks once a second (GFX-072), and never twice at once.
         if self.windows.iter().any(|w| w.app == DeskApp::Now) {
             let due = !self.vitals_pending
@@ -3405,6 +3386,19 @@ impl Desk {
             self.pending_sounds.push(Sound::Chime);
         }
         self.notify(NoticeLevel::Info, text.to_string(), now);
+    }
+
+    /// A program asked for one of its documents to be opened (PROC-009):
+    /// in a Notepad, as the Calendar's day notes always were -- made
+    /// empty first if there is none of that name.
+    pub fn open_document(&mut self, name: &str, exists: bool) -> Option<DeskRequest> {
+        self.open_note(String::from(name), exists)
+    }
+
+    /// A document was saved since last asked: programs holding documents
+    /// are sent their names again (PROC-009).
+    pub fn take_documents_changed(&mut self) -> bool {
+        core::mem::take(&mut self.notes_stale)
     }
 
     /// The programs the desk wants started for cards waiting for them.
@@ -3612,13 +3606,14 @@ impl Desk {
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
                 // A program's card, waiting for its program (thread 0 is
                 // none); `open_program` binds it.
-                DeskApp::Calculator | DeskApp::Timer | DeskApp::Tiles | DeskApp::Program => {
-                    AppState::Program(crate::program_card::ProgramCard::new(
-                        0,
-                        app.program().unwrap_or(""),
-                    ))
-                }
-                DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
+                DeskApp::Calculator
+                | DeskApp::Timer
+                | DeskApp::Tiles
+                | DeskApp::Calendar
+                | DeskApp::Program => AppState::Program(crate::program_card::ProgramCard::new(
+                    0,
+                    app.program().unwrap_or(""),
+                )),
                 DeskApp::Tasks => AppState::Tasks(TasksView::new()),
                 DeskApp::Sketch => AppState::Sketch(SketchView::new()),
                 DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
@@ -4074,10 +4069,6 @@ impl Desk {
             AppState::Shortcuts(_) => (
                 "Shortcuts".to_string(),
                 alloc::vec!["every key".to_string()],
-            ),
-            AppState::Calendar(calendar) => (
-                "Calendar".to_string(),
-                alloc::vec![calendar.selected.short()],
             ),
             AppState::Program(card) => (card.title(), alloc::vec![card.footer()]),
             AppState::Tasks(tasks) => (
@@ -5017,25 +5008,6 @@ impl Desk {
                                     clicked = true;
                                 }
                             }
-                            // Calendar: a day cell or a month button, by
-                            // pixel (GFX-083); the hit is a key the card answers.
-                            let mut effect = CalendarEffect::None;
-                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
-                                let bounds = self.window(*target).map(|w| w.bounds);
-                                let palette = crate::widgets::Palette::from_theme(&self.theme());
-                                if let (Some(bounds), Some(AppState::Calendar(calendar))) =
-                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
-                                {
-                                    let (w, h) = Self::canvas_size(bounds);
-                                    if let Some(key) = calendar.ui(w, h, palette, None).hit(x, y) {
-                                        effect = calendar.handle_byte(key);
-                                        clicked = true;
-                                    }
-                                }
-                            }
-                            if let CalendarEffect::OpenNote { name, exists } = effect {
-                                requests.extend(self.open_note(name, exists));
-                            }
                             // Tasks: a row or a button, by pixel (GFX-083).
                             if let Some((x, y)) = self.canvas_point(*target, px, py) {
                                 let bounds = self.window(*target).map(|w| w.bounds);
@@ -5922,15 +5894,6 @@ impl Desk {
                 self.program_key(id, byte);
                 (None, true)
             }
-            AppState::Calendar(calendar) => match calendar.handle_byte(byte) {
-                CalendarEffect::None => (None, false),
-                CalendarEffect::Redraw => (None, true),
-                CalendarEffect::Close => {
-                    self.close(id);
-                    (None, true)
-                }
-                CalendarEffect::OpenNote { name, exists } => (self.open_note(name, exists), true),
-            },
             AppState::Tasks(tasks) => match tasks.handle_byte(byte) {
                 TasksEffect::None => (None, false),
                 TasksEffect::Redraw => (None, true),
@@ -6567,11 +6530,6 @@ impl Desk {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(card.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), card.title(), card.footer(), None)
-                }
-                AppState::Calendar(calendar) => {
-                    let (w, h) = Self::canvas_size(window.bounds);
-                    graphics = Some(calendar.ui(w, h, palette, hover).into_ops());
-                    (Vec::new(), "Calendar".to_string(), calendar.footer(), None)
                 }
                 AppState::Tasks(tasks) => {
                     let (w, h) = Self::canvas_size(window.bounds);
@@ -9167,11 +9125,12 @@ mod tests {
         assert!(desk.window(id).is_some(), "the running one stays");
     }
 
-    /// The Calendar (GFX-076): opened from the palette it asks for the
-    /// listing, marks the days that have a note, opens a day's note in a
-    /// Notepad named by the day, and lists again after a save.
+    /// The Calendar (GFX-076; a program since PROC-009): opened from the
+    /// palette it waits for its program; the program's day, opened, is a
+    /// Notepad named by the day -- read if it exists, made if not -- and a
+    /// save tells the kernel to send programs their documents again.
     #[test]
-    fn the_calendar_marks_noted_days_and_opens_a_day_as_a_document() {
+    fn the_calendar_is_a_program_whose_days_open_as_documents() {
         let mut desk = Desk::new(1280, 800);
         desk.set_today(Some(Date::new(2026, 9, 24)));
         assert!(DeskApp::ALL.contains(&DeskApp::Calendar));
@@ -9179,56 +9138,31 @@ mod tests {
         for byte in b"calen" {
             desk.handle_key(*byte);
         }
-        let (request, _) = desk.handle_key(b'\n');
+        desk.handle_key(b'\n');
         let id = desk.focused_window().map(|w| w.id).unwrap();
         assert_eq!(desk.window(id).unwrap().app, DeskApp::Calendar);
-        assert_eq!(request, Some(DeskRequest::ListFiles { id }));
-        desk.files_listed(
-            id,
-            alloc::vec![FileEntry::named("2026-09-03"), FileEntry::named("memo")],
+        assert_eq!(
+            desk.take_program_runs(),
+            alloc::vec!["calendar".to_string()]
         );
-        let windows = desk.windows("", true, None);
-        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        let texts: Vec<String> = match &card.frame.content {
-            ViewContent::Graphics { ops } => ops
-                .iter()
-                .filter_map(|op| match op {
-                    view_types::DrawOp::Text { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => panic!("a drawn card"),
-        };
-        assert!(texts.contains(&"September 2026".to_string()), "{texts:?}");
-        assert!(texts.contains(&"Today  Thursday 24 September 2026".to_string()));
-        assert_eq!(card.actions[0], "Today");
-        // Enter on today: a new Notepad named by the day, nothing to read.
-        let (request, changed) = desk.handle_key(b'\n');
-        assert!(changed && request.is_none());
+        assert_eq!(desk.open_program(6, "calendar"), id);
+        // Today's note, new: a Notepad named by the day, nothing to read.
+        assert_eq!(desk.open_document("2026-09-24", false), None);
         let pad_id = desk.focused_window().map(|w| w.id).unwrap();
         let pad = desk.window(pad_id).unwrap().notepad().unwrap();
         assert_eq!(pad.path().as_deref(), Some("2026-09-24"));
         assert!(!pad.is_dirty());
-        // Its save makes the Calendar list again, once.
+        // Its save: the kernel is told documents changed, once.
+        assert!(!desk.take_documents_changed());
         let effect = NotepadEffect::Save {
             path: "2026-09-24".to_string(),
             content: "x".to_string(),
         };
         desk.io_done(pad_id, &effect, Ok(None), 10);
-        let asked: Vec<DeskRequest> = desk
-            .tick(11)
-            .into_iter()
-            .filter(|r| !matches!(r, DeskRequest::Sound(_)))
-            .collect();
-        assert_eq!(asked, alloc::vec![DeskRequest::ListFiles { id }]);
-        assert!(desk.tick(12).is_empty());
+        assert!(desk.take_documents_changed());
+        assert!(!desk.take_documents_changed());
         // A day with a note opens by reading it.
-        desk.raise(id);
-        desk.focus = Some(id);
-        for _ in 0..3 {
-            assert!(desk.handle_key(crate::notepad::KEY_UP).1);
-        }
-        let (request, _) = desk.handle_key(b'\n');
+        let request = desk.open_document("2026-09-03", true);
         let opened = desk.focused_window().map(|w| w.id).unwrap();
         assert_eq!(
             request,
@@ -9619,10 +9553,11 @@ mod tests {
     #[test]
     fn the_desk_asks_the_kernel_to_click_blip_and_chime() {
         let mut desk = Desk::new(1280, 800);
-        let calendar = desk.launch(DeskApp::Calendar);
+        let audit = desk.launch(DeskApp::Audit);
         desk.tick(1_000);
-        // A chip: the Calendar's Today.
-        let (_, _) = desk.card_action(calendar, 0);
+        // A chip: the Audit card's first.
+        assert!(!desk.window(audit).unwrap().actions().is_empty());
+        let (_, _) = desk.card_action(audit, 0);
         let requests = desk.tick(1_001);
         assert!(
             requests.contains(&DeskRequest::Sound(Sound::Click)),

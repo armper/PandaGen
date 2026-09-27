@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 program_image = { path = "../program_image" }
 free_list_heap = { path = "../free_list_heap" }
+calendar_core = { path = "../calendar_core" }
 app_protocol = { path = "../app_protocol", features = ["decode"] }
 editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }

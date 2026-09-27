@@ -30,6 +30,7 @@ fn main(_nothing: Console) -> u64 {
                 GameEffect::None => continue,
             },
             Event::Closed => return 0,
+            _ => continue,
         }
         if w == 0 || h == 0 {
             continue;

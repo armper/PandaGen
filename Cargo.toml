@@ -11,6 +11,7 @@ members = [
     "calculator_core",
     "timer_core",
     "tiles_core",
+    "calendar_core",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

@@ -553,6 +553,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_calendar".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        "--expect-serial".to_string(),
+        "desk: calendar is thread 1".to_string(),
         // The card: 420 wide, centred (x=430), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
@@ -1051,7 +1053,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 7 images (primes, ticker, tally, calculator, fragile, timer, tiles)".to_string(),
+        "programs: 8 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar)"
+            .to_string(),
         "--expect-serial".to_string(),
         "primes   an image:".to_string(),
         "--expect-serial".to_string(),
@@ -1125,6 +1128,31 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "fragile    waiting".to_string(),
         "--expect-serial".to_string(),
         "75% of the CPU at most".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
+    // Documents by pattern (PROC-009): the Calendar program holds the
+    // documents named like days, and only those. Enter opens today's note
+    // in a Notepad; a save sends the Calendar its list again, with the new
+    // day in it.
+    title = "the Calendar program: a day's note opened, saved and listed".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,c,a,l,e,n,ret,sleep:2,ret,sleep:2,h,i,ctrl-s,sleep:2,ctrl-w,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_calendar_note".to_string(),
+        "--expect-serial".to_string(),
+        "desk: calendar is thread 1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 has 0 named ####-##-##".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 has 1 named ####-##-##".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL EXCEPTION".to_string(),
         "--forbid-serial".to_string(),
@@ -2531,6 +2559,15 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
         &[program_image::Ask::Card, program_image::Ask::Notices],
     ),
     ("tiles", &[program_image::Ask::Card]),
+    // The dock's Calendar (PROC-009): its card, and the documents named
+    // like days -- nothing else a person keeps.
+    (
+        "calendar",
+        &[
+            program_image::Ask::Card,
+            program_image::Ask::Documents(program_image::Pattern::from_static("####-##-##")),
+        ],
+    ),
 ];
 
 /// Build every program for the machine and turn each into an image.

@@ -32,6 +32,7 @@ fn main(console: Console) -> u64 {
                 let _ = say!(console, "counted to {count}; goodbye");
                 return 0;
             }
+            _ => continue,
         }
         if w > 0 && h > 0 {
             show(count, w, h);

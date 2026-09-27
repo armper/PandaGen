@@ -24,6 +24,17 @@
 //! | 7   | `poll(card, ptr)`        | 1: an event at ptr; 0: none  |
 //! | 8   | `wait(ms)`               | 0, at an event or after `ms` |
 //! | 9   | `random(ptr, len)`       | 0: `len` random bytes at ptr |
+//! | 10  | `date()`                 | `y << 16 \| m << 8 \| d`; 0: unknown |
+//! | 11  | `list(docs)`             | 0: the names come as a message |
+//! | 12  | `open(docs, ptr, len)`   | 0: the desk opens it in a Notepad |
+//! | 13  | `receive(ptr, len)`      | a message's length; 0: none   |
+//!
+//! `list` and `open` are a program's documents (PROC-009), reached
+//! through a handle that names them by pattern: only names that match
+//! are listed, and only they can be opened. Their answers, and anything
+//! else the desk has for the program, arrive as messages: `Event::
+//! Message` says one is waiting, `receive` takes it (and refuses, leaving
+//! it, if the buffer is too small).
 //!
 //! `present`, `poll` and `wait` are a program's card (PROC-005): views
 //! out (`app_protocol`, at most `VIEW_MAX` bytes), events in, eight bytes
@@ -76,6 +87,19 @@ pub enum Call {
         ptr: u64,
         len: u64,
     },
+    Date,
+    List {
+        handle: u64,
+    },
+    Open {
+        handle: u64,
+        ptr: u64,
+        len: u64,
+    },
+    Receive {
+        ptr: u64,
+        len: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +149,14 @@ impl Call {
             },
             8 => Call::Wait { ms: rdi },
             9 => Call::Random { ptr: rdi, len: rsi },
+            10 => Call::Date,
+            11 => Call::List { handle: rdi },
+            12 => Call::Open {
+                handle: rdi,
+                ptr: rsi,
+                len: rdx,
+            },
+            13 => Call::Receive { ptr: rdi, len: rsi },
             _ => return Err(Error::NoSuchCall),
         })
     }
@@ -143,6 +175,9 @@ pub enum Capability {
     /// Notices on the desk (PROC-008): what it sends is said there, with
     /// a chime.
     Notices,
+    /// The documents whose names match (PROC-009): listed, and opened in
+    /// a Notepad for the person.
+    Documents(program_image::Pattern),
 }
 
 impl Capability {
@@ -212,6 +247,22 @@ impl Handles {
             return Err(Error::TooBig);
         }
         Ok(())
+    }
+
+    /// The pattern of the documents it holds, if any.
+    pub fn documents(&self) -> Option<program_image::Pattern> {
+        self.slots.iter().flatten().find_map(|c| match c {
+            Capability::Documents(p) => Some(*p),
+            _ => None,
+        })
+    }
+
+    /// Check a documents call: the handle is documents; their pattern.
+    pub fn check_documents(&self, handle: u64) -> Result<program_image::Pattern, Error> {
+        match self.get(handle)? {
+            Capability::Documents(pattern) => Ok(pattern),
+            _ => Err(Error::NotAllowed),
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -307,6 +358,25 @@ mod tests {
         );
         assert_eq!(h.check_send(card, 1), Err(Error::NotAllowed));
         assert_eq!(Call::decode(8, 0, 0, 0), Ok(Call::Wait { ms: 0 }));
+    }
+
+    #[test]
+    fn documents_are_reached_through_their_pattern_only() {
+        let mut h = Handles::new();
+        let card = h.grant(Capability::Card).unwrap();
+        let days = program_image::Pattern::from_static("####-##-##");
+        let docs = h.grant(Capability::Documents(days)).unwrap();
+        assert_eq!(h.check_documents(docs), Ok(days));
+        assert_eq!(h.check_documents(card), Err(Error::NotAllowed));
+        assert_eq!(h.check_documents(9), Err(Error::NoSuchHandle));
+        assert_eq!(h.check_send(docs, 1), Err(Error::NotAllowed));
+        assert_eq!(
+            Call::decode(13, 0x1000, 64, 0),
+            Ok(Call::Receive {
+                ptr: 0x1000,
+                len: 64
+            })
+        );
     }
 
     #[test]
