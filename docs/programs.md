@@ -1,0 +1,65 @@
+# Writing a PandaGen program
+
+A program runs in ring 3, in an address space of its own. It can do
+nothing outside that address space but ask the kernel, and it can only
+ask about things it was given: each is a *handle*, a small number that
+means something only in the program's own table of capabilities. There
+are no paths and no global names, and nothing like a "standard output"
+that every program has.
+
+## The pieces
+
+- **`pandagen_app`**: the SDK. It provides the system calls (`exit`,
+  `yield_now`, `sleep_ms`, `time_ms`), the handles (`Handle`,
+  `Console`), `say!` for formatted lines, and `entry!` for the entry
+  point and the panic handler. Programs need no heap: lines are formatted
+  in a fixed buffer.
+- **`program_image`**: the format a program ships in. An image holds a
+  name, an entry point, pieces of memory (each writable or runnable,
+  never both, all above the first 4 MiB), and the capabilities the
+  program asks for. The kernel checks all of it before it maps anything.
+- **`apps/<name>`**: the programs. Each is its own Cargo workspace,
+  built for `x86_64-unknown-none` and linked by `apps/app.ld` at
+  `0x400000`.
+- **`cargo xtask iso`** builds every program in `PROGRAMS`, turns each
+  ELF into an image with the capabilities listed there, and ships the
+  images in the ISO as Limine boot modules. The kernel finds them at
+  boot; `programs` in the Terminal lists them and `run <name>` starts one.
+
+## A program
+
+```rust
+#![no_std]
+#![no_main]
+
+use pandagen_app::{entry, say, Console};
+
+entry!(main);
+
+fn main(console: Console) -> u64 {
+    let _ = say!(console, "hello at {} ms", pandagen_app::time_ms());
+    0 // the exit code
+}
+```
+
+A panic sends `panicked: ...` to the console and exits with 101.
+
+## Adding one
+
+1. Copy `apps/ticker` to `apps/<name>` and change the package name.
+2. Add `("<name>", &[program_image::Ask::Console])` to `PROGRAMS` in
+   `xtask/src/main.rs`.
+3. `cargo xtask iso`, boot, and `run <name>` in a Terminal.
+
+## What a program is refused
+
+| It tries                                   | What happens                                         |
+|--------------------------------------------|------------------------------------------------------|
+| a handle it was not given                  | `Error::NoSuchHandle`: the handle does not exist      |
+| a pointer outside its memory in a call     | `Error::BadPointer`, and nothing is read or written   |
+| touching the kernel's memory               | a page fault; the kernel ends the program             |
+| `cli`, `hlt`, `in`, `out`, `int` (but 0x80) | a general-protection fault; the kernel ends it        |
+| looping forever                            | it is preempted like any thread, and `stop` ends it   |
+
+The machine carries on in every case. How a program ended is shown in
+the Terminal: `exited with 0`, `stopped`, or `ended by the kernel: ...`.

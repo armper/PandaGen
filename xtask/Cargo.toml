@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+program_image = { path = "../program_image" }
 remote_ipc = { path = "../remote_ipc" }
 ipc = { path = "../ipc" }
 # The gauntlet's HTTPS server (NET-040), with the test CA's certificate.

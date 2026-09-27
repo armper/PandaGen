@@ -1,0 +1,9 @@
+[package]
+name = "program_image"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "PandaGen program images: the format programs are loaded from, and ELF to image"
+
+[dependencies]

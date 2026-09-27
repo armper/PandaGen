@@ -23,3 +23,6 @@ Thumbs.db
 /debug/
 /release/
 dist/
+
+# Programs build into target/apps; a stray build inside one lands here.
+apps/*/target/

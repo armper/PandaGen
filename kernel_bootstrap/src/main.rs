@@ -81,7 +81,7 @@ use limine::memory_map::EntryType;
 #[cfg(all(not(test), target_os = "none"))]
 use limine::request::{
     ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-    MemoryMapRequest, MpRequest,
+    MemoryMapRequest, ModuleRequest, MpRequest,
 };
 #[cfg(all(not(test), target_os = "none"))]
 use limine::BaseRevision;
@@ -1443,6 +1443,26 @@ pub extern "C" fn rust_main() -> ! {
     #[cfg(all(not(test), target_os = "none"))]
     if let Some(hhdm) = kernel.boot.hhdm_offset {
         threads::init(hhdm);
+    }
+    // And the images they are loaded from (PROC-004).
+    #[cfg(all(not(test), target_os = "none"))]
+    if let Some(modules) = MODULE_REQUEST.get_response() {
+        for module in modules.modules() {
+            // SAFETY: Limine loaded the module there, in memory kept from
+            // the frame allocator for as long as the machine runs.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(module.addr() as *const u8, module.size() as usize)
+            };
+            let name = module.string().to_str().unwrap_or("").trim();
+            programs::add_image(name, bytes);
+        }
+        let names = programs::image_names();
+        kprintln!(
+            serial,
+            "programs: {} images ({})",
+            names.len(),
+            names.join(", ")
+        );
     }
 
     // Phase 78: Boot with display console for QEMU window UI
@@ -5749,6 +5769,13 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[used]
 #[link_section = ".limine_requests"]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+/// Program images the machine boots with (PROC-004): Limine loads each
+/// `module_path` into memory the frame allocator leaves alone.
+#[cfg(all(not(test), target_os = "none"))]
+#[used]
+#[link_section = ".limine_requests"]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 
 #[cfg(all(not(test), target_os = "none"))]
 #[used]

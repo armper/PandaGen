@@ -1026,6 +1026,39 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     ];
     shapes.push(Shape::new(&title, &args));
 
+    // Programs from images (PROC-004): Rust programs built against
+    // `pandagen_app`, shipped as boot modules, loaded from their images
+    // into ring 3. One counts primes flat out; one sleeps between ticks
+    // and finds a handle it was never given is not there.
+    title = "program images: Rust programs loaded from boot modules".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,p,r,o,g,r,a,m,s,ret,sleep:1,r,u,n,spc,p,r,i,m,e,s,ret,sleep:1,r,u,n,spc,t,i,c,k,e,r,ret,sleep:6".to_string(),
+        "--out".to_string(),
+        "dist/qemu_program_images".to_string(),
+        "--expect-serial".to_string(),
+        "programs: 2 images (primes, ticker)".to_string(),
+        "--expect-serial".to_string(),
+        "primes   an image:".to_string(),
+        "--expect-serial".to_string(),
+        "primes: 78498 primes below 1000000, in".to_string(),
+        "--expect-serial".to_string(),
+        "primes: exited with 0".to_string(),
+        "--expect-serial".to_string(),
+        "ticker: tick 3 at".to_string(),
+        "--expect-serial".to_string(),
+        "ticker: handle 5: not mine, so not there".to_string(),
+        "--expect-serial".to_string(),
+        "ticker: exited with 0".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
     // A reboot (DESK-020): the cards come back, and so does the document
     // one of them shows -- the first check that anything survives a
     // restart of the machine.
@@ -1338,7 +1371,9 @@ fn cmd_iso() -> Result<(), Box<dyn std::error::Error>> {
     ensure_limine_files(&vendor)?;
 
     build_kernel(&root)?;
+    let programs = build_programs(&root)?;
     let staging = stage_iso(&root, &vendor)?;
+    stage_programs(&staging, &programs)?;
     build_iso(&root, &staging)?;
     install_limine(&root, &vendor)?;
 
@@ -2399,6 +2434,97 @@ fn build_kernel(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .arg("--target")
         .arg(TARGET)
         .arg("-Zbuild-std=core,alloc"))
+}
+
+/// The programs (PROC-004): each crate under `apps/`, and what it asks for.
+const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
+    ("primes", &[program_image::Ask::Console]),
+    ("ticker", &[program_image::Ask::Console]),
+];
+
+/// Build every program for the machine and turn each into an image.
+///
+/// Each is its own workspace, built with `RUSTFLAGS` so none of the
+/// kernel's flags (its linker script above all) apply: a program is
+/// linked by `apps/app.ld` at 0x400000, statically, with its code, its
+/// read-only data and its data in separate pages.
+/// A program's name and its image, as bytes.
+type ProgramImage = (String, Vec<u8>);
+
+fn build_programs(root: &Path) -> Result<Vec<ProgramImage>, Box<dyn std::error::Error>> {
+    let link = root.join("apps/app.ld");
+    let target_dir = root.join("target/apps");
+    let mut out = Vec::new();
+    for (name, asks) in PROGRAMS {
+        run(Command::new("cargo")
+            .current_dir(root.join("apps").join(name))
+            .env(
+                "RUSTFLAGS",
+                format!(
+                    "-C link-arg=-T{} -C relocation-model=static",
+                    link.display()
+                ),
+            )
+            .arg("build")
+            .arg("--release")
+            .arg("--target")
+            .arg(TARGET)
+            .arg("-Zbuild-std=core")
+            .arg("--target-dir")
+            .arg(&target_dir))?;
+        let elf = fs::read(target_dir.join(TARGET).join("release").join(name))?;
+        let image = program_image::Image::from_elf(&elf, name, asks)
+            .map_err(|why| format!("{name}: not a program image: {why:?}"))?;
+        println!(
+            "program {name}: {} pieces, {} KiB, entry 0x{:x}",
+            image.pieces.len(),
+            image.memory() / 1024,
+            image.entry
+        );
+        out.push((name.to_string(), image.to_bytes()));
+    }
+    Ok(out)
+}
+
+/// Put the images in the ISO and name each as a boot module of every
+/// entry, its module string the program's name.
+fn stage_programs(
+    staging: &Path,
+    programs: &[ProgramImage],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = staging.join("boot/programs");
+    fs::create_dir_all(&dir)?;
+    let mut modules = String::new();
+    for (name, bytes) in programs {
+        fs::write(dir.join(format!("{name}.pgx")), bytes)?;
+        modules.push_str(&format!(
+            "    module_path: boot():/boot/programs/{name}.pgx\n    module_cmdline: {name}\n"
+        ));
+    }
+    for conf in [
+        "boot/limine.conf",
+        "limine.conf",
+        "limine/limine.conf",
+        "boot/limine.cfg",
+        "limine.cfg",
+        "limine/limine.cfg",
+    ] {
+        let path = staging.join(conf);
+        let text = fs::read_to_string(&path)?;
+        let mut with = String::new();
+        for line in text.lines() {
+            with.push_str(line);
+            with.push('\n');
+            if line
+                .trim_start()
+                .starts_with("path: boot():/boot/kernel.elf")
+            {
+                with.push_str(&modules);
+            }
+        }
+        fs::write(&path, with)?;
+    }
+    Ok(())
 }
 
 fn stage_iso(root: &Path, vendor: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {

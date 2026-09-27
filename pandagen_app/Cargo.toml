@@ -1,0 +1,12 @@
+[package]
+name = "pandagen_app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Write PandaGen programs: the system calls, the handles, the entry point"
+
+# Fields are spelled out rather than inherited: programs are built
+# outside the main workspace (for the machine, not the host), and depend
+# on this by path.
+
+[dependencies]

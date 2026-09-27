@@ -1039,8 +1039,8 @@ impl WorkspaceSession {
                 _ =>
                 {
                     #[cfg(not(test))]
-                    for (name, what) in crate::programs::CATALOG {
-                        self.emit_line(serial, &format!("  {name:<8} {what}"));
+                    for line in crate::programs::catalog() {
+                        self.emit_line(serial, &line);
                     }
                 }
             }

@@ -10,15 +10,24 @@
 //! cannot name anything it was not handed. When it breaks a rule the CPU
 //! stops it, the kernel ends it, and the machine carries on.
 //!
-//! The programs themselves are, for now, a few built in -- short machine
-//! code, loaded like any program would be: copied into fresh pages at
-//! `CODE_AT`, with a stack below `STACK_TOP`. A program format and a
-//! loader for programs from disk come next.
+//! Programs come from images (PROC-004): `program_image`'s format,
+//! built from Rust against `pandagen_app` and shipped with the machine as
+//! boot modules. An image says where each piece of memory goes, whether
+//! it may be written or run (never both), and what the program asks
+//! for; the loader checks all of it before anything is mapped, lays the
+//! pieces out in a fresh address space with a stack below `STACK_TOP`,
+//! and grants what was asked, as handles in the order asked.
+//!
+//! A few programs are built in as well -- short machine code that breaks
+//! the rules on purpose, to show what happens when a program does.
 
 extern crate alloc;
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use hal_x86_64::mmio_map::PhysMemory;
 use hal_x86_64::user_space::{Access, Frames, UserSpace};
+use program_image::{Ask, Image};
 
 use crate::syscall_abi::{Capability, Handles};
 
@@ -122,6 +131,56 @@ impl Frames for Owned<'_> {
     }
 }
 
+/// Images the machine booted with, by name. Registered once, at boot.
+static IMAGES: hal_x86_64::SpinLock<Vec<(&'static str, &'static [u8])>> =
+    hal_x86_64::SpinLock::new(Vec::new());
+
+/// A program image the machine booted with, named `name`.
+pub fn add_image(name: &str, bytes: &'static [u8]) {
+    if name.is_empty() {
+        return;
+    }
+    // Thread names are `&'static str`; an image's name lives as long as
+    // the machine does, like the image.
+    let name: &'static str = alloc::boxed::Box::leak(String::from(name).into_boxed_str());
+    IMAGES.lock().push((name, bytes));
+}
+
+pub fn image_names() -> Vec<&'static str> {
+    IMAGES.lock().iter().map(|(name, _)| *name).collect()
+}
+
+fn image_named(name: &str) -> Option<(&'static str, &'static [u8])> {
+    IMAGES.lock().iter().find(|(n, _)| *n == name).copied()
+}
+
+/// What `programs` shows: the images, what each asks for and how much
+/// memory it lays out, then the built-in programs.
+pub fn catalog() -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, bytes) in IMAGES.lock().iter() {
+        out.push(match Image::parse(bytes) {
+            Ok(image) => {
+                let asks: Vec<&str> = image.asks.iter().map(|a| a.name()).collect();
+                alloc::format!(
+                    "  {name:<8} an image: {} KiB, asks for {}",
+                    image.memory() / 1024,
+                    if asks.is_empty() {
+                        String::from("nothing")
+                    } else {
+                        asks.join(", ")
+                    }
+                )
+            }
+            Err(why) => alloc::format!("  {name:<8} a damaged image ({why:?})"),
+        });
+    }
+    for (name, what) in CATALOG {
+        out.push(alloc::format!("  {name:<8} built in: {what}"));
+    }
+    out
+}
+
 /// The built-in programs, by name, with what each shows.
 pub const CATALOG: &[(&str, &str)] = &[
     (
@@ -190,8 +249,31 @@ pub fn run(
     hhdm: u64,
     frames: &mut crate::FrameAllocator,
 ) -> Result<u32, alloc::string::String> {
-    let Some((name, code)) = code_of(name) else {
-        return Err(alloc::format!("run: no program {name:?} (try `programs`)"));
+    // An image, else a built-in program: the image's pieces and asks, or
+    // the built-in's code and the console.
+    let (name, image) = match image_named(name) {
+        Some((name, bytes)) => (
+            name,
+            Image::parse(bytes)
+                .map_err(|why| alloc::format!("run: {name} is damaged ({why:?})"))?,
+        ),
+        None => {
+            let Some((name, code)) = code_of(name) else {
+                return Err(alloc::format!("run: no program {name:?} (try `programs`)"));
+            };
+            let image = Image {
+                name: String::from(name),
+                entry: CODE_AT,
+                asks: alloc::vec![Ask::Console],
+                pieces: alloc::vec![program_image::Piece {
+                    at: CODE_AT,
+                    size: (code.len() as u64).max(1),
+                    access: program_image::EXECUTE,
+                    bytes: code.to_vec(),
+                }],
+            };
+            (name, image)
+        }
     };
     let mut memory = Owned::new(hhdm, frames);
     let mut space = UserSpace::new(
@@ -200,8 +282,16 @@ pub fn run(
         crate::threads::nx(),
     )
     .map_err(|_| alloc::string::String::from("run: out of memory"))?;
-    let loaded = space
-        .load(&mut memory, CODE_AT, code, Access::CODE)
+    let loaded = image
+        .pieces
+        .iter()
+        .try_for_each(|piece| {
+            let access = Access {
+                write: piece.access & program_image::WRITE != 0,
+                execute: piece.access & program_image::EXECUTE != 0,
+            };
+            space.lay_out(&mut memory, piece.at, piece.size, &piece.bytes, access)
+        })
         .and_then(|()| {
             (1..=STACK_PAGES).try_for_each(|page| {
                 space
@@ -213,9 +303,15 @@ pub fn run(
         space.free(&mut memory);
         return Err(alloc::string::String::from("run: out of memory"));
     }
+    // What it asked for, in the order asked: all of it, for now -- the
+    // console is the only thing there is to ask for.
     let mut handles = Handles::new();
-    handles.grant(Capability::Console);
-    match crate::threads::spawn_program(name, space, handles, CODE_AT, STACK_TOP) {
+    for ask in &image.asks {
+        match ask {
+            Ask::Console => handles.grant(Capability::Console),
+        };
+    }
+    match crate::threads::spawn_program(name, space, handles, image.entry, STACK_TOP) {
         Ok(id) => Ok(id),
         Err((why, space)) => {
             space.free(&mut memory);

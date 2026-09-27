@@ -161,14 +161,37 @@ impl UserSpace {
         bytes: &[u8],
         access: Access,
     ) -> Result<(), SpaceError> {
-        let pages = (bytes.len() as u64).div_ceil(PAGE).max(1);
-        for page in 0..pages {
-            let frame = self.map_new(mem, virt + page * PAGE, access)?;
-            let start = (page * PAGE) as usize;
-            let end = bytes.len().min(start + PAGE as usize);
-            if start < end {
-                mem.write_bytes(frame, 0, &bytes[start..end]);
+        self.lay_out(mem, virt, (bytes.len() as u64).max(1), bytes, access)
+    }
+
+    /// Map fresh pages covering `at..at+size` -- wherever in a page it
+    /// starts -- and put `bytes` at `at`; the rest is zero. One piece of
+    /// a program image (PROC-004).
+    pub fn lay_out<M: Frames>(
+        &mut self,
+        mem: &mut M,
+        at: u64,
+        size: u64,
+        bytes: &[u8],
+        access: Access,
+    ) -> Result<(), SpaceError> {
+        let end = at.checked_add(size).ok_or(SpaceError::BadAddress)?;
+        if size == 0 || bytes.len() as u64 > size || end > USER_END {
+            return Err(SpaceError::BadAddress);
+        }
+        let filled = at + bytes.len() as u64;
+        let mut page = at & !(PAGE - 1);
+        while page < end {
+            let frame = self.map_new(mem, page, access)?;
+            let (from, to) = (at.max(page), filled.min(page + PAGE));
+            if from < to {
+                mem.write_bytes(
+                    frame,
+                    (from - page) as usize,
+                    &bytes[(from - at) as usize..(to - at) as usize],
+                );
             }
+            page += PAGE;
         }
         Ok(())
     }
@@ -422,6 +445,29 @@ mod tests {
         let pt = ram.read_entry(pd, 4) & ADDR_MASK;
         ram.write_entry(pt, 1, 0xDDD000 | PRESENT | WRITABLE);
         assert_eq!(space.page(&ram, 0x80_1000), None);
+    }
+
+    #[test]
+    fn a_piece_starting_mid_page_lands_where_it_says() {
+        let mut ram = Ram::new();
+        let k = kernel(&mut ram);
+        let mut space = UserSpace::new(&mut ram, k, true).unwrap();
+        // 10 bytes at 0x401ffb straddle two pages; 0x3000 in all.
+        space
+            .lay_out(&mut ram, 0x40_1ffb, 0x3000, b"0123456789", Access::DATA)
+            .unwrap();
+        assert_eq!(space.read(&ram, 0x40_1ffb, 10).unwrap(), b"0123456789");
+        assert_eq!(space.read(&ram, 0x40_1000, 8).unwrap(), [0; 8]);
+        assert!(
+            space.page(&ram, 0x40_4000).is_some(),
+            "the size, not the bytes"
+        );
+        assert!(space.page(&ram, 0x40_5000).is_none());
+        // More bytes than the piece holds is refused.
+        assert_eq!(
+            space.lay_out(&mut ram, 0x50_0000, 4, b"toolong", Access::DATA),
+            Err(SpaceError::BadAddress)
+        );
     }
 
     #[test]

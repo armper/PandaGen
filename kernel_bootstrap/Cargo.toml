@@ -8,6 +8,7 @@ name = "kernel_bootstrap_lib"
 path = "src/lib.rs"
 
 [dependencies]
+program_image = { path = "../program_image" }
 editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }
 console_vga = { path = "../console_vga", default-features = false, optional = true }

@@ -4,6 +4,8 @@ members = [
     "graphics_rasterizer",
     "net_stack",
     "entropy",
+    "program_image",
+    "pandagen_app",
     "net_tls",
     "kernel_bootstrap",
     "core_types",
@@ -62,6 +64,8 @@ members = [
     "services_job_scheduler",
     "services_file_picker",
 ]
+# Programs (PROC-004) are built for the machine, each its own workspace.
+exclude = ["apps"]
 
 [workspace.package]
 version = "0.1.0"
