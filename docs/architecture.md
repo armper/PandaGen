@@ -251,6 +251,21 @@ fn timer_interrupt() {
 }
 ```
 
+**On the machine (Phase 434)**: the bare-metal kernel now preempts. The
+PIT's interrupt entry saves every general register on the running
+thread's stack and passes the stack pointer to `timer_irq_handler`, which
+returns the stack to resume -- the same one, or another thread's; a thread
+gives up the processor early with `int 0x81`, saved the same way. The
+decisions (round robin, sleepers woken by the tick, threads stopped by
+asking, finished threads reaped) are `kernel_bootstrap/src/sched.rs`, a
+pure table tested under `cargo test`; the stacks, frames and interrupt
+masking are `kernel_bootstrap/src/threads.rs`. The desk's loop is thread
+0, and yields when it is idle. Nothing is allocated or locked with
+interrupts masked: a preempted thread may hold the heap's lock, and
+waiting for it with the timer off would wait forever. Everything still
+runs in ring 0 in one address space; isolating programs from each other
+is the next step.
+
 ### 7. Virtual Memory and Address Spaces (Phase 24)
 
 **Problem**: Memory is often treated as ambient authority - any code can access any memory in its address space. Traditional systems use implicit sharing (fork), copy-on-write, and implicit inheritance, making it difficult to reason about memory safety and isolation.

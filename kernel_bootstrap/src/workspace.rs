@@ -75,7 +75,8 @@ fn command_words() -> Vec<&'static str> {
     let mut words = vec![
         "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
         "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
-        "ticks", "editor", "fault", "fetch", "resolve", "random",
+        "ticks", "editor", "fault", "fetch", "resolve", "random", "threads", "spin", "stop",
+        "after",
     ];
     words.extend(crate::access_shell::WORDS);
     words
@@ -1023,6 +1024,64 @@ impl WorkspaceSession {
             return;
         }
 
+        // Threads (PROC-001): the table, a busy one to watch, and asking
+        // one to stop.
+        if matches!(cmd, "threads" | "spin" | "stop" | "after") {
+            self.emit_command_line(serial, command.as_bytes());
+            let arg = parts.next().and_then(|n| n.parse::<u64>().ok());
+            #[cfg(all(not(test), target_os = "none"))]
+            match (cmd, arg) {
+                ("threads", _) => {
+                    for line in crate::threads::listing() {
+                        self.emit_line(serial, &line);
+                    }
+                }
+                ("spin", seconds) => {
+                    let seconds = seconds.unwrap_or(5).clamp(1, 600);
+                    match crate::threads::start_spin(seconds) {
+                        Ok(id) => self.emit_line(
+                            serial,
+                            &format!("spin: thread {id} counting primes for {seconds} s"),
+                        ),
+                        Err(why) => self.emit_line(serial, why),
+                    }
+                }
+                ("after", Some(seconds)) => {
+                    let words: Vec<&str> = parts.collect();
+                    let seconds = seconds.clamp(1, 86_400);
+                    let words = if words.is_empty() {
+                        String::from("time's up")
+                    } else {
+                        words.join(" ")
+                    };
+                    match crate::threads::start_after(seconds, words) {
+                        Ok(id) => self.emit_line(
+                            serial,
+                            &format!("after: thread {id} asleep for {seconds} s"),
+                        ),
+                        Err(why) => self.emit_line(serial, why),
+                    }
+                }
+                ("stop", Some(id)) if crate::threads::ask_stop(id as u32) => {
+                    self.emit_line(serial, &format!("stop: asked thread {id} to stop"))
+                }
+                ("stop", Some(id)) => self.emit_line(
+                    serial,
+                    &format!("stop: no thread {id} (the desk, 0, runs on)"),
+                ),
+                _ => self.emit_line(
+                    serial,
+                    "Usage: threads | spin [seconds] | after <seconds> [words] | stop <id>",
+                ),
+            }
+            #[cfg(not(all(not(test), target_os = "none")))]
+            {
+                let _ = arg;
+                self.emit_line(serial, "threads: need the machine");
+            }
+            return;
+        }
+
         // The machine's generator (SEC-030): bytes, and how it has done.
         if cmd == "random" {
             self.emit_command_line(serial, command.as_bytes());
@@ -1135,6 +1194,16 @@ impl WorkspaceSession {
                     serial,
                     "random [bytes]  - Random bytes from the machine's generator",
                 );
+                self.emit_line(
+                    serial,
+                    "threads        - The machine's threads, and their CPU",
+                );
+                self.emit_line(
+                    serial,
+                    "spin [secs]    - A thread that counts primes flat out",
+                );
+                self.emit_line(serial, "after <secs> [words] - The words, that much later");
+                self.emit_line(serial, "stop <id>      - Ask a thread to stop");
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
@@ -1623,6 +1692,11 @@ impl WorkspaceSession {
     /// Take the `fetch` or `resolve` the Terminal asked for.
     pub fn take_net_request(&mut self) -> Option<NetRequest> {
         self.net_request.take()
+    }
+
+    /// A line a thread left (PROC-001), into the transcript.
+    pub fn emit_thread_line(&mut self, serial: &mut SerialPort, line: &str) {
+        self.emit_line(serial, line);
     }
 
     /// A line of the network's answer, into the transcript.

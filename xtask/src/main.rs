@@ -960,6 +960,33 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     ];
     shapes.push(Shape::new(&title, &args));
 
+    // Threads (PROC-001): one counting primes flat out, never waiting,
+    // and one asleep. The desk answers `threads` while the counter is
+    // still going -- which it could not, if the timer did not take the
+    // processor back -- and the counter stops when asked.
+    title = "threads: the desk answers while a thread spins; sleep, stop".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,s,p,i,n,spc,6,0,ret,sleep:1,a,f,t,e,r,spc,1,spc,h,e,l,l,o,ret,sleep:1,t,h,r,e,a,d,s,ret,sleep:2,s,t,o,p,spc,1,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_threads".to_string(),
+        "--expect-serial".to_string(),
+        "spin: thread 1 counting primes for 60 s".to_string(),
+        "--expect-serial".to_string(),
+        "    1 spin ".to_string(),
+        "--expect-serial".to_string(),
+        "after 1 s: hello".to_string(),
+        "--expect-serial".to_string(),
+        "spin: stopped".to_string(),
+        "--forbid-serial".to_string(),
+        "spin: done".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
     // A reboot (DESK-020): the cards come back, and so does the document
     // one of them shows -- the first check that anything survives a
     // restart of the machine.

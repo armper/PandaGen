@@ -44,11 +44,14 @@ mod present_policy;
 mod random;
 mod render_stats;
 mod rtc;
+mod sched;
 mod sharing;
 mod sign_in;
 mod sketch;
 mod speaker;
 mod tasks;
+#[cfg(not(test))]
+mod threads;
 mod timer;
 mod vga;
 mod web;
@@ -312,10 +315,53 @@ irq_timer_entry:
     push r13
     push r14
     push r15
-    
+
+    # The handler returns the stack to resume (PROC-001): this one, or
+    # another thread's, saved the same way.
+    mov rdi, rsp
     call timer_irq_handler
-    
+    mov rsp, rax
+
     # Restore all registers in reverse order
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+.global irq_yield_entry
+irq_yield_entry:
+    # A thread giving up the processor (int 0x81): saved as the timer's
+    # entry saves, so either can resume it.
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    call yield_irq_handler
+    mov rsp, rax
     pop r15
     pop r14
     pop r13
@@ -540,6 +586,7 @@ irq_lapic_timer_entry:
 #[cfg(not(test))]
 extern "C" {
     fn irq_timer_entry();
+    fn irq_yield_entry();
     fn irq_keyboard_entry();
     fn irq_mouse_entry();
     fn irq_ipi_entry();
@@ -677,13 +724,22 @@ extern "C" fn ipi_handler() {
 
 #[cfg(not(test))]
 #[no_mangle]
-extern "C" fn timer_irq_handler() {
-    KERNEL_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+extern "C" fn timer_irq_handler(rsp: u64) -> u64 {
+    let now = KERNEL_TICK_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Send EOI to PIC
     unsafe {
         outb(0x20, 0x20);
     }
+    // Then, perhaps, another thread's turn (PROC-001).
+    threads::on_interrupt(rsp, now, true)
+}
+
+/// A thread yielded (PROC-001): someone else's turn, if anyone's ready.
+#[cfg(not(test))]
+#[no_mangle]
+extern "C" fn yield_irq_handler(rsp: u64) -> u64 {
+    threads::on_interrupt(rsp, KERNEL_TICK_COUNTER.load(Ordering::Relaxed), false)
 }
 
 #[cfg(not(test))]
@@ -764,6 +820,7 @@ fn install_idt() {
         let code_segment = current_code_segment();
         // Set up timer interrupt (IRQ 0 = vector 32)
         IDT[32].set_handler(irq_timer_entry, code_segment);
+        IDT[threads::YIELD_VECTOR as usize].set_handler(irq_yield_entry, code_segment);
 
         // Set up keyboard interrupt (IRQ 1 = vector 33)
         IDT[33].set_handler(irq_keyboard_entry, code_segment);
@@ -1859,6 +1916,17 @@ fn workspace_loop(
             },
             get_tick_count(),
         );
+
+        // Threads (PROC-001): finished ones' stacks freed, and what they
+        // left for the Terminal printed.
+        #[cfg(all(not(test), target_os = "none"))]
+        {
+            threads::reap();
+            for line in threads::take_notes() {
+                workspace.emit_thread_line(serial, &line);
+                output_dirty = true;
+            }
+        }
 
         // The Terminal's `fetch` and `resolve` (NET-033): started here, and
         // their lines carried back as they come.
@@ -3614,6 +3682,13 @@ fn workspace_loop(
         }
 
         if !kernel_progressed && !input_progressed && !present_pacer.is_pending() {
+            // Nothing for the desk to do: a thread's turn, if one is
+            // waiting, rather than the rest of this slice spent pausing.
+            #[cfg(all(not(test), target_os = "none"))]
+            if threads::others_ready() {
+                threads::yield_now();
+                continue;
+            }
             idle_pause();
         }
     }
