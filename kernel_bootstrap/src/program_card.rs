@@ -30,7 +30,16 @@ pub struct ProgramCard {
     told: Option<(u16, u16)>,
     /// Why the last view was refused, if it was.
     refused: Option<ViewError>,
+    /// Its program's crashes, for deciding about restarting it (PROC-007).
+    pub crashes: crate::supervision::Crashes,
+    /// What the card says while it has no program: why it is waiting.
+    status: Option<String>,
+    /// It crashed too often to be restarted; the person decides.
+    gave_up: bool,
 }
+
+/// The key of the "Start it again" button on a card that gave up.
+pub const START_AGAIN: u8 = b'r';
 
 impl ProgramCard {
     pub fn new(thread: u32, name: &str) -> Self {
@@ -40,7 +49,56 @@ impl ProgramCard {
             view: None,
             told: None,
             refused: None,
+            crashes: crate::supervision::Crashes::default(),
+            status: None,
+            gave_up: false,
         }
+    }
+
+    /// Program `thread` takes the card: it starts from a blank card and
+    /// hears the canvas size afresh.
+    pub fn bind(&mut self, thread: u32) {
+        self.thread = thread;
+        self.view = None;
+        self.told = None;
+        self.refused = None;
+        self.status = None;
+    }
+
+    /// Its program was ended by the kernel (PROC-007): the card waits,
+    /// saying why, and whether it starts the program again. Returns
+    /// whether to.
+    pub fn crashed(&mut self, how: &str, now: u64) -> bool {
+        use crate::supervision::{Decision, RESTARTS};
+        self.thread = 0;
+        self.view = None;
+        match self.crashes.crashed(now) {
+            Decision::Restart(n) => {
+                self.status = Some(format!("{how}. Starting it again ({n} of {RESTARTS})."));
+                self.gave_up = false;
+                true
+            }
+            Decision::GiveUp => {
+                self.status = Some(format!(
+                    "{how}. It has been ended {} times in a minute.",
+                    RESTARTS + 1
+                ));
+                self.gave_up = true;
+                false
+            }
+        }
+    }
+
+    /// A key while the card has no program: "Start it again", if it gave
+    /// up. Returns whether to start the program.
+    pub fn waiting_key(&mut self, key: u8) -> bool {
+        if !self.gave_up || !(key == START_AGAIN || key == b'\n') {
+            return false;
+        }
+        self.gave_up = false;
+        self.crashes.forgive();
+        self.status = Some(format!("Starting {}...", self.name));
+        true
     }
 
     /// A view from the program, checked against a `w` x `h` canvas.
@@ -76,6 +134,9 @@ impl ProgramCard {
     }
 
     pub fn footer(&self) -> String {
+        if self.gave_up {
+            return String::from("R or the button starts it again   Ctrl+W closes");
+        }
         match (&self.refused, &self.view) {
             (Some(why), _) => format!("{} sent a view the desk refused ({why:?})", self.name),
             (None, Some(view)) => view.footer.clone(),
@@ -87,8 +148,29 @@ impl ProgramCard {
     pub fn ui(&self, w: u32, h: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
         let mut ui = Ui::new(palette, hover);
         let Some(view) = &self.view else {
-            let line = format!("Starting {}...", self.name);
-            ui.text_centered(&rect(0, 0, w, h), &line, palette.muted, 1);
+            let line = match &self.status {
+                Some(status) => status.clone(),
+                None => format!("Starting {}...", self.name),
+            };
+            // The line, wrapped to the card, above the button if any.
+            let per_line = (w.saturating_sub(32) / crate::widgets::GLYPH_W).max(8) as usize;
+            let lines = wrap(&line, per_line);
+            let total = lines.len() as u32 * (crate::widgets::GLYPH_H + 4);
+            let top = h.saturating_sub(total + if self.gave_up { 64 } else { 0 }) / 2;
+            for (i, text) in lines.iter().enumerate() {
+                let y = top + i as u32 * (crate::widgets::GLYPH_H + 4);
+                ui.text_centered(
+                    &rect(0, y as i32, w, crate::widgets::GLYPH_H),
+                    text,
+                    palette.muted,
+                    1,
+                );
+            }
+            if self.gave_up {
+                let bw = 180.min(w);
+                let area = rect(((w - bw) / 2) as i32, (top + total + 20) as i32, bw, 40);
+                ui.button(area, "Start it again", START_AGAIN, ButtonKind::Primary);
+            }
             return ui;
         };
         for op in &view.ops {
@@ -150,6 +232,25 @@ impl ProgramCard {
         }
         ui
     }
+}
+
+/// `text` in lines of at most `width` characters, broken at spaces.
+fn wrap(text: &str, width: usize) -> alloc::vec::Vec<String> {
+    let mut lines = alloc::vec::Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(core::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn clamp16(v: u32) -> u16 {
@@ -251,6 +352,32 @@ mod tests {
             card.resized(100_000, 5),
             Some(Event::Size { w: u16::MAX, h: 5 })
         );
+    }
+
+    #[test]
+    fn a_card_whose_program_keeps_crashing_gives_up_and_offers_a_button() {
+        let mut card = ProgramCard::new(7, "fragile");
+        let how = "fragile: ended by the kernel: it touched 0x0, not its memory (at 0x400010)";
+        for n in 1..=3 {
+            assert!(card.crashed(how, n * 10), "restart {n}");
+            assert_eq!(card.thread, 0);
+            assert!(card.footer().contains("starting"), "{}", card.footer());
+            card.bind(10 + n as u32);
+            assert!(
+                card.resized(400, 300).is_some(),
+                "the new program hears its size"
+            );
+        }
+        assert!(!card.crashed(how, 40), "a fourth in the minute");
+        let ui = card.ui(400, 300, palette(), None);
+        // The button is the only thing to hit, and it is "Start it again".
+        let hit = (0..300).step_by(4).find_map(|y| ui.hit(200, y));
+        assert_eq!(hit, Some(START_AGAIN));
+        assert!(!card.waiting_key(b'x'));
+        assert!(card.waiting_key(START_AGAIN), "the person starts it");
+        assert!(!card.waiting_key(START_AGAIN), "once");
+        // Forgiven: three more restarts before giving up again.
+        assert!(card.crashed(how, 50));
     }
 
     #[test]

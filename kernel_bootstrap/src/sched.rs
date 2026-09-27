@@ -26,6 +26,9 @@ pub enum State {
     Running,
     /// Until this tick.
     Sleeping(u64),
+    /// Held back until this tick: it used its budget for the window
+    /// (PROC-007). Unlike sleep, no event wakes it early.
+    Throttled(u64),
     /// Finished (or stopped); its stack is the kernel's to free.
     Exited,
 }
@@ -45,6 +48,24 @@ pub struct Thread {
     /// Threads are stopped by asking, never from outside, because one
     /// stopped mid-step could be holding a lock -- the heap's -- forever.
     pub stop_asked: bool,
+    /// How much of the processor it may have (PROC-007); `None`: all
+    /// it can get, as the kernel's own threads may.
+    pub budget: Option<Budget>,
+    /// The window its budget is counted in, and what it has used of it.
+    window_start: u64,
+    used: u64,
+    /// Times it was held back for using its budget up.
+    pub throttled: u64,
+}
+
+/// A share of the processor: at most `ticks` timer ticks of running in
+/// every `window` ticks (PROC-007). A program that has had its share
+/// waits for the next window, so no program -- however it loops -- can
+/// take the processor from the desk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub ticks: u64,
+    pub window: u64,
 }
 
 #[derive(Debug)]
@@ -74,6 +95,10 @@ impl Scheduler {
             ticks: 0,
             runs: 1,
             stop_asked: false,
+            budget: None,
+            window_start: 0,
+            used: 0,
+            throttled: 0,
         });
         Self {
             slots,
@@ -97,6 +122,10 @@ impl Scheduler {
             ticks: 0,
             runs: 0,
             stop_asked: false,
+            budget: None,
+            window_start: 0,
+            used: 0,
+            throttled: 0,
         });
         Some((slot, id))
     }
@@ -126,7 +155,7 @@ impl Scheduler {
             i != self.current
                 && t.is_some_and(|t| match t.state {
                     State::Ready => true,
-                    State::Sleeping(until) => until <= now,
+                    State::Sleeping(until) | State::Throttled(until) => until <= now,
                     _ => false,
                 })
         })
@@ -139,6 +168,16 @@ impl Scheduler {
         }
         if let Some(t) = self.slots[self.current].as_mut() {
             t.state = State::Sleeping(until);
+        }
+    }
+
+    /// Give slot `slot` a budget (never the desk, which must always run).
+    pub fn set_budget(&mut self, slot: usize, budget: Budget) {
+        if slot == 0 || budget.ticks == 0 || budget.window == 0 {
+            return;
+        }
+        if let Some(t) = self.slots.get_mut(slot).and_then(Option::as_mut) {
+            t.budget = Some(budget);
         }
     }
 
@@ -213,13 +252,31 @@ impl Scheduler {
             if t.state == State::Running {
                 t.state = State::Ready;
             }
-        }
-        // Sleepers whose time has come.
-        for t in self.slots.iter_mut().flatten() {
-            if let State::Sleeping(until) = t.state {
-                if until <= now {
-                    t.state = State::Ready;
+            // Its budget: the tick counts against the window; with the
+            // window's share used, it waits for the next.
+            if let (Some(budget), true) = (t.budget, tick) {
+                if now >= t.window_start + budget.window {
+                    t.window_start = now;
+                    t.used = 0;
                 }
+                t.used += 1;
+                if t.used >= budget.ticks && t.state == State::Ready {
+                    t.state = State::Throttled(t.window_start + budget.window);
+                    t.throttled += 1;
+                }
+            }
+        }
+        // Sleepers whose time has come, and the held back whose window
+        // has turned.
+        for t in self.slots.iter_mut().flatten() {
+            match t.state {
+                State::Sleeping(until) if until <= now => t.state = State::Ready,
+                State::Throttled(until) if until <= now => {
+                    t.state = State::Ready;
+                    t.window_start = now;
+                    t.used = 0;
+                }
+                _ => {}
             }
         }
         // Round robin: the next ready after the current, the current last.
@@ -460,6 +517,70 @@ mod tests {
         s.switch(1, 0x1000, true);
         assert_eq!((s.saved_rsp(0), s.saved_rsp(a)), (Some(0x1000), None));
         assert_eq!(s.running_name(), "a");
+    }
+
+    #[test]
+    fn a_thread_on_a_budget_gets_its_share_and_no_more() {
+        let mut s = Scheduler::new();
+        let (a, _) = s.add("hog", 0xA000).unwrap();
+        s.set_budget(
+            a,
+            Budget {
+                ticks: 3,
+                window: 10,
+            },
+        );
+        // It runs flat out; the desk has nothing to do but yield.
+        let mut hog_ticks = 0;
+        for now in 1..=100u64 {
+            if s.current() == a {
+                hog_ticks += 1;
+            }
+            let rsp = if s.current() == a { 0xA000 } else { 0x1000 };
+            s.switch(now, rsp, true);
+            // The desk, when it runs, gives the processor straight back.
+            if s.current() == 0 && s.others_ready(now) {
+                s.switch(now, 0x1000, false);
+            }
+        }
+        let hog = s.threads().find(|t| t.name == "hog").unwrap();
+        assert!(
+            hog.throttled >= 9,
+            "held back every window: {}",
+            hog.throttled
+        );
+        assert!((25..=35).contains(&hog_ticks), "about 3 in 10: {hog_ticks}");
+        // An event does not wake the held back.
+        let (b, _) = s.add("b", 0xB000).unwrap();
+        s.set_budget(
+            b,
+            Budget {
+                ticks: 1,
+                window: 50,
+            },
+        );
+        while s.current() != b {
+            s.switch(200, 0x1000, false);
+        }
+        s.switch(201, 0xB000, true);
+        assert!(matches!(
+            s.threads().find(|t| t.name == "b").unwrap().state,
+            State::Throttled(_)
+        ));
+        s.wake(b);
+        assert!(matches!(
+            s.threads().find(|t| t.name == "b").unwrap().state,
+            State::Throttled(_)
+        ));
+        // The desk cannot be given a budget.
+        s.set_budget(
+            0,
+            Budget {
+                ticks: 1,
+                window: 10,
+            },
+        );
+        assert!(s.threads().next().unwrap().budget.is_none());
     }
 
     #[test]

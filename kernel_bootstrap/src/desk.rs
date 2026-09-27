@@ -3419,7 +3419,7 @@ impl Desk {
             .find(|w| matches!(&w.state, AppState::Program(c) if c.thread == 0 && c.name == name));
         if let Some(window) = waiting {
             if let AppState::Program(card) = &mut window.state {
-                card.thread = thread;
+                card.bind(thread);
             }
             return window.id;
         }
@@ -3465,20 +3465,55 @@ impl Desk {
 
     /// Program `thread` has ended, as `how` says: its card closes, and a
     /// program the kernel ended leaves a notice.
-    pub fn program_ended(&mut self, thread: u32, how: &str, now: u64) {
-        let ids: Vec<ViewId> = self
-            .windows
-            .iter()
-            .filter(|w| matches!(&w.state, AppState::Program(c) if c.thread == thread))
-            .map(|w| w.id)
-            .collect();
-        for id in &ids {
-            self.close(*id);
+    ///
+    /// Supervision (PROC-007): a program the kernel ended is not simply
+    /// gone -- its card waits and starts it again, up to three times in a
+    /// minute, then says it has given up and offers a button.
+    pub fn program_ended(&mut self, thread: u32, how: &str, faulted: bool, now: u64) {
+        let mut close = Vec::new();
+        let mut had_card = false;
+        for window in &mut self.windows {
+            let AppState::Program(card) = &mut window.state else {
+                continue;
+            };
+            if card.thread != thread {
+                continue;
+            }
+            had_card = true;
+            if faulted {
+                if card.crashed(how, now) {
+                    self.program_runs.push(card.name.clone());
+                }
+            } else {
+                close.push(window.id);
+            }
+        }
+        for id in close {
+            self.close(id);
         }
         // It is gone: nothing more to tell it.
         self.program_events.retain(|(t, _)| *t != thread);
-        if !ids.is_empty() && how.contains("ended by the kernel") {
+        if had_card && faulted {
             self.notify(NoticeLevel::Warning, how.to_string(), now);
+        }
+    }
+
+    /// A key or a click for program card `id`: its program's, or, while
+    /// the card has none, the card's own ("Start it again").
+    fn program_key(&mut self, id: ViewId, key: u8) {
+        let Some(window) = self.window_mut(id) else {
+            return;
+        };
+        let AppState::Program(card) = &mut window.state else {
+            return;
+        };
+        if card.thread != 0 {
+            let thread = card.thread;
+            self.program_events
+                .push((thread, app_protocol::Event::Key(key)));
+        } else if card.waiting_key(key) {
+            let name = card.name.clone();
+            self.program_runs.push(name);
         }
     }
 
@@ -5007,15 +5042,12 @@ impl Desk {
                                 let hit = self.window(*target).and_then(|w| match &w.state {
                                     AppState::Program(card) => {
                                         let (cw, ch) = Self::canvas_size(w.bounds);
-                                        card.ui(cw, ch, palette, None)
-                                            .hit(x, y)
-                                            .map(|key| (card.thread, key))
+                                        card.ui(cw, ch, palette, None).hit(x, y)
                                     }
                                     _ => None,
                                 });
-                                if let Some((thread, key)) = hit {
-                                    self.program_events
-                                        .push((thread, app_protocol::Event::Key(key)));
+                                if let Some(key) = hit {
+                                    self.program_key(*target, key);
                                     clicked = true;
                                 }
                             }
@@ -5944,14 +5976,12 @@ impl Desk {
                 _ => (None, false),
             },
             // Every other key is the program's (PROC-005).
-            AppState::Program(card) => {
+            AppState::Program(_) => {
                 if byte == crate::notepad::CTRL_W {
                     self.close(id);
                     return (None, true);
                 }
-                let thread = card.thread;
-                self.program_events
-                    .push((thread, app_protocol::Event::Key(byte)));
+                self.program_key(id, byte);
                 (None, true)
             }
             AppState::Calendar(calendar) => match calendar.handle_byte(byte) {
@@ -7425,20 +7455,24 @@ mod tests {
     }
 
     #[test]
-    fn a_program_the_kernel_ends_takes_its_card_and_leaves_a_notice() {
+    fn a_program_the_kernel_ends_is_restarted_into_its_card_with_a_notice() {
         let mut desk = Desk::new(1280, 800);
         let id = desk.open_program(9, "crashy");
         let before = desk.notice_log.len();
-        desk.program_ended(9, "crashy: ended by the kernel: it touched 0x0", 5);
-        assert!(desk.window(id).is_none());
+        desk.program_ended(9, "crashy: ended by the kernel: it touched 0x0", true, 5);
+        // Its card waits, and the program is started again into it.
+        assert!(desk.window(id).is_some(), "the card waits");
+        assert_eq!(desk.take_program_runs(), alloc::vec!["crashy".to_string()]);
         assert!(
             desk.take_program_events().is_empty(),
             "nothing to tell the gone"
         );
         assert_eq!(desk.notice_log.len(), before + 1);
-        // One that exited quietly leaves none.
-        desk.open_program(10, "tidy");
-        desk.program_ended(10, "tidy: exited with 0", 6);
+        assert_eq!(desk.open_program(11, "crashy"), id, "the same card");
+        // One that exited quietly takes its card and leaves no notice.
+        let tidy = desk.open_program(10, "tidy");
+        desk.program_ended(10, "tidy: exited with 0", false, 6);
+        assert!(desk.window(tidy).is_none());
         assert_eq!(desk.notice_log.len(), before + 1);
     }
 

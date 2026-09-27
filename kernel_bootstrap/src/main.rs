@@ -51,6 +51,7 @@ mod sharing;
 mod sign_in;
 mod sketch;
 mod speaker;
+mod supervision;
 mod syscall_abi;
 mod tasks;
 #[cfg(not(test))]
@@ -2117,10 +2118,10 @@ fn workspace_loop(
                 }
             });
             // A program that ended takes its card with it (PROC-005).
-            for (id, how) in &gone {
-                program_closing.retain(|(closing, _)| closing != id);
+            for ended in &gone {
+                program_closing.retain(|(closing, _)| *closing != ended.id);
                 if let Some(desk) = desk.as_mut() {
-                    desk.program_ended(*id, how, get_tick_count());
+                    desk.program_ended(ended.id, &ended.how, ended.faulted, get_tick_count());
                     output_dirty = true;
                 }
             }

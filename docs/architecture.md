@@ -267,7 +267,12 @@ thread can be a *program*: it runs in ring 3 in an address space of its
 own (`hal_x86_64::user_space`; the kernel's half shared but not USER),
 reaches the kernel only through `int 0x80` (`kernel_bootstrap/src/
 syscall_abi.rs`), names everything outside itself by handles in its own
-capability table, and is ended -- alone -- when it faults.
+capability table, and is ended -- alone -- when it faults. Programs
+ship as `program_image` images built against the `pandagen_app` SDK
+(Phase 436), can draw a card on the desk through `app_protocol` (Phase
+437; the Calculator is one, Phase 438), and are supervised (Phase 439):
+a memory limit checked at load, a CPU budget enforced by the scheduler,
+and restarts into the same card after a crash, three a minute at most.
 
 ### 7. Virtual Memory and Address Spaces (Phase 24)
 

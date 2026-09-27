@@ -1044,7 +1044,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 4 images (primes, ticker, tally, calculator)".to_string(),
+        "programs: 5 images (primes, ticker, tally, calculator, fragile)".to_string(),
         "--expect-serial".to_string(),
         "primes   an image:".to_string(),
         "--expect-serial".to_string(),
@@ -1083,6 +1083,41 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "tally: counted to 3; goodbye".to_string(),
         "--expect-serial".to_string(),
         "tally: exited with 0".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
+    // Supervision (PROC-007): `fragile` breaks when B is pressed; the
+    // kernel ends it and the desk starts it again into its card -- three
+    // times -- then, at the fourth crash in a minute, gives up until R
+    // starts it once more. A program's share of the processor shows in
+    // `threads`.
+    title = "supervision: a crashing program restarted, then given up on".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,u,n,spc,f,r,a,g,i,l,e,ret,sleep:2,b,sleep:2,b,sleep:2,b,sleep:2,b,sleep:2,r,sleep:2,ctrl-t,sleep:1,t,h,r,e,a,d,s,ret,sleep:1".to_string(),
+        "--out".to_string(),
+        "dist/qemu_supervision".to_string(),
+        "--expect-serial".to_string(),
+        "fragile: ended by the kernel: it touched 0x10, not its memory".to_string(),
+        "--expect-serial".to_string(),
+        "desk: fragile is thread 2".to_string(),
+        "--expect-serial".to_string(),
+        "desk: fragile is thread 4".to_string(),
+        // The fourth crash gives up; R starts it again.
+        "--expect-serial".to_string(),
+        "desk: fragile is thread 5".to_string(),
+        "--forbid-serial".to_string(),
+        "desk: fragile is thread 6".to_string(),
+        "--expect-serial".to_string(),
+        "fragile    waiting".to_string(),
+        "--expect-serial".to_string(),
+        "75% of the CPU at most".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL EXCEPTION".to_string(),
         "--forbid-serial".to_string(),
@@ -2481,6 +2516,8 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
     ),
     // The dock's Calculator (PROC-006): a card and nothing else.
     ("calculator", &[program_image::Ask::Card]),
+    // Breaks when asked, to show supervision (PROC-007).
+    ("fragile", &[program_image::Ask::Card]),
 ];
 
 /// Build every program for the machine and turn each into an image.

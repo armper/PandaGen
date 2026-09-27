@@ -146,8 +146,14 @@ pub fn on_interrupt(rsp: u64, now: u64, tick: bool) -> u64 {
         return end_current(table, rsp, now, End::Stopped);
     }
     if tick && !table.sched.others_ready(now) {
-        // The usual case: nothing else to run. Count the tick and go on.
-        return table.sched.switch(now, rsp, tick);
+        // The usual case: nothing else to run. Count the tick and go on
+        // -- unless that tick used up a program's budget (PROC-007) and
+        // the desk runs instead, in its own address space.
+        let next = table.sched.switch(now, rsp, tick);
+        if table.sched.current() != current {
+            enter(table, table.sched.current());
+        }
+        return next;
     }
     if let Some(stack) = table.stacks[current].as_ref() {
         if stack[0] != CANARY {
@@ -283,11 +289,20 @@ pub fn exit() -> ! {
     unreachable!("an exited thread was run again")
 }
 
+/// A program that has ended.
+pub struct Gone {
+    pub id: u32,
+    /// How, as the Terminal says it: "tally: exited with 0".
+    pub how: String,
+    /// The kernel ended it for breaking a rule.
+    pub faulted: bool,
+}
+
 /// Free the stacks of threads that have finished, and hand `free` the
 /// address spaces of programs that have, saying how each ended. The
 /// desk calls this; the frees happen with interrupts on. Returns the
 /// programs that ended, with how, for their cards.
-pub fn reap(mut free: impl FnMut(UserSpace)) -> Vec<(u32, String)> {
+pub fn reap(mut free: impl FnMut(UserSpace)) -> Vec<Gone> {
     let mut freed: [Option<Box<[u64]>>; MAX_THREADS] = [NO_STACK; MAX_THREADS];
     let mut ended: [Option<Program>; MAX_THREADS] = [NO_PROGRAM; MAX_THREADS];
     with_table(|t| {
@@ -301,20 +316,24 @@ pub fn reap(mut free: impl FnMut(UserSpace)) -> Vec<(u32, String)> {
     drop(freed);
     let mut gone = Vec::new();
     for program in ended.into_iter().flatten() {
+        let end = program.end.unwrap_or(End::Stopped);
         let mut why = String::new();
-        let _ = program.end.unwrap_or(End::Stopped).describe(&mut why);
+        let _ = end.describe(&mut why);
         let line = alloc::format!("{}: {why}", program.name);
         note(line.clone());
         free(program.space);
-        gone.push((program.id, line));
+        gone.push(Gone {
+            id: program.id,
+            how: line,
+            faulted: matches!(end, End::Fault { .. }),
+        });
     }
     gone
 }
 
 /// The table, as lines for `threads` in the Terminal.
 pub fn listing() -> Vec<String> {
-    let mut rows: [(u32, &'static str, State, u64, u64, usize); MAX_THREADS] =
-        [(0, "", State::Exited, 0, 0, 0); MAX_THREADS];
+    let mut rows: [(Option<crate::sched::Thread>, usize); MAX_THREADS] = [(None, 0); MAX_THREADS];
     let (n, switches) = with_table(|t| {
         let mut n = 0;
         for thread in t.sched.threads() {
@@ -322,14 +341,7 @@ pub fn listing() -> Vec<String> {
                 .sched
                 .slot_of(thread.id)
                 .and_then(|slot| t.programs[slot].as_ref().map(|p| p.space.frames()));
-            rows[n] = (
-                thread.id,
-                thread.name,
-                thread.state,
-                thread.ticks,
-                thread.runs,
-                frames.unwrap_or(0),
-            );
+            rows[n] = (Some(*thread), frames.unwrap_or(0));
             n += 1;
         }
         (n, t.sched.switches)
@@ -341,12 +353,21 @@ pub fn listing() -> Vec<String> {
         YIELDS.load(Ordering::Relaxed),
         STACK_BYTES / 1024
     ));
-    for (id, name, state, ticks, runs, frames) in &rows[..n] {
-        let state = match state {
+    for (thread, frames) in &rows[..n] {
+        let Some(thread) = thread else { continue };
+        let state = match thread.state {
             State::Running => String::from("running"),
             State::Ready => String::from("ready"),
+            // `wait(0)`: asleep until an event, however long.
+            State::Sleeping(u64::MAX) => String::from("waiting"),
             State::Sleeping(until) => {
-                alloc::format!("asleep {} ms", until.saturating_sub(now) * 10)
+                alloc::format!("asleep {} ms", until.saturating_sub(now).saturating_mul(10))
+            }
+            State::Throttled(until) => {
+                alloc::format!(
+                    "held back {} ms",
+                    until.saturating_sub(now).saturating_mul(10)
+                )
             }
             State::Exited => String::from("finished"),
         };
@@ -355,9 +376,21 @@ pub fn listing() -> Vec<String> {
         } else {
             String::new()
         };
+        // Its share of the processor (PROC-007), and how often it hit it.
+        let budget = match thread.budget {
+            Some(b) => alloc::format!(
+                ", {}% of the CPU at most (held back {} times)",
+                b.ticks * 100 / b.window,
+                thread.throttled
+            ),
+            None => String::new(),
+        };
         out.push(alloc::format!(
-            "  {id:>3} {name:<10} {state:<14} {} ms of CPU, run {runs} times{program}",
-            ticks * 10
+            "  {:>3} {:<10} {state:<14} {} ms of CPU, run {} times{program}{budget}",
+            thread.id,
+            thread.name,
+            thread.ticks * 10,
+            thread.runs
         ));
     }
     let overruns = OVERRUNS.load(Ordering::Relaxed);
@@ -720,6 +753,7 @@ pub fn spawn_program(
     handles: Handles,
     entry: u64,
     user_rsp: u64,
+    budget: crate::sched::Budget,
 ) -> Result<u32, (&'static str, UserSpace)> {
     let mut stack = vec![0u64; STACK_BYTES / 8].into_boxed_slice();
     stack[0] = CANARY;
@@ -735,6 +769,7 @@ pub fn spawn_program(
     let mut parts = Some((stack, space));
     let added = with_table(|t| {
         let (slot, id) = t.sched.add(name, rsp)?;
+        t.sched.set_budget(slot, budget);
         let (stack, space) = parts.take().expect("once");
         let program_id = id;
         t.stacks[slot] = Some(stack);

@@ -93,6 +93,24 @@ layout) opens a card at once and asks the kernel to start the program,
 which then takes the card over. If the program can't start, the card
 closes and a notice says why.
 
+## Supervision: what a program may use, and what happens when it breaks
+
+Every program runs within limits (`kernel_bootstrap/src/supervision.rs`):
+
+- **Memory.** Its image and its stack must fit in 16 MiB, checked before
+  anything is mapped. A program cannot grow past what it was loaded
+  with, so the check at load is the whole of it.
+- **The processor.** At most three quarters of it: 15 timer ticks in
+  every 20 (`sched::Budget`). A program that has used its share waits
+  for the next window, however it loops, so the desk always has the
+  rest. `threads` shows each program's share and how often it was held
+  back.
+- **Crashes.** When the kernel ends a program with a card, its card
+  stays and the program is started again into it, up to three times in
+  a minute. At the fourth crash in a minute the card says it has given
+  up and offers a "Start it again" button (or R). `apps/fragile` breaks
+  when you press B, to show this.
+
 ## Adding one
 
 1. Copy `apps/ticker` to `apps/<name>` and change the package name.

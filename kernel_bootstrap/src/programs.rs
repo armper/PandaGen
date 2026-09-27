@@ -283,6 +283,9 @@ pub fn run(
             (name, image)
         }
     };
+    // Its limits (PROC-007): it must fit before anything is mapped.
+    let limits = crate::supervision::PROGRAM_LIMITS;
+    limits.check_memory(name, image.memory(), STACK_PAGES * 4096)?;
     let mut memory = Owned::new(hhdm, frames);
     let mut space = UserSpace::new(
         &mut memory,
@@ -321,7 +324,7 @@ pub fn run(
         };
     }
     let wants_card = image.asks.contains(&Ask::Card);
-    match crate::threads::spawn_program(name, space, handles, image.entry, STACK_TOP) {
+    match crate::threads::spawn_program(name, space, handles, image.entry, STACK_TOP, limits.cpu) {
         Ok(id) => Ok(Started {
             id,
             name,
