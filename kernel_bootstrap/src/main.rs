@@ -40,6 +40,7 @@ mod notepad;
 mod optimized_render;
 mod palette_overlay;
 mod present_policy;
+mod program_card;
 #[cfg(not(test))]
 mod programs;
 #[cfg(all(not(test), target_os = "none"))]
@@ -1858,6 +1859,10 @@ fn workspace_loop(
     // What the desk asked the kernel for this iteration: file operations,
     // listings, a display switch. Served after input, once, in order.
     let mut desk_requests: alloc::vec::Vec<desk::DeskRequest> = alloc::vec::Vec::new();
+    // Programs whose cards closed, and when they are stopped if they
+    // have not finished by then (PROC-005).
+    #[cfg(all(not(test), target_os = "none"))]
+    let mut program_closing: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
     // The Web card whose fetch is out, and what it asked for (WEB-001).
     #[cfg_attr(
         not(all(not(test), target_os = "none")),
@@ -2105,13 +2110,21 @@ fn workspace_loop(
         // left for the Terminal printed.
         #[cfg(all(not(test), target_os = "none"))]
         {
-            threads::reap(|space| {
+            let gone = threads::reap(|space| {
                 if let (Some(hhdm), Some(frames)) =
                     (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut())
                 {
                     space.free(&mut programs::Owned::new(hhdm, frames));
                 }
             });
+            // A program that ended takes its card with it (PROC-005).
+            for (id, how) in &gone {
+                program_closing.retain(|(closing, _)| closing != id);
+                if let Some(desk) = desk.as_mut() {
+                    desk.program_ended(*id, how, get_tick_count());
+                    output_dirty = true;
+                }
+            }
             // `run` (PROC-002): a program in an address space of its own.
             if let Some(name) = workspace.take_program_request() {
                 let started = match (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut()) {
@@ -2119,7 +2132,23 @@ fn workspace_loop(
                     _ => Err(alloc::string::String::from("run: no memory for programs")),
                 };
                 let line = match started {
-                    Ok(id) => alloc::format!("run: {name} is thread {id}, in ring 3"),
+                    Ok(started) => {
+                        let mut line = alloc::format!(
+                            "run: {} is thread {}, in ring 3",
+                            started.name,
+                            started.id
+                        );
+                        if started.wants_card {
+                            match desk.as_mut() {
+                                Some(desk) => {
+                                    desk.open_program(started.id, started.name);
+                                    line.push_str(", with a card on the desk");
+                                }
+                                None => line.push_str(" (it wants a card: there is no desk)"),
+                            }
+                        }
+                        line
+                    }
                     Err(why) => why,
                 };
                 workspace.emit_thread_line(serial, &line);
@@ -2129,6 +2158,29 @@ fn workspace_loop(
                 workspace.emit_thread_line(serial, &line);
                 output_dirty = true;
             }
+            // Programs' cards (PROC-005): views in, events out. A closed
+            // card's program has two seconds to finish before it is
+            // stopped.
+            if let Some(desk) = desk.as_mut() {
+                for (id, view) in threads::take_views() {
+                    desk.program_view(id, &view);
+                    output_dirty = true;
+                }
+                for (id, event) in desk.take_program_events() {
+                    threads::post_event(id, event.encode());
+                    if event == app_protocol::Event::Closed {
+                        program_closing.push((id, get_tick_count() + 200));
+                    }
+                }
+            }
+            let now = get_tick_count();
+            program_closing.retain(|&(id, deadline)| {
+                if now < deadline {
+                    return true;
+                }
+                threads::ask_stop(id);
+                false
+            });
         }
 
         // The Terminal's `fetch` and `resolve` (NET-033): started here, and

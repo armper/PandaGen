@@ -1,0 +1,15 @@
+[package]
+name = "app_protocol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "How a PandaGen program and its card talk: views out, events in"
+
+# Fields are spelled out rather than inherited: programs, built outside
+# the main workspace, depend on this by path (through pandagen_app).
+
+[features]
+# The desk's side: owned, checked views (needs a heap).
+decode = []
+
+[dependencies]

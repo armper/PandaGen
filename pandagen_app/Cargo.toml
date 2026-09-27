@@ -10,3 +10,4 @@ description = "Write PandaGen programs: the system calls, the handles, the entry
 # on this by path.
 
 [dependencies]
+app_protocol = { path = "../app_protocol" }

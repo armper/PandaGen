@@ -131,6 +131,14 @@ impl Frames for Owned<'_> {
     }
 }
 
+/// A program that has started.
+pub struct Started {
+    pub id: u32,
+    pub name: &'static str,
+    /// It asked for a card: the desk opens one for it.
+    pub wants_card: bool,
+}
+
 /// Images the machine booted with, by name. Registered once, at boot.
 static IMAGES: hal_x86_64::SpinLock<Vec<(&'static str, &'static [u8])>> =
     hal_x86_64::SpinLock::new(Vec::new());
@@ -248,7 +256,7 @@ pub fn run(
     name: &str,
     hhdm: u64,
     frames: &mut crate::FrameAllocator,
-) -> Result<u32, alloc::string::String> {
+) -> Result<Started, alloc::string::String> {
     // An image, else a built-in program: the image's pieces and asks, or
     // the built-in's code and the console.
     let (name, image) = match image_named(name) {
@@ -304,15 +312,21 @@ pub fn run(
         return Err(alloc::string::String::from("run: out of memory"));
     }
     // What it asked for, in the order asked: all of it, for now -- the
-    // console is the only thing there is to ask for.
+    // console, and a card on the desk (which the desk opens for it).
     let mut handles = Handles::new();
     for ask in &image.asks {
         match ask {
             Ask::Console => handles.grant(Capability::Console),
+            Ask::Card => handles.grant(Capability::Card),
         };
     }
+    let wants_card = image.asks.contains(&Ask::Card);
     match crate::threads::spawn_program(name, space, handles, image.entry, STACK_TOP) {
-        Ok(id) => Ok(id),
+        Ok(id) => Ok(Started {
+            id,
+            name,
+            wants_card,
+        }),
         Err((why, space)) => {
             space.free(&mut memory);
             Err(alloc::string::String::from(why))

@@ -400,6 +400,10 @@ pub enum DeskApp {
     Audit,
     /// Pages over HTTP, read as text (WEB-001).
     Web,
+    /// A program's card (PROC-005): drawn from the views a program in
+    /// ring 3 sends. Not on the dock; `run` opens it for a program that
+    /// asked for one.
+    Program,
 }
 
 /// The cards a reboot brings back (DESK-020). Not the Welcome card, the
@@ -474,6 +478,7 @@ impl DeskApp {
             DeskApp::Tasks => "Tasks",
             DeskApp::Sketch => "Sketch",
             DeskApp::Web => "Web",
+            DeskApp::Program => "Program",
             DeskApp::Launcher => "Apps",
             DeskApp::Sharing => "Sharing",
             DeskApp::Access => "Access",
@@ -729,6 +734,7 @@ impl DeskApp {
             DeskApp::Tasks => "Td",
             DeskApp::Sketch => "Sk",
             DeskApp::Web => "Wb",
+            DeskApp::Program => "Pg",
             DeskApp::Launcher => "Ap",
             DeskApp::Sharing => "Sh",
             DeskApp::Access => "Ac",
@@ -753,6 +759,7 @@ impl DeskApp {
             DeskApp::Tasks => TASKS_SIZE,
             DeskApp::Sketch => SKETCH_SIZE,
             DeskApp::Web => WEB_SIZE,
+            DeskApp::Program => PROGRAM_SIZE,
             DeskApp::Launcher => LAUNCHER_SIZE,
             DeskApp::Sharing => SHARING_SIZE,
             DeskApp::Access => ACCESS_SIZE,
@@ -803,6 +810,8 @@ pub const ACCESS_SIZE: (usize, usize) = (640, 600);
 pub const AUDIT_SIZE: (usize, usize) = (760, 520);
 /// The Web card (WEB-001): a page wants width.
 pub const WEB_SIZE: (usize, usize) = (860, 600);
+/// A program's card (PROC-005), until the program's views say otherwise.
+pub const PROGRAM_SIZE: (usize, usize) = (480, 420);
 /// Files' Share chip: open the Sharing card for the selected document.
 pub const KEY_SHARE: u8 = 0xA1;
 
@@ -1363,6 +1372,15 @@ impl DeskWindow {
     /// on its state (GFX-057).
     /// The header's x closes every card, so no chip says Close too
     /// (GFX-099) -- except a prompt's, where Close means close the prompt.
+    /// What the bar and the card's ghost call it: the app, or for a
+    /// program's card, the program (PROC-005).
+    pub fn label(&self) -> String {
+        match &self.state {
+            AppState::Program(card) => card.name.clone(),
+            _ => self.app.name().to_string(),
+        }
+    }
+
     pub fn actions(&self) -> Vec<(String, u8)> {
         match &self.state {
             AppState::Notepad(notepad) if notepad.browsing_history() => alloc::vec![
@@ -1411,6 +1429,8 @@ impl DeskWindow {
             // is only for what the card does not draw -- the Calculator's
             // C, the Timer's Start and Reset, the Calendar's arrows.
             AppState::Calculator(_) => Vec::new(),
+            // A program draws its own controls (PROC-005).
+            AppState::Program(_) => Vec::new(),
             AppState::Calendar(_) => {
                 alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
             }
@@ -1910,6 +1930,8 @@ pub enum AppState {
     /// Boxed: a page, its cache and its history are far bigger than any
     /// other card's state, and every card would pay for them.
     Web(alloc::boxed::Box<crate::web::WebView>),
+    /// A program in ring 3 draws it (PROC-005).
+    Program(crate::program_card::ProgramCard),
 }
 
 /// Where screen pixel `(px, py)` falls in the canvas of a card with
@@ -2720,6 +2742,9 @@ pub struct Desk {
     overview_since: Option<u64>,
     /// Sounds to play, handed to the kernel on the next tick (GFX-087).
     pending_sounds: Vec<Sound>,
+    /// Events for programs' cards, by thread (PROC-005): keys, clicks,
+    /// closing. Taken by the kernel with `take_program_events`.
+    program_events: Vec<(u32, app_protocol::Event)>,
     /// Ctrl is held (GFX-093): the chips say their keys.
     ctrl_held: bool,
     /// Resting (GFX-092): the desk shows only the time until a key or
@@ -2788,6 +2813,7 @@ impl Desk {
             motion_clock: 0,
             overview_since: None,
             pending_sounds: Vec::new(),
+            program_events: Vec::new(),
             resting: false,
             sign_in: None,
             person: None,
@@ -3365,6 +3391,63 @@ impl Desk {
         self.focus
     }
 
+    /// Open a card for program `thread` (PROC-005), in front and focused.
+    pub fn open_program(&mut self, thread: u32, name: &str) -> ViewId {
+        let id = self.launch(DeskApp::Program);
+        if let Some(window) = self.window_mut(id) {
+            window.state = AppState::Program(crate::program_card::ProgramCard::new(thread, name));
+        }
+        id
+    }
+
+    /// A view program `thread` presented, for its card.
+    pub fn program_view(&mut self, thread: u32, bytes: &[u8]) {
+        for window in &mut self.windows {
+            if let AppState::Program(card) = &mut window.state {
+                if card.thread == thread {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    card.set_view(bytes, w, h);
+                }
+            }
+        }
+    }
+
+    /// Program `thread` has ended, as `how` says: its card closes, and a
+    /// program the kernel ended leaves a notice.
+    pub fn program_ended(&mut self, thread: u32, how: &str, now: u64) {
+        let ids: Vec<ViewId> = self
+            .windows
+            .iter()
+            .filter(|w| matches!(&w.state, AppState::Program(c) if c.thread == thread))
+            .map(|w| w.id)
+            .collect();
+        for id in &ids {
+            self.close(*id);
+        }
+        // It is gone: nothing more to tell it.
+        self.program_events.retain(|(t, _)| *t != thread);
+        if !ids.is_empty() && how.contains("ended by the kernel") {
+            self.notify(NoticeLevel::Warning, how.to_string(), now);
+        }
+    }
+
+    /// Events for programs' cards since last asked. A card whose size
+    /// its program has not been told says so first, so a program always
+    /// knows its canvas before its keys.
+    pub fn take_program_events(&mut self) -> Vec<(u32, app_protocol::Event)> {
+        let mut events = Vec::new();
+        for window in &mut self.windows {
+            let (w, h) = Self::canvas_size(window.bounds);
+            if let AppState::Program(card) = &mut window.state {
+                if let Some(event) = card.resized(w, h) {
+                    events.push((card.thread, event));
+                }
+            }
+        }
+        events.append(&mut self.program_events);
+        events
+    }
+
     pub fn window(&self, id: ViewId) -> Option<&DeskWindow> {
         self.windows.iter().find(|w| w.id == id)
     }
@@ -3449,6 +3532,8 @@ impl Desk {
                 DeskApp::Now => AppState::Now,
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
                 DeskApp::Calculator => AppState::Calculator(Calculator::new()),
+                // `open_program` names the program it is for.
+                DeskApp::Program => AppState::Program(crate::program_card::ProgramCard::new(0, "")),
                 DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
                 DeskApp::Timer => AppState::Timer(TimerView::new()),
                 // Seeded from the clock and the launch count: no two games
@@ -3921,6 +4006,7 @@ impl Desk {
                 "Timer".to_string(),
                 alloc::vec![crate::timer::format_ticks(timer.shown_ticks())],
             ),
+            AppState::Program(card) => (card.title(), alloc::vec![card.footer()]),
             AppState::Tiles(game) => (
                 "Tiles".to_string(),
                 alloc::vec![alloc::format!("score {}", game.score())],
@@ -4472,6 +4558,12 @@ impl Desk {
     }
 
     pub fn close(&mut self, id: ViewId) {
+        // A program's card closing tells the program (PROC-005).
+        if let Some(AppState::Program(card)) = self.window(id).map(|w| &w.state) {
+            let thread = card.thread;
+            self.program_events
+                .push((thread, app_protocol::Event::Closed));
+        }
         if self.window(id).map(|w| w.app) == Some(DeskApp::Look) {
             self.look_preview = None;
         }
@@ -4483,7 +4575,7 @@ impl Desk {
             if let Some(window) = self.window(id) {
                 let from = motion_bounds(&self.motions, self.motion_clock, id, window.bounds);
                 self.ghosts.push(Ghost {
-                    title: window.app.name().to_string(),
+                    title: window.label(),
                     z: window.z,
                     from,
                     start: self.motion_clock,
@@ -4853,6 +4945,25 @@ impl Desk {
                                         calc.press(key as char);
                                         clicked = true;
                                     }
+                                }
+                            }
+                            // A program's buttons (PROC-005): the hit is the
+                            // key the button stands for, and it is the program's.
+                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
+                                let palette = crate::widgets::Palette::from_theme(&self.theme());
+                                let hit = self.window(*target).and_then(|w| match &w.state {
+                                    AppState::Program(card) => {
+                                        let (cw, ch) = Self::canvas_size(w.bounds);
+                                        card.ui(cw, ch, palette, None)
+                                            .hit(x, y)
+                                            .map(|key| (card.thread, key))
+                                    }
+                                    _ => None,
+                                });
+                                if let Some((thread, key)) = hit {
+                                    self.program_events
+                                        .push((thread, app_protocol::Event::Key(key)));
+                                    clicked = true;
                                 }
                             }
                             // Calendar: a day cell or a month button, by
@@ -5786,6 +5897,17 @@ impl Desk {
                 }
                 (None, calc.handle_byte(byte))
             }
+            // Every other key is the program's (PROC-005).
+            AppState::Program(card) => {
+                if byte == crate::notepad::CTRL_W {
+                    self.close(id);
+                    return (None, true);
+                }
+                let thread = card.thread;
+                self.program_events
+                    .push((thread, app_protocol::Event::Key(byte)));
+                (None, true)
+            }
             AppState::Calendar(calendar) => match calendar.handle_byte(byte) {
                 CalendarEffect::None => (None, false),
                 CalendarEffect::Redraw => (None, true),
@@ -6448,6 +6570,11 @@ impl Desk {
                     graphics = Some(calc.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), "Calculator".to_string(), calc.footer(), None)
                 }
+                AppState::Program(card) => {
+                    let (w, h) = Self::canvas_size(window.bounds);
+                    graphics = Some(card.ui(w, h, palette, hover).into_ops());
+                    (Vec::new(), card.title(), card.footer(), None)
+                }
                 AppState::Calendar(calendar) => {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(calendar.ui(w, h, palette, hover).into_ops());
@@ -6813,7 +6940,7 @@ impl Desk {
                     n => alloc::format!("{}   -   {n} open", app.name()),
                 }
             }
-            (None, Some(w)) => w.app.name().to_string(),
+            (None, Some(w)) => w.label(),
             (None, None) if !self.windows.iter().any(|w| self.on_stage(w)) => {
                 "PandaGen   -   type to search, Ctrl+Space for everything".to_string()
             }
@@ -7211,6 +7338,67 @@ mod tests {
         // The Apps grid and the dock have eleven apps.
         assert_eq!(DeskApp::ALL.len(), 11);
         assert!(DeskApp::Web.picture(64).is_some());
+    }
+
+    #[test]
+    fn a_programs_card_carries_its_views_and_its_keys() {
+        use app_protocol::{Area, Event, Kind, Op, Role, ViewWriter};
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.open_program(7, "tally");
+        assert_eq!(desk.focus(), Some(id));
+        assert_eq!(desk.window(id).unwrap().label(), "tally");
+        assert!(!desk.layout_text().contains("Program"), "not restored");
+        // First the program hears its size; then every key is its own.
+        desk.handle_key(b'+');
+        let events = desk.take_program_events();
+        assert!(matches!(events[0], (7, Event::Size { .. })));
+        assert_eq!(events[1], (7, Event::Key(b'+')));
+        assert!(
+            desk.take_program_events().is_empty(),
+            "the size is told once"
+        );
+        // Its view titles the card.
+        let mut buf = [0u8; 256];
+        let mut view = ViewWriter::new(&mut buf, "Tally: 1", "");
+        view.op(Op::Button {
+            area: Area::new(0, 0, 40, 40),
+            kind: Kind::Primary,
+            key: b'+',
+            label: "+",
+        })
+        .op(Op::Text {
+            x: 50,
+            y: 0,
+            role: Role::Text,
+            scale: 2,
+            text: "1",
+        });
+        desk.program_view(7, view.finish().unwrap());
+        let windows = desk.windows("", true, None);
+        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        assert_eq!(card.frame.title.as_deref(), Some("Tally: 1"));
+        // Closing it tells the program.
+        desk.handle_key(crate::notepad::CTRL_W);
+        assert!(desk.window(id).is_none());
+        assert_eq!(desk.take_program_events(), alloc::vec![(7, Event::Closed)]);
+    }
+
+    #[test]
+    fn a_program_the_kernel_ends_takes_its_card_and_leaves_a_notice() {
+        let mut desk = Desk::new(1280, 800);
+        let id = desk.open_program(9, "crashy");
+        let before = desk.notice_log.len();
+        desk.program_ended(9, "crashy: ended by the kernel: it touched 0x0", 5);
+        assert!(desk.window(id).is_none());
+        assert!(
+            desk.take_program_events().is_empty(),
+            "nothing to tell the gone"
+        );
+        assert_eq!(desk.notice_log.len(), before + 1);
+        // One that exited quietly leaves none.
+        desk.open_program(10, "tidy");
+        desk.program_ended(10, "tidy: exited with 0", 6);
+        assert_eq!(desk.notice_log.len(), before + 1);
     }
 
     #[test]

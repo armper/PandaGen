@@ -6,6 +6,7 @@ members = [
     "entropy",
     "program_image",
     "pandagen_app",
+    "app_protocol",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

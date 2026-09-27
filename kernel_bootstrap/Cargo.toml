@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 program_image = { path = "../program_image" }
+app_protocol = { path = "../app_protocol", features = ["decode"] }
 editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }
 console_vga = { path = "../console_vga", default-features = false, optional = true }

@@ -35,7 +35,13 @@ pub mod call {
     pub const SEND: u64 = 3;
     pub const TIME: u64 = 4;
     pub const DROP: u64 = 5;
+    pub const PRESENT: u64 = 6;
+    pub const POLL: u64 = 7;
+    pub const WAIT: u64 = 8;
 }
+
+/// What a card shows and what happens to it (`app_protocol`).
+pub use app_protocol::{Area, Event, Kind, Op, Role, ViewError, ViewWriter, VIEW_MAX};
 
 /// Most bytes one `send` carries.
 pub const SEND_MAX: usize = 256;
@@ -186,6 +192,78 @@ impl Line {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+
+    pub fn as_str(&self) -> &str {
+        // Only whole characters are ever written.
+        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+    }
+}
+
+/// Format into a [`Line`]: `line!("{n} left")`.
+#[macro_export]
+macro_rules! line {
+    ($($arg:tt)*) => {{
+        let mut line = $crate::Line::new();
+        let _ = core::fmt::Write::write_fmt(&mut line, format_args!($($arg)*));
+        line
+    }};
+}
+
+/// The program's card on the desk (PROC-005), when it asked for one.
+///
+/// It describes what the card shows with [`ViewWriter`] and hands the
+/// view to [`Card::present`]; the desk draws it in the desk's theme.
+/// Keys typed into the card and buttons clicked in it come back as
+/// [`Event::Key`], the card's size as [`Event::Size`] (first, and on
+/// every change), and its closing as [`Event::Closed`], after which the
+/// program has two seconds to finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Card(pub Handle);
+
+impl Card {
+    /// Show `view` (the bytes [`ViewWriter::finish`] gives).
+    pub fn present(&self, view: &[u8]) -> Result<(), Error> {
+        check(syscall(
+            call::PRESENT,
+            (self.0).0,
+            view.as_ptr() as u64,
+            view.len() as u64,
+        ))
+        .map(|_| ())
+    }
+
+    /// The next event, if one is waiting.
+    pub fn poll(&self) -> Option<Event> {
+        let mut bytes = [0u8; app_protocol::EVENT_BYTES];
+        match check(syscall(
+            call::POLL,
+            (self.0).0,
+            bytes.as_mut_ptr() as u64,
+            0,
+        )) {
+            Ok(1) => Event::decode(&bytes),
+            _ => None,
+        }
+    }
+
+    /// The next event, sleeping until there is one.
+    pub fn next_event(&self) -> Event {
+        loop {
+            if let Some(event) = self.poll() {
+                return event;
+            }
+            syscall(call::WAIT, 0, 0, 0);
+        }
+    }
+
+    /// The next event, or `None` after `ms` milliseconds without one.
+    pub fn event_within(&self, ms: u64) -> Option<Event> {
+        if let Some(event) = self.poll() {
+            return Some(event);
+        }
+        syscall(call::WAIT, ms.max(1), 0, 0);
+        self.poll()
+    }
 }
 
 impl fmt::Write for Line {
@@ -243,6 +321,13 @@ mod tests {
         assert_eq!(check(-2), Err(Error::NoSuchHandle));
         assert_eq!(check(-3), Err(Error::BadPointer));
         assert_eq!(check(-99), Err(Error::Other(-99)));
+    }
+
+    #[test]
+    fn line_formats_without_a_heap() {
+        let n = 42;
+        let l = line!("{n} left");
+        assert_eq!(l.as_str(), "42 left");
     }
 
     #[test]

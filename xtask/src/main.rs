@@ -1039,7 +1039,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 2 images (primes, ticker)".to_string(),
+        "programs: 3 images (primes, ticker, tally)".to_string(),
         "--expect-serial".to_string(),
         "primes   an image:".to_string(),
         "--expect-serial".to_string(),
@@ -1052,6 +1052,32 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "ticker: handle 5: not mine, so not there".to_string(),
         "--expect-serial".to_string(),
         "ticker: exited with 0".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
+    // A program's card (PROC-005): `tally` draws its card from ring 3;
+    // two clicks on its + (the pointer moved there from the middle of the
+    // screen, where a blank disk's desk puts the card's button) and a
+    // Space count three; closing the card tells the program, which says
+    // goodbye and exits.
+    title = "a program's card: drawn from ring 3, clicked and typed into".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,u,n,spc,t,a,l,l,y,ret,sleep:2,mouse:180;22,sleep:1,mbtn:1,mbtn:0,sleep:1,mbtn:1,mbtn:0,sleep:1,spc,sleep:1,ctrl-w,sleep:3".to_string(),
+        "--out".to_string(),
+        "dist/qemu_program_card".to_string(),
+        "--expect-serial".to_string(),
+        "run: tally is thread 1, in ring 3, with a card on the desk".to_string(),
+        "--expect-serial".to_string(),
+        "tally: counted to 3; goodbye".to_string(),
+        "--expect-serial".to_string(),
+        "tally: exited with 0".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL EXCEPTION".to_string(),
         "--forbid-serial".to_string(),
@@ -2440,6 +2466,11 @@ fn build_kernel(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
     ("primes", &[program_image::Ask::Console]),
     ("ticker", &[program_image::Ask::Console]),
+    // A card of its own (PROC-005): handle 0 the console, 1 the card.
+    (
+        "tally",
+        &[program_image::Ask::Console, program_image::Ask::Card],
+    ),
 ];
 
 /// Build every program for the machine and turn each into an image.

@@ -56,18 +56,22 @@ pub const EXECUTE: u8 = 2;
 pub enum Ask {
     /// Lines to the Terminal that started it.
     Console = 1,
+    /// A card on the desk that the program draws (`app_protocol`).
+    Card = 2,
 }
 
 impl Ask {
     pub fn from_u16(n: u16) -> Option<Ask> {
         match n {
             1 => Some(Ask::Console),
+            2 => Some(Ask::Card),
             _ => None,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Ask::Console => "console",
+            Ask::Card => "a card",
         }
     }
 }

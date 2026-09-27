@@ -41,6 +41,7 @@ use hal_x86_64::user_space::UserSpace;
 
 use crate::sched::{Scheduler, State, MAX_THREADS};
 use crate::syscall_abi::{Call, End, Error, Handles, SEND_MAX};
+use app_protocol::{EVENT_BYTES, VIEW_MAX};
 
 /// A thread's stack, in bytes.
 pub const STACK_BYTES: usize = 64 * 1024;
@@ -284,8 +285,9 @@ pub fn exit() -> ! {
 
 /// Free the stacks of threads that have finished, and hand `free` the
 /// address spaces of programs that have, saying how each ended. The
-/// desk calls this; the frees happen with interrupts on.
-pub fn reap(mut free: impl FnMut(UserSpace)) {
+/// desk calls this; the frees happen with interrupts on. Returns the
+/// programs that ended, with how, for their cards.
+pub fn reap(mut free: impl FnMut(UserSpace)) -> Vec<(u32, String)> {
     let mut freed: [Option<Box<[u64]>>; MAX_THREADS] = [NO_STACK; MAX_THREADS];
     let mut ended: [Option<Program>; MAX_THREADS] = [NO_PROGRAM; MAX_THREADS];
     with_table(|t| {
@@ -297,12 +299,16 @@ pub fn reap(mut free: impl FnMut(UserSpace)) {
         }
     });
     drop(freed);
+    let mut gone = Vec::new();
     for program in ended.into_iter().flatten() {
         let mut why = String::new();
         let _ = program.end.unwrap_or(End::Stopped).describe(&mut why);
-        note(alloc::format!("{}: {why}", program.name));
+        let line = alloc::format!("{}: {why}", program.name);
+        note(line.clone());
         free(program.space);
+        gone.push((program.id, line));
     }
+    gone
 }
 
 /// The table, as lines for `threads` in the Terminal.
@@ -422,10 +428,74 @@ fn is_prime(n: u64) -> bool {
 /// A thread that is a program: its address space, what it holds, and
 /// (once it has ended) why.
 struct Program {
+    id: u32,
     name: &'static str,
     space: UserSpace,
     handles: Handles,
     end: Option<End>,
+    /// Events for its card, oldest first (PROC-005): a fixed ring, since
+    /// they are put here with interrupts off.
+    events: [[u8; EVENT_BYTES]; EVENTS_MAX],
+    events_head: usize,
+    events_len: usize,
+    /// Asleep in `wait`, to be woken by the next event.
+    waiting: bool,
+}
+
+/// Events a program's card holds for it before the oldest are dropped.
+const EVENTS_MAX: usize = 32;
+
+impl Program {
+    fn push_event(&mut self, event: [u8; EVENT_BYTES]) -> bool {
+        if self.events_len == EVENTS_MAX {
+            return false;
+        }
+        self.events[(self.events_head + self.events_len) % EVENTS_MAX] = event;
+        self.events_len += 1;
+        true
+    }
+
+    fn peek_event(&self) -> Option<[u8; EVENT_BYTES]> {
+        (self.events_len > 0).then(|| self.events[self.events_head])
+    }
+
+    fn pop_event(&mut self) {
+        if self.events_len > 0 {
+            self.events_head = (self.events_head + 1) % EVENTS_MAX;
+            self.events_len -= 1;
+        }
+    }
+}
+
+/// Views programs have presented, for the desk to take: the latest per
+/// program (an older one not yet drawn is never worth drawing).
+static VIEWS: hal_x86_64::SpinLock<Vec<(u32, Vec<u8>)>> = hal_x86_64::SpinLock::new(Vec::new());
+
+/// The views presented since last asked, per program.
+pub fn take_views() -> Vec<(u32, Vec<u8>)> {
+    match VIEWS.try_lock() {
+        Some(mut views) if !views.is_empty() => core::mem::take(&mut *views),
+        _ => Vec::new(),
+    }
+}
+
+/// An event for program `id`'s card; wakes it if it is waiting for one.
+/// Whether it was taken (not when the program is gone or its ring full).
+pub fn post_event(id: u32, event: [u8; EVENT_BYTES]) -> bool {
+    with_table(|t| {
+        let Some(slot) = t.sched.slot_of(id) else {
+            return false;
+        };
+        let Some(program) = t.programs[slot].as_mut() else {
+            return false;
+        };
+        let taken = program.push_event(event);
+        if program.waiting {
+            program.waiting = false;
+            t.sched.wake(slot);
+        }
+        taken
+    })
 }
 
 /// The saved frame at `rsp` was interrupted in ring 3: the program was
@@ -549,6 +619,70 @@ pub fn on_syscall(rsp: u64) -> u64 {
             });
             rsp
         }
+        Call::Present { handle, ptr, len } => {
+            let program = t.programs[current].as_ref().expect("checked above");
+            if let Err(e) = program.handles.check_card(handle, len) {
+                set_rax(e.to_rax());
+                return rsp;
+            }
+            let mut buffer = [0u8; VIEW_MAX];
+            let len = len as usize;
+            let memory = crate::programs::Direct::new(t.hhdm);
+            if !program.space.read_into(&memory, ptr, &mut buffer[..len]) {
+                set_rax(Error::BadPointer.to_rax());
+                return rsp;
+            }
+            let id = program.id;
+            // Keeping it takes the heap: interrupts on, as for `send`.
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            {
+                let bytes = buffer[..len].to_vec();
+                let mut views = VIEWS.lock();
+                views.retain(|(of, _)| *of != id);
+                views.push((id, bytes));
+            }
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            set_rax(0);
+            rsp
+        }
+        Call::Poll { handle, ptr } => {
+            let hhdm = t.hhdm;
+            let program = t.programs[current].as_mut().expect("checked above");
+            if let Err(e) = program.handles.check_card(handle, 0) {
+                set_rax(e.to_rax());
+                return rsp;
+            }
+            let Some(event) = program.peek_event() else {
+                set_rax(0);
+                return rsp;
+            };
+            let mut memory = crate::programs::Direct::new(hhdm);
+            if !program.space.write(&mut memory, ptr, &event) {
+                set_rax(Error::BadPointer.to_rax());
+                return rsp;
+            }
+            program.pop_event();
+            set_rax(1);
+            rsp
+        }
+        Call::Wait { ms } => {
+            set_rax(0);
+            let program = t.programs[current].as_mut().expect("checked above");
+            if program.events_len > 0 {
+                return rsp;
+            }
+            program.waiting = true;
+            let until = if ms == 0 {
+                u64::MAX
+            } else {
+                now + ms.div_ceil(10).max(1)
+            };
+            t.sched.sleep_current(until);
+            let next = t.sched.switch(now, rsp, false);
+            enter(t, t.sched.current());
+            next
+        }
         Call::Send { handle, ptr, len } => {
             let program = t.programs[current].as_ref().expect("checked above");
             if let Err(e) = program.handles.check_send(handle, len) {
@@ -602,9 +736,15 @@ pub fn spawn_program(
     let added = with_table(|t| {
         let (slot, id) = t.sched.add(name, rsp)?;
         let (stack, space) = parts.take().expect("once");
+        let program_id = id;
         t.stacks[slot] = Some(stack);
         t.tops[slot] = top;
         t.programs[slot] = Some(Program {
+            id: program_id,
+            events: [[0; EVENT_BYTES]; EVENTS_MAX],
+            events_head: 0,
+            events_len: 0,
+            waiting: false,
             name,
             space,
             handles,

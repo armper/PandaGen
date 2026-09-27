@@ -142,6 +142,15 @@ impl Scheduler {
         }
     }
 
+    /// Wake slot `slot` if it is asleep (an event came for it).
+    pub fn wake(&mut self, slot: usize) {
+        if let Some(t) = self.slots.get_mut(slot).and_then(Option::as_mut) {
+            if matches!(t.state, State::Sleeping(_)) {
+                t.state = State::Ready;
+            }
+        }
+    }
+
     /// The running thread is done (the desk never is).
     pub fn exit_current(&mut self) {
         self.stop(self.current);
@@ -357,6 +366,12 @@ mod tests {
         assert!(s.others_ready(10));
         assert_eq!(s.switch(10, 0x1200, true), 0xA100, "awake");
         assert_eq!(s.current(), a);
+        // Woken early, by an event.
+        s.sleep_current(u64::MAX);
+        s.switch(11, 0xA200, false);
+        assert!(!s.others_ready(1_000));
+        s.wake(a);
+        assert_eq!(s.switch(12, 0x1300, true), 0xA200);
         // The desk asked to sleep: ignored.
         let mut d = Scheduler::new();
         d.sleep_current(100);

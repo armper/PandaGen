@@ -44,6 +44,41 @@ fn main(console: Console) -> u64 {
 
 A panic sends `panicked: ...` to the console and exits with 101.
 
+## A card on the desk
+
+A program that asks for a card (`program_image::Ask::Card`) gets one
+when it runs: `run tally` opens a card for it. The program never draws
+pixels. It describes the card with `ViewWriter`: a title, a footer, and
+fills, outlines, text and buttons, in colour *roles* (surface, raised,
+text, muted, accent, ...). The desk draws that with its own widgets in
+its own theme. A button stands for a key, so a click and a key press are
+the same event to the program, and anything a program does works with
+the mouse alone or the keyboard alone.
+
+```rust
+const CARD: Card = Card(Handle(1)); // handles come in the order asked
+
+loop {
+    match CARD.next_event() {          // sleeps until something happens
+        Event::Size { w, h } => { /* lay out for w x h */ }
+        Event::Key(b'+') => count += 1, // typed, or the "+" button clicked
+        Event::Closed => return 0,      // two seconds to finish
+        _ => continue,
+    }
+    let mut buf = [0u8; 1024];
+    let mut view = ViewWriter::new(&mut buf, "Tally", "+ adds one");
+    view.op(Op::Button { area: Area::new(16, 16, 80, 40), kind: Kind::Primary, key: b'+', label: "+" });
+    CARD.present(view.finish().unwrap()).ok();
+}
+```
+
+The desk checks every view against the card before drawing it: every
+widget inside the canvas, every text valid, short and free of control
+characters, at most 256 widgets and 8 KiB. A view that fails is refused,
+the card keeps the last good one, and its footer says why. A program the
+kernel ends takes its card with it, and the desk leaves a notice saying
+why.
+
 ## Adding one
 
 1. Copy `apps/ticker` to `apps/<name>` and change the package name.
@@ -60,6 +95,7 @@ A panic sends `panicked: ...` to the console and exits with 101.
 | touching the kernel's memory               | a page fault; the kernel ends the program             |
 | `cli`, `hlt`, `in`, `out`, `int` (but 0x80) | a general-protection fault; the kernel ends it        |
 | looping forever                            | it is preempted like any thread, and `stop` ends it   |
+| drawing outside its card, or spoofing text | the view is refused; the last good one stays          |
 
 The machine carries on in every case. How a program ended is shown in
 the Terminal: `exited with 0`, `stopped`, or `ended by the kernel: ...`.

@@ -20,6 +20,13 @@
 //! | 3   | `send(handle, ptr, len)` | bytes sent, or an error      |
 //! | 4   | `time()`                 | milliseconds since boot      |
 //! | 5   | `drop(handle)`           | 0, or an error               |
+//! | 6   | `present(card, ptr, len)`| 0: the card shows the view   |
+//! | 7   | `poll(card, ptr)`        | 1: an event at ptr; 0: none  |
+//! | 8   | `wait(ms)`               | 0, at an event or after `ms` |
+//!
+//! `present`, `poll` and `wait` are a program's card (PROC-005): views
+//! out (`app_protocol`, at most `VIEW_MAX` bytes), events in, eight bytes
+//! each. `wait(0)` waits for an event however long it takes.
 //!
 //! Errors are small negative numbers (as `i64`), so a program checks the
 //! sign. It is kept free of the machine so it runs under `cargo test`.
@@ -39,6 +46,9 @@ pub enum Call {
     Send { handle: u64, ptr: u64, len: u64 },
     Time,
     Drop { handle: u64 },
+    Present { handle: u64, ptr: u64, len: u64 },
+    Poll { handle: u64, ptr: u64 },
+    Wait { ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +87,16 @@ impl Call {
             },
             4 => Call::Time,
             5 => Call::Drop { handle: rdi },
+            6 => Call::Present {
+                handle: rdi,
+                ptr: rsi,
+                len: rdx,
+            },
+            7 => Call::Poll {
+                handle: rdi,
+                ptr: rsi,
+            },
+            8 => Call::Wait { ms: rdi },
             _ => return Err(Error::NoSuchCall),
         })
     }
@@ -90,6 +110,8 @@ pub enum Capability {
     /// A channel it may only look at (to show a held capability without
     /// the right to send refuses rather than vanishes).
     ReadOnlyConsole,
+    /// Its card on the desk (PROC-005).
+    Card,
 }
 
 impl Capability {
@@ -148,6 +170,17 @@ impl Handles {
             return Err(Error::TooBig);
         }
         Ok(cap)
+    }
+
+    /// Check a card call: the handle is a card, the view not too big.
+    pub fn check_card(&self, handle: u64, len: u64) -> Result<(), Error> {
+        if self.get(handle)? != Capability::Card {
+            return Err(Error::NotAllowed);
+        }
+        if len > app_protocol::VIEW_MAX as u64 {
+            return Err(Error::TooBig);
+        }
+        Ok(())
     }
 
     pub fn count(&self) -> usize {
@@ -227,6 +260,22 @@ mod tests {
         assert_eq!(h.check_send(1, 10), Err(Error::NoSuchHandle));
         assert_eq!(h.check_send(u64::MAX, 10), Err(Error::NoSuchHandle));
         assert_eq!(h.check_send(0, SEND_MAX as u64 + 1), Err(Error::TooBig));
+    }
+
+    #[test]
+    fn card_calls_need_a_card() {
+        let mut h = Handles::new();
+        let console = h.grant(Capability::Console).unwrap();
+        let card = h.grant(Capability::Card).unwrap();
+        assert_eq!(h.check_card(card, 100), Ok(()));
+        assert_eq!(h.check_card(console, 100), Err(Error::NotAllowed));
+        assert_eq!(h.check_card(9, 100), Err(Error::NoSuchHandle));
+        assert_eq!(
+            h.check_card(card, app_protocol::VIEW_MAX as u64 + 1),
+            Err(Error::TooBig)
+        );
+        assert_eq!(h.check_send(card, 1), Err(Error::NotAllowed));
+        assert_eq!(Call::decode(8, 0, 0, 0), Ok(Call::Wait { ms: 0 }));
     }
 
     #[test]
