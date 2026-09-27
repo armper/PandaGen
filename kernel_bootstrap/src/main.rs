@@ -38,6 +38,7 @@ mod optimized_render;
 mod palette_overlay;
 mod present_policy;
 mod program_card;
+mod program_store;
 #[cfg(not(test))]
 mod programs;
 #[cfg(all(not(test), target_os = "none"))]
@@ -1731,6 +1732,66 @@ fn console_loop(serial: &mut serial::SerialPort, kernel: &Kernel) -> ! {
     }
 }
 
+/// A program's image as installed on disk (PROC-010), if it is there.
+#[cfg(all(not(test), target_os = "none"))]
+fn read_installed(
+    workspace: &mut workspace::WorkspaceSession,
+    name: &str,
+) -> Option<alloc::vec::Vec<u8>> {
+    let mut fs = workspace.take_filesystem()?;
+    let file = program_store::file_name(name);
+    // One in the bin is uninstalled: not run.
+    let installed = fs
+        .list_entries()
+        .map(|entries| entries.iter().any(|e| e.name == file && !e.trashed))
+        .unwrap_or(false);
+    let bytes = if installed {
+        fs.read_file_by_name(&file).ok()
+    } else {
+        None
+    };
+    workspace.set_filesystem(fs);
+    bytes
+}
+
+/// What `programs` shows (PROC-010): the programs installed on disk,
+/// each with what it asks for, then the built-in ones.
+#[cfg(all(not(test), target_os = "none"))]
+fn program_catalog(
+    workspace: &mut workspace::WorkspaceSession,
+) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    if let Some(mut fs) = workspace.take_filesystem() {
+        // Not the ones in the bin: they are uninstalled.
+        let files: alloc::vec::Vec<alloc::string::String> = fs
+            .list_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !e.trashed)
+            .map(|e| e.name)
+            .collect();
+        for name in program_store::installed(files.iter().map(|f| f.as_str())) {
+            let line = match fs
+                .read_file_by_name(&program_store::file_name(name))
+                .map_err(|_| alloc::string::String::from("unreadable"))
+                .and_then(|bytes| program_store::check(&bytes))
+            {
+                Ok(image) => alloc::format!("  {}", program_store::describe(&image)),
+                Err(why) => alloc::format!("  {name}: {why}"),
+            };
+            out.push(line);
+        }
+        workspace.set_filesystem(fs);
+    }
+    if out.is_empty() {
+        out.push(alloc::string::String::from("  (no programs installed)"));
+    }
+    for (name, what) in programs::CATALOG {
+        out.push(alloc::format!("  {name:<8} built in: {what}"));
+    }
+    out
+}
+
 /// Workspace loop - main interactive session
 /// Phase 64: This replaces the demo editor loop with a proper workspace prompt
 /// Phase 69: Now supports framebuffer console output
@@ -1860,6 +1921,41 @@ fn workspace_loop(
     // have not finished by then (PROC-005).
     #[cfg(all(not(test), target_os = "none"))]
     let mut program_closing: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+    // Installs whose image is being fetched (PROC-010): the fetch's token
+    // and the URL. Tokens have the top bit set, apart from the Web card's.
+    #[cfg(all(not(test), target_os = "none"))]
+    let mut install_waiting: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
+    #[cfg(all(not(test), target_os = "none"))]
+    let mut install_next: u64 = 1 << 63;
+    // Programs on disk (PROC-010): what the boot image carries is
+    // installed there -- or, if the disk's copy differs, updated, the old
+    // one kept as a version -- before anything runs, so programs are
+    // always run from the disk.
+    #[cfg(all(not(test), target_os = "none"))]
+    if let Some(mut fs) = workspace.take_filesystem() {
+        let (mut installed, mut updated) = (0, 0);
+        for (name, bytes) in programs::boot_images() {
+            let file = program_store::file_name(name);
+            let on_disk = fs.read_file_by_name(&file).ok();
+            let decision = program_store::seed(on_disk.as_deref(), bytes);
+            if decision != program_store::Seed::Keep
+                && fs
+                    .write_named(&file, bytes, 0, Some(program_store::KIND))
+                    .is_ok()
+            {
+                if decision == program_store::Seed::Install {
+                    installed += 1;
+                } else {
+                    updated += 1;
+                }
+            }
+        }
+        workspace.set_filesystem(fs);
+        kprintln!(
+            serial,
+            "programs: from the boot image, {installed} installed, {updated} updated"
+        );
+    }
     // The Web card whose fetch is out, and what it asked for (WEB-001).
     #[cfg_attr(
         not(all(not(test), target_os = "none")),
@@ -2123,9 +2219,55 @@ fn workspace_loop(
                 }
             }
             // `run` (PROC-002): a program in an address space of its own.
-            if let Some(name) = workspace.take_program_request() {
+            let request = workspace.take_program_request();
+            if let Some(workspace::ProgramRequest::Catalog) = request {
+                for line in program_catalog(&mut workspace) {
+                    workspace.emit_thread_line(serial, &line);
+                }
+                output_dirty = true;
+            }
+            if let Some(workspace::ProgramRequest::Install(url)) = &request {
+                let token = install_next;
+                install_next += 1;
+                let started = match NET.lock().as_mut() {
+                    Some(net) => net.start_web_fetch(url, token, get_tick_count()),
+                    None => Err(alloc::string::String::from("install: no network")),
+                };
+                let line = match started {
+                    Ok(()) => {
+                        install_waiting.push((token, url.clone()));
+                        alloc::format!("install: fetching {url}")
+                    }
+                    Err(why) => why,
+                };
+                workspace.emit_thread_line(serial, &line);
+                output_dirty = true;
+            }
+            if let Some(workspace::ProgramRequest::Uninstall(name)) = &request {
+                let file = program_store::file_name(name);
+                let line = match workspace.take_filesystem() {
+                    Some(fs) => {
+                        let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                        let done = io.set_trashed(&file, true);
+                        workspace.set_filesystem(io.into_filesystem());
+                        match done {
+                            Ok(()) => alloc::format!(
+                                "uninstall: {name} is in the bin (Files can bring it back)"
+                            ),
+                            Err(_) => alloc::format!("uninstall: no program {name:?} on disk"),
+                        }
+                    }
+                    None => alloc::string::String::from("uninstall: no disk"),
+                };
+                workspace.emit_thread_line(serial, &line);
+                output_dirty = true;
+            }
+            if let Some(workspace::ProgramRequest::Run(name)) = request {
+                let installed = read_installed(&mut workspace, &name);
                 let started = match (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut()) {
-                    (Some(hhdm), Some(frames)) => programs::run(&name, hhdm, frames),
+                    (Some(hhdm), Some(frames)) => {
+                        programs::run(&name, installed.as_deref(), hhdm, frames)
+                    }
                     _ => Err(alloc::string::String::from("run: no memory for programs")),
                 };
                 let line = match started {
@@ -2162,14 +2304,21 @@ fn workspace_loop(
                 // Dock apps that are programs (PROC-006): the desk opened
                 // a card and asks for the program to take it.
                 for name in desk.take_program_runs() {
+                    let installed = read_installed(&mut workspace, &name);
                     let started = match (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut())
                     {
-                        (Some(hhdm), Some(frames)) => programs::run(&name, hhdm, frames),
+                        (Some(hhdm), Some(frames)) => {
+                            programs::run(&name, installed.as_deref(), hhdm, frames)
+                        }
                         _ => Err(alloc::string::String::from("run: no memory for programs")),
                     };
                     match started {
                         Ok(started) => {
-                            desk.open_program(started.id, started.name);
+                            // A card for it if it asked for one (from Files,
+                            // a program may not).
+                            if started.wants_card {
+                                desk.open_program(started.id, started.name);
+                            }
                             kprintln!(serial, "desk: {} is thread {}", started.name, started.id);
                         }
                         Err(why) => {
@@ -2295,6 +2444,43 @@ fn workspace_loop(
                 .and_then(|mut net| net.as_mut().map(|n| n.take_web_outcomes()))
                 .unwrap_or_default();
             for (request, outcome) in outcomes {
+                // An install's image (PROC-010): checked as the loader
+                // will check it, then kept on disk as `<name>.pgx`.
+                if let Some(at) = install_waiting.iter().position(|(t, _)| *t == request) {
+                    let (_, url) = install_waiting.remove(at);
+                    let line = match outcome {
+                        Err(why) => alloc::format!("install: {url}: {why}"),
+                        Ok(r) if r.status != 200 => {
+                            alloc::format!("install: {url} answered {} {}", r.status, r.reason)
+                        }
+                        Ok(r) => match program_store::check(&r.body) {
+                            Err(why) => why,
+                            Ok(image) => {
+                                let file = program_store::file_name(&image.name);
+                                let kept = workspace.take_filesystem().map(|mut fs| {
+                                    let kept = fs
+                                        .write_named(&file, &r.body, 0, Some(program_store::KIND))
+                                        .is_ok();
+                                    workspace.set_filesystem(fs);
+                                    kept
+                                });
+                                match kept {
+                                    Some(true) => alloc::format!(
+                                        "install: {} installed; `run {}` starts it",
+                                        program_store::describe(&image),
+                                        image.name
+                                    ),
+                                    _ => {
+                                        alloc::format!("install: {} could not be kept", image.name)
+                                    }
+                                }
+                            }
+                        },
+                    };
+                    workspace.emit_thread_line(serial, &line);
+                    output_dirty = true;
+                    continue;
+                }
                 let Some(at) = web_waiting.iter().position(|(r, _, _)| *r == request) else {
                     continue;
                 };

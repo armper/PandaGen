@@ -73,13 +73,58 @@ macro_rules! route_trace {
 /// The words Tab can finish at the prompt (KBD-012).
 fn command_words() -> Vec<&'static str> {
     let mut words = vec![
-        "help", "open", "list", "focus", "clear", "cls", "display", "pointer", "pipeline", "heap",
-        "cpus", "smp", "net", "gfx", "quit", "exit", "halt", "ls", "cat", "write", "boot", "mem",
-        "ticks", "editor", "fault", "fetch", "resolve", "random", "threads", "spin", "stop",
-        "after", "run", "programs",
+        "help",
+        "open",
+        "list",
+        "focus",
+        "clear",
+        "cls",
+        "display",
+        "pointer",
+        "pipeline",
+        "heap",
+        "cpus",
+        "smp",
+        "net",
+        "gfx",
+        "quit",
+        "exit",
+        "halt",
+        "ls",
+        "cat",
+        "write",
+        "boot",
+        "mem",
+        "ticks",
+        "editor",
+        "fault",
+        "fetch",
+        "resolve",
+        "random",
+        "threads",
+        "spin",
+        "stop",
+        "after",
+        "run",
+        "programs",
+        "install",
+        "uninstall",
     ];
     words.extend(crate::access_shell::WORDS);
     words
+}
+
+/// What the Terminal asked of programs (PROC-010), for the loop -- which
+/// has the filesystem and the network -- to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramRequest {
+    Run(String),
+    /// List what there is to run.
+    Catalog,
+    /// Fetch an image from this URL, check it, keep it.
+    Install(String),
+    /// Put a program's image in the bin.
+    Uninstall(String),
 }
 
 /// Component type in the workspace
@@ -256,7 +301,7 @@ pub struct WorkspaceSession {
     /// A `fetch` or `resolve` for the loop to hand the network (NET-033).
     net_request: Option<NetRequest>,
     /// A program `run` asked for (PROC-002), for the loop to start.
-    program_request: Option<String>,
+    program_request: Option<ProgramRequest>,
 }
 
 /// `fetch <url>`, `resolve <name> [server]`, or the same after `net`:
@@ -1031,18 +1076,20 @@ impl WorkspaceSession {
         // one to stop.
         // Programs (PROC-002): `run` starts one in ring 3; `programs`
         // lists what there is to run.
-        if cmd == "run" || cmd == "programs" {
+        if matches!(cmd, "run" | "programs" | "install" | "uninstall") {
             self.emit_command_line(serial, command.as_bytes());
-            match (cmd, parts.next()) {
-                ("run", Some(name)) => self.program_request = Some(String::from(name)),
-                ("run", None) => self.emit_line(serial, "Usage: run <program> (see `programs`)"),
-                _ =>
-                {
-                    #[cfg(not(test))]
-                    for line in crate::programs::catalog() {
-                        self.emit_line(serial, &line);
-                    }
+            let arg = parts.next().map(String::from);
+            match (cmd, arg) {
+                ("run", Some(name)) => self.program_request = Some(ProgramRequest::Run(name)),
+                ("install", Some(url)) => self.program_request = Some(ProgramRequest::Install(url)),
+                ("uninstall", Some(name)) => {
+                    self.program_request = Some(ProgramRequest::Uninstall(name))
                 }
+                ("programs", _) => self.program_request = Some(ProgramRequest::Catalog),
+                _ => self.emit_line(
+                    serial,
+                    "Usage: run <program> | programs | install <url> | uninstall <program>",
+                ),
             }
             return;
         }
@@ -1227,6 +1274,11 @@ impl WorkspaceSession {
                 self.emit_line(serial, "stop <id>      - Ask a thread to stop");
                 self.emit_line(serial, "run <program>  - Start a program in ring 3");
                 self.emit_line(serial, "programs       - The programs there are to run");
+                self.emit_line(
+                    serial,
+                    "install <url>  - Fetch a program and keep it on disk",
+                );
+                self.emit_line(serial, "uninstall <p>  - Put a program in the bin");
                 self.emit_line(serial, "gfx [stats|reset] - Show display path telemetry");
                 self.emit_line(serial, "quit           - Exit component");
                 self.emit_line(serial, "halt           - Halt system");
@@ -1713,7 +1765,7 @@ impl WorkspaceSession {
     }
 
     /// Take the program `run` asked for.
-    pub fn take_program_request(&mut self) -> Option<String> {
+    pub fn take_program_request(&mut self) -> Option<ProgramRequest> {
         self.program_request.take()
     }
 

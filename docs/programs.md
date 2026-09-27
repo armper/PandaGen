@@ -131,11 +131,34 @@ Every program runs within limits (`kernel_bootstrap/src/supervision.rs`):
   up and offers a "Start it again" button (or R). `apps/fragile` breaks
   when you press B, to show this.
 
+## Programs live on the disk
+
+A program is a document: its image, kept as `<name>.pgx` (of kind
+"program"), with versions like anything else. Files shows it as a
+Program, wearing its dock app's icon if it is one, and Enter on it runs
+it. Every run loads the program from the disk.
+
+- **From the boot image.** At boot, each program the boot image carries
+  is installed if the disk has none of that name, and updated (a new
+  version, the old one kept) if the disk's differs. The serial log says
+  how many: `programs: from the boot image, 8 installed, 0 updated`.
+- **Over the network.** `install <url>` fetches an image over HTTP or
+  HTTPS, checks it exactly as the loader will before running it, and
+  keeps it: `install: hello (16 KiB, asks for console) installed`. The
+  gauntlet serves every built image at `/programs/<name>.pgx`; `hello` is
+  built but left off the boot image to be installed this way.
+- **`uninstall <name>`** puts the program in the bin, where Files can
+  bring it back; a program in the bin does not run.
+- **`programs`** lists what is installed, each with what it asks for,
+  then the few built-in programs (`probe`, `crash`, `rogue`, `hog`),
+  which show what happens when a program breaks the rules.
+
 ## Adding one
 
 1. Copy `apps/ticker` to `apps/<name>` and change the package name.
 2. Add `("<name>", &[program_image::Ask::Console])` to `PROGRAMS` in
-   `xtask/src/main.rs`.
+   `xtask/src/main.rs` (and the name to `INSTALL_ONLY` to leave it off
+   the boot image, for `install`).
 3. `cargo xtask iso`, boot, and `run <name>` in a Terminal.
 
 ## What a program is refused

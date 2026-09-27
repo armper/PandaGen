@@ -192,7 +192,7 @@ pub fn catalog() -> Vec<String> {
 /// The built-in programs, by name, with what each shows.
 pub const CATALOG: &[(&str, &str)] = &[
     (
-        "hello",
+        "probe",
         "says hello three times; tries a handle and a pointer it was not given",
     ),
     ("crash", "writes to the kernel's memory"),
@@ -223,8 +223,8 @@ fn code_of(name: &str) -> Option<(&'static str, &'static [u8])> {
         };
         use core::ptr::addr_of;
         Some(match name {
-            "hello" => (
-                "hello",
+            "probe" => (
+                "probe",
                 span(addr_of!(user_hello_start), addr_of!(user_hello_end)),
             ),
             "crash" => (
@@ -250,21 +250,44 @@ fn code_of(_name: &str) -> Option<(&'static str, &'static [u8])> {
     None
 }
 
-/// Start the program `name`, holding one capability: lines to the
-/// Terminal, as handle 0. Its thread id, or why not.
+/// The images the machine booted with, to be installed on its disk
+/// (PROC-010).
+pub fn boot_images() -> Vec<(&'static str, &'static [u8])> {
+    IMAGES.lock().clone()
+}
+
+/// Names that last as long as the machine: a thread's name is
+/// `&'static str`, and a program run again reuses its name.
+static NAMES: hal_x86_64::SpinLock<Vec<&'static str>> = hal_x86_64::SpinLock::new(Vec::new());
+
+fn intern(name: &str) -> &'static str {
+    let mut names = NAMES.lock();
+    if let Some(known) = names.iter().find(|n| **n == name) {
+        return known;
+    }
+    let kept: &'static str = alloc::boxed::Box::leak(String::from(name).into_boxed_str());
+    names.push(kept);
+    kept
+}
+
+/// Start the program `name` (PROC-010): from its image on disk
+/// (`installed`, read by the caller, who has the filesystem), else from
+/// the boot image, else a built-in program. Its thread id, or why not.
 pub fn run(
     name: &str,
+    installed: Option<&[u8]>,
     hhdm: u64,
     frames: &mut crate::FrameAllocator,
 ) -> Result<Started, alloc::string::String> {
     // An image, else a built-in program: the image's pieces and asks, or
     // the built-in's code and the console.
-    let (name, image) = match image_named(name) {
-        Some((name, bytes)) => (
-            name,
-            Image::parse(bytes)
-                .map_err(|why| alloc::format!("run: {name} is damaged ({why:?})"))?,
-        ),
+    let image_bytes = installed.or_else(|| image_named(name).map(|(_, bytes)| bytes));
+    let (name, image) = match image_bytes {
+        Some(bytes) => {
+            let image = Image::parse(bytes)
+                .map_err(|why| alloc::format!("run: {name} is damaged ({why:?})"))?;
+            (intern(name), image)
+        }
         None => {
             let Some((name, code)) = code_of(name) else {
                 return Err(alloc::format!("run: no program {name:?} (try `programs`)"));

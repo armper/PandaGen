@@ -1011,17 +1011,17 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
         "--keys".to_string(),
-        "sleep:6,ctrl-t,sleep:2,r,u,n,spc,h,e,l,l,o,ret,sleep:3,r,u,n,spc,c,r,a,s,h,ret,sleep:1,r,u,n,spc,r,o,g,u,e,ret,sleep:1,r,u,n,spc,h,o,g,ret,sleep:1,t,h,r,e,a,d,s,ret,sleep:1,s,t,o,p,spc,4,ret,sleep:2,m,e,m,ret,sleep:1".to_string(),
+        "sleep:6,ctrl-t,sleep:2,r,u,n,spc,p,r,o,b,e,ret,sleep:3,r,u,n,spc,c,r,a,s,h,ret,sleep:1,r,u,n,spc,r,o,g,u,e,ret,sleep:1,r,u,n,spc,h,o,g,ret,sleep:1,t,h,r,e,a,d,s,ret,sleep:1,s,t,o,p,spc,4,ret,sleep:2,m,e,m,ret,sleep:1".to_string(),
         "--out".to_string(),
         "dist/qemu_programs".to_string(),
         "--expect-serial".to_string(),
-        "hello: hello from ring 3, in an address space of my own".to_string(),
+        "probe: hello from ring 3, in an address space of my own".to_string(),
         "--expect-serial".to_string(),
-        "hello: handle 7: there is no such thing".to_string(),
+        "probe: handle 7: there is no such thing".to_string(),
         "--expect-serial".to_string(),
-        "hello: the kernel's memory as my buffer: refused".to_string(),
+        "probe: the kernel's memory as my buffer: refused".to_string(),
         "--expect-serial".to_string(),
-        "hello: exited with 0".to_string(),
+        "probe: exited with 0".to_string(),
         "--expect-serial".to_string(),
         "crash: ended by the kernel: it touched 0xffff800000100000".to_string(),
         "--expect-serial".to_string(),
@@ -1044,7 +1044,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     // `pandagen_app`, shipped as boot modules, loaded from their images
     // into ring 3. One counts primes flat out; one sleeps between ticks
     // and finds a handle it was never given is not there.
-    title = "program images: Rust programs loaded from boot modules".to_string();
+    title = "program images: Rust programs from the boot image, run from the disk".to_string();
     let args = [
         "--port-base".to_string(),
         GAUNTLET_PORT_BASE.to_string(),
@@ -1056,7 +1056,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "programs: 8 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar)"
             .to_string(),
         "--expect-serial".to_string(),
-        "primes   an image:".to_string(),
+        "  primes (16 KiB, asks for console)".to_string(),
         "--expect-serial".to_string(),
         "primes: 78498 primes below 1000000, in".to_string(),
         "--expect-serial".to_string(),
@@ -1160,6 +1160,37 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     ];
     shapes.push(Shape::new(&title, &args));
 
+    // Programs on disk (PROC-010): the boot image's programs are
+    // installed on a blank disk; `hello`, which is not on the boot image,
+    // is installed over the network, checked, kept, and run from the
+    // disk; uninstalled, it is in the bin and no longer runs.
+    title = "programs on disk: installed over the network, run, uninstalled".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--http-serve".to_string(),
+        "18084".to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-t,sleep:2,i,n,s,t,a,l,l,spc,h,t,t,p,shift-semicolon,slash,slash,1,0,dot,0,dot,2,dot,2,shift-semicolon,1,8,0,8,4,slash,p,r,o,g,r,a,m,s,slash,h,e,l,l,o,dot,p,g,x,ret,sleep:4,r,u,n,spc,h,e,l,l,o,ret,sleep:2,u,n,i,n,s,t,a,l,l,spc,h,e,l,l,o,ret,sleep:1,r,u,n,spc,h,e,l,l,o,ret,sleep:2".to_string(),
+        "--out".to_string(),
+        "dist/qemu_program_install".to_string(),
+        "--expect-serial".to_string(),
+        "programs: from the boot image, 8 installed, 0 updated".to_string(),
+        "--expect-serial".to_string(),
+        "install: hello (16 KiB, asks for console) installed".to_string(),
+        "--expect-serial".to_string(),
+        "hello: hello from a program installed over the network".to_string(),
+        "--expect-serial".to_string(),
+        "uninstall: hello is in the bin".to_string(),
+        "--expect-serial".to_string(),
+        "run: no program \"hello\"".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL EXCEPTION".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args));
+
     // A reboot (DESK-020): the cards come back, and so does the document
     // one of them shows -- the first check that anything survives a
     // restart of the machine.
@@ -1188,6 +1219,10 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         // The restored Calculator is a program again (PROC-006).
         "--expect-serial".to_string(),
         "desk: calculator is thread 1".to_string(),
+        // Its programs were installed on the first boot; the second has
+        // nothing to install (PROC-010).
+        "--expect-serial".to_string(),
+        "programs: from the boot image, 0 installed, 0 updated".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -2568,7 +2603,16 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
             program_image::Ask::Documents(program_image::Pattern::from_static("####-##-##")),
         ],
     ),
+    // Not on the boot image (PROC-010): installed over the network.
+    ("hello", &[program_image::Ask::Console]),
 ];
+
+/// Programs built but left off the boot image: installed with `install`.
+const INSTALL_ONLY: &[&str] = &["hello"];
+
+/// Where every program's image is written, for the gauntlet's HTTP
+/// server to offer (`/programs/<name>.pgx`).
+const PROGRAM_IMAGES_DIR: &str = "target/program-images";
 
 /// Build every program for the machine and turn each into an image.
 ///
@@ -2616,7 +2660,15 @@ fn build_programs(root: &Path) -> Result<Vec<ProgramImage>, Box<dyn std::error::
             image.memory() / 1024,
             image.entry
         );
-        out.push((name.to_string(), image.to_bytes()));
+        let bytes = image.to_bytes();
+        fs::create_dir_all(root.join(PROGRAM_IMAGES_DIR))?;
+        fs::write(
+            root.join(PROGRAM_IMAGES_DIR).join(format!("{name}.pgx")),
+            &bytes,
+        )?;
+        if !INSTALL_ONLY.contains(name) {
+            out.push((name.to_string(), bytes));
+        }
     }
     Ok(out)
 }
@@ -3186,6 +3238,32 @@ fn answer_test_request<S: std::io::Read + std::io::Write>(stream: &mut S) {
     }
     let head = String::from_utf8_lossy(&head);
     let path = head.split_whitespace().nth(1).unwrap_or("/");
+    // A program's image (PROC-010), for `install`.
+    if let Some(name) = path
+        .strip_prefix("/programs/")
+        .and_then(|p| p.strip_suffix(".pgx"))
+        .filter(|n| {
+            n.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+    {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(PROGRAM_IMAGES_DIR)
+            .join(format!("{name}.pgx"));
+        let (status, body) = match fs::read(&file) {
+            Ok(bytes) => ("200 OK", bytes),
+            Err(_) => ("404 Not Found", b"no such program\n".to_vec()),
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+        return;
+    }
     let (kind, body) = match path {
         "/page.html" => (
             "text/html; charset=utf-8",

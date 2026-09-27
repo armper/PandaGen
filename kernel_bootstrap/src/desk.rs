@@ -1522,6 +1522,7 @@ impl FileEntry {
         match (self.kind, self.schema.as_deref()) {
             ("folder", _) => "Folder",
             (_, Some("text/plain")) => "Text",
+            (_, Some(crate::program_store::KIND)) => "Program",
             (_, Some(_)) => "Data",
             (_, None) => "File",
         }
@@ -1551,6 +1552,10 @@ impl FileEntry {
 /// the Sketch's, and anything else a page of the Notepad's -- which is
 /// where Enter on it opens it.
 pub fn document_app(name: &str) -> DeskApp {
+    // A program (PROC-010) wears its dock app's icon, if it is one.
+    if let Some(program) = crate::program_store::program_name(name) {
+        return DeskApp::for_program(program);
+    }
     if Date::parse(name).is_some() {
         DeskApp::Calendar
     } else if name == crate::tasks::TASKS_FILE {
@@ -5682,7 +5687,16 @@ impl Desk {
     /// selects, the next opens, and there is no double-click clock to beat.
     fn open_files_selection(&mut self, id: ViewId) -> Option<DeskRequest> {
         let files = self.window_mut(id).and_then(|w| w.files_mut())?;
-        let name = files.selected().map(|e| e.name.clone())?;
+        let entry = files.selected()?;
+        let name = entry.name.clone();
+        // A program (PROC-010) is run, not read: Enter on it starts it,
+        // with a card if it asks for one.
+        if entry.schema.as_deref() == Some(crate::program_store::KIND) {
+            if let Some(program) = crate::program_store::program_name(&name) {
+                self.program_runs.push(String::from(program));
+                return None;
+            }
+        }
         let notepad_id = self.launch(DeskApp::Notepad);
         Some(DeskRequest::Io {
             id: notepad_id,
@@ -7336,6 +7350,23 @@ mod tests {
         desk.program_ended(10, "tidy: exited with 0", false, 6);
         assert!(desk.window(tidy).is_none());
         assert_eq!(desk.notice_log.len(), before + 1);
+    }
+
+    #[test]
+    fn a_program_in_files_is_a_program_and_enter_runs_it() {
+        let mut desk = Desk::new(1280, 800);
+        let files = desk.launch(DeskApp::Files);
+        let mut tiles = FileEntry::named("tiles.pgx");
+        tiles.schema = Some(crate::program_store::KIND.to_string());
+        assert_eq!(tiles.kind_label(), "Program");
+        assert_eq!(tiles.app(), DeskApp::Tiles, "it wears the dock app's icon");
+        let mut other = FileEntry::named("hello.pgx");
+        other.schema = Some(crate::program_store::KIND.to_string());
+        assert_eq!(other.app(), DeskApp::Program);
+        desk.files_listed(files, alloc::vec![tiles]);
+        desk.take_program_runs();
+        assert_eq!(desk.open_files_selection(files), None, "no Notepad");
+        assert_eq!(desk.take_program_runs(), alloc::vec!["tiles".to_string()]);
     }
 
     #[test]

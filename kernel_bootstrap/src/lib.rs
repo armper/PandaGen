@@ -24,6 +24,7 @@ pub mod optimized_render;
 pub mod palette_overlay;
 pub mod present_policy;
 pub mod program_card;
+pub mod program_store;
 pub mod render_stats;
 pub mod rtc;
 pub mod sched;
