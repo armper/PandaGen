@@ -310,11 +310,16 @@ impl Image {
                 (false, true) => EXECUTE,
                 (false, false) => 0,
             };
+            // Pages come zeroed, so trailing zeros need not be carried.
+            let mut bytes = r(offset, filesz)?.to_vec();
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
             pieces.push(Piece {
                 at: vaddr,
                 size: memsz,
                 access,
-                bytes: r(offset, filesz)?.to_vec(),
+                bytes,
             });
         }
         let image = Image {
@@ -470,7 +475,7 @@ mod tests {
         e[56..58].copy_from_slice(&2u16.to_le_bytes());
         let data_at = e.len();
         e.extend_from_slice(&[0xC3; 32]); // code
-        e.extend_from_slice(&[1, 2, 3, 4]); // data
+        e.extend_from_slice(&[1, 2, 0, 0]); // data, ending in zeros
         let ph = |e: &mut Vec<u8>,
                   i: usize,
                   flags: u32,
@@ -500,6 +505,11 @@ mod tests {
         assert_eq!(image.pieces[0].bytes, vec![0xC3; 32]);
         assert_eq!(image.pieces[1].access, WRITE);
         assert_eq!(image.pieces[1].size, 0x2000);
+        assert_eq!(
+            image.pieces[1].bytes,
+            vec![1, 2],
+            "trailing zeros are implied"
+        );
         assert_eq!(Image::parse(&image.to_bytes()), Ok(image));
     }
 

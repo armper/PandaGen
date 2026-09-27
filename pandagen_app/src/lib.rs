@@ -43,6 +43,38 @@ pub mod call {
 /// What a card shows and what happens to it (`app_protocol`).
 pub use app_protocol::{Area, Event, Kind, Op, Role, ViewError, ViewWriter, VIEW_MAX};
 
+/// A program's heap (PROC-006), with the `heap` feature: `HEAP_BYTES` of
+/// its own memory -- zeroed pages the image lays out -- managed by the
+/// same first-fit allocator the kernel uses. `entry!` sets it up before
+/// `main`, so `alloc`'s `String`, `Vec` and `Box` just work.
+#[cfg(feature = "heap")]
+pub mod heap {
+    use free_list_heap::FreeListHeap;
+
+    pub const HEAP_BYTES: usize = 256 * 1024;
+
+    #[repr(C, align(16))]
+    struct Arena([u8; HEAP_BYTES]);
+
+    static mut ARENA: Arena = Arena([0; HEAP_BYTES]);
+
+    #[cfg_attr(all(target_os = "none", not(test)), global_allocator)]
+    static HEAP: FreeListHeap = FreeListHeap::empty();
+
+    pub(crate) fn init() {
+        // SAFETY: once, before anything allocates; the arena is the
+        // program's own and nothing else refers to it.
+        unsafe { HEAP.init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES) }
+    }
+}
+
+/// What `entry!` does before `main`.
+#[doc(hidden)]
+pub fn __start() {
+    #[cfg(feature = "heap")]
+    heap::init();
+}
+
 /// Most bytes one `send` carries.
 pub const SEND_MAX: usize = 256;
 
@@ -297,6 +329,7 @@ macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
         pub extern "C" fn _start() -> ! {
+            $crate::__start();
             let code = $main($crate::Console::FIRST);
             $crate::exit(code)
         }

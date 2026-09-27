@@ -9,5 +9,11 @@ description = "Write PandaGen programs: the system calls, the handles, the entry
 # outside the main workspace (for the machine, not the host), and depend
 # on this by path.
 
+[features]
+# A heap (PROC-006): `alloc`'s String, Vec and Box, in the program's own
+# memory, managed by the kernel's own allocator.
+heap = ["dep:free_list_heap"]
+
 [dependencies]
 app_protocol = { path = "../app_protocol" }
+free_list_heap = { path = "../free_list_heap", optional = true }

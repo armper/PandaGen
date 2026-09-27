@@ -1,0 +1,15 @@
+[package]
+name = "calculator_core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The Calculator program's arithmetic and card, testable on the host"
+
+# Fields are spelled out rather than inherited: the Calculator program,
+# built outside the main workspace, depends on this by path.
+
+[dependencies]
+app_protocol = { path = "../app_protocol" }
+
+[dev-dependencies]
+app_protocol = { path = "../app_protocol", features = ["decode"] }

@@ -7,6 +7,8 @@ members = [
     "program_image",
     "pandagen_app",
     "app_protocol",
+    "free_list_heap",
+    "calculator_core",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

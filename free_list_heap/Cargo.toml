@@ -1,0 +1,11 @@
+[package]
+name = "free_list_heap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A first-fit free-list heap with coalescing: the kernel's allocator, and programs'"
+
+# Fields are spelled out rather than inherited: programs, built outside
+# the main workspace, depend on this by path (through pandagen_app).
+
+[dependencies]

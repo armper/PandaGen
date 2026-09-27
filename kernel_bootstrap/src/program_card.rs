@@ -133,6 +133,19 @@ impl ProgramCard {
                     key,
                     label,
                 } => ui.button(pixels(*area), label, *key, button_kind(*kind)),
+                OwnedOp::Line {
+                    from,
+                    to,
+                    role,
+                    thickness,
+                } => ui.line(
+                    from.0 as i32,
+                    from.1 as i32,
+                    to.0 as i32,
+                    to.1 as i32,
+                    color(&palette, *role),
+                    *thickness as i32,
+                ),
             }
         }
         ui

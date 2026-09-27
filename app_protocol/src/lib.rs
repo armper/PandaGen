@@ -117,7 +117,7 @@ pub enum Op<'a> {
         radius: u8,
         thickness: u8,
     },
-    /// Text with its top-left at `(x, y)`; `scale` 1 or 2.
+    /// Text with its top-left at `(x, y)`; `scale` 1, 2 or 3.
     Text {
         x: u16,
         y: u16,
@@ -140,6 +140,13 @@ pub enum Op<'a> {
         key: u8,
         label: &'a str,
     },
+    /// A straight line, `thickness` pixels (1 to 8) wide: a drawn sign.
+    Line {
+        from: (u16, u16),
+        to: (u16, u16),
+        role: Role,
+        thickness: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +160,7 @@ pub enum ViewError {
     BadRole(u8),
     BadKind(u8),
     BadScale(u8),
+    BadThickness(u8),
     BadOp(u8),
     NotText,
     /// A widget reaching outside the card.
@@ -274,6 +282,18 @@ impl<'b> ViewWriter<'b> {
                 self.bytes(&[kind as u8, key]);
                 self.text(label);
             }
+            Op::Line {
+                from,
+                to,
+                role,
+                thickness,
+            } => {
+                self.bytes(&[6]);
+                for v in [from.0, from.1, to.0, to.1] {
+                    self.bytes(&v.to_le_bytes());
+                }
+                self.bytes(&[role as u8, thickness]);
+            }
         }
         self.ops += 1;
         self
@@ -375,6 +395,12 @@ pub enum OwnedOp {
         key: u8,
         label: alloc::string::String,
     },
+    Line {
+        from: (u16, u16),
+        to: (u16, u16),
+        role: Role,
+        thickness: u8,
+    },
 }
 
 #[cfg(feature = "decode")]
@@ -421,7 +447,7 @@ impl View {
             }
             fn scale(&mut self) -> Result<u8, ViewError> {
                 match self.u8()? {
-                    s @ (1 | 2) => Ok(s),
+                    s @ (1..=3) => Ok(s),
                     s => Err(ViewError::BadScale(s)),
                 }
             }
@@ -501,6 +527,22 @@ impl View {
                         kind: Kind::from_u8(k).ok_or(ViewError::BadKind(k))?,
                         key: r.u8()?,
                         label: r.text()?,
+                    }
+                }
+                6 => {
+                    let (x0, y0, x1, y1) = (r.u16()?, r.u16()?, r.u16()?, r.u16()?);
+                    point(x0, y0)?;
+                    point(x1, y1)?;
+                    let role = r.role()?;
+                    let thickness = r.u8()?;
+                    if !(1..=8).contains(&thickness) {
+                        return Err(ViewError::BadThickness(thickness));
+                    }
+                    OwnedOp::Line {
+                        from: (x0, y0),
+                        to: (x1, y1),
+                        role,
+                        thickness,
                     }
                 }
                 other => return Err(ViewError::BadOp(other)),
@@ -599,6 +641,38 @@ mod tests {
             &view.ops[2],
             OwnedOp::Button { key: b' ', label, kind: Kind::Primary, .. } if label == "Add one"
         ));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn lines_are_drawn_signs_inside_the_card() {
+        let mut buf = [0u8; 128];
+        let mut v = ViewWriter::new(&mut buf, "", "");
+        v.op(Op::Line {
+            from: (10, 20),
+            to: (30, 20),
+            role: Role::Accent,
+            thickness: 2,
+        });
+        let bytes = v.finish().unwrap().to_vec();
+        let view = View::decode(&bytes, 100, 100).unwrap();
+        assert_eq!(
+            view.ops[0],
+            OwnedOp::Line {
+                from: (10, 20),
+                to: (30, 20),
+                role: Role::Accent,
+                thickness: 2
+            }
+        );
+        assert_eq!(View::decode(&bytes, 20, 100), Err(ViewError::OutOfCard));
+        let mut thick = bytes.clone();
+        let last = thick.len() - 1;
+        thick[last] = 40;
+        assert_eq!(
+            View::decode(&thick, 100, 100),
+            Err(ViewError::BadThickness(40))
+        );
     }
 
     #[cfg(feature = "decode")]

@@ -234,7 +234,6 @@ pub const OVERVIEW_CARD: (usize, usize) = (280, 150);
 pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
-use crate::calculator::Calculator;
 use crate::calendar::{CalendarEffect, CalendarView, Date};
 use crate::game::{Game, GameEffect};
 use crate::launcher::{LauncherEffect, LauncherView};
@@ -740,6 +739,23 @@ impl DeskApp {
             DeskApp::Access => "Ac",
             DeskApp::Audit => "Au",
         }
+    }
+
+    /// The program that is this app (PROC-006): its card is the
+    /// program's, and opening it starts the program.
+    pub const fn program(self) -> Option<&'static str> {
+        match self {
+            DeskApp::Calculator => Some("calculator"),
+            _ => None,
+        }
+    }
+
+    /// The app a program is, if it is one of the dock's.
+    pub fn for_program(name: &str) -> DeskApp {
+        DeskApp::ALL
+            .into_iter()
+            .find(|app| app.program() == Some(name))
+            .unwrap_or(DeskApp::Program)
     }
 
     const fn size(self) -> (usize, usize) {
@@ -1376,7 +1392,7 @@ impl DeskWindow {
     /// program's card, the program (PROC-005).
     pub fn label(&self) -> String {
         match &self.state {
-            AppState::Program(card) => card.name.clone(),
+            AppState::Program(card) if self.app == DeskApp::Program => card.name.clone(),
             _ => self.app.name().to_string(),
         }
     }
@@ -1428,8 +1444,8 @@ impl DeskWindow {
             // A drawn card's own buttons are its controls (GFX-103): a chip
             // is only for what the card does not draw -- the Calculator's
             // C, the Timer's Start and Reset, the Calendar's arrows.
-            AppState::Calculator(_) => Vec::new(),
-            // A program draws its own controls (PROC-005).
+            // A program draws its own controls (PROC-005) -- the
+            // Calculator is one (PROC-006).
             AppState::Program(_) => Vec::new(),
             AppState::Calendar(_) => {
                 alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
@@ -1917,7 +1933,6 @@ pub enum AppState {
     Now,
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
-    Calculator(Calculator),
     Calendar(CalendarView),
     Timer(TimerView),
     Tiles(Game),
@@ -2745,6 +2760,8 @@ pub struct Desk {
     /// Events for programs' cards, by thread (PROC-005): keys, clicks,
     /// closing. Taken by the kernel with `take_program_events`.
     program_events: Vec<(u32, app_protocol::Event)>,
+    /// Programs to start for cards waiting for them (PROC-006).
+    program_runs: Vec<String>,
     /// Ctrl is held (GFX-093): the chips say their keys.
     ctrl_held: bool,
     /// Resting (GFX-092): the desk shows only the time until a key or
@@ -2814,6 +2831,7 @@ impl Desk {
             overview_since: None,
             pending_sounds: Vec::new(),
             program_events: Vec::new(),
+            program_runs: Vec::new(),
             resting: false,
             sign_in: None,
             person: None,
@@ -3391,13 +3409,46 @@ impl Desk {
         self.focus
     }
 
-    /// Open a card for program `thread` (PROC-005), in front and focused.
+    /// Open a card for program `thread` (PROC-005), in front and focused
+    /// -- or, for a program the desk asked for (PROC-006), hand it the
+    /// card that has been waiting for it.
     pub fn open_program(&mut self, thread: u32, name: &str) -> ViewId {
-        let id = self.launch(DeskApp::Program);
+        let waiting = self
+            .windows
+            .iter_mut()
+            .find(|w| matches!(&w.state, AppState::Program(c) if c.thread == 0 && c.name == name));
+        if let Some(window) = waiting {
+            if let AppState::Program(card) = &mut window.state {
+                card.thread = thread;
+            }
+            return window.id;
+        }
+        let id = self.launch_as(DeskApp::for_program(name), false);
         if let Some(window) = self.window_mut(id) {
             window.state = AppState::Program(crate::program_card::ProgramCard::new(thread, name));
         }
         id
+    }
+
+    /// The programs the desk wants started for cards waiting for them.
+    pub fn take_program_runs(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.program_runs)
+    }
+
+    /// A program the desk asked for could not start: the card waiting
+    /// for it closes, and a notice says why.
+    pub fn program_failed(&mut self, name: &str, why: &str, now: u64) {
+        let ids: Vec<ViewId> = self
+            .windows
+            .iter()
+            .filter(|w| matches!(&w.state, AppState::Program(c) if c.thread == 0 && c.name == name))
+            .map(|w| w.id)
+            .collect();
+        for id in ids {
+            self.close(id);
+        }
+        self.program_events.retain(|(t, _)| *t != 0);
+        self.notify(NoticeLevel::Warning, why.to_string(), now);
     }
 
     /// A view program `thread` presented, for its card.
@@ -3439,12 +3490,18 @@ impl Desk {
         for window in &mut self.windows {
             let (w, h) = Self::canvas_size(window.bounds);
             if let AppState::Program(card) = &mut window.state {
+                // A card still waiting for its program tells it nothing
+                // yet; it hears its size once it has taken the card.
+                if card.thread == 0 {
+                    continue;
+                }
                 if let Some(event) = card.resized(w, h) {
                     events.push((card.thread, event));
                 }
             }
         }
         events.append(&mut self.program_events);
+        events.retain(|(thread, _)| *thread != 0);
         events
     }
 
@@ -3496,6 +3553,16 @@ impl Desk {
 
     /// Open `app` in a new card, cascaded from the last, and focus it.
     pub fn launch(&mut self, app: DeskApp) -> ViewId {
+        self.launch_as(app, true)
+    }
+
+    /// Open a card for `app`. An app that is a program (PROC-006) opens
+    /// as a card waiting for it, and -- when `run` -- the kernel is asked
+    /// to start the program, which then takes the card over.
+    fn launch_as(&mut self, app: DeskApp, run: bool) -> ViewId {
+        if let (Some(name), true) = (app.program(), run) {
+            self.program_runs.push(String::from(name));
+        }
         let (w, h) = app.size();
         let area = self.work_area();
         let w = w.min(area.width);
@@ -3531,9 +3598,11 @@ impl Desk {
                 DeskApp::Notices => AppState::Notices,
                 DeskApp::Now => AppState::Now,
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
-                DeskApp::Calculator => AppState::Calculator(Calculator::new()),
-                // `open_program` names the program it is for.
-                DeskApp::Program => AppState::Program(crate::program_card::ProgramCard::new(0, "")),
+                // A program's card, waiting for its program (thread 0 is
+                // none); `open_program` binds it.
+                DeskApp::Calculator | DeskApp::Program => AppState::Program(
+                    crate::program_card::ProgramCard::new(0, app.program().unwrap_or("")),
+                ),
                 DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
                 DeskApp::Timer => AppState::Timer(TimerView::new()),
                 // Seeded from the clock and the launch count: no two games
@@ -3997,7 +4066,6 @@ impl Desk {
                 "Shortcuts".to_string(),
                 alloc::vec!["every key".to_string()],
             ),
-            AppState::Calculator(calc) => ("Calculator".to_string(), alloc::vec![calc.shown()]),
             AppState::Calendar(calendar) => (
                 "Calendar".to_string(),
                 alloc::vec![calendar.selected.short()],
@@ -4931,21 +4999,6 @@ impl Desk {
                             }
                             if open {
                                 requests.extend(self.open_files_selection(*target));
-                            }
-                            // Calculator: the keys are in the content (GFX-075).
-                            // Calculator: real keys, hit by pixel (GFX-081).
-                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
-                                let bounds = self.window(*target).map(|w| w.bounds);
-                                let palette = crate::widgets::Palette::from_theme(&self.theme());
-                                if let (Some(bounds), Some(AppState::Calculator(calc))) =
-                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
-                                {
-                                    let (w, h) = Self::canvas_size(bounds);
-                                    if let Some(key) = calc.ui(w, h, palette, None).hit(x, y) {
-                                        calc.press(key as char);
-                                        clicked = true;
-                                    }
-                                }
                             }
                             // A program's buttons (PROC-005): the hit is the
                             // key the button stands for, and it is the program's.
@@ -5890,13 +5943,6 @@ impl Desk {
                 }
                 _ => (None, false),
             },
-            AppState::Calculator(calc) => {
-                if byte == crate::notepad::CTRL_W {
-                    self.close(id);
-                    return (None, true);
-                }
-                (None, calc.handle_byte(byte))
-            }
             // Every other key is the program's (PROC-005).
             AppState::Program(card) => {
                 if byte == crate::notepad::CTRL_W {
@@ -6564,11 +6610,6 @@ impl Desk {
                         "The machine, this second; refreshed every second".to_string(),
                         None,
                     )
-                }
-                AppState::Calculator(calc) => {
-                    let (w, h) = Self::canvas_size(window.bounds);
-                    graphics = Some(calc.ui(w, h, palette, hover).into_ops());
-                    (Vec::new(), "Calculator".to_string(), calc.footer(), None)
                 }
                 AppState::Program(card) => {
                     let (w, h) = Self::canvas_size(window.bounds);
@@ -9122,82 +9163,70 @@ mod tests {
         ));
     }
 
-    /// The Calculator (GFX-075): on the dock and in the palette; its keys
-    /// are clicked in the content and typed on the keyboard, and the card
-    /// shows the expression, the result and the tape.
+    /// The Calculator (GFX-075; a program since PROC-006): on the dock
+    /// and in the palette, it opens a card that waits for its program and
+    /// asks the kernel to start it; the program takes the card over, and
+    /// clicks on the keys it draws are keys for the program.
     #[test]
-    fn the_calculator_takes_clicks_on_its_keys_and_typed_keys_alike() {
+    fn the_calculator_is_a_program_whose_keys_are_clicked_or_typed() {
+        use app_protocol::{Event, ViewWriter};
         let mut desk = Desk::new(1280, 800);
         let mut router = DesktopInputRouter::new();
         let compositor = Compositor::new();
         assert!(DeskApp::ALL.contains(&DeskApp::Calculator));
         assert!(PaletteAction::ALL.contains(&PaletteAction::Calculator));
         let id = desk.launch(DeskApp::Calculator);
+        assert_eq!(
+            desk.take_program_runs(),
+            alloc::vec!["calculator".to_string()]
+        );
+        // Until the program has it, the card waits and tells no one.
+        desk.handle_key(b'7');
+        assert!(desk.take_program_events().is_empty());
+        assert_eq!(desk.open_program(5, "calculator"), id, "the waiting card");
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Calculator);
+        let events = desk.take_program_events();
+        let Some((5, Event::Size { w, h })) = events.first().copied() else {
+            panic!("{events:?}")
+        };
+        // The program's view: the real Calculator's.
+        let calc = calculator_core::Calculator::new();
+        let mut buf = alloc::vec![0u8; app_protocol::VIEW_MAX];
+        let mut view = ViewWriter::new(&mut buf, "Calculator", &calc.footer());
+        calc.draw(w, h, &mut view);
+        desk.program_view(5, view.finish().unwrap());
         let windows = desk.windows("", true, None);
         let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
         assert!(card.actions.is_empty(), "its keys are drawn");
         assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
-        let bounds = desk.window(id).unwrap().bounds;
-        let (w, h) = Desk::canvas_size(bounds);
-        let layout = crate::calculator::Layout::new(w, h);
+        let layout = calculator_core::Layout::new(w, h);
         // Click the centres of "7", "+", "8", "=" as the layout places them.
-        let click = |desk: &mut Desk, router: &mut DesktopInputRouter, key: char| {
+        for key in ['7', '+', '8', '='] {
             let windows = desk.windows("", true, None);
-            let cell = layout.key_rect(key).expect("a key on the grid");
-            let x = (ox as u32 + cell.x + cell.width / 2) as i32;
-            let y = (oy as u32 + cell.y + cell.height / 2) as i32;
+            let cell = layout.key_area(key).expect("a key on the grid");
+            let x = ox as i32 + (cell.x + cell.w / 2) as i32;
+            let y = oy as i32 + (cell.y + cell.h / 2) as i32;
             let deliveries = router.route(&compositor, &windows, press(x, y));
             desk.handle_deliveries_with_requests(&deliveries);
             let deliveries = router.route(&compositor, &windows, release(x, y));
             desk.handle_deliveries_with_requests(&deliveries);
-        };
-        for key in ['7', '+', '8', '='] {
-            click(&mut desk, &mut router, key);
         }
-        let calc = match &desk.window(id).unwrap().state {
-            AppState::Calculator(calc) => calc.clone(),
-            _ => panic!(),
-        };
-        assert_eq!(calc.shown(), "15");
-        assert_eq!(
-            calc.tape().first().map(|(e, r)| (e.as_str(), r.as_str())),
-            Some(("7+8", "15"))
-        );
-        // The pointer over "=" outlines it: one more op than at rest.
-        let cell = layout.key_rect('=').unwrap();
-        let at_rest = calc
-            .ui(
-                w,
-                h,
-                crate::widgets::Palette::from_theme(&Theme::DEFAULT),
-                None,
-            )
-            .into_ops()
-            .len();
-        let hovered = calc
-            .ui(
-                w,
-                h,
-                crate::widgets::Palette::from_theme(&Theme::DEFAULT),
-                Some((cell.x as i32 + 2, cell.y as i32 + 2)),
-            )
-            .into_ops()
-            .len();
-        assert_eq!(hovered, at_rest + 1);
-        // Typed: the result carries on. Esc clears rather than closing.
-        desk.handle_key(b'*');
-        desk.handle_key(b'2');
-        desk.handle_key(b'\n');
-        let calc = match &desk.window(id).unwrap().state {
-            AppState::Calculator(calc) => calc.clone(),
-            _ => panic!(),
-        };
-        assert_eq!(calc.shown(), "30");
-        desk.handle_key(crate::notepad::ESC);
-        assert!(desk.window(id).is_some());
-        desk.handle_key(crate::notepad::CTRL_W);
-        assert!(desk.window(id).is_none());
+        let keys: Vec<u8> = desk
+            .take_program_events()
+            .into_iter()
+            .filter_map(|(t, e)| match (t, e) {
+                (5, Event::Key(k)) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, b"7+8=".to_vec());
+        // And a card whose program could not start closes, saying why.
+        let other = desk.launch(DeskApp::Calculator);
+        desk.take_program_runs();
+        desk.program_failed("calculator", "run: out of memory", 9);
+        assert!(desk.window(other).is_none());
+        assert!(desk.window(id).is_some(), "the running one stays");
     }
 
     /// The Calendar (GFX-076): opened from the palette it asks for the

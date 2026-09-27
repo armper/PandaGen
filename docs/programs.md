@@ -12,8 +12,11 @@ that every program has.
 - **`pandagen_app`**: the SDK. It provides the system calls (`exit`,
   `yield_now`, `sleep_ms`, `time_ms`), the handles (`Handle`,
   `Console`), `say!` for formatted lines, and `entry!` for the entry
-  point and the panic handler. Programs need no heap: lines are formatted
-  in a fixed buffer.
+  point and the panic handler. Programs need no heap (lines are formatted
+  in a fixed buffer), but can have one: the `heap` feature gives a
+  program 256 KiB of its own memory, managed by the same allocator as
+  the kernel's (`free_list_heap`), so `alloc`'s `String`, `Vec` and `Box`
+  work.
 - **`program_image`**: the format a program ships in. An image holds a
   name, an entry point, pieces of memory (each writable or runnable,
   never both, all above the first 4 MiB), and the capabilities the
@@ -78,6 +81,17 @@ characters, at most 256 widgets and 8 KiB. A view that fails is refused,
 the card keeps the last good one, and its footer says why. A program the
 kernel ends takes its card with it, and the desk leaves a notice saying
 why.
+
+## A dock app that is a program
+
+The Calculator is a program (`apps/calculator`, with its arithmetic and
+its card in the host-tested `calculator_core`). It asks for exactly one
+capability, its card, so it cannot reach a file, the network or the
+console. `DeskApp::program` names the program behind a dock app. Opening
+that app (from the dock, the palette, the Apps grid, or a restored
+layout) opens a card at once and asks the kernel to start the program,
+which then takes the card over. If the program can't start, the card
+closes and a notice says why.
 
 ## Adding one
 

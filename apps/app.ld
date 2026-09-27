@@ -19,7 +19,9 @@ SECTIONS
     .rodata : { *(.rodata .rodata.*) } :rodata
 
     . = ALIGN(4096);
-    .data : { *(.data .data.*) } :data
+    /* The GOT with the data, before .bss: anything after .bss would
+     * make the zeroed .bss (a program's whole heap) part of the file. */
+    .data : { *(.data .data.*) *(.got .got.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
 
     /DISCARD/ : { *(.eh_frame*) *(.comment) *(.note*) }

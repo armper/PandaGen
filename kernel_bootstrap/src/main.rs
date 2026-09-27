@@ -23,14 +23,13 @@ mod bare_metal_editor_io;
 #[cfg(all(not(test), target_os = "none"))]
 mod bare_metal_net;
 mod bare_metal_storage;
-mod calculator;
+
 mod calendar;
 mod desk;
 mod desktop_frame;
 mod display_mode;
 mod display_sink;
 mod framebuffer;
-mod free_list_heap;
 mod game;
 mod guard;
 mod launcher;
@@ -2162,6 +2161,26 @@ fn workspace_loop(
             // card's program has two seconds to finish before it is
             // stopped.
             if let Some(desk) = desk.as_mut() {
+                // Dock apps that are programs (PROC-006): the desk opened
+                // a card and asks for the program to take it.
+                for name in desk.take_program_runs() {
+                    let started = match (kernel.boot.hhdm_offset, kernel.allocator.lock().as_mut())
+                    {
+                        (Some(hhdm), Some(frames)) => programs::run(&name, hhdm, frames),
+                        _ => Err(alloc::string::String::from("run: no memory for programs")),
+                    };
+                    match started {
+                        Ok(started) => {
+                            desk.open_program(started.id, started.name);
+                            kprintln!(serial, "desk: {} is thread {}", started.name, started.id);
+                        }
+                        Err(why) => {
+                            kprintln!(serial, "desk: {name} did not start: {why}");
+                            desk.program_failed(&name, &why, get_tick_count());
+                        }
+                    }
+                    output_dirty = true;
+                }
                 for (id, view) in threads::take_views() {
                     desk.program_view(id, &view);
                     output_dirty = true;
@@ -6259,13 +6278,13 @@ fn start_application_processors(
 
 #[cfg(all(not(test), target_os = "none"))]
 #[global_allocator]
-static GLOBAL_HEAP: free_list_heap::FreeListHeap = free_list_heap::FreeListHeap::empty();
+static GLOBAL_HEAP: ::free_list_heap::FreeListHeap = ::free_list_heap::FreeListHeap::empty();
 
 /// Host builds of the binary (integration tests build it) get a plain heap
 /// object so the `mem`/telemetry paths compile; it is never installed as
 /// the allocator there.
 #[cfg(all(not(test), not(target_os = "none")))]
-static GLOBAL_HEAP: free_list_heap::FreeListHeap = free_list_heap::FreeListHeap::empty();
+static GLOBAL_HEAP: ::free_list_heap::FreeListHeap = ::free_list_heap::FreeListHeap::empty();
 
 #[cfg(all(not(test), target_os = "none"))]
 #[alloc_error_handler]

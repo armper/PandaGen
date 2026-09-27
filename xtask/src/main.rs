@@ -509,6 +509,9 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
     ];
     shapes.push(Shape::new(&title, &args));
 
+    // The Calculator is a program (PROC-006): the palette opens its card,
+    // the kernel starts it in ring 3, and it draws the same card the
+    // kernel used to.
     title = "the desk: the Calculator from the palette, worked with the keyboard".to_string();
     let args = [
         "--port-base".to_string(),
@@ -521,6 +524,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_calc".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        "--expect-serial".to_string(),
+        "desk: calculator is thread 1".to_string(),
         // The card: 300 wide, centred (x=490), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
@@ -1039,7 +1044,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 3 images (primes, ticker, tally)".to_string(),
+        "programs: 4 images (primes, ticker, tally, calculator)".to_string(),
         "--expect-serial".to_string(),
         "primes   an image:".to_string(),
         "--expect-serial".to_string(),
@@ -1110,6 +1115,9 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_reboot_2".to_string(),
         "--expect-serial".to_string(),
         "desk: layout restored, 2 cards".to_string(),
+        // The restored Calculator is a program again (PROC-006).
+        "--expect-serial".to_string(),
+        "desk: calculator is thread 1".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -2471,6 +2479,8 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
         "tally",
         &[program_image::Ask::Console, program_image::Ask::Card],
     ),
+    // The dock's Calculator (PROC-006): a card and nothing else.
+    ("calculator", &[program_image::Ask::Card]),
 ];
 
 /// Build every program for the machine and turn each into an image.
@@ -2484,6 +2494,13 @@ type ProgramImage = (String, Vec<u8>);
 
 fn build_programs(root: &Path) -> Result<Vec<ProgramImage>, Box<dyn std::error::Error>> {
     let link = root.join("apps/app.ld");
+    // Cargo does not know a program depends on its link script; its hash
+    // in the flags makes a changed script relink every program.
+    let script_hash = fs::read(&link)?
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3)
+        });
     let target_dir = root.join("target/apps");
     let mut out = Vec::new();
     for (name, asks) in PROGRAMS {
@@ -2492,7 +2509,7 @@ fn build_programs(root: &Path) -> Result<Vec<ProgramImage>, Box<dyn std::error::
             .env(
                 "RUSTFLAGS",
                 format!(
-                    "-C link-arg=-T{} -C relocation-model=static",
+                    "-C link-arg=-T{} -C relocation-model=static -C metadata=ld{script_hash:x}",
                     link.display()
                 ),
             )
@@ -2500,7 +2517,7 @@ fn build_programs(root: &Path) -> Result<Vec<ProgramImage>, Box<dyn std::error::
             .arg("--release")
             .arg("--target")
             .arg(TARGET)
-            .arg("-Zbuild-std=core")
+            .arg("-Zbuild-std=core,alloc")
             .arg("--target-dir")
             .arg(&target_dir))?;
         let elf = fs::read(target_dir.join(TARGET).join("release").join(name))?;

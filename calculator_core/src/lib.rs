@@ -1,23 +1,27 @@
-//! Calculator (GFX-075, GFX-081): real keys, a display, a tape.
+//! The Calculator (GFX-075, GFX-081; a program since PROC-006): exact
+//! decimal arithmetic, a display, twenty keys and a tape.
 //!
 //! The arithmetic is exact decimal, not floating point: values are `i128`
 //! scaled by [`SCALE`] (twelve decimal places), so `0.1 + 0.2` is `0.3`
-//! and a kernel without a floating-point unit never needs one. Anything
+//! and a machine without a floating-point unit never needs one. Anything
 //! that would not fit says "Too big" rather than wrapping.
 //!
-//! The card is drawn with the widget layer: the expression small and the
-//! result twice the font's size, right-aligned; a grid of rounded keys;
-//! the tape in the muted tone below. A click lands on a key through the
-//! [`Ui`]'s hit rectangles and arrives here as the same character the
-//! keyboard would send, so both reach [`Calculator::press`].
+//! This used to be a card compiled into the kernel. It is a program now
+//! (`apps/calculator`), running in ring 3 with a card of its own; this
+//! crate is everything it does that can be tested on the host -- the
+//! arithmetic, the keys, and the card, described as an `app_protocol`
+//! view: the expression small and the result large, right-aligned; a
+//! grid of rounded keys, the operators drawn as the signs people know;
+//! the tape in the muted tone below. A click on a key arrives as the
+//! same character the keyboard would send.
+
+#![no_std]
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use view_types::PixelRect;
-
-use crate::widgets::{grid, rect, ButtonKind, Palette, Ui, GLYPH_H};
+use app_protocol::{Area, Kind, Op, Role, ViewWriter};
 
 /// Fixed-point scale: twelve decimal places.
 pub const SCALE: i128 = 1_000_000_000_000;
@@ -36,32 +40,47 @@ pub const KEYS: [[char; 4]; 5] = [
     ['0', '.', '<', '='],
 ];
 /// The display's height in canvas pixels.
-pub const DISPLAY_H: u32 = 80;
-const GAP: u32 = 6;
-const KEY_ROWS_H: u32 = 244;
-const TAPE_PITCH: u32 = GLYPH_H + 2;
+pub const DISPLAY_H: u16 = 80;
+const GAP: u16 = 6;
+const KEY_ROWS_H: u16 = 244;
+/// The font's cell height; a tape line is two pixels more.
+const GLYPH_H: u16 = 16;
+const TAPE_PITCH: u16 = GLYPH_H + 2;
 
-/// Where things go on a canvas of a given size (GFX-081): the display,
-/// the twenty keys, the tape. Pure geometry, so a test and the desk agree
-/// on where a key is.
+/// Where things go on a canvas of a given size: the display, the twenty
+/// keys, the tape. Pure geometry, so a test and the card agree on where a
+/// key is.
 #[derive(Debug, Clone)]
 pub struct Layout {
-    pub width: u32,
-    pub display: PixelRect,
-    pub keys: Vec<PixelRect>,
-    pub tape_top: u32,
-    pub tape_rows: u32,
+    pub width: u16,
+    pub display: Area,
+    pub keys: Vec<Area>,
+    pub tape_top: u16,
+    pub tape_rows: u16,
 }
 
 impl Layout {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u16, height: u16) -> Self {
         let keys_top = DISPLAY_H + 8;
-        let keys = grid(rect(0, keys_top as i32, width, KEY_ROWS_H), 4, 5, GAP);
+        let (cols, rows) = (4u16, 5u16);
+        let cell_w = width.saturating_sub(GAP * (cols - 1)) / cols;
+        let cell_h = KEY_ROWS_H.saturating_sub(GAP * (rows - 1)) / rows;
+        let mut keys = Vec::with_capacity(20);
+        for r in 0..rows {
+            for c in 0..cols {
+                keys.push(Area::new(
+                    c * (cell_w + GAP),
+                    keys_top + r * (cell_h + GAP),
+                    cell_w,
+                    cell_h,
+                ));
+            }
+        }
         let tape_top = keys_top + KEY_ROWS_H + 12;
         let tape_rows = height.saturating_sub(tape_top) / TAPE_PITCH;
         Self {
             width,
-            display: rect(0, 0, width, DISPLAY_H),
+            display: Area::new(0, 0, width, DISPLAY_H),
             keys,
             tape_top,
             tape_rows,
@@ -69,11 +88,16 @@ impl Layout {
     }
 
     /// The rectangle of key `ch`.
-    pub fn key_rect(&self, ch: char) -> Option<PixelRect> {
+    pub fn key_area(&self, ch: char) -> Option<Area> {
         KEYS.iter()
             .flatten()
             .position(|k| *k == ch)
             .and_then(|i| self.keys.get(i).copied())
+    }
+
+    /// Whether a canvas this size has room for the card at all.
+    pub fn fits(width: u16, height: u16) -> bool {
+        width >= 4 * 24 + 3 * GAP && height >= DISPLAY_H + 8 + KEY_ROWS_H
     }
 }
 
@@ -182,74 +206,128 @@ impl Calculator {
         }
     }
 
-    /// The card, drawn (GFX-081): the display, the keys, the tape.
-    /// `hover` is the pointer in canvas pixels, if it is over the card.
-    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+    /// The card, as a view for a `width` x `height` canvas.
+    pub fn draw(&self, width: u16, height: u16, view: &mut ViewWriter) {
+        if !Layout::fits(width, height) {
+            view.op(Op::Text {
+                x: 8,
+                y: 8,
+                role: Role::Muted,
+                scale: 1,
+                text: "Make me bigger",
+            });
+            return;
+        }
         let layout = Layout::new(width, height);
-        let mut ui = Ui::new(palette, hover);
-        let p = *ui.palette();
         // The display: a raised well, the expression small above the
         // result large, both right-aligned; an error reads in the accent.
-        ui.fill(layout.display, p.raised, 8);
-        let right = width as i32 - 10;
-        let expr_ink = if self.fresh { p.muted } else { p.text };
-        ui.text_right(right, 6, &self.expr, expr_ink, 1);
-        let (shown, ink) = match &self.result {
-            Some(Ok(value)) => (value.clone(), p.text),
-            Some(Err(why)) => (why.clone(), p.accent),
-            None => (String::new(), p.text),
+        view.op(Op::Fill {
+            area: layout.display,
+            role: Role::Raised,
+            radius: 8,
+        });
+        let right = width - 10;
+        let expr_role = if self.fresh { Role::Muted } else { Role::Text };
+        if !self.expr.is_empty() {
+            view.op(Op::TextRight {
+                right,
+                y: 6,
+                role: expr_role,
+                scale: 1,
+                text: &self.expr,
+            });
+        }
+        let (shown, role) = match &self.result {
+            Some(Ok(value)) => (value.as_str(), Role::Text),
+            Some(Err(why)) => (why.as_str(), Role::Accent),
+            None => ("", Role::Text),
         };
-        // The result as large as it fits (GFX-099): three times the font
-        // for a number, smaller for a long one or a sentence.
-        let scale = match shown.len() {
+        // The result as large as it fits: three times the font for a
+        // number, smaller for a long one or a sentence.
+        let scale: u8 = match shown.len() {
             0..=10 => 3,
             11..=16 => 2,
             _ => 1,
         };
-        let top = DISPLAY_H as i32 - 8 - 16 * scale as i32;
-        ui.text_right(right, top, &shown, ink, scale);
+        if !shown.is_empty() {
+            view.op(Op::TextRight {
+                right,
+                y: DISPLAY_H - 8 - 16 * scale as u16,
+                role,
+                scale,
+                text: shown,
+            });
+        }
         // The keys.
+        let mut label = [0u8; 4];
         for (cell, key) in layout.keys.iter().zip(KEYS.iter().flatten()) {
             let kind = match key {
-                '=' => ButtonKind::Primary,
-                '/' | '*' | '-' | '+' => ButtonKind::Accent,
-                'C' | '<' | '(' | ')' => ButtonKind::Quiet,
-                _ => ButtonKind::Plain,
+                '=' => Kind::Primary,
+                '/' | '*' | '-' | '+' => Kind::Accent,
+                'C' | '<' | '(' | ')' => Kind::Quiet,
+                _ => Kind::Plain,
             };
-            // The operators are drawn as the signs people know (GFX-096),
-            // all four in one weight (GFX-099); the keys they stand for
-            // are the ones typed.
+            // The operators are drawn as the signs people know, all four
+            // in one weight; the keys they stand for are the ones typed.
             let drawn = matches!(key, '/' | '*' | '+' | '-');
-            let label = if drawn {
-                String::from(" ")
+            let text = if drawn {
+                " "
             } else {
-                key.to_string()
+                key.encode_utf8(&mut label)
             };
-            ui.button(*cell, &label, *key as u8, kind);
+            view.op(Op::Button {
+                area: *cell,
+                kind,
+                key: *key as u8,
+                label: text,
+            });
             if drawn {
-                let cx = (cell.x + cell.width / 2) as i32;
-                let cy = (cell.y + cell.height / 2) as i32;
-                if *key == '*' {
-                    ui.line(cx - 6, cy - 6, cx + 6, cy + 6, p.accent, 2);
-                    ui.line(cx - 6, cy + 6, cx + 6, cy - 6, p.accent, 2);
-                } else if *key == '+' {
-                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
-                    ui.line(cx, cy - 8, cx, cy + 8, p.accent, 2);
-                } else if *key == '-' {
-                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
-                } else {
-                    ui.line(cx - 8, cy, cx + 8, cy, p.accent, 2);
-                    ui.fill(rect(cx - 2, cy - 8, 4, 4), p.accent, 2);
-                    ui.fill(rect(cx - 2, cy + 5, 4, 4), p.accent, 2);
+                let (cx, cy) = (cell.x + cell.w / 2, cell.y + cell.h / 2);
+                let line = |view: &mut ViewWriter, from: (u16, u16), to: (u16, u16)| {
+                    view.op(Op::Line {
+                        from,
+                        to,
+                        role: Role::Accent,
+                        thickness: 2,
+                    });
+                };
+                match key {
+                    '*' => {
+                        line(view, (cx - 6, cy - 6), (cx + 6, cy + 6));
+                        line(view, (cx - 6, cy + 6), (cx + 6, cy - 6));
+                    }
+                    '+' => {
+                        line(view, (cx - 8, cy), (cx + 8, cy));
+                        line(view, (cx, cy - 8), (cx, cy + 8));
+                    }
+                    '-' => line(view, (cx - 8, cy), (cx + 8, cy)),
+                    _ => {
+                        line(view, (cx - 8, cy), (cx + 8, cy));
+                        view.op(Op::Fill {
+                            area: Area::new(cx - 2, cy - 8, 4, 4),
+                            role: Role::Accent,
+                            radius: 2,
+                        });
+                        view.op(Op::Fill {
+                            area: Area::new(cx - 2, cy + 5, 4, 4),
+                            role: Role::Accent,
+                            radius: 2,
+                        });
+                    }
                 }
             }
         }
         // The tape, newest first, in the muted tone.
         for (i, (expr, value)) in self.tape.iter().take(layout.tape_rows as usize).enumerate() {
-            let y = (layout.tape_top + i as u32 * TAPE_PITCH) as i32;
-            ui.text_right(right, y, &alloc::format!("{expr} = {value}"), p.muted, 1);
+            let line = alloc::format!("{expr} = {value}");
+            view.op(Op::TextRight {
+                right,
+                y: layout.tape_top + i as u16 * TAPE_PITCH,
+                role: Role::Muted,
+                scale: 1,
+                text: &line,
+            });
         }
-        ui
     }
 
     pub fn footer(&self) -> String {
@@ -404,12 +482,32 @@ pub fn format_fixed(value: i128) -> String {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
-    use services_gui_host::Theme;
-    use view_types::DrawOp;
+    use app_protocol::{OwnedOp, View};
 
     fn value(text: &str) -> String {
         format_fixed(evaluate(text).unwrap())
+    }
+
+    fn view_of(calc: &Calculator, w: u16, h: u16) -> View {
+        let mut buf = [0u8; app_protocol::VIEW_MAX];
+        let mut view = ViewWriter::new(&mut buf, "Calculator", &calc.footer());
+        calc.draw(w, h, &mut view);
+        View::decode(view.finish().unwrap(), w, h).expect("a view the desk takes")
+    }
+
+    /// The key a click at `(x, y)` would be, as the desk's hit test finds
+    /// it: the last button drawn there.
+    fn hit(view: &View, x: u16, y: u16) -> Option<u8> {
+        view.ops.iter().rev().find_map(|op| match op {
+            OwnedOp::Button { area, key, .. }
+                if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h =>
+            {
+                Some(*key)
+            }
+            _ => None,
+        })
     }
 
     #[test]
@@ -436,36 +534,34 @@ mod tests {
 
     #[test]
     fn keys_are_real_buttons_hit_by_pixel_and_typed_keys_reach_the_same_code() {
-        let palette = Palette::from_theme(&Theme::DEFAULT);
         let layout = Layout::new(284, 400);
         assert_eq!(layout.keys.len(), 20);
-        assert_eq!(layout.key_rect('7'), Some(rect(0, 138, 66, 44)));
-        assert_eq!(layout.key_rect('='), Some(rect(216, 288, 66, 44)));
+        assert_eq!(layout.key_area('7'), Some(Area::new(0, 138, 66, 44)));
+        assert_eq!(layout.key_area('='), Some(Area::new(216, 288, 66, 44)));
         assert_eq!(layout.tape_rows, 3);
         let mut calc = Calculator::new();
         // Click 7, +, 8, = through the drawn keys.
         for key in ['7', '+', '8', '='] {
-            let cell = layout.key_rect(key).unwrap();
-            let hit = calc
-                .ui(284, 400, palette, None)
-                .hit(cell.x as i32 + 5, cell.y as i32 + 5)
-                .expect("a key there");
-            assert_eq!(hit as char, key);
-            calc.press(hit as char);
+            let cell = layout.key_area(key).unwrap();
+            let got = hit(&view_of(&calc, 284, 400), cell.x + 5, cell.y + 5).expect("a key");
+            assert_eq!(got as char, key);
+            calc.press(got as char);
         }
         assert_eq!(calc.shown(), "15");
         assert_eq!(calc.tape()[0], ("7+8".to_string(), "15".to_string()));
-        // The display shows the result at twice the size; the tape once.
-        let ops = calc.ui(284, 400, palette, None).into_ops();
-        assert!(ops.iter().any(
-            |op| matches!(op, DrawOp::Text { text, style, .. } if text == "15" && style.scale == 3)
+        // The display shows the result at three times the size; the tape once.
+        let view = view_of(&calc, 284, 400);
+        assert!(view
+            .ops
+            .iter()
+            .any(|op| matches!(op, OwnedOp::TextRight { text, scale: 3, .. } if text == "15")));
+        assert!(view.ops.iter().any(
+            |op| matches!(op, OwnedOp::TextRight { text, scale: 1, .. } if text == "7+8 = 15")
         ));
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            DrawOp::Text { text, style, .. } if text == "7+8 = 15" && style.scale == 1
-        )));
+        // The operators are drawn signs.
+        assert!(view.ops.iter().any(|op| matches!(op, OwnedOp::Line { .. })));
         // Between the keys there is nothing to hit.
-        assert_eq!(calc.ui(284, 400, palette, None).hit(68, 130), None);
+        assert_eq!(hit(&view, 68, 130), None);
         // An operator carries the result on; Enter is =; x is *.
         calc.handle_byte(b'x');
         calc.handle_byte(b'2');
@@ -483,5 +579,22 @@ mod tests {
         assert!(calc.handle_byte(0x1B));
         assert_eq!(calc.shown(), "");
         assert!(!calc.handle_byte(b'\n'), "nothing to work out");
+    }
+
+    #[test]
+    fn a_full_tape_and_a_long_result_still_make_a_view_the_desk_takes() {
+        let mut calc = Calculator::new();
+        for _ in 0..10 {
+            for b in b"123456789/7\n" {
+                calc.handle_byte(*b);
+            }
+        }
+        for (w, h) in [(284, 400), (480, 600), (1200, 800)] {
+            let view = view_of(&calc, w, h);
+            assert!(view.ops.len() > 20);
+        }
+        // Too small: it says so, and never draws outside the card.
+        let view = view_of(&calc, 60, 60);
+        assert_eq!(view.ops.len(), 1);
     }
 }

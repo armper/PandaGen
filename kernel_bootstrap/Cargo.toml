@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 program_image = { path = "../program_image" }
+free_list_heap = { path = "../free_list_heap" }
 app_protocol = { path = "../app_protocol", features = ["decode"] }
 editor_core = { path = "../editor_core", default-features = false }
 limine = { version = "0.5.0", optional = true }
@@ -36,6 +37,7 @@ graphics_rasterizer = { path = "../graphics_rasterizer" }
 
 [dev-dependencies]
 services_workspace_manager = { path = "../services_workspace_manager" }
+calculator_core = { path = "../calculator_core" }
 
 [features]
 default = ["console_vga", "limine"]
