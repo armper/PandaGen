@@ -28,6 +28,8 @@
 //! | 11  | `list(docs)`             | 0: the names come as a message |
 //! | 12  | `open(docs, ptr, len)`   | 0: the desk opens it in a Notepad |
 //! | 13  | `receive(ptr, len)`      | a message's length; 0: none   |
+//! | 14  | `read(docs, ptr, len)`   | 0: the content comes as a message |
+//! | 15  | `write(docs, ptr, len)`  | 0: the result comes as a message |
 //!
 //! `list` and `open` are a program's documents (PROC-009), reached
 //! through a handle that names them by pattern: only names that match
@@ -100,6 +102,16 @@ pub enum Call {
         ptr: u64,
         len: u64,
     },
+    Read {
+        handle: u64,
+        ptr: u64,
+        len: u64,
+    },
+    Write {
+        handle: u64,
+        ptr: u64,
+        len: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +169,16 @@ impl Call {
                 len: rdx,
             },
             13 => Call::Receive { ptr: rdi, len: rsi },
+            14 => Call::Read {
+                handle: rdi,
+                ptr: rsi,
+                len: rdx,
+            },
+            15 => Call::Write {
+                handle: rdi,
+                ptr: rsi,
+                len: rdx,
+            },
             _ => return Err(Error::NoSuchCall),
         })
     }
@@ -175,9 +197,9 @@ pub enum Capability {
     /// Notices on the desk (PROC-008): what it sends is said there, with
     /// a chime.
     Notices,
-    /// The documents whose names match (PROC-009): listed, and opened in
-    /// a Notepad for the person.
-    Documents(program_image::Pattern),
+    /// The documents whose names match (PROC-009), with these rights
+    /// (PROC-011).
+    Documents(program_image::Pattern, program_image::Rights),
 }
 
 impl Capability {
@@ -249,18 +271,24 @@ impl Handles {
         Ok(())
     }
 
-    /// The pattern of the documents it holds, if any.
+    /// The documents it holds and may list, if any: after a save it is
+    /// sent their names again.
     pub fn documents(&self) -> Option<program_image::Pattern> {
         self.slots.iter().flatten().find_map(|c| match c {
-            Capability::Documents(p) => Some(*p),
+            Capability::Documents(p, r) if r.has(program_image::Rights::LIST) => Some(*p),
             _ => None,
         })
     }
 
-    /// Check a documents call: the handle is documents; their pattern.
-    pub fn check_documents(&self, handle: u64) -> Result<program_image::Pattern, Error> {
+    /// Check a documents call: the handle is documents, and has `right`;
+    /// their pattern.
+    pub fn check_documents(
+        &self,
+        handle: u64,
+        right: program_image::Rights,
+    ) -> Result<program_image::Pattern, Error> {
         match self.get(handle)? {
-            Capability::Documents(pattern) => Ok(pattern),
+            Capability::Documents(pattern, rights) if rights.has(right) => Ok(pattern),
             _ => Err(Error::NotAllowed),
         }
     }
@@ -365,10 +393,27 @@ mod tests {
         let mut h = Handles::new();
         let card = h.grant(Capability::Card).unwrap();
         let days = program_image::Pattern::from_static("####-##-##");
-        let docs = h.grant(Capability::Documents(days)).unwrap();
-        assert_eq!(h.check_documents(docs), Ok(days));
-        assert_eq!(h.check_documents(card), Err(Error::NotAllowed));
-        assert_eq!(h.check_documents(9), Err(Error::NoSuchHandle));
+        use program_image::Rights;
+        let docs = h
+            .grant(Capability::Documents(days, Rights::LIST.and(Rights::OPEN)))
+            .unwrap();
+        assert_eq!(h.check_documents(docs, Rights::LIST), Ok(days));
+        assert_eq!(h.check_documents(docs, Rights::OPEN), Ok(days));
+        // Rights not granted are refused.
+        assert_eq!(
+            h.check_documents(docs, Rights::READ),
+            Err(Error::NotAllowed)
+        );
+        assert_eq!(
+            h.check_documents(docs, Rights::WRITE),
+            Err(Error::NotAllowed)
+        );
+        assert_eq!(
+            h.check_documents(card, Rights::LIST),
+            Err(Error::NotAllowed)
+        );
+        assert_eq!(h.check_documents(9, Rights::LIST), Err(Error::NoSuchHandle));
+        assert_eq!(h.documents(), Some(days));
         assert_eq!(h.check_send(docs, 1), Err(Error::NotAllowed));
         assert_eq!(
             Call::decode(13, 0x1000, 64, 0),

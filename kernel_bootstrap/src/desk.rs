@@ -238,7 +238,9 @@ use crate::launcher::{LauncherEffect, LauncherView};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
 pub use crate::speaker::Sound;
-use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
+/// The document the Tasks program keeps its list in (PROC-011): it wears
+/// the Tasks icon in Files.
+const TASKS_FILE: &str = "tasks";
 use calendar_core::Date;
 
 pub const TOP_BAR_HEIGHT: usize = 28;
@@ -445,11 +447,9 @@ impl DeskApp {
     /// card `id`: the cards that show a document need it read.
     pub fn launch_request(self, id: ViewId) -> Option<DeskRequest> {
         match self {
-            DeskApp::Files | DeskApp::Calendar => Some(DeskRequest::ListFiles { id }),
-            DeskApp::Tasks => Some(DeskRequest::PreviewFile {
-                id,
-                name: TASKS_FILE.to_string(),
-            }),
+            // The Calendar and Tasks are programs that ask for their own
+            // documents (PROC-009, PROC-011).
+            DeskApp::Files => Some(DeskRequest::ListFiles { id }),
             DeskApp::Sketch => Some(DeskRequest::PreviewFile {
                 id,
                 name: SKETCH_FILE.to_string(),
@@ -747,6 +747,7 @@ impl DeskApp {
             DeskApp::Timer => Some("timer"),
             DeskApp::Tiles => Some("tiles"),
             DeskApp::Calendar => Some("calendar"),
+            DeskApp::Tasks => Some("tasks"),
             _ => None,
         }
     }
@@ -1448,11 +1449,6 @@ impl DeskWindow {
             // A program draws its own controls (PROC-005) -- the
             // Calculator is one (PROC-006).
             AppState::Program(_) => Vec::new(),
-            AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
-                ("Add".to_string(), b'\n'),
-                ("Cancel".to_string(), crate::notepad::ESC),
-            ],
-            AppState::Tasks(_) => Vec::new(),
             AppState::Sketch(_) => Vec::new(),
             AppState::Launcher(_) => Vec::new(),
             AppState::Sharing(_) => Vec::new(),
@@ -1558,7 +1554,7 @@ pub fn document_app(name: &str) -> DeskApp {
     }
     if Date::parse(name).is_some() {
         DeskApp::Calendar
-    } else if name == crate::tasks::TASKS_FILE {
+    } else if name == TASKS_FILE {
         DeskApp::Tasks
     } else if name == crate::sketch::SKETCH_FILE {
         DeskApp::Sketch
@@ -1934,7 +1930,6 @@ pub enum AppState {
     Now,
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
-    Tasks(TasksView),
     Sketch(SketchView),
     Launcher(LauncherView),
     Sharing(crate::sharing::SharingView),
@@ -3216,12 +3211,6 @@ impl Desk {
                 files.preview_pending = None;
             }
         }
-        // The Tasks card reads its whole document the same way (GFX-079).
-        if let Some(AppState::Tasks(tasks)) = self.window_mut(id).map(|w| &mut w.state) {
-            if name == TASKS_FILE {
-                tasks.load(text);
-            }
-        }
         // And the Sketch its strokes (GFX-080).
         if let Some(AppState::Sketch(sketch)) = self.window_mut(id).map(|w| &mut w.state) {
             if name == SKETCH_FILE {
@@ -3314,21 +3303,6 @@ impl Desk {
                     requests.push(DeskRequest::Io {
                         id: window.id,
                         effect,
-                    });
-                    if !self.quiet_saves.contains(&window.id) {
-                        self.quiet_saves.push(window.id);
-                    }
-                }
-            }
-            // The task list saves itself the same way (GFX-079).
-            if let AppState::Tasks(tasks) = &mut window.state {
-                if let Some(content) = tasks.save_due(now) {
-                    requests.push(DeskRequest::Io {
-                        id: window.id,
-                        effect: NotepadEffect::Save {
-                            path: TASKS_FILE.to_string(),
-                            content,
-                        },
                     });
                     if !self.quiet_saves.contains(&window.id) {
                         self.quiet_saves.push(window.id);
@@ -3615,11 +3589,11 @@ impl Desk {
                 | DeskApp::Timer
                 | DeskApp::Tiles
                 | DeskApp::Calendar
+                | DeskApp::Tasks
                 | DeskApp::Program => AppState::Program(crate::program_card::ProgramCard::new(
                     0,
                     app.program().unwrap_or(""),
                 )),
-                DeskApp::Tasks => AppState::Tasks(TasksView::new()),
                 DeskApp::Sketch => AppState::Sketch(SketchView::new()),
                 DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
                 DeskApp::Sharing => AppState::Sharing(crate::sharing::SharingView::new("")),
@@ -4076,13 +4050,6 @@ impl Desk {
                 alloc::vec!["every key".to_string()],
             ),
             AppState::Program(card) => (card.title(), alloc::vec![card.footer()]),
-            AppState::Tasks(tasks) => (
-                "Tasks".to_string(),
-                alloc::vec![alloc::format!(
-                    "{} to do",
-                    tasks.tasks().iter().filter(|t| !t.done).count()
-                )],
-            ),
             AppState::Sketch(sketch) => (
                 "Sketch".to_string(),
                 alloc::vec![alloc::format!("{} strokes", sketch.strokes().len())],
@@ -5013,20 +4980,6 @@ impl Desk {
                                     clicked = true;
                                 }
                             }
-                            // Tasks: a row or a button, by pixel (GFX-083).
-                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
-                                let bounds = self.window(*target).map(|w| w.bounds);
-                                let palette = crate::widgets::Palette::from_theme(&self.theme());
-                                if let (Some(bounds), Some(AppState::Tasks(tasks))) =
-                                    (bounds, self.window_mut(*target).map(|w| &mut w.state))
-                                {
-                                    let (w, h) = Self::canvas_size(bounds);
-                                    if let Some(key) = tasks.ui(w, h, palette, None).hit(x, y) {
-                                        tasks.handle_byte(key);
-                                        clicked = true;
-                                    }
-                                }
-                            }
                             // Apps: a cell, by pixel (GFX-089); the key it
                             // answers opens the app and closes the card.
                             let launcher_key =
@@ -5908,14 +5861,6 @@ impl Desk {
                 self.program_key(id, byte);
                 (None, true)
             }
-            AppState::Tasks(tasks) => match tasks.handle_byte(byte) {
-                TasksEffect::None => (None, false),
-                TasksEffect::Redraw => (None, true),
-                TasksEffect::Close => {
-                    self.close(id);
-                    (None, true)
-                }
-            },
             AppState::Sketch(sketch) => match sketch.handle_byte(byte) {
                 SketchEffect::None => (None, false),
                 SketchEffect::Redraw => (None, true),
@@ -6544,11 +6489,6 @@ impl Desk {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(card.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), card.title(), card.footer(), None)
-                }
-                AppState::Tasks(tasks) => {
-                    let (w, h) = Self::canvas_size(window.bounds);
-                    graphics = Some(tasks.ui(w, h, palette, hover).into_ops());
-                    (Vec::new(), "Tasks".to_string(), tasks.footer(), None)
                 }
                 AppState::Sketch(sketch) => {
                     let (w, _) = Self::canvas_size(window.bounds);
@@ -9259,11 +9199,12 @@ mod tests {
         assert!(desk.take_program_events().contains(&(4, Event::Key(b'n'))));
     }
 
-    /// Tasks (GFX-079): opening asks for the `tasks` document, the card
-    /// shows it with the selected row highlighted, a change saves itself
-    /// quietly a second later, and the chips follow the footer prompt.
+    /// Tasks (GFX-079; a program since PROC-011): from the palette its
+    /// card waits for its program -- which reads and writes its own
+    /// document, so the desk asks for nothing -- and `tasks` wears the
+    /// Tasks icon in Files.
     #[test]
-    fn tasks_is_a_document_that_saves_itself_quietly() {
+    fn tasks_is_a_program_that_keeps_its_own_document() {
         let mut desk = Desk::new(1280, 800);
         assert!(DeskApp::ALL.contains(&DeskApp::Tasks));
         desk.handle_key(KEY_CTRL_SPACE);
@@ -9271,58 +9212,12 @@ mod tests {
             desk.handle_key(*byte);
         }
         let (request, _) = desk.handle_key(b'\n');
+        assert_eq!(request, None, "the program reads its own list");
         let id = desk.focused_window().map(|w| w.id).unwrap();
-        assert_eq!(
-            request,
-            Some(DeskRequest::PreviewFile {
-                id,
-                name: "tasks".to_string()
-            })
-        );
-        desk.preview_loaded(id, "tasks", "[ ] one\n[x] two\n");
-        let windows = desk.windows("", true, None);
-        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
-        assert!(card.actions.is_empty(), "its buttons are drawn");
-        // Add through the footer: the chips become Add / Cancel.
-        desk.tick(10);
-        desk.handle_key(b'a');
-        assert_eq!(desk.window(id).unwrap().actions()[1].0, "Cancel");
-        for byte in b"three" {
-            desk.handle_key(*byte);
-        }
-        desk.handle_key(b'\n');
-        // Nothing yet; a second later, a quiet save of the whole document.
-        assert!(desk.tick(50).is_empty());
-        let requests = desk.tick(10 + crate::tasks::SAVE_AFTER_TICKS);
-        assert_eq!(
-            requests,
-            alloc::vec![DeskRequest::Io {
-                id,
-                effect: NotepadEffect::Save {
-                    path: "tasks".to_string(),
-                    content: "[ ] one\n[x] two\n[ ] three\n".to_string()
-                }
-            }]
-        );
-        let before = desk.notice_log.len();
-        let effect = match &requests[0] {
-            DeskRequest::Io { effect, .. } => effect.clone(),
-            _ => panic!(),
-        };
-        desk.io_done(id, &effect, Ok(None), 200);
-        assert_eq!(desk.notice_log.len(), before, "a quiet save");
-        // The dock tile asks for the document too.
-        desk.handle_key(crate::notepad::CTRL_W);
-        assert!(desk.window(id).is_none());
-        let (request, _) = desk.handle_key(KEY_CTRL_SPACE);
-        assert!(request.is_none());
-        desk.handle_key(crate::notepad::ESC);
-        let fresh = desk.launch(DeskApp::Tasks);
-        assert!(matches!(
-            DeskApp::Tasks.launch_request(fresh),
-            Some(DeskRequest::PreviewFile { .. })
-        ));
+        assert_eq!(desk.window(id).unwrap().app, DeskApp::Tasks);
+        assert_eq!(desk.take_program_runs(), alloc::vec!["tasks".to_string()]);
+        assert_eq!(DeskApp::Tasks.launch_request(id), None);
+        assert_eq!(document_app("tasks"), DeskApp::Tasks);
     }
 
     /// Sketch (GFX-080): press, move, release draws a stroke in the

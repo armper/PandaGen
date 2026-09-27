@@ -12,6 +12,7 @@ members = [
     "timer_core",
     "tiles_core",
     "calendar_core",
+    "tasks_core",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

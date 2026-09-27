@@ -345,7 +345,9 @@ pub fn run(
             Ask::Console => handles.grant(Capability::Console),
             Ask::Card => handles.grant(Capability::Card),
             Ask::Notices => handles.grant(Capability::Notices),
-            Ask::Documents(pattern) => handles.grant(Capability::Documents(*pattern)),
+            Ask::Documents(pattern, rights) => {
+                handles.grant(Capability::Documents(*pattern, *rights))
+            }
         };
     }
     let wants_card = image.asks.contains(&Ask::Card);

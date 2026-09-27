@@ -132,8 +132,20 @@ pub fn set_date(year: u16, month: u8, day: u8) {
 pub struct DocumentRequest {
     pub id: u32,
     pub pattern: program_image::Pattern,
-    /// `Some(name)`: open it in a Notepad; `None`: list the names.
-    pub open: Option<String>,
+    pub op: DocumentOp,
+}
+
+/// What a program asked of its documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentOp {
+    /// The names its pattern names.
+    List,
+    /// Open this one in a Notepad for the person.
+    Open(String),
+    /// This one's content (PROC-011).
+    Read(String),
+    /// Replace this one's content (PROC-011).
+    Write(String, Vec<u8>),
 }
 
 static DOC_REQUESTS: hal_x86_64::SpinLock<Vec<DocumentRequest>> =
@@ -793,7 +805,10 @@ pub fn on_syscall(rsp: u64) -> u64 {
         }
         Call::List { handle } => {
             let program = t.programs[current].as_ref().expect("checked above");
-            let pattern = match program.handles.check_documents(handle) {
+            let pattern = match program
+                .handles
+                .check_documents(handle, program_image::Rights::LIST)
+            {
                 Ok(p) => p,
                 Err(e) => {
                     set_rax(e.to_rax());
@@ -806,15 +821,19 @@ pub fn on_syscall(rsp: u64) -> u64 {
             DOC_REQUESTS.lock().push(DocumentRequest {
                 id,
                 pattern,
-                open: None,
+                op: DocumentOp::List,
             });
             unsafe { asm!("cli", options(nomem, nostack)) };
             set_rax(0);
             rsp
         }
-        Call::Open { handle, ptr, len } => {
+        Call::Open { handle, ptr, len } | Call::Read { handle, ptr, len } => {
+            let (right, read) = match call {
+                Call::Read { .. } => (program_image::Rights::READ, true),
+                _ => (program_image::Rights::OPEN, false),
+            };
             let program = t.programs[current].as_ref().expect("checked above");
-            let pattern = match program.handles.check_documents(handle) {
+            let pattern = match program.handles.check_documents(handle, right) {
                 Ok(p) => p,
                 Err(e) => {
                     set_rax(e.to_rax());
@@ -843,11 +862,57 @@ pub fn on_syscall(rsp: u64) -> u64 {
             let id = program.id;
             // SAFETY: nothing of the table is held across this.
             unsafe { asm!("sti", options(nomem, nostack)) };
+            let name = String::from(name);
             DOC_REQUESTS.lock().push(DocumentRequest {
                 id,
                 pattern,
-                open: Some(String::from(name)),
+                op: if read {
+                    DocumentOp::Read(name)
+                } else {
+                    DocumentOp::Open(name)
+                },
             });
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            set_rax(0);
+            rsp
+        }
+        Call::Write { handle, ptr, len } => {
+            let program = t.programs[current].as_ref().expect("checked above");
+            let pattern = match program
+                .handles
+                .check_documents(handle, program_image::Rights::WRITE)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    set_rax(e.to_rax());
+                    return rsp;
+                }
+            };
+            if len > MESSAGE_MAX as u64 {
+                set_rax(Error::TooBig.to_rax());
+                return rsp;
+            }
+            let mut buffer = [0u8; MESSAGE_MAX];
+            let len = len as usize;
+            let memory = crate::programs::Direct::new(t.hhdm);
+            if !program.space.read_into(&memory, ptr, &mut buffer[..len]) {
+                set_rax(Error::BadPointer.to_rax());
+                return rsp;
+            }
+            let Some((name, content)) = app_protocol::message::read_write_request(&buffer[..len])
+                .filter(|(n, _)| pattern.matches(n))
+            else {
+                set_rax(Error::NotAllowed.to_rax());
+                return rsp;
+            };
+            let id = program.id;
+            // Keeping it takes the heap: interrupts on.
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            let op = DocumentOp::Write(String::from(name), content.to_vec());
+            DOC_REQUESTS
+                .lock()
+                .push(DocumentRequest { id, pattern, op });
             unsafe { asm!("cli", options(nomem, nostack)) };
             set_rax(0);
             rsp

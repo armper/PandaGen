@@ -52,7 +52,6 @@ mod sketch;
 mod speaker;
 mod supervision;
 mod syscall_abi;
-mod tasks;
 #[cfg(not(test))]
 mod threads;
 mod vga;
@@ -1927,6 +1926,9 @@ fn workspace_loop(
     let mut install_waiting: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
     #[cfg(all(not(test), target_os = "none"))]
     let mut install_next: u64 = 1 << 63;
+    // A program wrote a document (PROC-011): holders are listed again.
+    #[cfg(all(not(test), target_os = "none"))]
+    let mut documents_written = false;
     // Programs on disk (PROC-010): what the boot image carries is
     // installed there -- or, if the disk's copy differs, updated, the old
     // one kept as a version -- before anything runs, so programs are
@@ -2333,52 +2335,102 @@ fn workspace_loop(
                 // handed to the desk; and after a save, every holder is
                 // sent its list again.
                 let mut requests = threads::take_document_requests();
-                if desk.take_documents_changed() {
+                // A save anywhere -- a Notepad's, or a program's write --
+                // sends every holder its list again.
+                if desk.take_documents_changed() || core::mem::take(&mut documents_written) {
                     for (id, pattern) in threads::document_holders() {
                         requests.push(threads::DocumentRequest {
                             id,
                             pattern,
-                            open: None,
+                            op: threads::DocumentOp::List,
                         });
                     }
                 }
                 if !requests.is_empty() {
-                    let names: alloc::vec::Vec<alloc::string::String> =
-                        match workspace.take_filesystem() {
-                            Some(fs) => {
-                                let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
-                                let entries = io.list_entries().unwrap_or_default();
-                                workspace.set_filesystem(io.into_filesystem());
-                                entries.into_iter().map(|e| e.name).collect()
-                            }
-                            None => alloc::vec::Vec::new(),
-                        };
-                    for request in requests {
-                        match request.open {
-                            None => {
-                                let mut listed = alloc::string::String::new();
-                                let mut count = 0;
-                                for name in names.iter().filter(|n| request.pattern.matches(n)) {
-                                    listed.push_str(name);
-                                    listed.push('\n');
-                                    count += 1;
+                    if let Some(fs) = workspace.take_filesystem() {
+                        let mut io = bare_metal_editor_io::BareMetalEditorIo::new(fs);
+                        // What is in the bin is not listed, and not read.
+                        let names: alloc::vec::Vec<alloc::string::String> = io
+                            .list_entries()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|e| !e.trashed)
+                            .map(|e| e.name)
+                            .collect();
+                        let mut fs = io.into_filesystem();
+                        for request in requests {
+                            match request.op {
+                                threads::DocumentOp::List => {
+                                    let mut listed = alloc::string::String::new();
+                                    let mut count = 0;
+                                    for name in names.iter().filter(|n| request.pattern.matches(n))
+                                    {
+                                        listed.push_str(name);
+                                        listed.push('\n');
+                                        count += 1;
+                                    }
+                                    kprintln!(
+                                        serial,
+                                        "documents: thread {} has {count} named {}",
+                                        request.id,
+                                        request.pattern.as_str()
+                                    );
+                                    threads::post_message(
+                                        request.id,
+                                        app_protocol::message::names(&listed),
+                                    );
                                 }
-                                kprintln!(
-                                    serial,
-                                    "documents: thread {} has {count} named {}",
-                                    request.id,
-                                    request.pattern.as_str()
-                                );
-                                threads::post_message(request.id, listed.into_bytes());
-                            }
-                            Some(name) => {
-                                let exists = names.iter().any(|n| *n == name);
-                                if let Some(follow) = desk.open_document(&name, exists) {
-                                    desk_requests.push(follow);
+                                threads::DocumentOp::Open(name) => {
+                                    let exists = names.iter().any(|n| *n == name);
+                                    if let Some(follow) = desk.open_document(&name, exists) {
+                                        desk_requests.push(follow);
+                                    }
+                                    output_dirty = true;
                                 }
-                                output_dirty = true;
+                                threads::DocumentOp::Read(name) => {
+                                    let content = names
+                                        .iter()
+                                        .any(|n| *n == name)
+                                        .then(|| fs.read_file_by_name(&name).ok())
+                                        .flatten();
+                                    kprintln!(
+                                        serial,
+                                        "documents: thread {} read {name} ({})",
+                                        request.id,
+                                        match &content {
+                                            Some(b) => alloc::format!("{} bytes", b.len()),
+                                            None => alloc::string::String::from("absent"),
+                                        }
+                                    );
+                                    let message = match content {
+                                        Some(bytes) => {
+                                            app_protocol::message::document(&name, &bytes)
+                                        }
+                                        None => app_protocol::message::absent(&name),
+                                    };
+                                    threads::post_message(request.id, message);
+                                }
+                                threads::DocumentOp::Write(name, content) => {
+                                    // A new version; the old ones are kept.
+                                    let kept = fs
+                                        .write_named(&name, &content, 0, Some("text/plain"))
+                                        .is_ok();
+                                    kprintln!(
+                                        serial,
+                                        "documents: thread {} wrote {name} ({} bytes){}",
+                                        request.id,
+                                        content.len(),
+                                        if kept { "" } else { ", refused" }
+                                    );
+                                    documents_written |= kept;
+                                    threads::post_message(
+                                        request.id,
+                                        app_protocol::message::written(&name, kept),
+                                    );
+                                }
                             }
                         }
+                        workspace.set_filesystem(fs);
                     }
                 }
                 // A program's notice (PROC-008): said like the desk's own.

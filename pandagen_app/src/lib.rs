@@ -43,7 +43,12 @@ pub mod call {
     pub const LIST: u64 = 11;
     pub const OPEN: u64 = 12;
     pub const RECEIVE: u64 = 13;
+    pub const READ: u64 = 14;
+    pub const WRITE: u64 = 15;
 }
+
+/// Messages, read in place (`receive` fills the buffer).
+pub use app_protocol::message::{self, Message};
 
 /// Today, as `(year, month, day)`, when the machine's clock is set.
 pub fn date() -> Option<(u16, u8, u8)> {
@@ -69,8 +74,9 @@ pub fn receive(buffer: &mut [u8]) -> Result<usize, Error> {
 }
 
 /// Documents named by a pattern (PROC-009), when the program asked for
-/// them: their names, and having one opened in a Notepad for the person.
-/// Their contents are not the program's.
+/// them, with the rights it asked for (PROC-011): their names, having one
+/// opened in a Notepad for the person, reading and writing them. A right
+/// not asked for is `NotAllowed`; so is a name the pattern does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Documents(pub Handle);
 
@@ -89,6 +95,33 @@ impl Documents {
             (self.0).0,
             name.as_ptr() as u64,
             name.len() as u64,
+        ))
+        .map(|_| ())
+    }
+
+    /// Ask for document `name`'s content; it comes as a message
+    /// (`Message::Document`, or `Message::Absent` if there is none).
+    pub fn read(&self, name: &str) -> Result<(), Error> {
+        check(syscall(
+            call::READ,
+            (self.0).0,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        ))
+        .map(|_| ())
+    }
+
+    /// Replace document `name`'s content with `content` (a new version:
+    /// the old ones are kept). `buffer` holds the request; it must fit
+    /// the name and the content. Whether it was kept comes as a message
+    /// (`Message::Written`).
+    pub fn write(&self, name: &str, content: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
+        let request = message::write_request(buffer, name, content).ok_or(Error::TooBig)?;
+        check(syscall(
+            call::WRITE,
+            (self.0).0,
+            request.as_ptr() as u64,
+            request.len() as u64,
         ))
         .map(|_| ())
     }

@@ -12,10 +12,9 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use calendar_core::{CalendarEffect, CalendarView, Date};
-use pandagen_app::{entry, Card, Console, Documents, Event, Handle, ViewWriter, VIEW_MAX};
+use pandagen_app::{entry, Card, Console, Documents, Event, Handle, Message, ViewWriter, VIEW_MAX};
 
 entry!(main);
 
@@ -54,9 +53,11 @@ fn main(_nothing: Console) -> u64 {
                     if n == 0 {
                         break;
                     }
-                    let text = String::from_utf8_lossy(&message[..n]);
-                    let names: Vec<&str> = text.lines().collect();
-                    calendar.set_file_names(&names);
+                    if let Some(Message::Names(text)) = pandagen_app::message::decode(&message[..n])
+                    {
+                        let names: Vec<&str> = text.lines().collect();
+                        calendar.set_file_names(&names);
+                    }
                 }
             }
             Some(Event::Closed) => return 0,

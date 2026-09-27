@@ -138,9 +138,54 @@ pub enum Ask {
     Card,
     /// Notices on the desk, with a chime (PROC-008): a timer that is up.
     Notices,
-    /// The documents whose names match (PROC-009): their names, and
-    /// having one opened in a Notepad -- not their contents.
-    Documents(Pattern),
+    /// The documents whose names match (PROC-009), with these rights
+    /// (PROC-011): the Calendar lists and opens day notes; Tasks reads
+    /// and writes its one list.
+    Documents(Pattern, Rights),
+}
+
+/// What a program may do with the documents its pattern names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Rights(pub u8);
+
+impl Rights {
+    /// Their names.
+    pub const LIST: Rights = Rights(1);
+    /// Have one opened in a Notepad for the person.
+    pub const OPEN: Rights = Rights(2);
+    /// Their contents.
+    pub const READ: Rights = Rights(4);
+    /// Replace their contents (a new version; the old ones are kept).
+    pub const WRITE: Rights = Rights(8);
+
+    pub const fn and(self, other: Rights) -> Rights {
+        Rights(self.0 | other.0)
+    }
+
+    pub fn has(self, right: Rights) -> bool {
+        self.0 & right.0 == right.0
+    }
+
+    /// As `programs` says it: "list, open".
+    pub fn describe(self) -> String {
+        let words: Vec<&str> = [
+            (Rights::LIST, "list"),
+            (Rights::OPEN, "open"),
+            (Rights::READ, "read"),
+            (Rights::WRITE, "write"),
+        ]
+        .into_iter()
+        .filter(|(r, _)| self.has(*r))
+        .map(|(_, w)| w)
+        .collect();
+        words.join(", ")
+    }
+}
+
+impl core::fmt::Debug for Rights {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Rights({})", self.describe())
+    }
 }
 
 impl Ask {
@@ -150,7 +195,7 @@ impl Ask {
             Ask::Console => 1,
             Ask::Card => 2,
             Ask::Notices => 3,
-            Ask::Documents(_) => 4,
+            Ask::Documents(..) => 4,
         }
     }
 
@@ -160,7 +205,9 @@ impl Ask {
             Ask::Console => "console".into(),
             Ask::Card => "a card".into(),
             Ask::Notices => "notices".into(),
-            Ask::Documents(p) => alloc::format!("documents named {}", p.as_str()),
+            Ask::Documents(p, r) => {
+                alloc::format!("documents named {} ({})", p.as_str(), r.describe())
+            }
         }
     }
 }
@@ -281,7 +328,8 @@ impl Image {
         out.extend_from_slice(&(self.asks.len() as u16).to_le_bytes());
         for ask in &self.asks {
             out.extend_from_slice(&ask.code().to_le_bytes());
-            if let Ask::Documents(pattern) = ask {
+            if let Ask::Documents(pattern, rights) = ask {
+                out.push(rights.0);
                 out.push(pattern.as_str().len() as u8);
                 out.extend_from_slice(pattern.as_str().as_bytes());
             }
@@ -323,10 +371,17 @@ impl Image {
                 2 => Ask::Card,
                 3 => Ask::Notices,
                 4 => {
+                    let rights = r.u8()?;
+                    if rights == 0 || rights & !0x0F != 0 {
+                        return Err(ImageError::UnknownAsk(n));
+                    }
                     let len = r.u8()? as usize;
                     let text = core::str::from_utf8(r.take(len)?)
                         .map_err(|_| ImageError::UnknownAsk(n))?;
-                    Ask::Documents(Pattern::new(text).ok_or(ImageError::UnknownAsk(n))?)
+                    Ask::Documents(
+                        Pattern::new(text).ok_or(ImageError::UnknownAsk(n))?,
+                        Rights(rights),
+                    )
                 }
                 _ => return Err(ImageError::UnknownAsk(n)),
             });
@@ -520,10 +575,21 @@ mod tests {
         assert_eq!(Pattern::new(""), None);
         assert_eq!(Pattern::new("has space"), None);
         let mut image = hello();
-        image.asks.push(Ask::Documents(days));
+        image
+            .asks
+            .push(Ask::Documents(days, Rights::LIST.and(Rights::OPEN)));
         let back = Image::parse(&image.to_bytes()).unwrap();
         assert_eq!(back.asks, image.asks);
-        assert_eq!(back.asks[1].describe(), "documents named ####-##-##");
+        assert_eq!(
+            back.asks[1].describe(),
+            "documents named ####-##-## (list, open)"
+        );
+        // No rights, or rights nobody knows, are not an ask.
+        let mut none = hello();
+        none.asks = alloc::vec![Ask::Documents(days, Rights(0))];
+        assert!(Image::parse(&none.to_bytes()).is_err());
+        none.asks = alloc::vec![Ask::Documents(days, Rights(0x10))];
+        assert!(Image::parse(&none.to_bytes()).is_err());
     }
 
     #[test]

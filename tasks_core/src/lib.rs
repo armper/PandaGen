@@ -1,27 +1,39 @@
-//! Tasks (GFX-079): a to-do list that is a document.
+//! Tasks (GFX-079; a program since PROC-011): a to-do list that is a
+//! document.
 //!
 //! The list is kept as the document named `tasks`, one line per task,
 //! `[x] done` or `[ ] not yet` -- readable in a Notepad, kept in versions
-//! like everything else, and saved by the desk a second after it changes.
-//! The card is the pleasant way to use it: a row is a task with a real
-//! checkbox, Enter or a click ticks it, `a` asks for a new one in the
-//! footer, Delete removes, and every action is a button too (GFX-083).
+//! like everything else, and saved a second after it changes. The card is
+//! the pleasant way to use it: a row is a task with a real checkbox,
+//! Enter or a click ticks it, `a` asks for a new one in the footer,
+//! Delete removes, and every action is a button too.
+//!
+//! The program (`apps/tasks`) holds exactly one document -- `tasks`, to
+//! read and write -- and nothing else a person keeps.
+
+#![no_std]
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use view_types::PixelRect;
+use app_protocol::{Area, Kind, Op, Role, ViewWriter};
 
-use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
+/// Keys (the desk's).
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_DELETE: u8 = 0x84;
+pub const BACKSPACE: u8 = 0x08;
+pub const CTRL_W: u8 = 0x17;
+pub const ESC: u8 = 0x1B;
 
 /// A row as a key byte (GFX-083): `ROW_KEY_FIRST` is the first task
 /// shown; the desk sends it for a click on the row.
 pub const ROW_KEY_FIRST: u8 = 0xC0;
 pub const ROW_KEY_LAST: u8 = 0xFF;
 /// A row's height in canvas pixels, and the buttons' height.
-pub const ROW_H: u32 = 28;
-pub const BUTTONS_H: u32 = 44;
+pub const ROW_H: u16 = 28;
+pub const BUTTONS_H: u16 = 44;
 
 /// The document the list lives in.
 pub const TASKS_FILE: &str = "tasks";
@@ -193,7 +205,6 @@ impl TasksView {
     /// A key. While the footer asks for a new task, printable keys go
     /// there, Enter adds it and Esc drops it.
     pub fn handle_byte(&mut self, byte: u8) -> TasksEffect {
-        use crate::notepad::{BACKSPACE, CTRL_W, ESC, KEY_DELETE, KEY_DOWN, KEY_UP};
         if let Some(prompt) = self.prompt.as_mut() {
             match byte {
                 ESC => self.prompt = None,
@@ -220,8 +231,8 @@ impl TasksView {
             b'u' | b'U' => self.shift(-1),
             b'd' | b'D' => self.shift(1),
             b'c' | b'C' => self.clear_done(),
-            // A row's own key (GFX-083): the desk sends it for a click on
-            // the row. The selected row ticks; another selects.
+            // A row's own key: a click on the row. The selected row
+            // ticks; another selects.
             key @ ROW_KEY_FIRST..=ROW_KEY_LAST => {
                 let index = self.scroll + (key - ROW_KEY_FIRST) as usize;
                 if index >= self.tasks.len() {
@@ -240,33 +251,41 @@ impl TasksView {
     }
 
     /// How many rows fit above the buttons on a canvas `height` tall.
-    pub fn rows_that_fit(height: u32) -> usize {
+    pub fn rows_that_fit(height: u16) -> usize {
         (height.saturating_sub(BUTTONS_H + 12) / ROW_H).max(1) as usize
     }
 
-    /// The buttons' rectangles for a canvas: Add, Done, Remove, Clear done.
-    pub fn buttons(width: u32, height: u32) -> Vec<PixelRect> {
-        grid(
-            rect(0, height as i32 - BUTTONS_H as i32, width, BUTTONS_H),
-            4,
-            1,
-            6,
-        )
+    /// The buttons' rectangles for a canvas: four across the foot.
+    pub fn buttons(width: u16, height: u16) -> Vec<Area> {
+        let gap = 6;
+        let w = width.saturating_sub(gap * 3) / 4;
+        (0..4)
+            .map(|i| {
+                Area::new(
+                    i * (w + gap),
+                    height.saturating_sub(BUTTONS_H),
+                    w,
+                    BUTTONS_H,
+                )
+            })
+            .collect()
     }
 
-    /// The card, drawn (GFX-083): a row a task with a checkbox, the
-    /// selected row raised, the buttons under. Rows that do not fit
-    /// scroll so the selection is always shown. `hover` is the pointer in
-    /// canvas pixels.
-    pub fn ui(
-        &mut self,
-        width: u32,
-        height: u32,
-        palette: Palette,
-        hover: Option<(i32, i32)>,
-    ) -> Ui {
-        let mut ui = Ui::new(palette, hover);
-        let p = *ui.palette();
+    /// The card: a row a task with a checkbox, the selected row raised,
+    /// the buttons under -- Add, Done, Remove, Clear done; while a new
+    /// task is being typed, Add it and Cancel. Rows that do not fit
+    /// scroll so the selection is always shown.
+    pub fn draw(&mut self, width: u16, height: u16, view: &mut ViewWriter) {
+        if width < 200 || height < BUTTONS_H + ROW_H + 12 {
+            view.op(Op::Text {
+                x: 0,
+                y: 0,
+                role: Role::Muted,
+                scale: 1,
+                text: "Make me bigger",
+            });
+            return;
+        }
         let rows = Self::rows_that_fit(height);
         if self.selection < self.scroll {
             self.scroll = self.selection;
@@ -279,41 +298,86 @@ impl TasksView {
             } else {
                 "Reading the list..."
             };
-            ui.text(6, 6, note, p.muted, 1);
+            view.op(Op::Text {
+                x: 6,
+                y: 6,
+                role: Role::Muted,
+                scale: 1,
+                text: note,
+            });
         }
         for (i, task) in self.tasks.iter().skip(self.scroll).take(rows).enumerate() {
             let index = self.scroll + i;
-            let row = rect(0, (i as u32 * ROW_H) as i32, width, ROW_H);
+            let row = Area::new(0, i as u16 * ROW_H, width, ROW_H);
             if index == self.selection {
-                ui.fill(row, p.raised, 6);
+                view.op(Op::Fill {
+                    area: row,
+                    role: Role::Raised,
+                    radius: 6,
+                });
             }
-            let check = rect(8, row.y as i32 + 5, 18, 18);
+            let check = Area::new(8, row.y + 5, 18, 18);
             if task.done {
-                ui.fill(check, p.accent, 4);
-                ui.text_centered(&check, "x", p.on_accent, 1);
+                view.op(Op::Fill {
+                    area: check,
+                    role: Role::Accent,
+                    radius: 4,
+                })
+                .op(Op::TextCentered {
+                    area: check,
+                    role: Role::OnAccent,
+                    scale: 1,
+                    text: "x",
+                });
             } else {
-                ui.outline(check, p.muted, 4, 2);
+                view.op(Op::Outline {
+                    area: check,
+                    role: Role::Muted,
+                    radius: 4,
+                    thickness: 2,
+                });
             }
-            let ink = if task.done { p.muted } else { p.text };
-            ui.text(36, row.y as i32 + 6, &task.text, ink, 1);
-            if ui.hovered(&row) && index != self.selection {
-                ui.outline(row, p.raised, 6, 1);
-            }
+            view.op(Op::Text {
+                x: 36,
+                y: row.y + 6,
+                role: if task.done { Role::Muted } else { Role::Text },
+                scale: 1,
+                text: &task.text,
+            });
             if i < (ROW_KEY_LAST - ROW_KEY_FIRST) as usize {
-                ui.hit_area(row, ROW_KEY_FIRST + i as u8);
+                view.op(Op::Hit {
+                    area: row,
+                    key: ROW_KEY_FIRST + i as u8,
+                });
             }
         }
         let buttons = Self::buttons(width, height);
-        ui.button(buttons[0], "Add", b'a', ButtonKind::Primary);
-        ui.button(buttons[1], "Done", b'\n', ButtonKind::Plain);
-        ui.button(
-            buttons[2],
-            "Remove",
-            crate::notepad::KEY_DELETE,
-            ButtonKind::Quiet,
-        );
-        ui.button(buttons[3], "Clear done", b'c', ButtonKind::Quiet);
-        ui
+        let set: [(&str, u8, Kind); 4] = if self.prompt.is_some() {
+            [
+                ("Add it", b'\n', Kind::Primary),
+                ("Cancel", ESC, Kind::Quiet),
+                ("", 0, Kind::Quiet),
+                ("", 0, Kind::Quiet),
+            ]
+        } else {
+            [
+                ("Add", b'a', Kind::Primary),
+                ("Done", b'\n', Kind::Plain),
+                ("Remove", KEY_DELETE, Kind::Quiet),
+                ("Clear done", b'c', Kind::Quiet),
+            ]
+        };
+        for (area, (label, key, kind)) in buttons.iter().zip(set.iter()) {
+            if label.is_empty() {
+                continue;
+            }
+            view.op(Op::Button {
+                area: *area,
+                kind: *kind,
+                key: *key,
+                label,
+            });
+        }
     }
 
     pub fn footer(&self) -> String {
@@ -332,25 +396,40 @@ impl TasksView {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
-    use crate::notepad::{KEY_DELETE, KEY_DOWN, KEY_UP};
-    use services_gui_host::Theme;
-    use view_types::DrawOp;
+    use app_protocol::{OwnedOp, View};
 
-    fn palette() -> Palette {
-        Palette::from_theme(&Theme::DEFAULT)
+    fn view_of(tasks: &mut TasksView) -> View {
+        let mut buf = [0u8; app_protocol::VIEW_MAX];
+        let footer = tasks.footer();
+        let mut view = ViewWriter::new(&mut buf, "Tasks", &footer);
+        tasks.draw(444, 340, &mut view);
+        View::decode(view.finish().unwrap(), 444, 340).expect("a view the desk takes")
     }
 
     fn texts(tasks: &mut TasksView) -> Vec<String> {
-        tasks
-            .ui(444, 340, palette(), None)
-            .into_ops()
+        view_of(tasks)
+            .ops
             .into_iter()
             .filter_map(|op| match op {
-                DrawOp::Text { text, .. } => Some(text),
+                OwnedOp::Text { text, .. } | OwnedOp::TextCentered { text, .. } => Some(text),
+                OwnedOp::Button { label, .. } => Some(label),
                 _ => None,
             })
             .collect()
+    }
+
+    /// The key a click at `(x, y)` is, as the desk finds it.
+    fn hit(tasks: &mut TasksView, x: u16, y: u16) -> Option<u8> {
+        view_of(tasks).ops.iter().rev().find_map(|op| match op {
+            OwnedOp::Button { area, key, .. } | OwnedOp::Hit { area, key }
+                if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h =>
+            {
+                Some(*key)
+            }
+            _ => None,
+        })
     }
 
     #[test]
@@ -410,11 +489,7 @@ mod tests {
         assert_eq!(tasks.selection, 1);
         // Clicks, by pixel: another row selects, the same row ticks,
         // buttons act.
-        let row0 = rect(0, 0, 444, ROW_H);
-        let key = tasks
-            .ui(444, 340, palette(), None)
-            .hit(row0.x as i32 + 100, row0.y as i32 + 10)
-            .expect("a row there");
+        let key = hit(&mut tasks, 100, 10).expect("a row there");
         assert_eq!(key, ROW_KEY_FIRST);
         assert_eq!(tasks.handle_byte(key), TasksEffect::Redraw);
         assert_eq!(tasks.selection, 0);
@@ -422,22 +497,23 @@ mod tests {
         assert!(tasks.tasks()[0].done);
         let buttons = TasksView::buttons(444, 340);
         let clear = buttons[3];
-        let key = tasks
-            .ui(444, 340, palette(), None)
-            .hit(clear.x as i32 + 4, clear.y as i32 + 4)
-            .unwrap();
+        let key = hit(&mut tasks, clear.x + 4, clear.y + 4).unwrap();
         assert_eq!(key, b'c');
         assert_eq!(tasks.handle_byte(key), TasksEffect::Redraw, "Clear done");
         assert_eq!(tasks.tasks().len(), 1);
         assert_eq!(tasks.tasks()[0].text, "two");
         let add = buttons[0];
-        let key = tasks
-            .ui(444, 340, palette(), None)
-            .hit(add.x as i32 + 4, add.y as i32 + 4)
-            .unwrap();
+        let key = hit(&mut tasks, add.x + 4, add.y + 4).unwrap();
         assert_eq!(key, b'a');
         tasks.handle_byte(key);
         assert!(tasks.prompt_open());
+        // While typing, the buttons are Add it and Cancel.
+        assert_eq!(hit(&mut tasks, add.x + 4, add.y + 4), Some(b'\n'));
+        assert_eq!(
+            hit(&mut tasks, buttons[1].x + 4, buttons[1].y + 4),
+            Some(ESC)
+        );
+        assert_eq!(hit(&mut tasks, clear.x + 4, clear.y + 4), None);
         assert_eq!(tasks.handle_byte(0x1B), TasksEffect::Redraw);
         assert!(!tasks.prompt_open());
         assert_eq!(

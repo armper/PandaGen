@@ -54,14 +54,24 @@ A panic sends `panicked: ...` to the console and exits with 101.
 - **`random_bytes` / `random_u64`**: bytes from the machine's generator.
   Any program may ask: it reveals nothing and reaches nothing.
 - **`date()`**: today, when the machine's clock is set.
-- **Documents** (`Ask::Documents(Pattern::from_static("####-##-##"))`):
-  the documents whose names match a pattern (`#` a digit, `?` any
-  character, `*` any run), and only those. `Documents::list()` asks for
-  their names, which arrive as a message (`Event::Message`, then
-  `receive`), and again, unasked, after any save. `Documents::open(name)`
-  has one opened in a Notepad for the person, made empty if it isn't
-  there yet. A program never reads or writes a document itself; the
-  Calendar is the example.
+- **Documents** (`Ask::Documents(pattern, rights)`): the documents whose
+  names match a pattern (`#` a digit, `?` any character, `*` any run),
+  and only those, with only the rights asked for:
+  - `LIST`: `Documents::list()` asks for their names. They arrive as a
+    message, and again, unasked, after any save.
+  - `OPEN`: `Documents::open(name)` has one opened in a Notepad for the
+    person, made empty if it isn't there yet.
+  - `READ`: `Documents::read(name)` asks for its content, which arrives
+    as `Message::Document` (or `Message::Absent`).
+  - `WRITE`: `Documents::write(name, content, buffer)` replaces it (a new
+    version; the old ones are kept), and `Message::Written` says whether
+    it was kept.
+
+  The Calendar asks for `####-##-##` with list and open, so it can see
+  its day notes' names but never their contents. Tasks asks for exactly
+  `tasks` with read and write. Messages are typed
+  (`pandagen_app::message::decode`) and are read in place, so no heap is
+  needed.
 
 ## A card on the desk
 
@@ -101,7 +111,7 @@ why.
 
 ## Dock apps that are programs
 
-The Calculator, the Timer, Tiles and the Calendar are programs (`apps/calculator`,
+The Calculator, the Timer, Tiles, the Calendar and Tasks are programs (`apps/calculator`,
 `apps/timer`, `apps/tiles`, with everything testable in the host-tested
 `calculator_core`, `timer_core` and `tiles_core`). The Calculator and
 Tiles ask for exactly one capability, their card; the Timer asks for its

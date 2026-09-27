@@ -421,6 +421,109 @@ impl Event {
     }
 }
 
+/// Messages (PROC-009, PROC-011): what the desk sends a program beyond an
+/// eight-byte event, taken with `receive`. The first byte says which;
+/// the rest is read in place, so a program needs no heap to read one.
+pub mod message {
+    /// The names of the documents a pattern names, one per line.
+    pub const NAMES: u8 = 1;
+    /// A document read: its name's length, its name, its content.
+    pub const DOCUMENT: u8 = 2;
+    /// A document asked for that is not there: its name.
+    pub const ABSENT: u8 = 3;
+    /// A write done: 1 or 0 for whether it was kept, then the name.
+    pub const WRITTEN: u8 = 4;
+
+    /// A message, read in place.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Message<'a> {
+        Names(&'a str),
+        Document { name: &'a str, content: &'a [u8] },
+        Absent { name: &'a str },
+        Written { name: &'a str, kept: bool },
+    }
+
+    /// Read a message; `None` for one this program does not know.
+    pub fn decode(bytes: &[u8]) -> Option<Message<'_>> {
+        fn text(b: &[u8]) -> Option<&str> {
+            core::str::from_utf8(b).ok()
+        }
+        let (&kind, rest) = bytes.split_first()?;
+        Some(match kind {
+            NAMES => Message::Names(text(rest)?),
+            DOCUMENT => {
+                let (&n, rest) = rest.split_first()?;
+                let name = text(rest.get(..n as usize)?)?;
+                Message::Document {
+                    name,
+                    content: &rest[n as usize..],
+                }
+            }
+            ABSENT => Message::Absent { name: text(rest)? },
+            WRITTEN => {
+                let (&kept, rest) = rest.split_first()?;
+                Message::Written {
+                    name: text(rest)?,
+                    kept: kept == 1,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// The bytes of a write: the name's length, the name, the content.
+    /// `None` when the name is longer than 255 bytes.
+    pub fn write_request<'b>(buf: &'b mut [u8], name: &str, content: &[u8]) -> Option<&'b [u8]> {
+        let n = name.len();
+        let total = 1 + n + content.len();
+        if n > 255 || total > buf.len() {
+            return None;
+        }
+        buf[0] = n as u8;
+        buf[1..1 + n].copy_from_slice(name.as_bytes());
+        buf[1 + n..total].copy_from_slice(content);
+        Some(&buf[..total])
+    }
+
+    /// A write, read back: the name and the content.
+    pub fn read_write_request(bytes: &[u8]) -> Option<(&str, &[u8])> {
+        let (&n, rest) = bytes.split_first()?;
+        let name = core::str::from_utf8(rest.get(..n as usize)?).ok()?;
+        Some((name, &rest[n as usize..]))
+    }
+
+    /// The desk's side: messages made.
+    #[cfg(feature = "decode")]
+    pub fn names(listed: &str) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec![NAMES];
+        out.extend_from_slice(listed.as_bytes());
+        out
+    }
+
+    #[cfg(feature = "decode")]
+    pub fn document(name: &str, content: &[u8]) -> alloc::vec::Vec<u8> {
+        let name = &name.as_bytes()[..name.len().min(255)];
+        let mut out = alloc::vec![DOCUMENT, name.len() as u8];
+        out.extend_from_slice(name);
+        out.extend_from_slice(content);
+        out
+    }
+
+    #[cfg(feature = "decode")]
+    pub fn absent(name: &str) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec![ABSENT];
+        out.extend_from_slice(name.as_bytes());
+        out
+    }
+
+    #[cfg(feature = "decode")]
+    pub fn written(name: &str, kept: bool) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec![WRITTEN, kept as u8];
+        out.extend_from_slice(name.as_bytes());
+        out
+    }
+}
+
 /// A view as the desk keeps it: owned, checked.
 #[cfg(feature = "decode")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +777,38 @@ mod tests {
             label: "Add one",
         });
         v.finish().unwrap()
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn messages_round_trip_and_the_unknown_is_nothing() {
+        use message::*;
+        assert_eq!(decode(&names("a\nb\n")), Some(Message::Names("a\nb\n")));
+        assert_eq!(
+            decode(&document("tasks", b"[ ] milk\n")),
+            Some(Message::Document {
+                name: "tasks",
+                content: b"[ ] milk\n"
+            })
+        );
+        assert_eq!(
+            decode(&absent("tasks")),
+            Some(Message::Absent { name: "tasks" })
+        );
+        assert_eq!(
+            decode(&written("tasks", true)),
+            Some(Message::Written {
+                name: "tasks",
+                kept: true
+            })
+        );
+        assert_eq!(decode(&[99, 1, 2]), None);
+        assert_eq!(decode(&[DOCUMENT, 9, b'x']), None, "name runs past the end");
+        let mut buf = [0u8; 32];
+        let req = write_request(&mut buf, "tasks", b"[x] done\n").unwrap();
+        assert_eq!(read_write_request(req), Some(("tasks", &b"[x] done\n"[..])));
+        let mut small = [0u8; 4];
+        assert_eq!(write_request(&mut small, "tasks", b"x"), None);
     }
 
     #[test]

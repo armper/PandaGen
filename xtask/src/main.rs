@@ -633,6 +633,11 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_tasks".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        // A program since PROC-011, keeping its own document.
+        "--expect-serial".to_string(),
+        "desk: tasks is thread 1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 wrote tasks (9 bytes)".to_string(),
         // The card: 460 wide, centred (x=410), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
@@ -1053,7 +1058,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 8 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar)"
+        "programs: 9 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar, tasks)"
             .to_string(),
         "--expect-serial".to_string(),
         "  primes (16 KiB, asks for console)".to_string(),
@@ -1175,7 +1180,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_install".to_string(),
         "--expect-serial".to_string(),
-        "programs: from the boot image, 8 installed, 0 updated".to_string(),
+        "programs: from the boot image, 9 installed, 0 updated".to_string(),
         "--expect-serial".to_string(),
         "install: hello (16 KiB, asks for console) installed".to_string(),
         "--expect-serial".to_string(),
@@ -1190,6 +1195,42 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "KERNEL PANIC".to_string(),
     ];
     shapes.push(Shape::new(&title, &args));
+
+    // A program's own document survives a reboot (PROC-011): Tasks adds
+    // "milk" and writes its list; after the reboot the restored card's
+    // program reads it back.
+    title = "Tasks keeps its list: written, and read again after a reboot".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,t,a,s,k,s,ret,sleep:2,a,m,i,l,k,ret,sleep:4".to_string(),
+        "--out".to_string(),
+        "dist/qemu_tasks_kept_1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 read tasks (absent)".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 wrote tasks (9 bytes)".to_string(),
+        "--expect-serial".to_string(),
+        "desk: layout saved".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    let again = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:9".to_string(),
+        "--out".to_string(),
+        "dist/qemu_tasks_kept_2".to_string(),
+        "--expect-serial".to_string(),
+        "desk: tasks is thread 1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 read tasks (9 bytes)".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args).then(&again));
 
     // A reboot (DESK-020): the cards come back, and so does the document
     // one of them shows -- the first check that anything survives a
@@ -2600,7 +2641,22 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
         "calendar",
         &[
             program_image::Ask::Card,
-            program_image::Ask::Documents(program_image::Pattern::from_static("####-##-##")),
+            program_image::Ask::Documents(
+                program_image::Pattern::from_static("####-##-##"),
+                program_image::Rights::LIST.and(program_image::Rights::OPEN),
+            ),
+        ],
+    ),
+    // The dock's Tasks (PROC-011): its card, and one document to read
+    // and write.
+    (
+        "tasks",
+        &[
+            program_image::Ask::Card,
+            program_image::Ask::Documents(
+                program_image::Pattern::from_static("tasks"),
+                program_image::Rights::READ.and(program_image::Rights::WRITE),
+            ),
         ],
     ),
     // Not on the boot image (PROC-010): installed over the network.

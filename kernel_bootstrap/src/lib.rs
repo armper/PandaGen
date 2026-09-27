@@ -32,7 +32,6 @@ pub mod sketch;
 pub mod speaker;
 pub mod supervision;
 pub mod syscall_abi;
-pub mod tasks;
 pub mod web;
 pub mod widgets;
 
