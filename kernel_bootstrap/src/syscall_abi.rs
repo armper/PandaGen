@@ -23,6 +23,7 @@
 //! | 6   | `present(card, ptr, len)`| 0: the card shows the view   |
 //! | 7   | `poll(card, ptr)`        | 1: an event at ptr; 0: none  |
 //! | 8   | `wait(ms)`               | 0, at an event or after `ms` |
+//! | 9   | `random(ptr, len)`       | 0: `len` random bytes at ptr |
 //!
 //! `present`, `poll` and `wait` are a program's card (PROC-005): views
 //! out (`app_protocol`, at most `VIEW_MAX` bytes), events in, eight bytes
@@ -40,15 +41,41 @@ pub const MAX_HANDLES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Call {
-    Exit { code: u64 },
+    Exit {
+        code: u64,
+    },
     Yield,
-    Sleep { ms: u64 },
-    Send { handle: u64, ptr: u64, len: u64 },
+    Sleep {
+        ms: u64,
+    },
+    Send {
+        handle: u64,
+        ptr: u64,
+        len: u64,
+    },
     Time,
-    Drop { handle: u64 },
-    Present { handle: u64, ptr: u64, len: u64 },
-    Poll { handle: u64, ptr: u64 },
-    Wait { ms: u64 },
+    Drop {
+        handle: u64,
+    },
+    Present {
+        handle: u64,
+        ptr: u64,
+        len: u64,
+    },
+    Poll {
+        handle: u64,
+        ptr: u64,
+    },
+    Wait {
+        ms: u64,
+    },
+    /// Bytes from the machine's generator (PROC-008): a game's shuffle,
+    /// a program's own salts. Needs no capability: it reveals nothing
+    /// and reaches nothing.
+    Random {
+        ptr: u64,
+        len: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +124,7 @@ impl Call {
                 ptr: rsi,
             },
             8 => Call::Wait { ms: rdi },
+            9 => Call::Random { ptr: rdi, len: rsi },
             _ => return Err(Error::NoSuchCall),
         })
     }
@@ -112,11 +140,14 @@ pub enum Capability {
     ReadOnlyConsole,
     /// Its card on the desk (PROC-005).
     Card,
+    /// Notices on the desk (PROC-008): what it sends is said there, with
+    /// a chime.
+    Notices,
 }
 
 impl Capability {
     pub fn can_send(self) -> bool {
-        matches!(self, Capability::Console)
+        matches!(self, Capability::Console | Capability::Notices)
     }
 }
 

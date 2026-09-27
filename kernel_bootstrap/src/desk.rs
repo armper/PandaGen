@@ -235,13 +235,11 @@ pub const OVERVIEW_GAP: usize = 16;
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
 use crate::calendar::{CalendarEffect, CalendarView, Date};
-use crate::game::{Game, GameEffect};
 use crate::launcher::{LauncherEffect, LauncherView};
 use crate::notepad::{Notepad, NotepadEffect};
 use crate::sketch::{SketchEffect, SketchView, SKETCH_FILE};
 pub use crate::speaker::Sound;
 use crate::tasks::{TasksEffect, TasksView, TASKS_FILE};
-use crate::timer::{TimerEffect, TimerView};
 
 pub const TOP_BAR_HEIGHT: usize = 28;
 pub const DOCK_HEIGHT: usize = 84;
@@ -746,6 +744,8 @@ impl DeskApp {
     pub const fn program(self) -> Option<&'static str> {
         match self {
             DeskApp::Calculator => Some("calculator"),
+            DeskApp::Timer => Some("timer"),
+            DeskApp::Tiles => Some("tiles"),
             _ => None,
         }
     }
@@ -1450,8 +1450,6 @@ impl DeskWindow {
             AppState::Calendar(_) => {
                 alloc::vec![("Today".to_string(), b't'), ("Note".to_string(), b'\n'),]
             }
-            AppState::Timer(_) => Vec::new(),
-            AppState::Tiles(_) => Vec::new(),
             AppState::Tasks(tasks) if tasks.prompt_open() => alloc::vec![
                 ("Add".to_string(), b'\n'),
                 ("Cancel".to_string(), crate::notepad::ESC),
@@ -1934,8 +1932,6 @@ pub enum AppState {
     /// The sheet, with how many rows it has scrolled.
     Shortcuts(usize),
     Calendar(CalendarView),
-    Timer(TimerView),
-    Tiles(Game),
     Tasks(TasksView),
     Sketch(SketchView),
     Launcher(LauncherView),
@@ -2744,8 +2740,6 @@ pub struct Desk {
     /// A document was saved since the Calendars last listed: their dots
     /// may be stale.
     notes_stale: bool,
-    /// The tick a running timer was last drawn at (GFX-077).
-    timer_drawn: u64,
     /// Cards on their way and cards shrinking away (GFX-085), and the
     /// clock they run on: the last `tick`. Before the first tick there is
     /// no clock, so nothing moves -- a desk built and read in one breath,
@@ -2824,7 +2818,6 @@ impl Desk {
             file_names_cache: Vec::new(),
             today: None,
             notes_stale: false,
-            timer_drawn: 0,
             motions: Vec::new(),
             ghosts: Vec::new(),
             motion_clock: 0,
@@ -3266,32 +3259,6 @@ impl Desk {
         if self.in_motion() {
             requests.push(DeskRequest::Repaint);
         }
-        // Timers run on the desk's ticks; a countdown that is up is said
-        // through a notice, so it is heard from any space (GFX-077).
-        let mut done = Vec::new();
-        for window in &mut self.windows {
-            if let AppState::Timer(timer) = &mut window.state {
-                if let Some(message) = timer.poll(now) {
-                    done.push(message);
-                    self.pending_sounds.push(Sound::Chime);
-                }
-            }
-        }
-        for message in done {
-            self.notify(NoticeLevel::Info, message, now);
-        }
-        // A running timer is drawn ten times a second.
-        let running = self
-            .windows
-            .iter()
-            .any(|w| matches!(&w.state, AppState::Timer(t) if t.running()));
-        if running
-            && now.saturating_sub(self.timer_drawn) >= crate::timer::HZ / 10
-            && !requests.contains(&DeskRequest::Repaint)
-        {
-            self.timer_drawn = now;
-            requests.push(DeskRequest::Repaint);
-        }
         // A save may have made a day's note: the Calendars list again.
         if self.notes_stale {
             self.notes_stale = false;
@@ -3428,6 +3395,16 @@ impl Desk {
             window.state = AppState::Program(crate::program_card::ProgramCard::new(thread, name));
         }
         id
+    }
+
+    /// A program's notice (PROC-008): in the notices centre, with the
+    /// chime a timer that is up has always had.
+    pub fn program_notice(&mut self, text: &str, now: u64) {
+        // The chime first: a notice with a chime waiting does not blip.
+        if self.pending_sounds.len() < 8 {
+            self.pending_sounds.push(Sound::Chime);
+        }
+        self.notify(NoticeLevel::Info, text.to_string(), now);
     }
 
     /// The programs the desk wants started for cards waiting for them.
@@ -3635,16 +3612,13 @@ impl Desk {
                 DeskApp::Shortcuts => AppState::Shortcuts(0),
                 // A program's card, waiting for its program (thread 0 is
                 // none); `open_program` binds it.
-                DeskApp::Calculator | DeskApp::Program => AppState::Program(
-                    crate::program_card::ProgramCard::new(0, app.program().unwrap_or("")),
-                ),
+                DeskApp::Calculator | DeskApp::Timer | DeskApp::Tiles | DeskApp::Program => {
+                    AppState::Program(crate::program_card::ProgramCard::new(
+                        0,
+                        app.program().unwrap_or(""),
+                    ))
+                }
                 DeskApp::Calendar => AppState::Calendar(CalendarView::new(self.today)),
-                DeskApp::Timer => AppState::Timer(TimerView::new()),
-                // Seeded from the clock and the launch count: no two games
-                // alike, and the same game under test.
-                DeskApp::Tiles => AppState::Tiles(Game::new(
-                    self.last_tick.wrapping_mul(6_364_136_223_846_793_005) ^ self.opened as u64,
-                )),
                 DeskApp::Tasks => AppState::Tasks(TasksView::new()),
                 DeskApp::Sketch => AppState::Sketch(SketchView::new()),
                 DeskApp::Launcher => AppState::Launcher(LauncherView::default()),
@@ -4105,15 +4079,7 @@ impl Desk {
                 "Calendar".to_string(),
                 alloc::vec![calendar.selected.short()],
             ),
-            AppState::Timer(timer) => (
-                "Timer".to_string(),
-                alloc::vec![crate::timer::format_ticks(timer.shown_ticks())],
-            ),
             AppState::Program(card) => (card.title(), alloc::vec![card.footer()]),
-            AppState::Tiles(game) => (
-                "Tiles".to_string(),
-                alloc::vec![alloc::format!("score {}", game.score())],
-            ),
             AppState::Tasks(tasks) => (
                 "Tasks".to_string(),
                 alloc::vec![alloc::format!(
@@ -5070,34 +5036,6 @@ impl Desk {
                             if let CalendarEffect::OpenNote { name, exists } = effect {
                                 requests.extend(self.open_note(name, exists));
                             }
-                            // Timer and Tiles: real buttons, hit by pixel
-                            // (GFX-082); the hit is the key the button is.
-                            if let Some((x, y)) = self.canvas_point(*target, px, py) {
-                                let bounds = self.window(*target).map(|w| w.bounds);
-                                let palette = crate::widgets::Palette::from_theme(&self.theme());
-                                if let Some(bounds) = bounds {
-                                    let (w, h) = Self::canvas_size(bounds);
-                                    match self.window_mut(*target).map(|w| &mut w.state) {
-                                        Some(AppState::Timer(timer)) => {
-                                            if let Some(key) =
-                                                timer.ui(w, h, palette, None).hit(x, y)
-                                            {
-                                                timer.handle_byte(key);
-                                                clicked = true;
-                                            }
-                                        }
-                                        Some(AppState::Tiles(game)) => {
-                                            if let Some(key) =
-                                                game.ui(w, h, palette, None).hit(x, y)
-                                            {
-                                                game.handle_byte(key);
-                                                clicked = true;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
                             // Tasks: a row or a button, by pixel (GFX-083).
                             if let Some((x, y)) = self.canvas_point(*target, px, py) {
                                 let bounds = self.window(*target).map(|w| w.bounds);
@@ -5993,22 +5931,6 @@ impl Desk {
                 }
                 CalendarEffect::OpenNote { name, exists } => (self.open_note(name, exists), true),
             },
-            AppState::Timer(timer) => match timer.handle_byte(byte) {
-                TimerEffect::None => (None, false),
-                TimerEffect::Redraw => (None, true),
-                TimerEffect::Close => {
-                    self.close(id);
-                    (None, true)
-                }
-            },
-            AppState::Tiles(game) => match game.handle_byte(byte) {
-                GameEffect::None => (None, false),
-                GameEffect::Redraw => (None, true),
-                GameEffect::Close => {
-                    self.close(id);
-                    (None, true)
-                }
-            },
             AppState::Tasks(tasks) => match tasks.handle_byte(byte) {
                 TasksEffect::None => (None, false),
                 TasksEffect::Redraw => (None, true),
@@ -6650,24 +6572,6 @@ impl Desk {
                     let (w, h) = Self::canvas_size(window.bounds);
                     graphics = Some(calendar.ui(w, h, palette, hover).into_ops());
                     (Vec::new(), "Calendar".to_string(), calendar.footer(), None)
-                }
-                AppState::Timer(timer) => {
-                    let title = if timer.running() {
-                        alloc::format!(
-                            "Timer - {}",
-                            crate::timer::format_ticks(timer.shown_ticks())
-                        )
-                    } else {
-                        "Timer".to_string()
-                    };
-                    let (w, h) = Self::canvas_size(window.bounds);
-                    graphics = Some(timer.ui(w, h, palette, hover).into_ops());
-                    (Vec::new(), title, timer.footer(), None)
-                }
-                AppState::Tiles(game) => {
-                    let (w, h) = Self::canvas_size(window.bounds);
-                    graphics = Some(game.ui(w, h, palette, hover).into_ops());
-                    (Vec::new(), "Tiles".to_string(), game.footer(), None)
                 }
                 AppState::Tasks(tasks) => {
                     let (w, h) = Self::canvas_size(window.bounds);
@@ -9337,90 +9241,57 @@ mod tests {
         );
     }
 
-    /// The Timer (GFX-077): it runs on `tick`, its title shows the time
-    /// while running, and a countdown that is up becomes a notice in the
-    /// log -- once -- whether or not the card is on this space.
+    /// The Timer and Tiles (GFX-077, GFX-078; programs since PROC-008):
+    /// on the dock, each opens a card that waits for its program; a
+    /// program's notice -- a countdown that is up -- is heard from any
+    /// space, with a chime; and a click on a key a program drew is that
+    /// key, for the program.
     #[test]
-    fn a_countdown_that_is_up_becomes_a_notice_from_any_space() {
-        let mut desk = Desk::new(1280, 800);
-        assert!(DeskApp::ALL.contains(&DeskApp::Timer));
-        let id = desk.launch(DeskApp::Timer);
-        desk.tick(1_000);
-        // Preset 1: one minute, running at once.
-        assert!(desk.handle_key(b'1').1);
-        assert!(matches!(&desk.window(id).unwrap().state, AppState::Timer(t) if t.running()));
-        assert_eq!(desk.tick(1_100), alloc::vec![DeskRequest::Repaint]);
-        assert!(desk.tick(1_105).is_empty(), "ten a second, not a hundred");
-        let windows = desk.windows_at("", true, None, 1_100, &[]);
-        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
-        assert_eq!(card.frame.title.as_deref(), Some("Timer - 00:58.9"));
-        // Move to another space; the countdown still runs and is heard.
-        desk.go_to_space(2);
-        let before = desk.notice_log.len();
-        desk.tick(1_000 + 60 * crate::timer::HZ + 5);
-        assert_eq!(desk.notice_log.len(), before + 1);
-        assert_eq!(desk.notice_log[0].1.text, "Timer: 1 minute up");
-        desk.tick(1_000 + 60 * crate::timer::HZ + 500);
-        assert_eq!(desk.notice_log.len(), before + 1, "said once");
-        // Back on space 1, the timer has stopped.
-        desk.go_to_space(0);
-        assert!(matches!(&desk.window(id).unwrap().state, AppState::Timer(t) if !t.running()));
-        desk.handle_key(crate::notepad::CTRL_W);
-        assert!(desk.window(id).is_none());
-    }
-
-    /// Tiles (GFX-078): on the dock and in the palette; arrows and the
-    /// buttons both play, and a click on a button is a move.
-    #[test]
-    fn tiles_plays_by_arrow_and_by_button() {
+    fn the_timer_and_tiles_are_programs_and_their_notices_are_heard() {
+        use app_protocol::{Event, ViewWriter};
         let mut desk = Desk::new(1280, 800);
         let mut router = DesktopInputRouter::new();
         let compositor = Compositor::new();
+        assert!(DeskApp::ALL.contains(&DeskApp::Timer));
         assert!(DeskApp::ALL.contains(&DeskApp::Tiles));
-        let id = desk.launch(DeskApp::Tiles);
-        let count = |desk: &Desk| match &desk.window(id).unwrap().state {
-            AppState::Tiles(game) => game.cells().iter().flatten().filter(|v| **v != 0).count(),
-            _ => panic!(),
+        let timer = desk.launch(DeskApp::Timer);
+        assert_eq!(desk.take_program_runs(), alloc::vec!["timer".to_string()]);
+        assert_eq!(desk.open_program(3, "timer"), timer);
+        assert_eq!(desk.window(timer).unwrap().label(), "Timer");
+        // Another space; the countdown's program says it is up.
+        desk.go_to_space(2);
+        let before = desk.notice_log.len();
+        desk.pending_sounds.clear();
+        desk.program_notice("Timer: 1 minute up", 6_000);
+        assert_eq!(desk.notice_log.len(), before + 1);
+        assert_eq!(desk.notice_log[0].1.text, "Timer: 1 minute up");
+        assert_eq!(desk.pending_sounds, alloc::vec![Sound::Chime]);
+        desk.go_to_space(0);
+        // Tiles: its program draws the real board; New, clicked, is `n`.
+        let tiles = desk.launch(DeskApp::Tiles);
+        assert_eq!(desk.take_program_runs(), alloc::vec!["tiles".to_string()]);
+        desk.open_program(4, "tiles");
+        let events = desk.take_program_events();
+        let Some(&(4, Event::Size { w, h })) = events.iter().find(|(t, _)| *t == 4) else {
+            panic!("{events:?}")
         };
-        assert_eq!(count(&desk), 2);
-        let board = |desk: &Desk| match &desk.window(id).unwrap().state {
-            AppState::Tiles(game) => *game.cells(),
-            _ => panic!(),
-        };
-        let before = board(&desk);
-        // An arrow that moves something changes the board (two equal
-        // tiles may merge, so the count is not the measure).
-        let mut moved = false;
-        for key in [
-            crate::notepad::KEY_LEFT,
-            crate::notepad::KEY_UP,
-            crate::notepad::KEY_RIGHT,
-            crate::notepad::KEY_DOWN,
-        ] {
-            if desk.handle_key(key).1 {
-                moved = true;
-                break;
-            }
-        }
-        assert!(moved);
-        assert_ne!(board(&desk), before);
-        // The New button, clicked: two tiles again.
+        let game = tiles_core::Game::new(7);
+        let mut buf = alloc::vec![0u8; app_protocol::VIEW_MAX];
+        let mut view = ViewWriter::new(&mut buf, "Tiles", &game.footer());
+        game.draw(w, h, &mut view);
+        desk.program_view(4, view.finish().unwrap());
         let windows = desk.windows("", true, None);
-        let card = windows.iter().find(|w| w.frame.view_id == id).unwrap();
+        let card = windows.iter().find(|w| w.frame.view_id == tiles).unwrap();
         assert!(card.actions.is_empty(), "its New is drawn");
-        assert!(matches!(card.frame.content, ViewContent::Graphics { .. }));
         let (ox, oy, _) = card.card_text_origin();
-        let (w, h) = Desk::canvas_size(desk.window(id).unwrap().bounds);
-        let new = crate::game::GameLayout::new(w, h).buttons[4];
-        let x = (ox as u32 + new.x + new.width / 2) as i32;
-        let y = (oy as u32 + new.y + new.height / 2) as i32;
+        let new = tiles_core::GameLayout::new(w, h).buttons[4];
+        let x = ox as i32 + (new.x + new.w / 2) as i32;
+        let y = oy as i32 + (new.y + new.h / 2) as i32;
         let deliveries = router.route(&compositor, &windows, press(x, y));
         desk.handle_deliveries_with_requests(&deliveries);
         let deliveries = router.route(&compositor, &windows, release(x, y));
         desk.handle_deliveries_with_requests(&deliveries);
-        assert_eq!(count(&desk), 2);
-        desk.handle_key(crate::notepad::ESC);
-        assert!(desk.window(id).is_none());
+        assert!(desk.take_program_events().contains(&(4, Event::Key(b'n'))));
     }
 
     /// Tasks (GFX-079): opening asks for the `tasks` document, the card
@@ -9749,7 +9620,6 @@ mod tests {
     fn the_desk_asks_the_kernel_to_click_blip_and_chime() {
         let mut desk = Desk::new(1280, 800);
         let calendar = desk.launch(DeskApp::Calendar);
-        let id = desk.launch(DeskApp::Timer);
         desk.tick(1_000);
         // A chip: the Calendar's Today.
         let (_, _) = desk.card_action(calendar, 0);
@@ -9765,10 +9635,10 @@ mod tests {
         // A notice.
         desk.notify(NoticeLevel::Info, "Saved memo", 1_003);
         assert!(desk.tick(1_003).contains(&DeskRequest::Sound(Sound::Blip)));
-        // A countdown that is up: one chime, no blip.
-        desk.raise(id);
-        desk.handle_key(b'1');
-        let requests = desk.tick(1_003 + 60 * crate::timer::HZ + 1);
+        // A countdown that is up (the Timer program's notice): one chime,
+        // no blip.
+        desk.program_notice("Timer: 1 minute up", 1_004);
+        let requests = desk.tick(1_005);
         let sounds: Vec<&DeskRequest> = requests
             .iter()
             .filter(|r| matches!(r, DeskRequest::Sound(_)))

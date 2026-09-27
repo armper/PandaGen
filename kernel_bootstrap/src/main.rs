@@ -30,7 +30,6 @@ mod desktop_frame;
 mod display_mode;
 mod display_sink;
 mod framebuffer;
-mod game;
 mod guard;
 mod launcher;
 mod line_edit;
@@ -56,7 +55,6 @@ mod syscall_abi;
 mod tasks;
 #[cfg(not(test))]
 mod threads;
-mod timer;
 mod vga;
 mod web;
 mod widgets;
@@ -2180,6 +2178,11 @@ fn workspace_loop(
                             desk.program_failed(&name, &why, get_tick_count());
                         }
                     }
+                    output_dirty = true;
+                }
+                // A program's notice (PROC-008): said like the desk's own.
+                for text in threads::take_notices() {
+                    desk.program_notice(&text, get_tick_count());
                     output_dirty = true;
                 }
                 for (id, view) in threads::take_views() {

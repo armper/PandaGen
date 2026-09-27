@@ -578,6 +578,9 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_timer".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        // A program since PROC-008, drawing the card the kernel used to.
+        "--expect-serial".to_string(),
+        "desk: timer is thread 1".to_string(),
         // The card: 400 wide, centred (x=440), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
@@ -603,6 +606,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_tiles".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        "--expect-serial".to_string(),
+        "desk: tiles is thread 1".to_string(),
         // The card: 340 wide, centred (x=470), first cascade step at y=44,
         // focused, so its top edge is the accent ring...
         "--expect-pixel".to_string(),
@@ -679,6 +684,8 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_apps".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        "--expect-serial".to_string(),
+        "desk: timer is thread 1".to_string(),
         // The Timer opened from the grid: 400 wide, centred, first cascade
         // step, focused -- the accent ring on its top edge (GFX-089).
         "--expect-pixel".to_string(),
@@ -1044,7 +1051,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 5 images (primes, ticker, tally, calculator, fragile)".to_string(),
+        "programs: 7 images (primes, ticker, tally, calculator, fragile, timer, tiles)".to_string(),
         "--expect-serial".to_string(),
         "primes   an image:".to_string(),
         "--expect-serial".to_string(),
@@ -2518,6 +2525,12 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
     ("calculator", &[program_image::Ask::Card]),
     // Breaks when asked, to show supervision (PROC-007).
     ("fragile", &[program_image::Ask::Card]),
+    // The dock's Timer and Tiles (PROC-008).
+    (
+        "timer",
+        &[program_image::Ask::Card, program_image::Ask::Notices],
+    ),
+    ("tiles", &[program_image::Ask::Card]),
 ];
 
 /// Build every program for the machine and turn each into an image.

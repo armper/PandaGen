@@ -1,0 +1,20 @@
+[package]
+name = "timer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The dock's Timer, as a program: a stopwatch and countdowns on a card of its own"
+
+# Its own workspace: programs are built for the machine, not the host.
+[workspace]
+
+[dependencies]
+pandagen_app = { path = "../../pandagen_app", features = ["heap"] }
+timer_core = { path = "../../timer_core" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+
+[profile.dev]
+panic = "abort"

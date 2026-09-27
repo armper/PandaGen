@@ -17,7 +17,6 @@ pub mod desktop_frame;
 pub mod display_mode;
 pub mod display_sink;
 pub mod free_list_heap;
-pub mod game;
 pub mod launcher;
 pub mod line_edit;
 pub mod minimal_editor;
@@ -34,7 +33,6 @@ pub mod speaker;
 pub mod supervision;
 pub mod syscall_abi;
 pub mod tasks;
-pub mod timer;
 pub mod web;
 pub mod widgets;
 

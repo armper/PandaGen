@@ -1,56 +1,66 @@
-//! Timer (GFX-077): a stopwatch with laps, and a countdown that says so
-//! when it is done.
+//! The Timer (GFX-077; a program since PROC-008): a stopwatch with laps,
+//! and a countdown that says so when it is done.
 //!
-//! Time is the kernel's tick, 100 Hz, handed in by the desk: the card
+//! Time is ticks, 100 a second, handed in by whoever runs it: the Timer
 //! never reads a clock itself, so `cargo test` can run a whole countdown
-//! in no time at all. When a countdown reaches zero the desk raises a
-//! notice -- through the notices centre like everything else the desk
-//! says -- so the card need not be on screen, or even on this space, to
-//! be heard.
+//! in no time at all. The program (`apps/timer`) hands it the machine's
+//! time; when a countdown reaches zero, [`TimerView::poll`] returns what
+//! to say, and the program says it through its Notices capability -- so
+//! the card need not be on screen, or even on this space, to be heard.
 //!
-//! Every control is a real button (GFX-082) that stands for a key, so
-//! the pointer and the keyboard reach the same code; the time is drawn
-//! three times the font's size, and a countdown shows what is left as a
-//! bar.
+//! Every control is a button that stands for a key, so the pointer and
+//! the keyboard reach the same code; the time is drawn three times the
+//! font's size, and a countdown shows what is left as a bar.
+
+#![no_std]
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use view_types::PixelRect;
-
-use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
+use app_protocol::{Area, Kind, Op, Role, ViewWriter};
 
 /// Ticks per second.
 pub const HZ: u64 = 100;
 /// The countdown presets, in minutes, as the card offers them.
 pub const PRESETS: [u64; 4] = [1, 5, 10, 25];
 /// Where the card's parts go, top to bottom, in canvas pixels.
-pub const TIME_TOP: i32 = 20;
-pub const BAR_TOP: i32 = 76;
-pub const CONTROLS_TOP: i32 = 96;
-pub const PRESETS_TOP: i32 = 172;
-pub const LAPS_TOP: i32 = 222;
-const LAP_PITCH: i32 = 18;
+pub const TIME_TOP: u16 = 20;
+pub const BAR_TOP: u16 = 76;
+pub const CONTROLS_TOP: u16 = 96;
+pub const PRESETS_TOP: u16 = 172;
+pub const LAPS_TOP: u16 = 222;
+const LAP_PITCH: u16 = 18;
+/// Laps kept.
+pub const MAX_LAPS: usize = 6;
 
-/// The controls' and presets' rectangles for a canvas `width` wide
-/// (GFX-082): what the drawing and the desk's hit test agree on.
+/// Keys the Timer answers besides its buttons.
+pub const CTRL_W: u8 = 0x17;
+pub const ESC: u8 = 0x1B;
+
+/// `area` cut into `cols` cells with `gap` between them.
+fn row(area: Area, cols: u16, gap: u16) -> Vec<Area> {
+    let w = area.w.saturating_sub(gap * (cols - 1)) / cols;
+    (0..cols)
+        .map(|c| Area::new(area.x + c * (w + gap), area.y, w, area.h))
+        .collect()
+}
+
+/// The controls' and presets' rectangles for a canvas `width` wide.
 #[derive(Debug, Clone)]
 pub struct TimerLayout {
-    pub controls: Vec<PixelRect>,
-    pub presets: Vec<PixelRect>,
+    pub controls: Vec<Area>,
+    pub presets: Vec<Area>,
 }
 
 impl TimerLayout {
-    pub fn new(width: u32) -> Self {
+    pub fn new(width: u16) -> Self {
         Self {
-            controls: grid(rect(0, CONTROLS_TOP, width, 44), 3, 1, 6),
-            presets: grid(rect(0, PRESETS_TOP, width, 36), 4, 1, 6),
+            controls: row(Area::new(0, CONTROLS_TOP, width, 44), 3, 6),
+            presets: row(Area::new(0, PRESETS_TOP, width, 36), 4, 6),
         }
     }
 }
-/// Laps kept.
-pub const MAX_LAPS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -59,7 +69,7 @@ pub enum Mode {
     Countdown(u64),
 }
 
-/// What a key or click asks the desk to do.
+/// What a key or click asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimerEffect {
     None,
@@ -75,10 +85,10 @@ pub struct TimerView {
     banked: u64,
     /// The tick the current run started at, while running.
     started: Option<u64>,
-    /// The last tick the desk told us about.
+    /// The last tick it was told about.
     now: u64,
     laps: Vec<u64>,
-    /// The countdown reached zero and the desk was told.
+    /// The countdown reached zero and it was said.
     fired: bool,
 }
 
@@ -121,7 +131,8 @@ impl TimerView {
         }
     }
 
-    /// The desk's clock. Returns a message once when a countdown ends.
+    /// The time, in ticks. Returns what to say, once, when a countdown
+    /// ends.
     pub fn poll(&mut self, now: u64) -> Option<String> {
         self.now = now;
         if let Mode::Countdown(total) = self.mode {
@@ -173,7 +184,6 @@ impl TimerView {
     /// A key: Space starts or pauses, `l` laps, `r` resets, `s` is the
     /// stopwatch, `1`..`4` start a preset countdown.
     pub fn handle_byte(&mut self, byte: u8) -> TimerEffect {
-        use crate::notepad::{CTRL_W, ESC};
         match byte {
             b' ' | b'\n' | b'\r' => self.start_or_pause(),
             b'l' | b'L' => self.lap(),
@@ -189,59 +199,108 @@ impl TimerView {
         TimerEffect::Redraw
     }
 
-    /// The card, drawn (GFX-082): the mode, the time large, a bar of
-    /// what is left while counting down, the controls, the presets, the
-    /// laps. `hover` is the pointer in canvas pixels, if over the card.
-    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+    /// The card's title: the time while it runs.
+    pub fn title(&self) -> String {
+        if self.running() {
+            alloc::format!("Timer - {}", format_ticks(self.shown_ticks()))
+        } else {
+            "Timer".to_string()
+        }
+    }
+
+    /// The card: the mode, the time large, a bar of what is left while
+    /// counting down, the controls, the presets, the laps.
+    pub fn draw(&self, width: u16, height: u16, view: &mut ViewWriter) {
+        if width < 200 || height < PRESETS_TOP + 36 {
+            view.op(Op::Text {
+                x: 0,
+                y: 0,
+                role: Role::Muted,
+                scale: 1,
+                text: "Make me bigger",
+            });
+            return;
+        }
         let layout = TimerLayout::new(width);
-        let mut ui = Ui::new(palette, hover);
-        let p = *ui.palette();
         let heading = match self.mode {
             Mode::Stopwatch => "Stopwatch".to_string(),
             Mode::Countdown(total) => alloc::format!("Countdown  {}", describe(total)),
         };
-        ui.text(0, 0, &heading, p.muted, 1);
-        let time_ink = if self.fired { p.accent } else { p.text };
-        ui.text_centered(
-            &rect(0, TIME_TOP, width, 48),
-            &format_ticks(self.shown_ticks()),
-            time_ink,
-            3,
-        );
+        view.op(Op::Text {
+            x: 0,
+            y: 0,
+            role: Role::Muted,
+            scale: 1,
+            text: &heading,
+        });
+        let time = format_ticks(self.shown_ticks());
+        view.op(Op::TextCentered {
+            area: Area::new(0, TIME_TOP, width, 48),
+            role: if self.fired { Role::Accent } else { Role::Text },
+            scale: 3,
+            text: &time,
+        });
         if let Mode::Countdown(total) = self.mode {
             // What is left, as a bar.
-            ui.fill(rect(0, BAR_TOP, width, 8), p.raised, 4);
+            view.op(Op::Fill {
+                area: Area::new(0, BAR_TOP, width, 8),
+                role: Role::Raised,
+                radius: 4,
+            });
             let left = self.shown_ticks().min(total);
-            let filled = ((width as u64 * left) / total.max(1)) as u32;
+            let filled = ((width as u64 * left) / total.max(1)) as u16;
             if filled > 0 {
-                ui.fill(rect(0, BAR_TOP, filled, 8), p.accent, 4);
+                view.op(Op::Fill {
+                    area: Area::new(0, BAR_TOP, filled, 8),
+                    role: Role::Accent,
+                    radius: 4,
+                });
             }
         }
-        let start = if self.running() { "Pause" } else { "Start" };
-        let start_kind = if self.running() {
-            ButtonKind::Plain
+        let (start, start_kind) = if self.running() {
+            ("Pause", Kind::Plain)
         } else {
-            ButtonKind::Primary
+            ("Start", Kind::Primary)
         };
-        ui.button(layout.controls[0], start, b' ', start_kind);
+        let button = |view: &mut ViewWriter, area: Area, label: &str, key: u8, kind: Kind| {
+            view.op(Op::Button {
+                area,
+                kind,
+                key,
+                label,
+            });
+        };
+        button(view, layout.controls[0], start, b' ', start_kind);
         if self.mode == Mode::Stopwatch {
-            ui.button(layout.controls[1], "Lap", b'l', ButtonKind::Plain);
+            button(view, layout.controls[1], "Lap", b'l', Kind::Plain);
         } else {
-            ui.button(layout.controls[1], "Stopwatch", b's', ButtonKind::Plain);
+            button(view, layout.controls[1], "Stopwatch", b's', Kind::Plain);
         }
-        ui.button(layout.controls[2], "Reset", b'r', ButtonKind::Quiet);
-        ui.text(0, PRESETS_TOP - 20, "Countdown", p.muted, 1);
+        button(view, layout.controls[2], "Reset", b'r', Kind::Quiet);
+        view.op(Op::Text {
+            x: 0,
+            y: PRESETS_TOP - 20,
+            role: Role::Muted,
+            scale: 1,
+            text: "Countdown",
+        });
         for (i, (cell, minutes)) in layout.presets.iter().zip(PRESETS.iter()).enumerate() {
             let label = alloc::format!("{minutes}m");
-            ui.button(*cell, &label, b'1' + i as u8, ButtonKind::Accent);
+            button(view, *cell, &label, b'1' + i as u8, Kind::Accent);
         }
         let mut y = LAPS_TOP;
         if !self.laps.is_empty() {
-            ui.text(0, y, "Laps", p.muted, 1);
+            view.op(Op::Text {
+                x: 0,
+                y,
+                role: Role::Muted,
+                scale: 1,
+                text: "Laps",
+            });
             y += LAP_PITCH;
             let count = self.laps.len();
             for (i, lap) in self.laps.iter().enumerate() {
-                if y + LAP_PITCH > height as i32 {
+                if y + LAP_PITCH > height {
                     break;
                 }
                 let previous = self.laps.get(i + 1).copied().unwrap_or(0);
@@ -251,13 +310,24 @@ impl TimerView {
                     format_ticks(*lap),
                     format_ticks(lap - previous)
                 );
-                ui.text(8, y, &line, p.text, 1);
+                view.op(Op::Text {
+                    x: 8,
+                    y,
+                    role: Role::Text,
+                    scale: 1,
+                    text: &line,
+                });
                 y += LAP_PITCH;
             }
-        } else if self.fired {
-            ui.text(0, y, "Done", p.accent, 1);
+        } else if self.fired && y + LAP_PITCH <= height {
+            view.op(Op::Text {
+                x: 0,
+                y,
+                role: Role::Accent,
+                scale: 1,
+                text: "Done",
+            });
         }
-        ui
     }
 
     pub fn footer(&self) -> String {
@@ -269,27 +339,6 @@ impl TimerView {
             Mode::Countdown(_) => "Space pauses   R resets   S stopwatch".to_string(),
         }
     }
-}
-
-/// Which `[ button ]` on `text` covers `column`, counting from 0.
-pub fn button_at(text: &str, column: usize) -> Option<usize> {
-    let mut index = 0;
-    let mut open: Option<usize> = None;
-    for (i, ch) in text.chars().enumerate() {
-        match ch {
-            '[' => open = Some(i),
-            ']' => {
-                if let Some(start) = open.take() {
-                    if (start..=i).contains(&column) {
-                        return Some(index);
-                    }
-                    index += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// `mm:ss.t`, or `h:mm:ss` past an hour.
@@ -315,34 +364,49 @@ pub fn describe(ticks: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
-    use services_gui_host::Theme;
-    use view_types::DrawOp;
+    use app_protocol::{OwnedOp, View};
 
-    fn palette() -> Palette {
-        Palette::from_theme(&Theme::DEFAULT)
+    fn view_of(timer: &TimerView) -> View {
+        let mut buf = [0u8; app_protocol::VIEW_MAX];
+        let mut view = ViewWriter::new(&mut buf, &timer.title(), &timer.footer());
+        timer.draw(384, 360, &mut view);
+        View::decode(view.finish().unwrap(), 384, 360).expect("a view the desk takes")
     }
 
     fn texts(timer: &TimerView) -> Vec<String> {
-        timer
-            .ui(384, 360, palette(), None)
-            .into_ops()
+        view_of(timer)
+            .ops
             .into_iter()
             .filter_map(|op| match op {
-                DrawOp::Text { text, .. } => Some(text),
+                OwnedOp::Text { text, .. } | OwnedOp::TextCentered { text, .. } => Some(text),
+                OwnedOp::Button { label, .. } => Some(label),
                 _ => None,
             })
             .collect()
     }
 
+    fn hit(timer: &TimerView, x: u16, y: u16) -> Option<u8> {
+        view_of(timer).ops.iter().rev().find_map(|op| match op {
+            OwnedOp::Button { area, key, .. }
+                if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h =>
+            {
+                Some(*key)
+            }
+            _ => None,
+        })
+    }
+
     #[test]
-    fn the_stopwatch_runs_on_the_desks_ticks_pauses_and_laps() {
+    fn the_stopwatch_runs_on_the_ticks_it_is_given_pauses_and_laps() {
         let mut timer = TimerView::new();
         timer.poll(1_000);
         assert!(texts(&timer).contains(&"00:00.0".to_string()));
         assert_eq!(timer.handle_byte(b' '), TimerEffect::Redraw);
         timer.poll(1_230);
         assert!(texts(&timer).contains(&"00:02.3".to_string()));
+        assert_eq!(timer.title(), "Timer - 00:02.3");
         timer.handle_byte(b'l');
         timer.poll(1_500);
         timer.handle_byte(b'l');
@@ -380,18 +444,9 @@ mod tests {
         assert_eq!(layout.presets.len(), 4);
         // The second preset, clicked: five minutes, running at once.
         let cell = layout.presets[1];
-        let key = timer
-            .ui(384, 360, palette(), None)
-            .hit(cell.x as i32 + 3, cell.y as i32 + 3)
-            .expect("a preset there");
+        let key = hit(&timer, cell.x + 3, cell.y + 3).expect("a preset there");
         assert_eq!(key, b'2');
-        assert_eq!(
-            timer
-                .ui(384, 360, palette(), None)
-                .hit(cell.x as i32 - 2, cell.y as i32 + 3),
-            None,
-            "the gap"
-        );
+        assert_eq!(hit(&timer, cell.x - 2, cell.y + 3), None, "the gap");
         assert_eq!(timer.handle_byte(key), TimerEffect::Redraw);
         assert_eq!(timer.mode, Mode::Countdown(5 * 60 * HZ));
         assert!(timer.running());
@@ -401,11 +456,11 @@ mod tests {
         assert_eq!(timer.poll(100), None);
         assert!(texts(&timer).contains(&"04:59.0".to_string()));
         // The bar: a full-width track and an accent fill nearly as wide.
-        let ops = timer.ui(384, 360, palette(), None).into_ops();
-        let bars: Vec<u32> = ops
+        let bars: Vec<u16> = view_of(&timer)
+            .ops
             .iter()
             .filter_map(|op| match op {
-                DrawOp::RoundedFill { rect, .. } if rect.y == BAR_TOP as u32 => Some(rect.width),
+                OwnedOp::Fill { area, .. } if area.y == BAR_TOP => Some(area.w),
                 _ => None,
             })
             .collect();
@@ -424,10 +479,7 @@ mod tests {
         assert!(timer.footer().starts_with("Done"));
         // Reset, then Start runs it again from the top.
         let reset = layout.controls[2];
-        let key = timer
-            .ui(384, 360, palette(), None)
-            .hit(reset.x as i32 + 3, reset.y as i32 + 3)
-            .unwrap();
+        let key = hit(&timer, reset.x + 3, reset.y + 3).unwrap();
         assert_eq!(key, b'r');
         timer.handle_byte(key);
         assert_eq!(timer.elapsed(), 0);
@@ -437,22 +489,37 @@ mod tests {
         // The second control is "Stopwatch" while counting down.
         let second = layout.controls[1];
         assert!(texts(&timer).contains(&"Stopwatch".to_string()));
-        let key = timer
-            .ui(384, 360, palette(), None)
-            .hit(second.x as i32 + 3, second.y as i32 + 3)
-            .unwrap();
+        let key = hit(&timer, second.x + 3, second.y + 3).unwrap();
         assert_eq!(key, b's');
         timer.handle_byte(key);
         assert_eq!(timer.mode, Mode::Stopwatch);
-        assert_eq!(timer.handle_byte(0x1B), TimerEffect::Close);
+        assert_eq!(timer.handle_byte(ESC), TimerEffect::Close);
         assert_eq!(describe(90 * HZ), "90 seconds");
         assert_eq!(describe(60 * HZ), "1 minute");
     }
 
     #[test]
-    fn bracketed_words_are_still_found_by_column() {
-        assert_eq!(button_at("[ Add ] [ Done ]", 3), Some(0));
-        assert_eq!(button_at("[ Add ] [ Done ]", 7), None);
-        assert_eq!(button_at("[ Add ] [ Done ]", 12), Some(1));
+    fn six_laps_on_a_short_card_never_draw_outside_it() {
+        let mut timer = TimerView::new();
+        timer.poll(0);
+        timer.handle_byte(b' ');
+        for t in 1..=10u64 {
+            timer.poll(t * 100);
+            timer.handle_byte(b'l');
+        }
+        for (w, h) in [
+            (384u16, 120u16),
+            (384, 240),
+            (384, 300),
+            (384, 360),
+            (100, 400),
+        ] {
+            let mut buf = [0u8; app_protocol::VIEW_MAX];
+            let mut view = ViewWriter::new(&mut buf, "", "");
+            timer.draw(w, h, &mut view);
+            // Laps stop at the card's foot; too small a card says so.
+            let decoded = View::decode(view.finish().unwrap(), w, h);
+            assert!(decoded.is_ok(), "{w}x{h}: {decoded:?}");
+        }
     }
 }

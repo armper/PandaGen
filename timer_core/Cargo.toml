@@ -1,0 +1,15 @@
+[package]
+name = "timer_core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The Timer program's stopwatch, countdown and card, testable on the host"
+
+# Fields are spelled out rather than inherited: the Timer program, built
+# outside the main workspace, depends on this by path.
+
+[dependencies]
+app_protocol = { path = "../app_protocol" }
+
+[dev-dependencies]
+app_protocol = { path = "../app_protocol", features = ["decode"] }

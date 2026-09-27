@@ -9,6 +9,8 @@ members = [
     "app_protocol",
     "free_list_heap",
     "calculator_core",
+    "timer_core",
+    "tiles_core",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

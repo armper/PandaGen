@@ -215,6 +215,12 @@ impl ProgramCard {
                     key,
                     label,
                 } => ui.button(pixels(*area), label, *key, button_kind(*kind)),
+                OwnedOp::TextCentered {
+                    area,
+                    role,
+                    scale,
+                    text,
+                } => ui.text_centered(&pixels(*area), text, color(&palette, *role), *scale),
                 OwnedOp::Line {
                     from,
                     to,
@@ -275,6 +281,7 @@ fn color(p: &Palette, role: Role) -> view_types::Color {
         Role::Accent => p.accent,
         Role::OnAccent => p.on_accent,
         Role::Hairline => p.hairline,
+        Role::Rgb(r, g, b) => view_types::Color::rgb(r, g, b),
     }
 }
 

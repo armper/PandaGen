@@ -1,46 +1,74 @@
-//! Tiles (GFX-078): the sliding-tiles game, 2048, as a card.
+//! Tiles (GFX-078; a program since PROC-008): the sliding-tiles game,
+//! 2048.
 //!
 //! Arrows slide every tile; equal neighbours merge and score their sum; a
 //! new 2 (or, one time in ten, a 4) lands on a free cell. The game is over
 //! when no move changes anything. The randomness is a seeded xorshift, so
-//! a test can play a whole game and know what it will see, and the desk
-//! seeds it from the tick at launch so no two games are alike.
+//! a test can play a whole game and know what it will see; the program
+//! (`apps/tiles`) seeds it from the machine's generator, so no two games
+//! are alike.
 //!
-//! The board is drawn (GFX-082): coloured tiles on a grid, the moves as
-//! real buttons under it, so it plays with the pointer alone.
+//! The board is drawn as an `app_protocol` view: coloured tiles on a grid
+//! (the classic colours, by value -- the theme has no roles for them), the
+//! moves as buttons under it, so it plays with the pointer alone.
+
+#![no_std]
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use view_types::{Color, PixelRect};
-
-use crate::widgets::{grid, rect, ButtonKind, Palette, Ui};
+use app_protocol::{Area, Kind, Op, Role, ViewWriter};
 
 pub const SIZE: usize = 4;
 /// The board's top, under the score line, and the buttons' height.
-pub const BOARD_TOP: i32 = 24;
-pub const BUTTONS_H: u32 = 44;
+pub const BOARD_TOP: u16 = 24;
+pub const BUTTONS_H: u16 = 44;
 
-/// The board's cells and the five buttons for a canvas of a size
-/// (GFX-082): what the drawing and the desk's hit test agree on.
+/// Keys (the desk's): the arrows, Ctrl+W, Esc.
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+pub const CTRL_W: u8 = 0x17;
+pub const ESC: u8 = 0x1B;
+
+/// `area` cut into `cols` x `rows` cells with `gap` between them.
+fn grid(area: Area, cols: u16, rows: u16, gap: u16) -> Vec<Area> {
+    let w = area.w.saturating_sub(gap * (cols - 1)) / cols;
+    let h = area.h.saturating_sub(gap * (rows - 1)) / rows;
+    let mut cells = Vec::with_capacity((cols * rows) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            cells.push(Area::new(
+                area.x + c * (w + gap),
+                area.y + r * (h + gap),
+                w,
+                h,
+            ));
+        }
+    }
+    cells
+}
+
+/// The board's cells and the five buttons for a canvas of a size.
 #[derive(Debug, Clone)]
 pub struct GameLayout {
-    pub board: PixelRect,
-    pub cells: Vec<PixelRect>,
+    pub board: Area,
+    pub cells: Vec<Area>,
     /// Left, Up, Down, Right, New.
-    pub buttons: Vec<PixelRect>,
+    pub buttons: Vec<Area>,
 }
 
 impl GameLayout {
-    pub fn new(width: u32, height: u32) -> Self {
-        let side = width.min(height.saturating_sub(BOARD_TOP as u32 + BUTTONS_H + 12));
-        let board = rect(((width - side) / 2) as i32, BOARD_TOP, side, side);
+    pub fn new(width: u16, height: u16) -> Self {
+        let side = width.min(height.saturating_sub(BOARD_TOP + BUTTONS_H + 12));
+        let board = Area::new((width - side) / 2, BOARD_TOP, side, side);
         Self {
             board,
-            cells: grid(board, SIZE as u32, SIZE as u32, 6),
+            cells: grid(board, SIZE as u16, SIZE as u16, 6),
             buttons: grid(
-                rect(0, height as i32 - BUTTONS_H as i32, width, BUTTONS_H),
+                Area::new(0, height.saturating_sub(BUTTONS_H), width, BUTTONS_H),
                 5,
                 1,
                 6,
@@ -51,22 +79,22 @@ impl GameLayout {
 
 /// A tile's fill and ink by its value: warm for the low ones, gold for
 /// the high ones, the classic way.
-pub fn tile_colors(value: u32) -> (Color, Color) {
-    let dark = Color::rgb(119, 110, 101);
-    let light = Color::rgb(249, 246, 242);
+pub fn tile_colors(value: u32) -> (Role, Role) {
+    let dark = Role::Rgb(119, 110, 101);
+    let light = Role::Rgb(249, 246, 242);
     match value {
-        2 => (Color::rgb(238, 228, 218), dark),
-        4 => (Color::rgb(237, 224, 200), dark),
-        8 => (Color::rgb(242, 177, 121), light),
-        16 => (Color::rgb(245, 149, 99), light),
-        32 => (Color::rgb(246, 124, 95), light),
-        64 => (Color::rgb(246, 94, 59), light),
-        128 => (Color::rgb(237, 207, 114), light),
-        256 => (Color::rgb(237, 204, 97), light),
-        512 => (Color::rgb(237, 200, 80), light),
-        1024 => (Color::rgb(237, 197, 63), light),
-        2048 => (Color::rgb(237, 194, 46), light),
-        _ => (Color::rgb(60, 58, 50), light),
+        2 => (Role::Rgb(238, 228, 218), dark),
+        4 => (Role::Rgb(237, 224, 200), dark),
+        8 => (Role::Rgb(242, 177, 121), light),
+        16 => (Role::Rgb(245, 149, 99), light),
+        32 => (Role::Rgb(246, 124, 95), light),
+        64 => (Role::Rgb(246, 94, 59), light),
+        128 => (Role::Rgb(237, 207, 114), light),
+        256 => (Role::Rgb(237, 204, 97), light),
+        512 => (Role::Rgb(237, 200, 80), light),
+        1024 => (Role::Rgb(237, 197, 63), light),
+        2048 => (Role::Rgb(237, 194, 46), light),
+        _ => (Role::Rgb(60, 58, 50), light),
     }
 }
 
@@ -213,7 +241,6 @@ impl Game {
 
     /// Arrows slide, `n` starts over.
     pub fn handle_byte(&mut self, byte: u8) -> GameEffect {
-        use crate::notepad::{CTRL_W, ESC, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
         let dir = match byte {
             KEY_UP | b'w' | b'k' => Dir::Up,
             KEY_DOWN | b's' | b'j' => Dir::Down,
@@ -233,43 +260,75 @@ impl Game {
         }
     }
 
-    /// The card, drawn (GFX-082): the score, the board as coloured
-    /// tiles, the moves as buttons. `hover` is the pointer in canvas
-    /// pixels, if over the card.
-    pub fn ui(&self, width: u32, height: u32, palette: Palette, hover: Option<(i32, i32)>) -> Ui {
+    /// The card: the score, the board as coloured tiles, the moves as
+    /// buttons.
+    pub fn draw(&self, width: u16, height: u16, view: &mut ViewWriter) {
+        if width < 120 || height < BOARD_TOP + BUTTONS_H + 60 {
+            view.op(Op::Text {
+                x: 0,
+                y: 0,
+                role: Role::Muted,
+                scale: 1,
+                text: "Make me bigger",
+            });
+            return;
+        }
         let layout = GameLayout::new(width, height);
-        let mut ui = Ui::new(palette, hover);
-        let p = *ui.palette();
-        ui.text(0, 2, &alloc::format!("Score {}", self.score), p.text, 1);
-        ui.text_right(
-            width as i32,
-            2,
-            &alloc::format!("Best {}", self.best),
-            p.muted,
-            1,
-        );
+        let score = alloc::format!("Score {}", self.score);
+        view.op(Op::Text {
+            x: 0,
+            y: 2,
+            role: Role::Text,
+            scale: 1,
+            text: &score,
+        });
+        let best = alloc::format!("Best {}", self.best);
+        view.op(Op::TextRight {
+            right: width,
+            y: 2,
+            role: Role::Muted,
+            scale: 1,
+            text: &best,
+        });
         for (cell, value) in layout.cells.iter().zip(self.cells.iter().flatten()) {
             if *value == 0 {
-                ui.fill(*cell, p.raised, 6);
+                view.op(Op::Fill {
+                    area: *cell,
+                    role: Role::Raised,
+                    radius: 6,
+                });
                 continue;
             }
             let (fill, ink) = tile_colors(*value);
-            ui.fill(*cell, fill, 6);
+            view.op(Op::Fill {
+                area: *cell,
+                role: fill,
+                radius: 6,
+            });
             let label = value.to_string();
             let scale = if label.len() <= 3 { 2 } else { 1 };
-            ui.text_centered(cell, &label, ink, scale);
+            view.op(Op::TextCentered {
+                area: *cell,
+                role: ink,
+                scale,
+                text: &label,
+            });
         }
-        let buttons: [(&str, u8, ButtonKind); 5] = [
-            ("Left", b'a', ButtonKind::Accent),
-            ("Up", b'w', ButtonKind::Accent),
-            ("Down", b's', ButtonKind::Accent),
-            ("Right", b'd', ButtonKind::Accent),
-            ("New", b'n', ButtonKind::Quiet),
+        let buttons: [(&str, u8, Kind); 5] = [
+            ("Left", b'a', Kind::Accent),
+            ("Up", b'w', Kind::Accent),
+            ("Down", b's', Kind::Accent),
+            ("Right", b'd', Kind::Accent),
+            ("New", b'n', Kind::Quiet),
         ];
         for (cell, (label, key, kind)) in layout.buttons.iter().zip(buttons.iter()) {
-            ui.button(*cell, label, *key, *kind);
+            view.op(Op::Button {
+                area: *cell,
+                kind: *kind,
+                key: *key,
+                label,
+            });
         }
-        ui
     }
 
     pub fn footer(&self) -> String {
@@ -312,9 +371,31 @@ pub fn slide_line(line: &[u32]) -> (Vec<u32>, u32) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
-    use services_gui_host::Theme;
-    use view_types::DrawOp;
+    use app_protocol::{OwnedOp, View};
+
+    fn view_of(game: &Game, w: u16, h: u16) -> View {
+        let mut buf = [0u8; app_protocol::VIEW_MAX];
+        let mut view = ViewWriter::new(&mut buf, "Tiles", &game.footer());
+        game.draw(w, h, &mut view);
+        View::decode(view.finish().unwrap(), w, h).expect("a view the desk takes")
+    }
+
+    fn hit(game: &Game, x: u16, y: u16) -> Option<u8> {
+        view_of(game, 324, 340)
+            .ops
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                OwnedOp::Button { area, key, .. }
+                    if x >= area.x && y >= area.y && x < area.x + area.w && y < area.y + area.h =>
+                {
+                    Some(*key)
+                }
+                _ => None,
+            })
+    }
 
     #[test]
     fn a_line_slides_and_merges_once_per_pair() {
@@ -331,7 +412,6 @@ mod tests {
 
     #[test]
     fn the_board_slides_in_four_directions_scores_and_knows_the_end() {
-        let palette = Palette::from_theme(&Theme::DEFAULT);
         let mut game = Game::new(7);
         let tiles = game.cells().iter().flatten().filter(|v| **v != 0).count();
         assert_eq!(tiles, 2, "two tiles to start");
@@ -360,15 +440,13 @@ mod tests {
         // five buttons; the New button, hit by pixel, starts over.
         let layout = GameLayout::new(324, 340);
         assert_eq!(layout.cells.len(), 16);
-        assert_eq!(layout.board, rect(32, BOARD_TOP, 260, 260));
+        assert_eq!(layout.board, Area::new(32, BOARD_TOP, 260, 260));
         assert_eq!(layout.buttons.len(), 5);
-        let ops = game.ui(324, 340, palette, None).into_ops();
+        let ops = view_of(&game, 324, 340).ops;
         let big: Vec<&String> = ops
             .iter()
             .filter_map(|op| match op {
-                DrawOp::Text { text, style, .. }
-                    if style.scale == 2 && text.parse::<u32>().is_ok() =>
-                {
+                OwnedOp::TextCentered { text, scale: 2, .. } if text.parse::<u32>().is_ok() => {
                     Some(text)
                 }
                 _ => None,
@@ -376,16 +454,13 @@ mod tests {
             .collect();
         assert_eq!(big.len(), 16);
         let new = layout.buttons[4];
-        let key = game
-            .ui(324, 340, palette, None)
-            .hit(new.x as i32 + 4, new.y as i32 + 4)
-            .expect("the New button");
+        let key = hit(&game, new.x + 4, new.y + 4).expect("the New button");
         assert_eq!(key, b'n');
         assert_eq!(game.handle_byte(key), GameEffect::Redraw);
         assert_eq!(game.score(), 0);
         assert!(!game.over());
         assert_eq!(
-            game.ui(324, 340, palette, None).hit(0, BOARD_TOP + 10),
+            hit(&game, 0, BOARD_TOP + 10),
             None,
             "the board is not a button"
         );
@@ -394,6 +469,8 @@ mod tests {
         let b = Game::new(42);
         assert_eq!(a.cells(), b.cells());
         assert_eq!(a.handle_byte(0x1B), GameEffect::Close);
-        assert_eq!(tile_colors(2048).0, Color::rgb(237, 194, 46));
+        assert_eq!(tile_colors(2048).0, Role::Rgb(237, 194, 46));
+        // Too small a card says so, and never draws outside it.
+        assert_eq!(view_of(&game, 100, 100).ops.len(), 1);
     }
 }

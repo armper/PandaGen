@@ -47,13 +47,21 @@ fn main(console: Console) -> u64 {
 
 A panic sends `panicked: ...` to the console and exits with 101.
 
+## Other capabilities and calls
+
+- **Notices** (`Ask::Notices`): `Notices::say(text)` puts a line in the
+  desk's notices centre, with a chime.
+- **`random_bytes` / `random_u64`**: bytes from the machine's generator.
+  Any program may ask: it reveals nothing and reaches nothing.
+
 ## A card on the desk
 
 A program that asks for a card (`program_image::Ask::Card`) gets one
 when it runs: `run tally` opens a card for it. The program never draws
 pixels. It describes the card with `ViewWriter`: a title, a footer, and
-fills, outlines, text and buttons, in colour *roles* (surface, raised,
-text, muted, accent, ...). The desk draws that with its own widgets in
+fills, outlines, lines, text (left, right or centred) and buttons, in
+colour *roles* (surface, raised, text, muted, accent, ...) or, for what
+the theme has no role for, a colour by value (`Role::Rgb`: Tiles' tiles). The desk draws that with its own widgets in
 its own theme. A button stands for a key, so a click and a key press are
 the same event to the program, and anything a program does works with
 the mouse alone or the keyboard alone.
@@ -82,12 +90,15 @@ the card keeps the last good one, and its footer says why. A program the
 kernel ends takes its card with it, and the desk leaves a notice saying
 why.
 
-## A dock app that is a program
+## Dock apps that are programs
 
-The Calculator is a program (`apps/calculator`, with its arithmetic and
-its card in the host-tested `calculator_core`). It asks for exactly one
-capability, its card, so it cannot reach a file, the network or the
-console. `DeskApp::program` names the program behind a dock app. Opening
+The Calculator, the Timer and Tiles are programs (`apps/calculator`,
+`apps/timer`, `apps/tiles`, with everything testable in the host-tested
+`calculator_core`, `timer_core` and `tiles_core`). The Calculator and
+Tiles ask for exactly one capability, their card; the Timer asks for its
+card and **notices**, so a countdown that is up is said in the desk's
+notices centre, with a chime, wherever the person is. None of them can
+reach a file, the network or the console. `DeskApp::program` names the program behind a dock app. Opening
 that app (from the dock, the palette, the Apps grid, or a restored
 layout) opens a card at once and asks the kernel to start the program,
 which then takes the card over. If the program can't start, the card

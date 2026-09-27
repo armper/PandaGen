@@ -58,6 +58,8 @@ pub enum Ask {
     Console = 1,
     /// A card on the desk that the program draws (`app_protocol`).
     Card = 2,
+    /// Notices on the desk, with a chime (PROC-008): a timer that is up.
+    Notices = 3,
 }
 
 impl Ask {
@@ -65,6 +67,7 @@ impl Ask {
         match n {
             1 => Some(Ask::Console),
             2 => Some(Ask::Card),
+            3 => Some(Ask::Notices),
             _ => None,
         }
     }
@@ -72,6 +75,7 @@ impl Ask {
         match self {
             Ask::Console => "console",
             Ask::Card => "a card",
+            Ask::Notices => "notices",
         }
     }
 }

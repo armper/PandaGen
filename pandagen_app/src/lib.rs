@@ -38,6 +38,38 @@ pub mod call {
     pub const PRESENT: u64 = 6;
     pub const POLL: u64 = 7;
     pub const WAIT: u64 = 8;
+    pub const RANDOM: u64 = 9;
+}
+
+/// Fill `bytes` from the machine's generator (at most 256 at a time).
+pub fn random_bytes(bytes: &mut [u8]) -> Result<(), Error> {
+    for chunk in bytes.chunks_mut(SEND_MAX) {
+        check(syscall(
+            call::RANDOM,
+            chunk.as_mut_ptr() as u64,
+            chunk.len() as u64,
+            0,
+        ))?;
+    }
+    Ok(())
+}
+
+/// A random `u64` from the machine's generator (0 on the host).
+pub fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    let _ = random_bytes(&mut bytes);
+    u64::from_le_bytes(bytes)
+}
+
+/// Notices on the desk (PROC-008), when the program asked for them: what
+/// it says appears in the desk's notices centre, with a chime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Notices(pub Handle);
+
+impl Notices {
+    pub fn say(&self, text: &str) -> Result<usize, Error> {
+        Console(self.0).send(text.as_bytes())
+    }
 }
 
 /// What a card shows and what happens to it (`app_protocol`).

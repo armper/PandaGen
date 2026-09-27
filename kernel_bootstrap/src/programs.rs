@@ -321,6 +321,7 @@ pub fn run(
         match ask {
             Ask::Console => handles.grant(Capability::Console),
             Ask::Card => handles.grant(Capability::Card),
+            Ask::Notices => handles.grant(Capability::Notices),
         };
     }
     let wants_card = image.asks.contains(&Ask::Card);

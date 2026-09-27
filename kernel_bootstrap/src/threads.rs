@@ -115,6 +115,17 @@ static YIELDS: AtomicU32 = AtomicU32::new(0);
 /// Threads found to have run off their stacks, since boot.
 static OVERRUNS: AtomicU32 = AtomicU32::new(0);
 
+/// What programs asked the desk to say as notices (PROC-008).
+static NOTICES: hal_x86_64::SpinLock<Vec<String>> = hal_x86_64::SpinLock::new(Vec::new());
+
+/// The notices programs sent since last asked.
+pub fn take_notices() -> Vec<String> {
+    match NOTICES.try_lock() {
+        Some(mut notices) if !notices.is_empty() => core::mem::take(&mut *notices),
+        _ => Vec::new(),
+    }
+}
+
 /// Lines threads leave for the Terminal (the desk prints them).
 static NOTES: hal_x86_64::SpinLock<Vec<String>> = hal_x86_64::SpinLock::new(Vec::new());
 
@@ -716,12 +727,44 @@ pub fn on_syscall(rsp: u64) -> u64 {
             enter(t, t.sched.current());
             next
         }
-        Call::Send { handle, ptr, len } => {
-            let program = t.programs[current].as_ref().expect("checked above");
-            if let Err(e) = program.handles.check_send(handle, len) {
-                set_rax(e.to_rax());
+        Call::Random { ptr, len } => {
+            if len > SEND_MAX as u64 {
+                set_rax(Error::TooBig.to_rax());
                 return rsp;
             }
+            let len = len as usize;
+            let mut bytes = [0u8; SEND_MAX];
+            // The generator's lock may be held by a preempted thread:
+            // interrupts on while it is taken, as for `send`.
+            // SAFETY: nothing of the table is held across this.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            #[cfg(target_os = "none")]
+            crate::random::fill(&mut bytes[..len]);
+            // A host build has no generator; the bytes stay zero.
+            #[cfg(not(target_os = "none"))]
+            bytes[..len].fill(0);
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            // SAFETY: interrupts are off again, on the boot CPU.
+            let t = unsafe { &mut *TABLE.0.get() };
+            let hhdm = t.hhdm;
+            let program = t.programs[current].as_mut().expect("checked above");
+            let mut memory = crate::programs::Direct::new(hhdm);
+            set_rax(if program.space.write(&mut memory, ptr, &bytes[..len]) {
+                0
+            } else {
+                Error::BadPointer.to_rax()
+            });
+            rsp
+        }
+        Call::Send { handle, ptr, len } => {
+            let program = t.programs[current].as_ref().expect("checked above");
+            let cap = match program.handles.check_send(handle, len) {
+                Ok(cap) => cap,
+                Err(e) => {
+                    set_rax(e.to_rax());
+                    return rsp;
+                }
+            };
             let mut buffer = [0u8; SEND_MAX];
             let len = len as usize;
             let memory = crate::programs::Direct::new(t.hhdm);
@@ -736,7 +779,13 @@ pub fn on_syscall(rsp: u64) -> u64 {
             // SAFETY: nothing of the table is held across this.
             unsafe { asm!("sti", options(nomem, nostack)) };
             let text = String::from_utf8_lossy(&buffer[..len]);
-            note(alloc::format!("{name}: {}", text.trim_end()));
+            match cap {
+                // Notices (PROC-008): for the desk to say, with a chime.
+                crate::syscall_abi::Capability::Notices => {
+                    NOTICES.lock().push(String::from(text.trim_end()));
+                }
+                _ => note(alloc::format!("{name}: {}", text.trim_end())),
+            }
             unsafe { asm!("cli", options(nomem, nostack)) };
             set_rax(len as u64);
             rsp

@@ -33,25 +33,47 @@ pub const EVENT_BYTES: usize = 8;
 
 const MAGIC: &[u8; 3] = b"PV1";
 
-/// A colour, by what it is for.
+/// A colour, by what it is for -- or, for what the theme has no role
+/// for (a game's tiles), by value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum Role {
     /// The card's background.
-    Surface = 0,
+    Surface,
     /// A raised area: a key, a field.
-    Raised = 1,
-    Text = 2,
+    Raised,
+    Text,
     /// Secondary text.
-    Muted = 3,
-    Accent = 4,
+    Muted,
+    Accent,
     /// Text on an accent fill.
-    OnAccent = 5,
+    OnAccent,
     /// Thin rules.
-    Hairline = 6,
+    Hairline,
+    /// This colour, whatever the theme (PROC-008). Only inside the card:
+    /// it cannot reach the desk's own chrome, so it cannot dress up as it.
+    Rgb(u8, u8, u8),
 }
 
+/// The byte that says a colour by value follows.
+const RGB: u8 = 0xFF;
+
 impl Role {
+    /// Its bytes and how many: a role's number, or [`RGB`] and the
+    /// three values.
+    fn encode(self) -> ([u8; 4], usize) {
+        let n = match self {
+            Role::Rgb(r, g, b) => return ([RGB, r, g, b], 4),
+            Role::Surface => 0,
+            Role::Raised => 1,
+            Role::Text => 2,
+            Role::Muted => 3,
+            Role::Accent => 4,
+            Role::OnAccent => 5,
+            Role::Hairline => 6,
+        };
+        ([n, 0, 0, 0], 1)
+    }
+
     pub fn from_u8(n: u8) -> Option<Role> {
         Some(match n {
             0 => Role::Surface,
@@ -147,6 +169,13 @@ pub enum Op<'a> {
         role: Role,
         thickness: u8,
     },
+    /// Text centred in `area`: a tile's number, a clock's time.
+    TextCentered {
+        area: Area,
+        role: Role,
+        scale: u8,
+        text: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +246,11 @@ impl<'b> ViewWriter<'b> {
         self.bytes(t.as_bytes());
     }
 
+    fn role(&mut self, role: Role) {
+        let (bytes, n) = role.encode();
+        self.bytes(&bytes[..n]);
+    }
+
     fn area(&mut self, a: Area) {
         for v in [a.x, a.y, a.w, a.h] {
             self.bytes(&v.to_le_bytes());
@@ -233,7 +267,8 @@ impl<'b> ViewWriter<'b> {
             Op::Fill { area, role, radius } => {
                 self.bytes(&[1]);
                 self.area(area);
-                self.bytes(&[role as u8, radius]);
+                self.role(role);
+                self.bytes(&[radius]);
             }
             Op::Outline {
                 area,
@@ -243,7 +278,8 @@ impl<'b> ViewWriter<'b> {
             } => {
                 self.bytes(&[2]);
                 self.area(area);
-                self.bytes(&[role as u8, radius, thickness]);
+                self.role(role);
+                self.bytes(&[radius, thickness]);
             }
             Op::Text {
                 x,
@@ -255,7 +291,8 @@ impl<'b> ViewWriter<'b> {
                 self.bytes(&[3]);
                 self.bytes(&x.to_le_bytes());
                 self.bytes(&y.to_le_bytes());
-                self.bytes(&[role as u8, scale]);
+                self.role(role);
+                self.bytes(&[scale]);
                 self.text(text);
             }
             Op::TextRight {
@@ -268,7 +305,8 @@ impl<'b> ViewWriter<'b> {
                 self.bytes(&[4]);
                 self.bytes(&right.to_le_bytes());
                 self.bytes(&y.to_le_bytes());
-                self.bytes(&[role as u8, scale]);
+                self.role(role);
+                self.bytes(&[scale]);
                 self.text(text);
             }
             Op::Button {
@@ -292,7 +330,20 @@ impl<'b> ViewWriter<'b> {
                 for v in [from.0, from.1, to.0, to.1] {
                     self.bytes(&v.to_le_bytes());
                 }
-                self.bytes(&[role as u8, thickness]);
+                self.role(role);
+                self.bytes(&[thickness]);
+            }
+            Op::TextCentered {
+                area,
+                role,
+                scale,
+                text,
+            } => {
+                self.bytes(&[7]);
+                self.area(area);
+                self.role(role);
+                self.bytes(&[scale]);
+                self.text(text);
             }
         }
         self.ops += 1;
@@ -401,6 +452,12 @@ pub enum OwnedOp {
         role: Role,
         thickness: u8,
     },
+    TextCentered {
+        area: Area,
+        role: Role,
+        scale: u8,
+        text: alloc::string::String,
+    },
 }
 
 #[cfg(feature = "decode")]
@@ -443,6 +500,9 @@ impl View {
             }
             fn role(&mut self) -> Result<Role, ViewError> {
                 let n = self.u8()?;
+                if n == RGB {
+                    return Ok(Role::Rgb(self.u8()?, self.u8()?, self.u8()?));
+                }
                 Role::from_u8(n).ok_or(ViewError::BadRole(n))
             }
             fn scale(&mut self) -> Result<u8, ViewError> {
@@ -545,6 +605,12 @@ impl View {
                         thickness,
                     }
                 }
+                7 => OwnedOp::TextCentered {
+                    area: area(&mut r)?,
+                    role: r.role()?,
+                    scale: r.scale()?,
+                    text: r.text()?,
+                },
                 other => return Err(ViewError::BadOp(other)),
             };
             ops.push(op);
@@ -673,6 +739,42 @@ mod tests {
             View::decode(&thick, 100, 100),
             Err(ViewError::BadThickness(40))
         );
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_colour_by_value_survives_the_trip() {
+        let mut buf = [0u8; 64];
+        let mut v = ViewWriter::new(&mut buf, "", "");
+        v.op(Op::Fill {
+            area: Area::new(0, 0, 10, 10),
+            role: Role::Rgb(237, 194, 46),
+            radius: 6,
+        })
+        .op(Op::Text {
+            x: 0,
+            y: 0,
+            role: Role::Muted,
+            scale: 1,
+            text: "2048",
+        });
+        let bytes = v.finish().unwrap().to_vec();
+        let view = View::decode(&bytes, 20, 20).unwrap();
+        assert!(matches!(
+            view.ops[0],
+            OwnedOp::Fill {
+                role: Role::Rgb(237, 194, 46),
+                radius: 6,
+                ..
+            }
+        ));
+        assert!(matches!(
+            view.ops[1],
+            OwnedOp::Text {
+                role: Role::Muted,
+                ..
+            }
+        ));
     }
 
     #[cfg(feature = "decode")]
