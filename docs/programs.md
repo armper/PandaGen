@@ -102,16 +102,24 @@ loop {
 }
 ```
 
+**The pointer.** Where no button or hit area takes it, the pointer on a
+card's canvas is the program's: `Event::Pointer { kind, x, y }`, in the
+canvas's own pixels. The kinds are `Down`, then `Move` (only while
+pressed, so an idle pointer costs nothing), then `Up`. A fast drag's
+moves are folded into the latest, so a slow program sees where the
+pointer is rather than falling behind. `Op::Path` draws a stroke: up to
+4096 points joined by lines. Sketch draws with these.
+
 The desk checks every view against the card before drawing it: every
 widget inside the canvas, every text valid, short and free of control
-characters, at most 256 widgets and 8 KiB. A view that fails is refused,
+characters, at most 256 widgets and 64 KiB. A view that fails is refused,
 the card keeps the last good one, and its footer says why. A program the
 kernel ends takes its card with it, and the desk leaves a notice saying
 why.
 
 ## Dock apps that are programs
 
-The Calculator, the Timer, Tiles, the Calendar and Tasks are programs (`apps/calculator`,
+The Calculator, the Timer, Tiles, the Calendar, Tasks and Sketch are programs (`apps/calculator`,
 `apps/timer`, `apps/tiles`, with everything testable in the host-tested
 `calculator_core`, `timer_core` and `tiles_core`). The Calculator and
 Tiles ask for exactly one capability, their card; the Timer asks for its

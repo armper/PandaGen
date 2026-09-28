@@ -41,7 +41,7 @@ use hal_x86_64::user_space::UserSpace;
 
 use crate::sched::{Scheduler, State, MAX_THREADS};
 use crate::syscall_abi::{Call, End, Error, Handles, SEND_MAX};
-use app_protocol::{EVENT_BYTES, VIEW_MAX};
+use app_protocol::EVENT_BYTES;
 
 /// A thread's stack, in bytes.
 pub const STACK_BYTES: usize = 64 * 1024;
@@ -162,7 +162,8 @@ pub fn take_document_requests() -> Vec<DocumentRequest> {
 /// Messages waiting for programs, oldest first (PROC-009).
 static MESSAGES: hal_x86_64::SpinLock<Vec<(u32, Vec<u8>)>> = hal_x86_64::SpinLock::new(Vec::new());
 /// Longest message.
-pub const MESSAGE_MAX: usize = 8192;
+/// Room for a document the size of a full drawing (PROC-012).
+pub const MESSAGE_MAX: usize = 128 * 1024;
 
 /// A message for program `id`; its card hears `Event::Message`.
 pub fn post_message(id: u32, mut bytes: Vec<u8>) {
@@ -563,6 +564,17 @@ const EVENTS_MAX: usize = 32;
 
 impl Program {
     fn push_event(&mut self, event: [u8; EVENT_BYTES]) -> bool {
+        // A pointer move after a move not yet taken replaces it
+        // (PROC-012): a slow program sees where the pointer is, and a
+        // long drag never fills the ring and loses its release.
+        let is_move = |e: &[u8; EVENT_BYTES]| e[0] == 5 && e[1] == 1;
+        if is_move(&event) && self.events_len > 0 {
+            let last = (self.events_head + self.events_len - 1) % EVENTS_MAX;
+            if is_move(&self.events[last]) {
+                self.events[last] = event;
+                return true;
+            }
+        }
         if self.events_len == EVENTS_MAX {
             return false;
         }
@@ -741,25 +753,29 @@ pub fn on_syscall(rsp: u64) -> u64 {
                 set_rax(e.to_rax());
                 return rsp;
             }
-            let mut buffer = [0u8; VIEW_MAX];
-            let len = len as usize;
-            let memory = crate::programs::Direct::new(t.hhdm);
-            if !program.space.read_into(&memory, ptr, &mut buffer[..len]) {
-                set_rax(Error::BadPointer.to_rax());
-                return rsp;
-            }
-            let id = program.id;
-            // Keeping it takes the heap: interrupts on, as for `send`.
+            let (len, id, hhdm) = (len as usize, program.id, t.hhdm);
+            // A view can be 64 KiB (PROC-012): too big for this stack, so
+            // it goes straight to the heap -- taken with interrupts on.
             // SAFETY: nothing of the table is held across this.
             unsafe { asm!("sti", options(nomem, nostack)) };
-            {
-                let bytes = buffer[..len].to_vec();
+            let mut bytes = alloc::vec![0u8; len];
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            // SAFETY: interrupts are off again, on the boot CPU.
+            let t = unsafe { &mut *TABLE.0.get() };
+            let program = t.programs[current].as_ref().expect("checked above");
+            let memory = crate::programs::Direct::new(hhdm);
+            let read = program.space.read_into(&memory, ptr, &mut bytes);
+            // SAFETY: as above.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            if read {
                 let mut views = VIEWS.lock();
                 views.retain(|(of, _)| *of != id);
                 views.push((id, bytes));
+            } else {
+                drop(bytes);
             }
             unsafe { asm!("cli", options(nomem, nostack)) };
-            set_rax(0);
+            set_rax(if read { 0 } else { Error::BadPointer.to_rax() });
             rsp
         }
         Call::Poll { handle, ptr } => {
@@ -892,29 +908,38 @@ pub fn on_syscall(rsp: u64) -> u64 {
                 set_rax(Error::TooBig.to_rax());
                 return rsp;
             }
-            let mut buffer = [0u8; MESSAGE_MAX];
-            let len = len as usize;
-            let memory = crate::programs::Direct::new(t.hhdm);
-            if !program.space.read_into(&memory, ptr, &mut buffer[..len]) {
-                set_rax(Error::BadPointer.to_rax());
-                return rsp;
-            }
-            let Some((name, content)) = app_protocol::message::read_write_request(&buffer[..len])
-                .filter(|(n, _)| pattern.matches(n))
-            else {
-                set_rax(Error::NotAllowed.to_rax());
-                return rsp;
-            };
-            let id = program.id;
-            // Keeping it takes the heap: interrupts on.
+            let (len, id, hhdm) = (len as usize, program.id, t.hhdm);
+            // Up to 128 KiB: straight to the heap, with interrupts on.
             // SAFETY: nothing of the table is held across this.
             unsafe { asm!("sti", options(nomem, nostack)) };
-            let op = DocumentOp::Write(String::from(name), content.to_vec());
-            DOC_REQUESTS
-                .lock()
-                .push(DocumentRequest { id, pattern, op });
+            let mut buffer = alloc::vec![0u8; len];
             unsafe { asm!("cli", options(nomem, nostack)) };
-            set_rax(0);
+            // SAFETY: interrupts are off again, on the boot CPU.
+            let t = unsafe { &mut *TABLE.0.get() };
+            let program = t.programs[current].as_ref().expect("checked above");
+            let read =
+                program
+                    .space
+                    .read_into(&crate::programs::Direct::new(hhdm), ptr, &mut buffer);
+            // Everything from here takes or frees the heap.
+            // SAFETY: as above.
+            unsafe { asm!("sti", options(nomem, nostack)) };
+            let answer = match app_protocol::message::read_write_request(&buffer)
+                .filter(|(n, _)| pattern.matches(n))
+            {
+                _ if !read => Error::BadPointer.to_rax(),
+                None => Error::NotAllowed.to_rax(),
+                Some((name, content)) => {
+                    let op = DocumentOp::Write(String::from(name), content.to_vec());
+                    DOC_REQUESTS
+                        .lock()
+                        .push(DocumentRequest { id, pattern, op });
+                    0
+                }
+            };
+            drop(buffer);
+            unsafe { asm!("cli", options(nomem, nostack)) };
+            set_rax(answer);
             rsp
         }
         Call::Receive { ptr, len } => {

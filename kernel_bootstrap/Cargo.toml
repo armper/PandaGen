@@ -40,6 +40,7 @@ graphics_rasterizer = { path = "../graphics_rasterizer" }
 services_workspace_manager = { path = "../services_workspace_manager" }
 calculator_core = { path = "../calculator_core" }
 tiles_core = { path = "../tiles_core" }
+sketch_core = { path = "../sketch_core" }
 
 [features]
 default = ["console_vga", "limine"]

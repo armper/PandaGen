@@ -22,8 +22,10 @@
 #[cfg(feature = "decode")]
 extern crate alloc;
 
-/// Most bytes one view takes.
-pub const VIEW_MAX: usize = 8192;
+/// Most bytes one view takes: room for a drawing's strokes (PROC-012).
+pub const VIEW_MAX: usize = 64 * 1024;
+/// Most points in one path.
+pub const PATH_MAX: usize = 4096;
 /// Most widgets in one view.
 pub const OPS_MAX: usize = 256;
 /// Most bytes in one text, label, title or footer.
@@ -182,6 +184,13 @@ pub enum Op<'a> {
         area: Area,
         key: u8,
     },
+    /// Lines joining `points` in order, `thickness` pixels wide: a
+    /// stroke drawn with the pointer (PROC-012). One point is a dot.
+    Path {
+        role: Role,
+        thickness: u8,
+        points: &'a [(u16, u16)],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +205,8 @@ pub enum ViewError {
     BadKind(u8),
     BadScale(u8),
     BadThickness(u8),
+    /// A path with no points, or more than [`PATH_MAX`].
+    BadPath,
     BadOp(u8),
     NotText,
     /// A widget reaching outside the card.
@@ -356,6 +367,24 @@ impl<'b> ViewWriter<'b> {
                 self.area(area);
                 self.bytes(&[key]);
             }
+            Op::Path {
+                role,
+                thickness,
+                points,
+            } => {
+                if points.is_empty() || points.len() > PATH_MAX {
+                    self.error.get_or_insert(ViewError::BadPath);
+                    return self;
+                }
+                self.bytes(&[9]);
+                self.role(role);
+                self.bytes(&[thickness]);
+                self.bytes(&(points.len() as u16).to_le_bytes());
+                for (x, y) in points {
+                    self.bytes(&x.to_le_bytes());
+                    self.bytes(&y.to_le_bytes());
+                }
+            }
         }
         self.ops += 1;
         self
@@ -386,6 +415,19 @@ pub enum Event {
     /// A message is waiting for the program (PROC-009): an answer to
     /// something it asked, taken with `receive`.
     Message,
+    /// The pointer on the card's canvas (PROC-012), where no button or
+    /// hit area took it: pressed, moved while pressed, let go. Moves come
+    /// only between a press and its release, so an idle pointer costs a
+    /// program nothing.
+    Pointer { kind: PointerKind, x: u16, y: u16 },
+}
+
+/// What the pointer did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    Down,
+    Move,
+    Up,
 }
 
 impl Event {
@@ -403,6 +445,16 @@ impl Event {
             }
             Event::Closed => b[0] = 3,
             Event::Message => b[0] = 4,
+            Event::Pointer { kind, x, y } => {
+                b[0] = 5;
+                b[1] = match kind {
+                    PointerKind::Down => 0,
+                    PointerKind::Move => 1,
+                    PointerKind::Up => 2,
+                };
+                b[2..4].copy_from_slice(&x.to_le_bytes());
+                b[4..6].copy_from_slice(&y.to_le_bytes());
+            }
         }
         b
     }
@@ -416,6 +468,16 @@ impl Event {
             },
             3 => Event::Closed,
             4 => Event::Message,
+            5 => Event::Pointer {
+                kind: match b[1] {
+                    0 => PointerKind::Down,
+                    1 => PointerKind::Move,
+                    2 => PointerKind::Up,
+                    _ => return None,
+                },
+                x: u16::from_le_bytes([b[2], b[3]]),
+                y: u16::from_le_bytes([b[4], b[5]]),
+            },
             _ => return None,
         })
     }
@@ -583,6 +645,11 @@ pub enum OwnedOp {
         area: Area,
         key: u8,
     },
+    Path {
+        role: Role,
+        thickness: u8,
+        points: alloc::vec::Vec<(u16, u16)>,
+    },
 }
 
 #[cfg(feature = "decode")]
@@ -740,6 +807,28 @@ impl View {
                     area: area(&mut r)?,
                     key: r.u8()?,
                 },
+                9 => {
+                    let role = r.role()?;
+                    let thickness = r.u8()?;
+                    if !(1..=8).contains(&thickness) {
+                        return Err(ViewError::BadThickness(thickness));
+                    }
+                    let n = r.u16()? as usize;
+                    if n == 0 || n > PATH_MAX {
+                        return Err(ViewError::BadPath);
+                    }
+                    let mut points = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let (x, y) = (r.u16()?, r.u16()?);
+                        point(x, y)?;
+                        points.push((x, y));
+                    }
+                    OwnedOp::Path {
+                        role,
+                        thickness,
+                        points,
+                    }
+                }
                 other => return Err(ViewError::BadOp(other)),
             };
             ops.push(op);
@@ -818,6 +907,11 @@ mod tests {
             Event::Size { w: 640, h: 480 },
             Event::Closed,
             Event::Message,
+            Event::Pointer {
+                kind: PointerKind::Move,
+                x: 300,
+                y: 12,
+            },
         ] {
             assert_eq!(Event::decode(&e.encode()), Some(e));
         }
@@ -901,6 +995,33 @@ mod tests {
             View::decode(&thick, 100, 100),
             Err(ViewError::BadThickness(40))
         );
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_path_is_a_stroke_inside_the_card() {
+        let points = [(10u16, 10u16), (20, 15), (30, 30)];
+        let mut buf = [0u8; 128];
+        let mut v = ViewWriter::new(&mut buf, "", "");
+        v.op(Op::Path {
+            role: Role::Rgb(239, 83, 80),
+            thickness: 2,
+            points: &points,
+        });
+        let bytes = v.finish().unwrap().to_vec();
+        let view = View::decode(&bytes, 100, 100).unwrap();
+        assert!(
+            matches!(&view.ops[0], OwnedOp::Path { points: p, thickness: 2, .. } if p == &points)
+        );
+        assert_eq!(View::decode(&bytes, 25, 100), Err(ViewError::OutOfCard));
+        let mut buf = [0u8; 64];
+        let mut v = ViewWriter::new(&mut buf, "", "");
+        v.op(Op::Path {
+            role: Role::Text,
+            thickness: 2,
+            points: &[],
+        });
+        assert_eq!(v.finish(), Err(ViewError::BadPath));
     }
 
     #[cfg(feature = "decode")]

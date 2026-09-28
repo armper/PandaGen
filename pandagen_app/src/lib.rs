@@ -169,7 +169,9 @@ pub use app_protocol::{Area, Event, Kind, Op, Role, ViewError, ViewWriter, VIEW_
 pub mod heap {
     use free_list_heap::FreeListHeap;
 
-    pub const HEAP_BYTES: usize = 256 * 1024;
+    /// Room for a view (64 KiB) and a document's worth of messages
+    /// (up to 128 KiB each way) beside a program's own data.
+    pub const HEAP_BYTES: usize = 1024 * 1024;
 
     #[repr(C, align(16))]
     struct Arena([u8; HEAP_BYTES]);

@@ -13,6 +13,7 @@ members = [
     "tiles_core",
     "calendar_core",
     "tasks_core",
+    "sketch_core",
     "net_tls",
     "kernel_bootstrap",
     "core_types",

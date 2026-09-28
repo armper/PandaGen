@@ -215,6 +215,27 @@ impl ProgramCard {
                     key,
                     label,
                 } => ui.button(pixels(*area), label, *key, button_kind(*kind)),
+                OwnedOp::Path {
+                    role,
+                    thickness,
+                    points,
+                } => {
+                    let color = color(&palette, *role);
+                    let t = (*thickness).max(1) as i32;
+                    if let [(x, y)] = points.as_slice() {
+                        // A dot.
+                        let side = (t + 1) as u32;
+                        ui.fill(
+                            rect(*x as i32 - t / 2, *y as i32 - t / 2, side, side),
+                            color,
+                            0,
+                        );
+                    }
+                    for pair in points.windows(2) {
+                        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+                        ui.line(x0 as i32, y0 as i32, x1 as i32, y1 as i32, color, t);
+                    }
+                }
                 OwnedOp::Hit { area, key } => {
                     let area = pixels(*area);
                     if ui.hovered(&area) {

@@ -662,6 +662,9 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "dist/qemu_desk_sketch".to_string(),
         "--expect-serial".to_string(),
         "display_mode=Some(\"desk\")".to_string(),
+        // A program since PROC-012, drawing the toolbar the kernel did.
+        "--expect-serial".to_string(),
+        "desk: sketch is thread 1".to_string(),
         // The card: 520 wide, centred (x=380), first cascade step at y=44,
         // focused: the accent ring on its top edge...
         "--expect-pixel".to_string(),
@@ -1058,7 +1061,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_images".to_string(),
         "--expect-serial".to_string(),
-        "programs: 9 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar, tasks)"
+        "programs: 10 images (primes, ticker, tally, calculator, fragile, timer, tiles, calendar, tasks, sketch)"
             .to_string(),
         "--expect-serial".to_string(),
         "  primes (16 KiB, asks for console)".to_string(),
@@ -1180,7 +1183,7 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "--out".to_string(),
         "dist/qemu_program_install".to_string(),
         "--expect-serial".to_string(),
-        "programs: from the boot image, 9 installed, 0 updated".to_string(),
+        "programs: from the boot image, 10 installed, 0 updated".to_string(),
         "--expect-serial".to_string(),
         "install: hello (16 KiB, asks for console) installed".to_string(),
         "--expect-serial".to_string(),
@@ -1227,6 +1230,44 @@ fn cmd_gauntlet(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn st
         "desk: tasks is thread 1".to_string(),
         "--expect-serial".to_string(),
         "documents: thread 1 read tasks (9 bytes)".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    shapes.push(Shape::new(&title, &args).then(&again));
+
+    // The pointer is a program's (PROC-012): a real drag on Sketch's
+    // canvas -- press, move, move, release -- draws a stroke its program
+    // saves; after a reboot the restored card's program reads it back.
+    title = "Sketch: a stroke drawn with a real drag, kept across a reboot".to_string();
+    let args = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:6,ctrl-spc,sleep:1,s,k,e,t,c,h,ret,sleep:2,mbtn:1,sleep:0.3,mouse:60;0,sleep:0.3,mouse:0;-40,sleep:0.3,mbtn:0,sleep:4".to_string(),
+        "--out".to_string(),
+        "dist/qemu_sketch_drag_1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 read sketch (absent)".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 wrote sketch (".to_string(),
+        "--expect-serial".to_string(),
+        "desk: layout saved".to_string(),
+        "--forbid-serial".to_string(),
+        "KERNEL PANIC".to_string(),
+    ];
+    let again = [
+        "--port-base".to_string(),
+        GAUNTLET_PORT_BASE.to_string(),
+        "--keys".to_string(),
+        "sleep:9".to_string(),
+        "--out".to_string(),
+        "dist/qemu_sketch_drag_2".to_string(),
+        "--expect-serial".to_string(),
+        "desk: sketch is thread 1".to_string(),
+        "--expect-serial".to_string(),
+        "documents: thread 1 read sketch (".to_string(),
+        "--forbid-serial".to_string(),
+        "read sketch (absent)".to_string(),
         "--forbid-serial".to_string(),
         "KERNEL PANIC".to_string(),
     ];
@@ -2655,6 +2696,17 @@ const PROGRAMS: &[(&str, &[program_image::Ask])] = &[
             program_image::Ask::Card,
             program_image::Ask::Documents(
                 program_image::Pattern::from_static("tasks"),
+                program_image::Rights::READ.and(program_image::Rights::WRITE),
+            ),
+        ],
+    ),
+    // The dock's Sketch (PROC-012): its card, and one document.
+    (
+        "sketch",
+        &[
+            program_image::Ask::Card,
+            program_image::Ask::Documents(
+                program_image::Pattern::from_static("sketch"),
                 program_image::Rights::READ.and(program_image::Rights::WRITE),
             ),
         ],

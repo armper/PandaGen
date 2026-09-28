@@ -48,7 +48,6 @@ mod rtc;
 mod sched;
 mod sharing;
 mod sign_in;
-mod sketch;
 mod speaker;
 mod supervision;
 mod syscall_abi;

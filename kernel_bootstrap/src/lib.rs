@@ -28,7 +28,6 @@ pub mod program_store;
 pub mod render_stats;
 pub mod rtc;
 pub mod sched;
-pub mod sketch;
 pub mod speaker;
 pub mod supervision;
 pub mod syscall_abi;
