@@ -35,6 +35,17 @@ pub struct GfxTelemetry {
     pub animation_wakes: u64,
     /// Pointer events routed to the desktop.
     pub pointer_events: u64,
+    /// Time spent building and compositing frames (GFX-120): ticks in
+    /// all, the worst frame, and TSC cycles in all.
+    pub render_ticks_total: u64,
+    pub render_ticks_max: u64,
+    pub render_cycles_total: u64,
+    /// Pixels repainted, and the pixels the frames had in all: how much
+    /// of the screen damage-limited rendering actually touched.
+    pub repainted_pixels: u64,
+    pub frame_pixels: u64,
+    /// Frames that had to repaint the whole screen.
+    pub full_repaints: u64,
 }
 
 impl GfxTelemetry {
@@ -50,6 +61,25 @@ impl GfxTelemetry {
             present_workers: 1,
             animation_wakes: 0,
             pointer_events: 0,
+            render_ticks_total: 0,
+            render_ticks_max: 0,
+            render_cycles_total: 0,
+            repainted_pixels: 0,
+            frame_pixels: 0,
+            full_repaints: 0,
+        }
+    }
+
+    /// A frame rendered (GFX-120): how long it took, how many pixels it
+    /// repainted of how many, and whether it was the whole screen.
+    pub fn record_render(&mut self, ticks: u64, cycles: u64, repainted: u64, of: u64) {
+        self.render_ticks_total += ticks;
+        self.render_ticks_max = self.render_ticks_max.max(ticks);
+        self.render_cycles_total += cycles;
+        self.repainted_pixels += repainted;
+        self.frame_pixels += of;
+        if repainted >= of {
+            self.full_repaints += 1;
         }
     }
 
@@ -159,6 +189,19 @@ impl GfxSnapshot {
                 t.present_workers,
                 t.present_cycles_avg()
             ),
+            {
+                let frames = t.frames_rendered.max(1);
+                let ticks = t.render_ticks_total * 100 / frames;
+                format!(
+                    "render: avg={}.{:02} ticks max={} ticks avg_cycles={} repainted={}% full={}",
+                    ticks / 100,
+                    ticks % 100,
+                    t.render_ticks_max,
+                    t.render_cycles_total / frames,
+                    (t.repainted_pixels * 100).checked_div(t.frame_pixels).unwrap_or(0),
+                    t.full_repaints
+                )
+            },
             format!(
                 "memory: pressure={:?} transitions={} heap {}/{} KiB used, budget {}/{} KiB, tick={}",
                 self.pressure,
@@ -213,7 +256,7 @@ mod tests {
         snapshot.budget_limit = 24 * 1024 * 1024;
         snapshot.tick = 1234;
         let lines = snapshot.lines();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
         assert!(
             lines[0].starts_with("gfx: frames=0 presents=1 rejected=0 slow=1 avg_present=2.00"),
             "{}",
@@ -221,10 +264,34 @@ mod tests {
         );
         assert!(lines[1].contains("deferred=7"));
         assert!(lines[2].starts_with("present: workers="));
-        assert!(lines[3].contains("pressure=Low"));
-        assert!(lines[3].contains("heap 8192/32768 KiB"));
-        assert!(lines[3].contains("budget 0/24576 KiB"));
-        assert!(lines[3].ends_with("tick=1234"));
+        assert!(
+            lines[3].starts_with("render: avg=0.00 ticks"),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[4].contains("pressure=Low"));
+        assert!(lines[4].contains("heap 8192/32768 KiB"));
+        assert!(lines[4].contains("budget 0/24576 KiB"));
+        assert!(lines[4].ends_with("tick=1234"));
+    }
+
+    #[test]
+    fn render_telemetry_says_how_much_of_the_screen_was_repainted() {
+        let mut t = GfxTelemetry::new();
+        t.record_frame();
+        t.record_render(30, 1_000, 100, 100);
+        t.record_frame();
+        t.record_render(2, 100, 10, 100);
+        let snapshot = GfxSnapshot {
+            telemetry: t,
+            ..Default::default()
+        };
+        let line = &snapshot.lines()[3];
+        assert!(
+            line.starts_with("render: avg=16.00 ticks max=30 ticks"),
+            "{line}"
+        );
+        assert!(line.ends_with("repainted=55% full=1"), "{line}");
     }
 
     #[test]

@@ -16,11 +16,13 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use graphics_rasterizer::RasterRect;
 use graphics_rasterizer::RgbaColor;
 use services_gui_host::{
     compose_shell, shell_layout, Compositor, DesktopCursor, DesktopScene, DesktopWindow,
     HostedSurface, LauncherItem, RenderBackend, ShellModel, ShellNotice, ShellRects, ShellViewIds,
-    SoftwareBackend, SurfaceRect, SurfaceSize, Theme, RASTER_CELL_HEIGHT, RASTER_CELL_WIDTH,
+    SoftwareBackend, SurfaceRect, SurfaceSize, Theme, WindowStyle, RASTER_CELL_HEIGHT,
+    RASTER_CELL_WIDTH,
 };
 use view_types::{CursorPosition, ViewContent, ViewFrame, ViewId, ViewKind};
 
@@ -473,6 +475,299 @@ pub fn build_desktop_windows(
     compose_shell(&shell, &layout.shell, &ids.shell)
 }
 
+/// What a frame must repaint (GFX-120).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Damage {
+    /// Nothing changed: the last frame stands.
+    None,
+    /// Only these rectangles, which do not overlap.
+    Rects(Vec<RasterRect>),
+    /// Everything: the first frame, a new theme, wallpaper or size, or a
+    /// veil over the whole desk.
+    Full,
+}
+
+/// How far past a window's bounds its drawing reaches: the soft shadow
+/// under a card or the dock (spread and drop), with a pixel to spare.
+const SHADOW_REACH: usize = {
+    let card = services_gui_host::CARD_SHADOW_SPREAD + services_gui_host::CARD_SHADOW_DROP;
+    let dock =
+        (services_gui_host::DOCK_SHADOW_SPREAD + services_gui_host::DOCK_SHADOW_DROP) as usize;
+    (if card > dock { card } else { dock }) + 2
+};
+
+/// Pixels of margin round a caret's damage.
+const CARET_PAD: usize = 4;
+/// Most separate rectangles a frame repaints; past that they are merged.
+const MAX_RECTS: usize = 8;
+
+fn bounding(a: RasterRect, b: RasterRect) -> RasterRect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = a.right().max(b.right());
+    let bottom = a.bottom().max(b.bottom());
+    RasterRect::new(x, y, right - x, bottom - y)
+}
+
+/// Rectangles to repaint: added one at a time, overlapping ones merged.
+#[derive(Default)]
+struct Region(Vec<RasterRect>);
+
+impl Region {
+    fn add(&mut self, rect: RasterRect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let mut rect = rect;
+        // Merge with everything it overlaps, until nothing does.
+        loop {
+            match self.0.iter().position(|r| overlaps(*r, rect)) {
+                Some(i) => rect = bounding(self.0.swap_remove(i), rect),
+                None => break,
+            }
+        }
+        self.0.push(rect);
+        if self.0.len() > MAX_RECTS {
+            let all = self.0.drain(..).reduce(bounding).expect("some");
+            self.0.push(all);
+        }
+    }
+}
+
+/// A window's reach: its bounds and what it draws past them -- a card's
+/// shadow; the dock's shadow and, above it, the risen icon and its label.
+fn reach(window: &DesktopWindow) -> RasterRect {
+    use services_gui_host::{
+        CARD_SHADOW_DROP, CARD_SHADOW_SPREAD, DOCK_REACH, DOCK_SHADOW_DROP, DOCK_SHADOW_SPREAD,
+    };
+    let b = window.bounds();
+    // (left and right, up, down), a pixel to spare each: exactly what
+    // the painter draws past the bounds.
+    let (side, up, down) = match window.style {
+        // The top bar paints inside its bounds only.
+        WindowStyle::TopBar => return b,
+        WindowStyle::Card => (
+            CARD_SHADOW_SPREAD + 1,
+            CARD_SHADOW_SPREAD + 1,
+            CARD_SHADOW_SPREAD + CARD_SHADOW_DROP + 1,
+        ),
+        WindowStyle::Dock => (
+            DOCK_SHADOW_SPREAD as usize + 1,
+            DOCK_REACH + 1,
+            (DOCK_SHADOW_SPREAD + DOCK_SHADOW_DROP) as usize + 1,
+        ),
+        _ => (SHADOW_REACH, SHADOW_REACH, SHADOW_REACH),
+    };
+    RasterRect::new(
+        b.x.saturating_sub(side),
+        b.y.saturating_sub(up),
+        b.width + 2 * side,
+        b.height + up + down,
+    )
+}
+
+/// The parts of a card that changed, if nothing but its header (title,
+/// chips), its content (lines, selection, caret, graphics) or its footer
+/// did: each is drawn clipped to its own strip, so only those strips need
+/// repainting -- what typing, a ticking clock or a program's new view
+/// changes (GFX-120). `None` when the card moved, was raised, gained focus
+/// or anything else that changes it whole.
+fn card_parts_changed(old: &DesktopWindow, new: &DesktopWindow) -> Option<Vec<RasterRect>> {
+    use services_gui_host::{CARD_FOOTER_HEIGHT, CARD_HEADER_HEIGHT, CARD_PADDING};
+    if new.style != WindowStyle::Card {
+        return None;
+    }
+    let mut same = new.clone();
+    same.frame.content = old.frame.content.clone();
+    same.frame.cursor = old.frame.cursor;
+    same.frame.revision = old.frame.revision;
+    same.frame.timestamp_ns = old.frame.timestamp_ns;
+    same.highlight_line = old.highlight_line;
+    same.selection_spans = old.selection_spans.clone();
+    same.line_styles = old.line_styles.clone();
+    same.overlay = old.overlay.clone();
+    same.frame.title = old.frame.title.clone();
+    same.actions = old.actions.clone();
+    same.footer = old.footer.clone();
+    if &same != old {
+        return None;
+    }
+    let b = new.bounds();
+    let mut parts = Vec::new();
+    let content_changed = new.frame.content != old.frame.content
+        || new.frame.cursor != old.frame.cursor
+        || new.highlight_line != old.highlight_line
+        || new.selection_spans != old.selection_spans
+        || new.line_styles != old.line_styles
+        || new.overlay != old.overlay;
+    if content_changed {
+        let footer = if new.footer.is_some() {
+            CARD_FOOTER_HEIGHT
+        } else {
+            0
+        };
+        let top = b.y + CARD_HEADER_HEIGHT + CARD_PADDING;
+        let bottom = b.bottom().saturating_sub(CARD_PADDING + footer);
+        if top < bottom && b.width > CARD_PADDING * 2 {
+            // A pixel's margin, as for the caret.
+            parts.push(RasterRect::new(
+                b.x + CARD_PADDING - 1,
+                top - 1,
+                b.width - CARD_PADDING * 2 + 2,
+                bottom - top + 2,
+            ));
+        }
+    }
+    if new.frame.title != old.frame.title || new.actions != old.actions {
+        // The header, and the hairline under it.
+        parts.push(RasterRect::new(b.x, b.y, b.width, CARD_HEADER_HEIGHT + 2));
+    }
+    if new.footer != old.footer {
+        let h = CARD_FOOTER_HEIGHT + CARD_PADDING;
+        parts.push(RasterRect::new(
+            b.x,
+            b.bottom().saturating_sub(h),
+            b.width,
+            h,
+        ));
+    }
+    Some(parts)
+}
+
+/// Where damage makes a glass window repaint itself whole: what its blur
+/// reads -- its bounds and the blur's margin round them.
+fn glass_reads(window: &DesktopWindow) -> RasterRect {
+    let b = window.bounds();
+    let m = 2 * services_gui_host::DOCK_BLUR + 1;
+    RasterRect::new(
+        b.x.saturating_sub(m),
+        b.y.saturating_sub(m),
+        b.width + 2 * m,
+        b.height + 2 * m,
+    )
+}
+
+fn overlaps(a: RasterRect, b: RasterRect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+}
+
+/// What must be repainted to go from `prev` to `next` (GFX-120).
+///
+/// A window that changed repaints where it was and where it is, with its
+/// shadow; one whose only change is the caret repaints just the caret
+/// (the blink that used to repaint the whole screen twice a second). The
+/// dock is glass -- it blurs what is behind it -- so damage that touches
+/// it repaints all of it. A different theme, wallpaper or size, or a veil
+/// anywhere, repaints everything. Separate changes stay separate
+/// rectangles: a card and the clock are not the screen between them.
+pub fn frame_damage(prev: Option<&DesktopScene>, next: &DesktopScene) -> Damage {
+    let Some(prev) = prev else {
+        return Damage::Full;
+    };
+    if prev.size != next.size || prev.theme != next.theme || prev.wallpaper != next.wallpaper {
+        return Damage::Full;
+    }
+    let veil = |s: &DesktopScene| s.windows.iter().any(|w| w.style == WindowStyle::Veil);
+    if veil(prev) || veil(next) {
+        return Damage::Full;
+    }
+    let mut region = Region::default();
+    for window in &next.windows {
+        match prev
+            .windows
+            .iter()
+            .find(|w| w.frame.view_id == window.frame.view_id)
+        {
+            Some(old) if old == window => {}
+            Some(old) => {
+                let mut caret_only = window.clone();
+                caret_only.frame.cursor = old.frame.cursor;
+                let carets = if &caret_only == old {
+                    [old.frame.cursor, window.frame.cursor]
+                        .into_iter()
+                        .flatten()
+                        .map(|c| services_gui_host::caret_pixel_rect(window, c))
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    None
+                };
+                let parts = if carets.is_none() {
+                    card_parts_changed(old, window)
+                } else {
+                    None
+                };
+                match carets {
+                    None if parts.is_some() => {
+                        for part in parts.expect("checked") {
+                            region.add(part);
+                        }
+                    }
+                    // A few pixels round it: the painted caret reaches a
+                    // little past the rectangle it is said to be in.
+                    Some(rects) => {
+                        for r in rects {
+                            region.add(RasterRect::new(
+                                r.x.saturating_sub(CARET_PAD),
+                                r.y.saturating_sub(CARET_PAD),
+                                r.width + 2 * CARET_PAD,
+                                r.height + 2 * CARET_PAD,
+                            ));
+                        }
+                    }
+                    None => {
+                        region.add(reach(old));
+                        region.add(reach(window));
+                    }
+                }
+            }
+            None => region.add(reach(window)),
+        }
+    }
+    for old in &prev.windows {
+        if !next
+            .windows
+            .iter()
+            .any(|w| w.frame.view_id == old.frame.view_id)
+        {
+            region.add(reach(old));
+        }
+    }
+    if prev.cursor != next.cursor {
+        for cursor in [prev.cursor, next.cursor].into_iter().flatten() {
+            region.add(cursor.bounds());
+        }
+    }
+    // Glass: the dock and the top bar blur what is behind all of them,
+    // so damage that touches either repaints all of it -- a part
+    // repainted alone would blur its old, already-frosted neighbours in.
+    for _ in 0..2 {
+        for window in &next.windows {
+            if matches!(window.style, WindowStyle::Dock | WindowStyle::TopBar) {
+                let reads = glass_reads(window);
+                if region.0.iter().any(|r| overlaps(*r, reads)) {
+                    region.add(reach(window));
+                    region.add(reads);
+                }
+            }
+        }
+    }
+    let (w, h) = next.pixel_size();
+    let screen = RasterRect::new(0, 0, w, h);
+    let rects: Vec<RasterRect> = region
+        .0
+        .into_iter()
+        .filter_map(|r| r.intersect(screen))
+        .collect();
+    let area: usize = rects.iter().map(|r| r.width * r.height).sum();
+    if rects.is_empty() {
+        Damage::None
+    } else if area >= w * h {
+        Damage::Full
+    } else {
+        Damage::Rects(rects)
+    }
+}
+
 /// Owns the RGBA target and composes desktop frames into it.
 pub struct DesktopFrameRenderer {
     /// The renderer backend (GFX-050); software is authoritative.
@@ -481,6 +776,10 @@ pub struct DesktopFrameRenderer {
     ids: DesktopViewIds,
     width: usize,
     height: usize,
+    /// The scene the surface shows (GFX-120), for the next frame's damage.
+    last: Option<DesktopScene>,
+    /// The last frame's repaint: pixels repainted.
+    last_repainted: u64,
 }
 
 /// Background painted before the first frame; only visible if a scene is
@@ -515,6 +814,8 @@ impl DesktopFrameRenderer {
             ids: DesktopViewIds::new(),
             width,
             height,
+            last: None,
+            last_repainted: 0,
         }
     }
 
@@ -591,10 +892,54 @@ impl DesktopFrameRenderer {
             .scene(windows, pointer)
             .with_theme(theme)
             .with_wallpaper(wallpaper);
-        match self.backend.render(&scene) {
-            Ok(stats) => stats.painted_windows,
-            Err(_) => 0,
+        self.render_scene(scene)
+    }
+
+    /// Repaint only what changed since the last frame (GFX-120).
+    fn render_scene(&mut self, scene: DesktopScene) -> usize {
+        let all = (self.width * self.height) as u64;
+        let damage = frame_damage(self.last.as_ref(), &scene);
+        let painted = match damage {
+            Damage::None => {
+                self.last_repainted = 0;
+                return 0;
+            }
+            Damage::Rects(rects) => {
+                self.last_repainted = rects.iter().map(|r| (r.width * r.height) as u64).sum();
+                let mut painted = 0;
+                let mut result = Ok(());
+                for rect in rects {
+                    match self.backend.render_damage(&scene, rect) {
+                        Ok(stats) => painted = painted.max(stats.painted_windows),
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                result.map(|()| painted)
+            }
+            Damage::Full => {
+                self.last_repainted = all;
+                self.backend
+                    .render(&scene)
+                    .map(|stats| stats.painted_windows)
+            }
+        };
+        self.last = Some(scene);
+        match painted {
+            Ok(windows) => windows,
+            Err(_) => {
+                // Not what the surface shows: start again next frame.
+                self.last = None;
+                0
+            }
         }
+    }
+
+    /// Forget the last frame, so the next repaints everything.
+    pub fn invalidate(&mut self) {
+        self.last = None;
     }
 
     /// Compose an already-built window list (lets a caller apply focus first).
@@ -604,12 +949,7 @@ impl DesktopFrameRenderer {
         pointer: Option<(usize, usize)>,
     ) -> usize {
         let scene = self.scene(windows, pointer);
-        match self.backend.render(&scene) {
-            Ok(stats) => stats.painted_windows,
-            // The scene is built from this renderer's own layout, so a size
-            // mismatch cannot happen; treat it as "nothing painted".
-            Err(_) => 0,
-        }
+        self.render_scene(scene)
     }
 
     /// Compose `model` into the RGBA target. Returns the number of windows painted.
@@ -618,9 +958,133 @@ impl DesktopFrameRenderer {
         self.render_windows(windows, model.pointer)
     }
 
+    /// The last frame's repaint: pixels repainted, and the frame's pixels
+    /// in all (GFX-120).
+    pub fn last_repaint(&self) -> (u64, u64) {
+        let all = (self.width() * self.height()) as u64;
+        (self.last_repainted, all)
+    }
+
     /// Tightly packed RGBA8888 pixels, `width * height * 4` bytes.
     pub fn pixels(&self) -> &[u8] {
         self.backend.pixels()
+    }
+}
+
+#[cfg(test)]
+mod damage_tests {
+    use super::*;
+    use crate::desk::{Desk, DeskApp};
+
+    const W: usize = 1024;
+    const H: usize = 640;
+
+    /// Render `desk` as it is now through `renderer` (damage-limited), and
+    /// through a fresh renderer in full; the pixels must be the same.
+    fn same_as_full(
+        renderer: &mut DesktopFrameRenderer,
+        desk: &mut Desk,
+        caret: bool,
+        pointer: Option<(usize, usize)>,
+        what: &str,
+    ) -> u64 {
+        let windows = desk.windows("12:00", caret, None);
+        renderer.render_windows_with_look(windows.clone(), pointer, desk.theme(), desk.wallpaper());
+        let mut fresh = DesktopFrameRenderer::new(W, H);
+        fresh.render_windows_with_look(windows, pointer, desk.theme(), desk.wallpaper());
+        let (a, b) = (renderer.pixels(), fresh.pixels());
+        if a != b {
+            let first = a.iter().zip(b).position(|(x, y)| x != y).unwrap() / 4;
+            panic!("{what}: differs first at ({}, {})", first % W, first / W);
+        }
+        renderer.last_repaint().0
+    }
+
+    #[test]
+    fn a_damage_limited_frame_is_the_full_frame_pixel_for_pixel() {
+        let mut desk = Desk::new(W, H);
+        let mut renderer = DesktopFrameRenderer::new(W, H);
+        let all = (W * H) as u64;
+        let notepad = desk.launch(DeskApp::Notepad);
+        for byte in b"hello" {
+            desk.handle_key(*byte);
+        }
+        assert_eq!(
+            same_as_full(&mut renderer, &mut desk, true, None, "first"),
+            all
+        );
+        // Nothing changed: nothing repainted.
+        assert_eq!(
+            same_as_full(&mut renderer, &mut desk, true, None, "again"),
+            0
+        );
+        // The caret blinks: a sliver, not the screen.
+        let blink = same_as_full(&mut renderer, &mut desk, false, None, "blink");
+        assert!(blink > 0 && blink < all / 100, "the caret alone: {blink}");
+        same_as_full(&mut renderer, &mut desk, true, None, "blink back");
+        // Typing: the card, not the screen.
+        desk.handle_key(b'!');
+        let typed = same_as_full(&mut renderer, &mut desk, true, None, "typed");
+        assert!(typed < all / 2, "one card: {typed}");
+        // The pointer moves.
+        same_as_full(&mut renderer, &mut desk, true, Some((300, 300)), "pointer");
+        same_as_full(
+            &mut renderer,
+            &mut desk,
+            true,
+            Some((320, 310)),
+            "pointer moved",
+        );
+        // A second card opens over the first, then the first is raised,
+        // then the second closes -- shadows and all.
+        let calc = desk.launch(DeskApp::Calculator);
+        same_as_full(&mut renderer, &mut desk, true, None, "opened");
+        desk.raise(notepad);
+        same_as_full(&mut renderer, &mut desk, true, None, "raised");
+        desk.close(calc);
+        same_as_full(&mut renderer, &mut desk, true, None, "closed");
+        // A theme change is everything.
+        renderer.invalidate();
+        assert_eq!(
+            same_as_full(&mut renderer, &mut desk, true, None, "invalidated"),
+            all
+        );
+    }
+
+    #[test]
+    fn damage_that_touches_glass_takes_all_of_it() {
+        let desk_scene = |renderer: &DesktopFrameRenderer, desk: &mut Desk| {
+            renderer
+                .scene(desk.windows("12:00", true, None), None)
+                .with_theme(desk.theme())
+        };
+        let mut desk = Desk::new(W, H);
+        let renderer = DesktopFrameRenderer::new(W, H);
+        let before = desk_scene(&renderer, &mut desk);
+        let after = desk_scene(&renderer, &mut desk);
+        assert_eq!(frame_damage(Some(&before), &after), Damage::None);
+        assert_eq!(frame_damage(None, &after), Damage::Full);
+        // The clock changes: the bar, whole.
+        let later = renderer
+            .scene(desk.windows("12:01", true, None), None)
+            .with_theme(desk.theme());
+        let bar = later
+            .windows
+            .iter()
+            .find(|w| w.style == WindowStyle::TopBar)
+            .unwrap()
+            .bounds();
+        match frame_damage(Some(&after), &later) {
+            Damage::Rects(rects) => {
+                assert!(
+                    rects
+                        .iter()
+                        .any(|d| d.x <= bar.x && d.right() >= bar.right()),
+                    "{rects:?} vs {bar:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
 

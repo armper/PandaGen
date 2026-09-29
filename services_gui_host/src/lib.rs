@@ -1785,6 +1785,15 @@ fn raster_window(
         return false;
     }
 
+    // A card and the dock reach past their bounds (their shadows): damage
+    // that touches only the shadow still repaints it, and neither paints
+    // outside the damage (GFX-120).
+    match window.style {
+        WindowStyle::Card => return raster_card(target, window, rect, damage_rect, theme),
+        WindowStyle::Dock => return raster_dock(target, window, rect, damage_rect, theme),
+        _ => {}
+    }
+
     let clipped_rect = damage_rect
         .map(|damage| rect.intersect(damage))
         .unwrap_or(Some(rect));
@@ -1793,8 +1802,7 @@ fn raster_window(
     };
 
     match window.style {
-        WindowStyle::Card => return raster_card(target, window, rect, clipped_rect, theme),
-        WindowStyle::Dock => return raster_dock(target, window, rect, clipped_rect, theme),
+        WindowStyle::Card | WindowStyle::Dock => unreachable!("painted above"),
         WindowStyle::TopBar => return raster_top_bar(target, window, rect, clipped_rect, theme),
         WindowStyle::Veil => return raster_veil(target, window, rect, clipped_rect, theme),
         WindowStyle::Classic => {}
@@ -2031,20 +2039,27 @@ fn raster_card(
     target: &mut impl RenderTarget,
     window: &DesktopWindow,
     rect: RasterRect,
-    clipped_rect: RasterRect,
+    damage: Option<RasterRect>,
     theme: &Theme,
 ) -> bool {
-    // The lift extends two pixels past the card's bounds, so the clip has
-    // to as well -- a scissor cut to the bounds alone clipped the shadow
-    // away entirely, and the first pixel test caught it.
+    // The shadow extends past the card's bounds, so the clip has to as
+    // well -- a scissor cut to the bounds alone clipped the shadow away
+    // entirely, and the first pixel test caught it. And never past the
+    // damage (GFX-120): a clip grown from the damaged part of the card
+    // repainted the body beyond it but the text only within it, and
+    // blended the shadow over itself.
     let spread = CARD_SHADOW_SPREAD;
-    let lift = RasterRect::new(
-        clipped_rect.x.saturating_sub(spread),
-        clipped_rect.y.saturating_sub(spread),
-        clipped_rect.width + spread * 2,
-        clipped_rect.height + spread * 2 + CARD_SHADOW_DROP,
+    let reach = RasterRect::new(
+        rect.x.saturating_sub(spread),
+        rect.y.saturating_sub(spread),
+        rect.width + spread * 2,
+        rect.height + spread * 2 + CARD_SHADOW_DROP,
     )
     .clamped_to(target.width(), target.height());
+    let Some(lift) = damage.map_or(Some(reach), |d| reach.intersect(d)) else {
+        return false;
+    };
+    let clipped_rect = lift;
     let mut painter = ScissorTarget::new(target, lift);
 
     // A soft shadow under the card (GFX-099): blended, so the card floats
@@ -2558,17 +2573,21 @@ fn raster_dock(
     target: &mut impl RenderTarget,
     window: &DesktopWindow,
     rect: RasterRect,
-    clipped_rect: RasterRect,
+    damage: Option<RasterRect>,
     theme: &Theme,
 ) -> bool {
-    // The shadow, the risen icon and its label reach past the capsule.
-    let reach = RasterRect::new(
-        clipped_rect.x.saturating_sub(DOCK_SHADOW_SPREAD as usize),
-        clipped_rect.y.saturating_sub(DOCK_REACH),
-        clipped_rect.width + DOCK_SHADOW_SPREAD as usize * 2,
-        clipped_rect.height + DOCK_REACH + (DOCK_SHADOW_SPREAD + DOCK_SHADOW_DROP) as usize,
+    // The shadow, the risen icon and its label reach past the capsule --
+    // but never past the damage (GFX-120).
+    let full = RasterRect::new(
+        rect.x.saturating_sub(DOCK_SHADOW_SPREAD as usize),
+        rect.y.saturating_sub(DOCK_REACH),
+        rect.width + DOCK_SHADOW_SPREAD as usize * 2,
+        rect.height + DOCK_REACH + (DOCK_SHADOW_SPREAD + DOCK_SHADOW_DROP) as usize,
     )
     .clamped_to(target.width(), target.height());
+    let Some(reach) = damage.map_or(Some(full), |d| full.intersect(d)) else {
+        return false;
+    };
     let mut painter = ScissorTarget::new(target, reach);
     liquid_glass(&mut painter, rect, theme);
     let mut label: Option<(usize, String)> = None;

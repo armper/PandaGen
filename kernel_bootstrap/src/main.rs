@@ -3499,6 +3499,7 @@ fn workspace_loop(
                     continue;
                 };
                 let now = get_tick_count();
+                let render_started = hal_x86_64::rdtsc();
                 // The graphical editor uses the full window height.
                 workspace.set_editor_viewport_rows(renderer.layout().main_content_rows());
                 animation_clock
@@ -3584,8 +3585,18 @@ fn workspace_loop(
                     input_router.apply_focus(&mut windows);
                     renderer.render_windows(windows, model.pointer);
                 }
-                present_pacer.mark_dirty();
+                let (repainted, of) = renderer.last_repaint();
+                // Nothing repainted (GFX-120): the screen already shows it.
+                if repainted > 0 {
+                    present_pacer.mark_dirty();
+                }
                 gfx_telemetry.record_frame();
+                gfx_telemetry.record_render(
+                    get_tick_count().saturating_sub(now),
+                    hal_x86_64::rdtsc().saturating_sub(render_started),
+                    repainted,
+                    of,
+                );
                 // The text renderer's caches no longer describe the screen.
                 editor_render_cache.invalidate();
                 input_dirty = false;
